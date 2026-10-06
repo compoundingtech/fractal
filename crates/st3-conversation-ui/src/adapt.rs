@@ -380,10 +380,11 @@ pub fn conversation_with_filters(
             (_, TimelineBody::Truncation(truncation))
                 if truncation.reason.contains("native transcript prefix") =>
             {
-                Body::Event(
-                    "Earlier history is not shown: st reads only the newest part of this agent's transcript"
-                        .into(),
-                )
+                let mut notice = "Earlier history is not shown: st reads only the newest part of this agent's transcript".to_owned();
+                if truncation.reason.contains("not fetchable") {
+                    notice.push_str("; earlier history is not fetchable through this read");
+                }
+                Body::Event(notice)
             }
             (_, TimelineBody::Truncation(truncation)) => Body::Event(format!(
                 "history omitted: {} (sequences {}–{}{})",
