@@ -75,6 +75,8 @@ pub enum ErrorCode {
     TerminalUnavailable,
     TerminalEnded,
     TimelineHistoryIncomplete,
+    ConversationContentInvalidated,
+    TranscriptUnavailable,
     BlobTooLarge,
     UnsupportedMediaType,
     BlobContentMismatch,
@@ -1907,6 +1909,8 @@ pub struct TimelineMessageBody {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1916,6 +1920,8 @@ pub struct TimelineContentBody {
     pub text: Option<String>,
     #[serde(default)]
     pub attachment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1923,6 +1929,8 @@ pub struct TimelineToolCallBody {
     pub call_id: String,
     pub name: String,
     pub arguments: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1931,6 +1939,8 @@ pub struct TimelineToolResultBody {
     pub status: TimelineToolStatus,
     pub media_type: String,
     pub content: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1947,6 +1957,8 @@ pub struct TimelineStatusBody {
     pub status: TimelineStatus,
     #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1968,6 +1980,8 @@ pub struct TimelineErrorBody {
     pub message: String,
     pub retryable: bool,
     pub details: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -2005,6 +2019,8 @@ pub struct TimelineUsageBody {
     #[serde(default)]
     pub currency: Option<String>,
     pub attribution: TimelineAttribution,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2031,6 +2047,8 @@ pub struct TimelineRedactionBody {
     pub withheld_bytes: u64,
     #[serde(default)]
     pub withheld_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2040,6 +2058,8 @@ pub struct TimelineTruncationBody {
     pub omitted_to_sequence: u64,
     #[serde(default)]
     pub continuation_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<TimelineBlock>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -3727,4 +3747,35 @@ pub struct CustomReplyParameters {
     pub revision: String,
     pub episode: String,
     pub fields: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TimelineBlock {
+    pub id: String,
+    pub kind: String,
+    pub source_type: String,
+    pub payload: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<ConversationContentRef>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConversationContentRef {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ConversationContentChunk {
+    pub kind: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub media_type: String,
+    pub offset: u64,
+    pub size: u64,
+    pub data: String,
+    pub next_offset: Option<u64>,
 }
