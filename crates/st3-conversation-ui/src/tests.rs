@@ -1009,3 +1009,15 @@ fn review_unpaired_mail_refs_do_not_leak_into_the_next_envelope() {
         Entry { id: second, body: Body::Mail { body, .. }, .. }
     ] if first == "message/first" && refs.contains("application/pdf") && second == "message/second" && body == "Second message"), "{rendered:?}");
 }
+
+#[test]
+fn native_unknown_system_blocks_and_user_reasoning_tags_remain_visible() {
+    let raw = "[unrecognized future]\n{\"raw\":{\"token\":\"invented-token\"}}";
+    let entry: st3_client::TimelineEntry = serde_json::from_value(serde_json::json!({"id":"timeline-entry/raw","sequence":1,"revision":1,"timestamp":"2026-10-06T12:00:00Z","role":"system","type":"content","final":true,"body":{"media_type":"text/plain","text":raw,"blocks":[{"id":"raw","kind":"unknown","source_type":"future","payload":{"raw":{"token":"invented-token"}}}]}})).unwrap();
+    let shown = crate::adapt::conversation(&[entry], &std::collections::BTreeMap::new());
+    assert!(matches!(&shown[0].body, Body::Event(text) if text == raw));
+    assert_eq!(
+        clean_message_text("<analysis>visible invented-token</analysis>"),
+        "<analysis>visible invented-token</analysis>"
+    );
+}
