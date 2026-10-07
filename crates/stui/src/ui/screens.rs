@@ -10,6 +10,9 @@ use super::view::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// What Home says when nothing needs the person; setup's first-run test waits for it.
+pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
+
 /// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
 /// only have invented data to show (Nathan, 2026-09-28).
 pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
@@ -707,7 +710,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 doc.blank();
                 doc.line(Line::from(vec![
                     span("✓ ", theme::strong(theme::GREEN)),
-                    span("No alerts right now.", theme::bold()),
+                    span(HOME_IDLE_TEXT, theme::bold()),
                 ]));
                 doc.blank();
                 doc.wrap(

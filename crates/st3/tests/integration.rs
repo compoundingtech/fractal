@@ -93,6 +93,7 @@ mod reconcile_pass_perf;
 mod recorder_report;
 mod revision_seats;
 mod seat_queue_perf;
+mod setup;
 mod startup_readiness;
 mod stui_slo_history;
 mod subagent_publisher;
