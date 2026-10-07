@@ -36,3 +36,5 @@ toolchain() {
 lane "Toolchain and Buck root" toolchain
 lane "Frozen install" pnpm install --frozen-lockfile
 lane "Buck typecheck" buck2 build //:typecheck
+lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
+lane "UI kit Storybook" pnpm --filter @smalltalk/fractal-ui build-storybook
