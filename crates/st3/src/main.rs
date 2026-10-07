@@ -103,6 +103,9 @@ const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the terminal interface: spaces, conversations, Home and agent terminals.
+    #[command(version = st_drivers::version::display_version())]
+    Ui(stui::Args),
     /// Validate and publish KDL files containing seats, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     Apply(ApplyArgs),
@@ -4673,8 +4676,6 @@ fn main() -> ExitCode {
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
     }
-    // What `st clients` lists for this process: its name and build, as reported.
-    st3_client::set_client_name(format!("st {}", st_drivers::version::machine_version()));
     // A shell stub from `st completions` calls back with `COMPLETE=<shell>` on each TAB. Answer
     // before any config, runtime, or daemon work; this exits when the variable is set.
     clap_complete::env::CompleteEnv::with_factory(Cli::command).complete();
@@ -4707,16 +4708,14 @@ fn main() -> ExitCode {
         st_drivers::reexec::unblock_stop_signals();
     }
     let arguments = std::env::args_os().collect::<Vec<_>>();
-    if let Some(stui) = bare_st_opens(
+    if plain_ui_requested(
         arguments.len(),
-        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
         std::env::var_os("ST_AGENT").is_some(),
-        std::env::var_os("PATH").as_deref(),
     ) {
-        use std::os::unix::process::CommandExt as _;
-        // Only returns when stui could not start; the help below is the fallback.
-        let error = std::process::Command::new(stui).exec();
-        eprintln!("st: stui did not start ({error}); here is the help instead");
+        // setup-core adds st3::setup::prepare_plain_ui() here, before the TUI runtime.
+        return run_terminal_ui(stui::Args::default(), None);
     }
     if cli_help::all_help_requested(&arguments) {
         print!("{}", cli_help::root_help(true));
@@ -4738,6 +4737,11 @@ fn main() -> ExitCode {
         Err(error) => exit_usage_error(error),
     };
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    if let Command::Ui(options) = cli.command {
+        return run_terminal_ui(options, cli.endpoint.as_deref());
+    }
+    // Set the CLI identity only after the TUI path has chosen its stui client identity.
+    st3_client::set_client_name(format!("st {}", st_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
         record_daemon_commands(args);
     }
@@ -4759,20 +4763,31 @@ fn main() -> ExitCode {
     )
 }
 
-/// Bare `st` on a person's terminal opens stui, found on PATH; scripts, pipes and agent seats
-/// keep the help. `None` means print the help.
-fn bare_st_opens(
-    argument_count: usize,
-    interactive: bool,
-    in_seat: bool,
-    path: Option<&std::ffi::OsStr>,
-) -> Option<PathBuf> {
-    if argument_count != 1 || !interactive || in_seat {
-        return None;
+/// Bare st opens the TUI only for a person using both sides of a terminal.
+fn plain_ui_requested(arguments: usize, stdin: bool, stdout: bool, seat: bool) -> bool {
+    arguments == 1 && stdin && stdout && !seat
+}
+
+/// The TUI owns its runtime and terminal restoration; never enter it from run_cli.
+fn run_terminal_ui(mut options: stui::Args, endpoint: Option<&str>) -> ExitCode {
+    let result = (|| -> Result<()> {
+        if let Some(endpoint) = endpoint {
+            match Endpoint::parse(endpoint) {
+                Endpoint::Unix(path) => options = options.with_endpoint(path),
+                _ => anyhow::bail!(
+                    "st ui uses a local Unix socket; pair remote devices with st devices complete"
+                ),
+            }
+        }
+        stui::run(options)
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("st: {}", plain_error(&error));
+            ExitCode::FAILURE
+        }
     }
-    std::env::split_paths(path?)
-        .map(|directory| directory.join("stui"))
-        .find(|candidate| candidate.is_file())
 }
 
 /// Export the runtime fence before any provider or runtime worker thread starts. Fresh
@@ -5176,6 +5191,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
+        Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
         Command::Up(_) => unreachable!(),
         Command::Skill(_) => unreachable!(),
         Command::Evidence(_) => unreachable!(),
@@ -5881,30 +5897,6 @@ fn select_private_gateway(
         .into());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod bare_st_tests {
-    use super::*;
-
-    #[test]
-    fn bare_st_opens_stui_only_for_a_person_on_a_terminal_with_stui_on_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let stui = directory.path().join("stui");
-        std::fs::write(&stui, "").unwrap();
-        let path = std::env::join_paths([directory.path()]).unwrap();
-        let path = Some(path.as_os_str());
-        assert_eq!(bare_st_opens(1, true, false, path), Some(stui));
-        // A subcommand or flag, a pipe or script, and an agent seat keep their behavior.
-        assert_eq!(bare_st_opens(2, true, false, path), None);
-        assert_eq!(bare_st_opens(1, false, false, path), None);
-        assert_eq!(bare_st_opens(1, true, true, path), None);
-        // Without stui on PATH the help is printed.
-        let empty = tempfile::tempdir().unwrap();
-        let none = std::env::join_paths([empty.path()]).unwrap();
-        assert_eq!(bare_st_opens(1, true, false, Some(none.as_os_str())), None);
-        assert_eq!(bare_st_opens(1, true, false, None), None);
-    }
 }
 
 #[cfg(test)]
@@ -32009,5 +32001,75 @@ mission "review" state="ready" {
             "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
         })).unwrap();
         tokio::time::timeout(Duration::from_secs(1), observations.recv()).await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod terminal_ui_tests {
+    use super::*;
+
+    #[test]
+    fn plain_st_requires_two_terminals_and_no_seat() {
+        for arguments in [1, 2] {
+            for stdin in [false, true] {
+                for stdout in [false, true] {
+                    for seat in [false, true] {
+                        assert_eq!(
+                            plain_ui_requested(arguments, stdin, stdout, seat),
+                            arguments == 1 && stdin && stdout && !seat
+                        );
+                    }
+                }
+            }
+        }
+        assert!(Cli::try_parse_from(["st"]).is_err());
+    }
+
+    #[test]
+    fn terminal_ui_arguments_and_help_match_the_documented_surface() {
+        Cli::command().debug_assert();
+        for flag in [
+            "--client",
+            "--local",
+            "--space",
+            "--classic",
+            "--demo",
+            "--glass",
+            "--glasses",
+        ] {
+            let mut argv = vec!["st", "ui", flag];
+            if matches!(flag, "--space" | "--glass") {
+                argv.push("harbor");
+            }
+            assert!(matches!(
+                Cli::try_parse_from(argv).unwrap().command,
+                Command::Ui(_)
+            ));
+        }
+        assert!(Cli::try_parse_from(["st", "ui", "--client", "--local"]).is_err());
+        assert!(Cli::try_parse_from(["st", "ui", "--space", "harbor", "--classic"]).is_err());
+        assert!(Cli::try_parse_from(["st", "ui", "pair"]).is_err());
+        assert!(Cli::try_parse_from(["st", "ui", "--space"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "st", "ui", "--demo", "--dump", "--click", "5,8", "--pane", "home"
+            ])
+            .is_ok()
+        );
+        for flag in ["--version", "-V"] {
+            let error = match Cli::try_parse_from(["st", "ui", flag]) {
+                Err(error) => error, Ok(_) => panic!("version exits"),
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        }
+        let error = match Cli::try_parse_from(["st", "ui", "--help"]) {
+            Err(error) => error,
+            Ok(_) => panic!("help exits"),
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(error.to_string().contains("st ui"));
+        let help = cli_help::root_help(false);
+        assert!(help.contains("Open the terminal interface"));
+        assert!(help.contains("Run st in a terminal"));
     }
 }

@@ -216,7 +216,7 @@ def say(screen: Screen, write, pump, events: Events, marker: str, timeout: float
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default="target/release/stui")
+    parser.add_argument("--binary", default="target/release/st3")
     parser.add_argument("--seconds", type=float, default=180)
     parser.add_argument("--label", default="measure")
     parser.add_argument("--rows", type=int, default=50)
@@ -241,7 +241,10 @@ def main() -> int:
     if arguments.timing:
         env["STUI_TIMING_LOG"] = arguments.timing
     events.write("start", binary_label=arguments.label)
-    process = subprocess.Popen([arguments.binary], stdin=slave, stdout=slave, stderr=slave, env=env)
+    command = [arguments.binary]
+    if os.path.basename(arguments.binary) != "stui":
+        command.append("ui")
+    process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env)
     os.close(slave)
     received = 0
     screen = Screen(arguments.rows, arguments.columns)
