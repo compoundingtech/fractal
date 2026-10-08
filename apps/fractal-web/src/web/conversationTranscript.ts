@@ -10,12 +10,9 @@ import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
 import type { ConversationItem, RunStatus, SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
+import { fieldsOf } from '../conversation/semantics.ts'
 
-/**
- * Owner rule: unsupported native event kinds (omp `custom`, `credential_pin`, `title_change`, …)
- * and truncation notices never become transcript rows. The decision is structural — item tag and
- * notice kind — never a text match; the in-lane history boundary owns the truncation wording.
- */
+/** The explicit internal-event policy lives only here; every unlisted kind remains an Unknown row. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
 type KitTextItem = Extract<KitConversationItem, { _tag: 'Text' }>
 
@@ -28,8 +25,26 @@ const kitCoversAppFailureReasons: Extract<SendState, { _tag: 'Failed' }>['reason
 const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly role: 'user' } =>
   item._tag === 'Text' && item.role === 'user'
 
-const isOmittedItem = (item: ConversationItem): boolean =>
-  item._tag === 'UnknownEvent' || (item._tag === 'Notice' && item.kind === 'truncation')
+// Native source preserves raw omp records (`external_sessions.rs` push_unrecognized); the
+// converter decodes their JSON envelope (`fromTimeline.ts` unrecognizedOmpItem). `custom` is
+// a bucket, not a kind: its raw.customType distinguishes redundant tool-start bookkeeping.
+// Model/thinking changes are native status metadata (external_sessions.rs push_unrecognized).
+const internalEventKinds: Record<string, true | undefined> = {
+  credential_pin: true,
+  title_change: true,
+  model_change: true,
+  thinking_level_change: true,
+  'custom/tool_execution_start': true,
+}
+
+const isOmittedItem = (item: ConversationItem): boolean => {
+  if (item._tag !== 'UnknownEvent') return false
+  const raw = fieldsOf(fieldsOf(item.data)['raw'])
+  const customType = raw['customType']
+  const kind = item.eventType === 'custom' && typeof customType === 'string'
+    ? `custom/${customType}` : item.eventType
+  return Object.hasOwn(internalEventKinds, kind)
+}
 
 /** The host owns work-log classification: how a tool reads, runs or edits. */
 const toolKindFor = (name: string): WorkKind => {
@@ -77,21 +92,21 @@ export interface TranscriptTurnOptions {
   readonly firstTurnComplete: boolean
 }
 
-/**
- * Split a conversation page into prompt-owned turns for the kit composition. Kit A's
- * `TranscriptTurn` requires a prompt, so a truncated page's leading tail (items before the first
- * user text) stays omitted until the kit accepts prompt-less turns; the in-lane HasOlder boundary
- * states what is not loaded. Never synthesize a prompt.
- */
-export const transcriptTurnsForItems = (
+/** Prepared turns preserve the leading native tail without synthesizing a human prompt. */
+export type PreparedTranscriptTurn = Omit<TranscriptTurn, 'prompt'> & {
+  readonly prompt?: KitTextItem & { readonly role: 'user' }
+}
+
+export const prepareTranscriptTurns = (
   items: readonly ConversationItem[],
   options: TranscriptTurnOptions,
-): readonly TranscriptTurn[] => {
-  const turns: TranscriptTurn[] = []
+): readonly PreparedTranscriptTurn[] => {
+  const turns: PreparedTranscriptTurn[] = []
   let prompt: (KitTextItem & { readonly role: 'user' }) | undefined
   let turnItems: KitConversationItem[] = []
   const flush = () => {
-    if (prompt === undefined) return
+    const first = prompt ?? turnItems[0]
+    if (first === undefined) return
     const senderCaptions: Record<string, string | undefined> = {}
     for (const item of turnItems) {
       if (item._tag !== 'Text' || item.role !== 'assistant') continue
@@ -99,13 +114,13 @@ export const transcriptTurnsForItems = (
       if (caption !== undefined) senderCaptions[item.id] = caption
     }
     turns.push({
-      id: prompt.id,
-      prompt,
+      id: first.id,
+      ...(prompt === undefined ? {} : { prompt }),
       items: turnItems,
-      work: workLogTurnFromItems([prompt, ...turnItems], {
+      work: workLogTurnFromItems(prompt === undefined ? turnItems : [prompt, ...turnItems], {
         kindFor: toolKindFor,
-        ...workFactsFor(prompt.at, turnItems),
-        startedAt: prompt.at,
+        ...workFactsFor(first.at ?? '', turnItems),
+        ...(first.at === undefined ? {} : { startedAt: first.at }),
         ...(turns.length === 0 && !options.firstTurnComplete ? { completeHistory: false } : {}),
       }),
       ...(Object.keys(senderCaptions).length === 0 ? {} : { senderCaptions }),
@@ -119,11 +134,21 @@ export const transcriptTurnsForItems = (
       prompt = item
       continue
     }
-    if (prompt !== undefined) turnItems.push(item)
+    turnItems.push(item)
   }
   flush()
   return turns
 }
+
+// Kit A currently requires prompt. On its optional-prompt bump, change this predicate to `true`
+// and enable ConversationPane.composition.integration.test.tsx's skipped pointer test.
+const kitSupportsTurn = (turn: PreparedTranscriptTurn): turn is PreparedTranscriptTurn & TranscriptTurn =>
+  turn.prompt !== undefined
+
+export const transcriptTurnsForItems = (
+  items: readonly ConversationItem[],
+  options: TranscriptTurnOptions,
+): readonly TranscriptTurn[] => prepareTranscriptTurns(items, options).filter(kitSupportsTurn)
 
 export type ConversationTranscriptState =
   | { readonly _tag: 'Waiting' }
@@ -157,9 +182,7 @@ export const mapConversationFeed = (
     case 'Unavailable':
       return { _tag: 'Unavailable', availability: availabilityFor(feed.reason, feed.detail) }
     case 'Observed': {
-      // Either native signal states the boundary; neither leaks internal wording into rows.
       const hasOlder = feed.value.hasOlder
-        || feed.value.items.some(item => item._tag === 'Notice' && item.kind === 'truncation')
       const turns = transcriptTurnsForItems(feed.value.items, { agentName: options.agentName, firstTurnComplete: !hasOlder })
       // Native page provenance decides emptiness: a non-empty page whose rows are all omitted
       // (or that arrived with none) is filtered, not an empty conversation.

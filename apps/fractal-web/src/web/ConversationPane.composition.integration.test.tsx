@@ -46,8 +46,7 @@ const scenario: readonly ConversationItem[] = [
   { _tag: 'Reasoning', id: 'reasoning', text: 'Compare the observed selection with the projected rows.', streaming: false, durationMs: 1200, at: at(4) },
   { _tag: 'Text', id: 'answer', role: 'assistant', text: 'The projection keeps **visible rows** together and preserves selection.', attachments: [], streaming: false, at: at(6) },
   { _tag: 'Status', id: 'status', status: 'completed', detail: 'Finished', at: at(7) },
-  { _tag: 'UnknownEvent', id: 'custom', eventType: 'custom', data: { kind: 'custom' }, at: at(8) },
-  { _tag: 'Notice', id: 'truncated', kind: 'truncation', text: 'Older history unavailable in this transcript window', detail: 'retained · sequences 0–40 omitted', at: at(9) },
+  { _tag: 'UnknownEvent', id: 'custom', eventType: 'custom', data: { raw: { type: 'custom', customType: 'tool_execution_start' } }, at: at(8) },
 ]
 
 let root: Root | undefined
@@ -104,12 +103,12 @@ describe('ConversationPane composition activation', () => {
     expect(answer.querySelector('strong')?.textContent).toBe('visible rows')
     expect(answer.textContent).not.toContain('**')
 
-    // Unsupported event kinds are omitted by structural kind; no card per unknown event.
+    // Only known internal event kinds are omitted; unlisted kinds retain the kit Unknown row.
     expect(text()).not.toContain('custom')
     expect(text()).not.toContain('credential_pin')
     expect(text()).not.toContain('title_change')
 
-    // Truncation collapses into the single quiet in-lane history row.
+    // Native HasOlder owns the single quiet in-lane history row.
     const boundary = container.querySelector('[data-testid="history-boundary"]')!
     expect(boundary.textContent).toContain('Earlier messages not loaded')
     expect(text()).not.toContain('sequences')
