@@ -517,6 +517,7 @@ const make = (options: St3Options) =>
       client,
       socket,
       parentSpan: options.parentSpan,
+      commandTraceContext: () => outbound,
       ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
       ...(options.conversationSlots === 'advertised'
         ? {
