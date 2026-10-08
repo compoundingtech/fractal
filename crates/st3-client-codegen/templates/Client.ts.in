@@ -13,9 +13,12 @@ export type PageOptions = { cursor?: string; limit?: number };
 export type TerminalListOptions = PageOptions & { history?: boolean; owner?: string; state?: string };
 export type ListOptions = PageOptions & { history?: boolean; owner_run?: string; actor?: string; status?: string; native_only?: boolean };
 export type EventOptions = { after?: string; limit?: number; wait_ms?: number };
+export type TraceContext = { traceparent: string; tracestate?: string };
 export type ClientOptions = {
     baseUrl: string;
     credential?: () => string | undefined | Promise<string | undefined>;
+    /** Read the active span's W3C context once per request, stream open, or collection subscribe. */
+    traceContext?: () => TraceContext | undefined;
     fetchImpl?: typeof fetch;
     /** The app's name and build, sent as `x-st3-client` ("smalltalk-ios 1.0 (42)"). st lists it as
      * reported (clients.list); it is never identity or authority. */
@@ -128,25 +131,63 @@ function bounded(value: number | undefined, maximum: number, name: string): void
 export class St3Client {
     private readonly baseUrl: string;
     private readonly credential?: ClientOptions['credential'];
+    private readonly traceContext?: ClientOptions['traceContext'];
     private readonly client?: string;
     private readonly fetchImpl: typeof fetch;
-    private discovered?: EnvelopeOf<Capabilities>;
+    /** Shared with every `withTraceContext` view so they discover once. */
+    private discoveryCache: { value?: EnvelopeOf<Capabilities> } = {};
 
     constructor(options: ClientOptions) {
         this.baseUrl = options.baseUrl.replace(/\/+$/, '');
         this.credential = options.credential;
+        this.traceContext = options.traceContext;
         this.client = options.client;
         this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
     }
 
     async capabilities(): Promise<EnvelopeOf<Capabilities>> {
         const response = await this.request<Capabilities>('GET', '/v1/client/capabilities');
-        this.discovered = response;
+        this.discoveryCache.value = response;
         return response;
     }
 
     async discover(): Promise<EnvelopeOf<Capabilities>> {
-        return this.discovered ?? this.capabilities();
+        return this.discoveryCache.value ?? this.capabilities();
+    }
+
+    /**
+     * This client with every request and stream carrying `traceContext` instead, so a caller can name
+     * the span that owns one call; credentials, transport, and discovery stay shared.
+     */
+    withTraceContext(traceContext: () => TraceContext | undefined): St3Client {
+        const view = new St3Client({
+            baseUrl: this.baseUrl,
+            fetchImpl: this.fetchImpl,
+            traceContext,
+            ...(this.credential === undefined ? {} : { credential: this.credential }),
+            ...(this.client === undefined ? {} : { client: this.client }),
+        });
+        view.discoveryCache = this.discoveryCache;
+        return view;
+    }
+
+    /** The callback's context when its `traceparent` is lowercase W3C version 00 with non-zero ids; otherwise none. */
+    private currentTraceContext(): TraceContext | undefined {
+        const context = this.traceContext?.();
+        if (!context) return undefined;
+        const parent = context.traceparent;
+        if (parent.length !== 55 || !/^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/.test(parent)
+            || parent.slice(0, 2) === 'ff'
+            || parent.slice(3, 35) === '00000000000000000000000000000000'
+            || parent.slice(36, 52) === '0000000000000000') return undefined;
+        return context.tracestate === undefined ? { traceparent: parent } : { traceparent: parent, tracestate: context.tracestate };
+    }
+
+    private applyTraceContext(headers: Record<string, string>): void {
+        const context = this.currentTraceContext();
+        if (!context) return;
+        headers.traceparent = context.traceparent;
+        if (context.tracestate !== undefined) headers.tracestate = context.tracestate;
     }
 
     private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, idempotencyKey?: string, raw?: { contentType: string }): Promise<EnvelopeOf<T>> {
@@ -156,6 +197,7 @@ export class St3Client {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         if (body !== undefined) headers['Content-Type'] = raw?.contentType ?? 'application/json';
+        this.applyTraceContext(headers);
         const response = await this.fetchImpl(this.baseUrl + path, {
             method, headers, ...(body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) }),
         });
@@ -254,6 +296,7 @@ export class St3Client {
         const headers: Record<string, string> = { 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' };
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
+        this.applyTraceContext(headers);
         const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], headers);
         let ended = false;
         const stop = () => { ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };
@@ -281,6 +324,7 @@ export class St3Client {
         const headers: Record<string, string> = { 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' };
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
+        this.applyTraceContext(headers);
         const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
         let ended = false;
         const end = (error?: Error) => { if (ended) return; ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; options.onEnd?.(error); };
@@ -306,6 +350,7 @@ export class St3Client {
         const headers: Record<string, string> = { 'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1' };
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
+        this.applyTraceContext(headers);
         const socket = (options.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
         let ended = false, open = false;
         const waiting: Record<string, unknown>[] = [];
@@ -329,7 +374,10 @@ export class St3Client {
         };
         const send = (command: Record<string, unknown>) => {
             if (ended) return;
-            if (open) sendNow(command); else waiting.push(command);
+            // A subscribe carries the context active when it is issued, not when a queued command flushes.
+            const trace = command.kind === 'subscribe' ? this.currentTraceContext() : undefined;
+            const traced = trace === undefined ? command : { ...command, trace };
+            if (open) sendNow(traced); else waiting.push(traced);
         };
         socket.onopen = () => { open = true; if (options.onOpen) notify(options.onOpen); for (const command of waiting.splice(0)) { if (ended) break; sendNow(command); } };
         socket.onmessage = event => {

@@ -23,6 +23,14 @@ The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace share
 
 To verify generated files against the Rust generator, also run `cargo run -p st3-client-codegen -- --check`. The sibling [`st3-views`](../st3-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2.
 
+## Active span propagation
+
+Pass `traceContext: () => TraceContext | undefined` to continue the caller's active span without adding a runtime dependency. The synchronous callback is read when each HTTP request starts, when each WebSocket opens, and when each collection `subscribe` is issued (not when a queued command flushes). HTTP requests and WebSocket factories receive `traceparent` and, when present, a verbatim `tracestate`. Collection subscribe commands carry `trace: { traceparent, tracestate? }`; daemons ignore unknown command fields. An absent callback or `undefined` result sends nothing, and an invalid `traceparent` (not lowercase W3C version 00, version `ff`, or a zero trace or span id) suppresses both values.
+
+`client.withTraceContext(callback)` returns a view whose requests and streams carry that callback's context instead, sharing credentials, transport, and discovered capabilities with the original. Use it when one call has its own span, since an asynchronous call reads the callback after its first `await`.
+
+Browser `WebSocket` cannot set headers. A browser socket factory must move the context it receives in `headers` to the `traceparent`/`tracestate` URL query parameters, which the Fractal gateway validates and strips before forwarding.
+
 ## Rich Effect schemas
 
 Import `@smalltalk/st3-client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0-rc.118` peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
