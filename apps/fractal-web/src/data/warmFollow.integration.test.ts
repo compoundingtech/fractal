@@ -416,7 +416,7 @@ describe('warm conversation switching at the data layer', () => {
       const unmount = live.registry.mount(live.source.conversationInterest!(ref))
       await until(() => gateway.subscribesFor(ref) === 2)
       expect(live.registry.get(live.source.sync!.conversation(ref)).sync.status._tag).not.toBe('Failed')
-      gateway.conversationFrame(ref, snapshotRows(3))
+      gateway.conversationFrame(ref, snapshotRows(3), true)
       await until(() => items(live.registry.get(live.source.conversation(ref)))?.length === 3)
       expect(live.registry.get(live.source.conversation(ref))).toMatchObject({ _tag: 'Observed', freshness: 'live' })
       expect(live.registry.get(live.source.sync!.conversation(ref)).sync.status).toEqual({
