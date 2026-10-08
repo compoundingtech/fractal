@@ -405,7 +405,10 @@ export const liveSource = ({
       visible = true
       onVisibilityChange?.(true)
       if (explicitInterest) unmount ??= registry.mount(following)
-      if (ended && !terminalFailure) {
+      // An ended follow holds no socket subscription: re-acquired interest re-opens it as
+      // a fresh switch, whatever ended it. A Failed run re-runs and re-fails on its own
+      // verdict (an authorization refusal stays Unavailable), so this cannot loop.
+      if (ended) {
         ingest.flush()
         get.refresh(following)
       }
@@ -447,7 +450,7 @@ export const liveSource = ({
       },
       prefetch: () => {
         unmount ??= registry.mount(following)
-        if (ended && !terminalFailure) {
+        if (ended) {
           ingest.flush()
           registry.refresh(following)
         }
