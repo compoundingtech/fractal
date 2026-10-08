@@ -18,9 +18,13 @@
   "scripts": {
     "storybook": "storybook dev -p 53705 --host 127.0.0.1 --no-open --disable-telemetry",
     "build-storybook": "storybook build --disable-telemetry",
+    "check-scenarios": "node scripts/check-scenarios.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@smalltalk/st3-scenarios": "workspace:*",
+    "@smalltalk/st3-client": "workspace:*",
+    "effect": "4.0.0-rc.118",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-aria-components": "1.21.1",
