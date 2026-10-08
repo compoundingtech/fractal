@@ -418,9 +418,10 @@ version in `store`; synthetic worlds increment it by one per state-changing even
 worlds take it from the recording, so several recorded frames can share one version. Events that
 change no state (sync transport events) keep the current version.
 
-- Every collection `snapshot`/`changes` frame and every page response carries a fence for the
-  store version current when it is built (conversation and terminal frames carry none):
-  `store_index` is the version and the snapshot id is derived from host and version.
+- Every collection `snapshot`/`changes` frame, every terminal `screen` frame, and every page
+  response carries a fence for the store version current when it is built; only conversation
+  frames carry none. `store_index` is the version and the snapshot id is derived from host and
+  version. A screen does not advance the store.
 - Subscriptions read without an intervening state change carry the same fence.
 - On each socket, `store_index` is nondecreasing; it increases only when the store advances.
 
@@ -435,7 +436,7 @@ over the event union (a `never` check), and each row has a test through the real
 | conversation | `entries` | One `conversation` frame with `replace: false` and those entries, without `has_more`, to subscribers of that agent or session. |
 | conversation | `replace` | One `conversation` frame with `replace: true`, the newest page (`page_size`) and `has_more`. |
 | terminal | `screen` | One `screen` frame with the `TerminalScreen` to subscribers holding the current incarnation. |
-| terminal | `unavailable` | An `error` frame, code `terminal-unavailable`, `retryable: true`. A later subscribe with the same lease resumes with the current screen. |
+| terminal | `unavailable` | An `error` frame, code `terminal-unavailable`, `retryable: true`. A fresh `terminal.attach` returns the current incarnation and a capability, and a subscribe with it resumes with the current screen. A subscribe that reuses the earlier lease also resumes while the lease is valid (a separate protocol test; the SDK always attaches afresh). |
 | terminal | `end` | An `error` frame, code `terminal-ended`, `retryable: false`, to every subscriber. Later attaches and subscribes return `terminal-ended`. |
 | terminal | `incarnation` | Sets a new incarnation. Current subscribers get an `error` frame, code `stale-fence`. A subscribe with the old incarnation gets `stale-fence`; `terminal.attach` returns the new incarnation and a new capability. |
 | sync | `open-fail` | The next socket open fails as a browser observes it: `onerror`, then `onclose` with code 1006 and no body. |
@@ -462,14 +463,15 @@ world and variant, against the expected state the slice defines:
 | --- | --- | --- |
 | collection windows | the client's `applyWindow`, per subscription | slice state filtered, ordered and cut to that subscription's limit |
 | conversations | the conversation reducer in `@smalltalk/st3-views` (`sessionView`) | the slice's entries for that agent, joined as the reducer documents |
-| terminals | the SDK terminal follow in `@st3/sdk/effect` (`followTerminal`: attach, `subscribeTerminal`, screen decoding, and the shared follow's error and retry handling) | the latest screen at each step; `terminal-unavailable` resubscribes with the lease; `terminal-ended` ends the follow; `stale-fence` reattaches and continues with the new incarnation |
+| terminals | the SDK terminal follow in `@st3/sdk/effect` (`followTerminal`: attach, `subscribeTerminal`, screen decoding, and the shared follow's error and retry handling) | the latest screen at each step; after `terminal-unavailable` and after `stale-fence`, a fresh attach (runtime read plus `terminal.attach`) and a resubscribe that continues with the current incarnation's screen; `terminal-ended` ends the follow |
 | sync | the SDK sync fold in `@st3/sdk/effect` | the [sync matrix](#sync-matrix) `expected` status per surface |
 
 Windows and conversations run in this package's tests. The terminal and sync checks run in the SDK
 package, which takes the kit as a development dependency (see
 [Consumer contracts](#consumer-contracts-d2-d8)). Separately, this package tests wire delivery for
 every terminal event: the generated `collectionStream` receives the expected `screen` and `error`
-frames in order. `huge` checks windows and pages, not a full 1,000-agent window.
+frames in order, and each frame decodes as a `CollectionFrame` in strict mode, including the
+screen frame's `snapshot`. `huge` checks windows and pages, not a full 1,000-agent window.
 
 ## Sync matrix
 
@@ -585,15 +587,21 @@ and fails unless all hold:
 
 1. **Reads:** every declared slice was read; no undeclared slice was read. This applies to every
    story.
-2. **Data dependence:** each slice has a **contrast pair**: two variants over the same cast whose
-   wire state differs (for example `roster` `default` and `one-agent`). Each variant with content
-   exposes **markers**: display names and short texts from its data. Rendered with each variant
-   of the pair, the story shows that variant's markers and none of the other variant's markers.
-   When one side has no content (`empty`, `loading`, `none`), that side must show none of the
-   other side's markers, and the two renders must differ.
+2. **Data dependence:** each slice has **contrast pairs**: two variants over the same cast whose
+   wire state differs (for example `roster` `default` and `one-agent`). Shared cast members may
+   appear on both sides. For each side the pair defines what the render must show:
+   - **expected markers:** display names or short texts from that side's data that must appear;
+   - **distinguishing markers:** texts that must appear on this side and not on the other (for
+     example the names of agents `one-agent` removes);
+   - **counts** where a subset contrast has no unique text: the number of rendered rows of a
+     declared kind (for example agent rows: 4 versus 1);
+   - **states** for sides without content (`empty`, `loading`, `none`): the side shows none of
+     the other side's distinguishing markers and the renders differ.
+   A pair passes when every side meets its own expectation.
 3. **World switch:** for stories that do not pin a world, the check picks two catalog worlds whose
    declared slices differ in wire state (worlds that share them, such as the `failed-sync-*`
-   worlds for a roster story, are never paired) and applies check 2's rule to them.
+   worlds for a roster story, are never paired) and applies check 2's rule, using
+   distinguishing markers derived from the difference between the two worlds' slices.
 4. **Pinned world:** for stories that pin a world, changing the toolbar global leaves the render
    unchanged; check 3 does not apply.
 5. **URL state:** rendering from the URL state (`globals` and `args`) equals rendering from the
@@ -670,7 +678,7 @@ breaks a scenario fails in the same pull request.
 | Consumer | Owner | Contract |
 | --- | --- | --- |
 | fractal-ui Storybook | `agent/dotfiles/fractal` | `preview.ts` installs `scenarioGlobalTypes` and `withScenario`. Every story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
-| `@st3/sdk/effect` | `agent/dotfiles/fractal-web-dev3` | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, `terminal-unavailable` resubscription, `terminal-ended`, and `stale-fence` reattach. |
+| `@st3/sdk/effect` | `agent/dotfiles/fractal-web-dev3` | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | `agent/dotfiles/fractal-web-dev3` | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | `agent/compoundingtech/misc` | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
 | iOS app | `agent/compoundingtech/misc` | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
