@@ -5,7 +5,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "dev": "vite --config vite.config.ts --configLoader runner"
+    "dev": "vite --config vite.config.ts --configLoader runner",
+    "dev:scenario": "vite --config vite.config.ts --configLoader runner --mode scenario"
   },
   "dependencies": {
     "@smalltalk/st3-client": "file:../../clients/typescript/st3-client",
@@ -21,6 +22,7 @@
     "@effect/atom-react": "4.0.0-rc.118"
   },
   "devDependencies": {
+    "@smalltalk/st3-scenarios": "workspace:*",
     "@effect/vitest": "4.0.0-rc.118",
     "@types/node": "24.10.0",
     "typescript": "6.0.3",

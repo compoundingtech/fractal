@@ -4,7 +4,13 @@ import react from '@vitejs/plugin-react'
 import { createStylexVitePlugins } from './scripts/stylex.mjs'
 import { webfractalGateway } from './scripts/vite-gateway.mjs'
 import { extensionBuild } from './scripts/extensions-build.mjs'
-export default defineConfig({
+
+/**
+ * `--mode scenario` serves and builds the scenario entry (`scenario.html`): the same app and
+ * data layer, but the page owns no early roster socket and the runtime binds the scenario kit's
+ * replay seams. Every other mode keeps the live `index.html` entry.
+ */
+export default defineConfig(({ mode }) => ({
   root: 'src/web',
   plugins: [
     {
@@ -25,12 +31,28 @@ export default defineConfig({
     extensionBuild({ entry: '../src/extensions/app-public.ts', privateBuild: false }),
     ...createStylexVitePlugins({
       externalPackages: ['@smalltalk/fractal-ui'],
-      entries: [new URL('./src/web/main.tsx', import.meta.url).pathname],
+      entries: [
+        new URL('./src/web/main.tsx', import.meta.url).pathname,
+        new URL('./src/web/scenarioMain.tsx', import.meta.url).pathname,
+      ],
     }),
     react(),
     webfractalGateway(),
   ],
-  server: { strictPort: true, host: '127.0.0.1', allowedHosts: (process.env.WF_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(',') },
+  server: {
+    strictPort: true,
+    host: '127.0.0.1',
+    allowedHosts: (process.env.WF_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(','),
+    ...(mode === 'scenario' ? { open: '/scenario.html' } : {}),
+  },
   resolve: { dedupe: ['effect', 'react', 'react-dom'] },
-  build: { outDir: '../../dist/web', emptyOutDir: true },
-})
+  ...(mode === 'scenario'
+    ? {
+        build: {
+          outDir: '../../dist/web-scenario',
+          emptyOutDir: true,
+          rollupOptions: { input: { scenario: new URL('./src/web/scenario.html', import.meta.url).pathname } },
+        },
+      }
+    : { build: { outDir: '../../dist/web', emptyOutDir: true } }),
+}))
