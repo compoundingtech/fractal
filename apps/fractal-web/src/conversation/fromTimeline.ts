@@ -82,6 +82,14 @@ const isTurnHeader = (entry: Entry) =>
   entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined
 
 /**
+ * Ids st mints for a mailbox message's own content (`client_v0.rs`): the native projection
+ * pairs `<leaf>/<digest16>-message` with `<leaf>/<digest16>-content`; the stored fallback mints
+ * `<leaf>/<digest24>`. Harness turns carry `native-<n>` or their driver's own ids. Provenance is
+ * read from the entry itself, so it holds when the header is paged out of the window.
+ */
+const MAILBOX_CONTENT_ID = /^timeline-entry\/[^/]+\/(?:[0-9a-f]{16}-content|[0-9a-f]{24})$/
+
+/**
  * st merges native and mailbox items by `(timestamp, sequence)` (`client_v0.rs`
  * `native_timeline_page`); the fold mirrors that exact server rule, because mail
  * and harness sequences live in unrelated number spaces.
@@ -441,23 +449,17 @@ export class LiveTimeline {
     const items = this.items.slice(0, changedFrom)
     this.itemsBefore.length = from
     const shown = this.shownMessageIds()
-    // Both st projections stamp a mail pair from one claim: identical timestamp, message
-    // at `store_index*4`, content at `+1`. That structure survives split pages and native
-    // interleaving, unlike array adjacency.
-    const mailContentSlots = new Set(
-      this.ordered.flatMap((entry) => {
-        if (entry.type !== 'message' || isTurnHeader(entry)) return []
-        return [`${stampOf(entry)}|${entry.sequence + 1}`]
-      }),
-    )
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
       this.itemsBefore.push(items.length)
       if (isTurnHeader(entry)) continue
       // Only native harness turns repeat shown mail as delivery copies; a mailbox
       // message's own content is person-authored text that may quote anything.
-      const mailboxPair = mailContentSlots.has(`${stampOf(entry)}|${entry.sequence}`)
-      if (entry.type === 'content' && !mailboxPair && (entry.role === 'user' || entry.role === 'system')) {
+      if (
+        entry.type === 'content' &&
+        !MAILBOX_CONTENT_ID.test(entry.id) &&
+        (entry.role === 'user' || entry.role === 'system')
+      ) {
         const text = withoutShownDeliveries(entry.body.text ?? '', shown)
         if (text !== (entry.body.text ?? '')) {
           if (text.length > 0)
