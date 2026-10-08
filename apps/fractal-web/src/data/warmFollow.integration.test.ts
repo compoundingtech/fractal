@@ -392,6 +392,44 @@ describe('warm conversation switching at the data layer', () => {
     }
   })
 
+  it('re-follows a conversation whose follow ended in Failed when interest is re-acquired, keeping the last verified page', async () => {
+    const { live, gateway } = openLive({ maxFollows: 8, conversationSlots: 4 })
+    try {
+      const closeWindows = mountWindows(live)
+      const ref = 'agent/flaky'
+      await viewConversation(live, gateway, ref, snapshotRows(2))
+      // A non-authorization failure ends the follow; the retained page stays as trusted stale content.
+      gateway.send({
+        kind: 'error', id: gateway.conversationSubscription(ref).id,
+        collection: 'conversation', code: 'unavailable',
+        message: 'Owner host unavailable', retryable: false,
+      })
+      await until(() => live.registry.get(live.source.sync!.conversation(ref)).sync.status._tag === 'Failed')
+      expect(live.registry.get(live.source.conversation(ref))).toMatchObject({
+        _tag: 'Observed',
+        freshness: 'stale',
+        error: { reason: 'failed', detail: 'Owner host unavailable' },
+      })
+
+      // Switching back to this conversation is a fresh switch: re-acquired interest must
+      // re-open the follow instead of showing the terminal failure until a reload.
+      const unmount = live.registry.mount(live.source.conversationInterest!(ref))
+      await until(() => gateway.subscribesFor(ref) === 2)
+      expect(live.registry.get(live.source.sync!.conversation(ref)).sync.status._tag).not.toBe('Failed')
+      gateway.conversationFrame(ref, snapshotRows(3))
+      await until(() => items(live.registry.get(live.source.conversation(ref)))?.length === 3)
+      expect(live.registry.get(live.source.conversation(ref))).toMatchObject({ _tag: 'Observed', freshness: 'live' })
+      expect(live.registry.get(live.source.sync!.conversation(ref)).sync.status).toEqual({
+        _tag: 'Live',
+        since: expect.any(Number),
+      })
+      unmount()
+      closeWindows()
+    } finally {
+      await live.dispose()
+    }
+  })
+
   it('shows Reconnecting and never Live while the socket is down, keeping the last value', async () => {
     const { live, gateway } = openLive({ maxFollows: 8, conversationSlots: 2 })
     try {
