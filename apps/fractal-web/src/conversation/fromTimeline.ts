@@ -116,18 +116,37 @@ const unrecognizedOmpItem = (
   }
 }
 
+/**
+ * String convention emitted by st's external_sessions.rs `push_native_block`, matching the
+ * reasoning-label semantics in st3-conversation-ui/src/adapt.rs. No duration is available.
+ * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/smalltalk/issues/2010
+ */
+const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): ConversationItem | undefined => {
+  const prefix = '[reasoning]\n'
+  if (entry.role !== 'assistant' || !(entry.body.text ?? '').startsWith(prefix)) return undefined
+  return {
+    _tag: 'Reasoning',
+    id: entry.id,
+    text: (entry.body.text ?? '').slice(prefix.length),
+    streaming: !entry.final,
+    at: entryTimestamp(entry),
+  }
+}
+
 /** Projects one entry that is not a tool result (results join their call instead). */
 const itemOf = ({
   entry,
   sessionActive,
 }: {
-  readonly entry: Exclude<Entry, ToolResultEntry>
+  readonly entry: Exclude<Entry, ToolResultEntry | { type: 'truncation' }>
   readonly sessionActive: boolean
 }): ConversationItem => {
   switch (entry.type) {
     case 'content': {
       const internal = unrecognizedOmpItem(entry)
       if (internal !== undefined) return internal
+      const reasoning = parseNativeReasoning(entry)
+      if (reasoning !== undefined) return reasoning
       const event = contentEvent({
         id: entry.id,
         text: entry.body.text ?? '',
@@ -235,16 +254,6 @@ const itemOf = ({
         detail: entry.body.reason,
         at: entryTimestamp(entry),
       }
-    case 'truncation': {
-      return {
-        _tag: 'Notice',
-        id: entry.id,
-        kind: 'truncation',
-        text: 'Older history unavailable in this transcript window',
-        detail: `${entry.body.reason} · sequences ${entry.body.omitted_from_sequence}–${entry.body.omitted_to_sequence} omitted`,
-        at: entryTimestamp(entry),
-      }
-    }
     case 'unrecognized':
       return {
         _tag: 'UnknownEvent',
@@ -341,7 +350,7 @@ export class LiveTimeline {
       this.reindex = true
     }
     if (frame.replace) {
-      this.hasOlder = frame.hasMore
+      this.hasOlder = frame.hasMore || frame.entries.some(entry => entry.type === 'truncation')
       this.observation = frame.observation
     } else if (
       (frame.entries.length > 0 || frame.observation?.empty === false) &&
@@ -576,7 +585,7 @@ export class LiveTimeline {
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
       this.itemsBefore.push(items.length)
-      if (isTurnHeader(entry)) continue
+      if (isTurnHeader(entry) || entry.type === 'truncation') continue
       // Only native harness turns repeat shown mail as delivery copies; a mailbox
       // message's own content is person-authored text that may quote anything.
       if (
@@ -650,7 +659,7 @@ export class LiveTimeline {
     result,
     active,
   }: {
-    readonly entry: Entry
+    readonly entry: Exclude<Entry, { type: 'truncation' }>
     readonly result: ToolResultEntry | undefined
     readonly active: boolean
   }): ConversationItem {

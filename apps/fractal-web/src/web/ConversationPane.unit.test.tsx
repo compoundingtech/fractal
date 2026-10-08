@@ -45,8 +45,7 @@ const scenario: readonly ConversationItem[] = [
   { _tag: 'Reasoning', id: 'reasoning', text: 'Compare the observed selection first.', streaming: false, durationMs: 120, at: at(4) },
   { _tag: 'Text', id: 'answer', role: 'assistant', text: 'The projection keeps **visible rows** together.', attachments: [], streaming: false, at: at(5) },
   { _tag: 'Status', id: 'status', status: 'completed', at: at(7) },
-  { _tag: 'UnknownEvent', id: 'custom', eventType: 'custom', data: { kind: 'custom' }, at: at(8) },
-  { _tag: 'Notice', id: 'truncated', kind: 'truncation', text: 'Older history unavailable in this transcript window', detail: 'retained · sequences 0–40 omitted', at: at(9) },
+  { _tag: 'UnknownEvent', id: 'custom', eventType: 'custom', data: { raw: { type: 'custom', customType: 'tool_execution_start' } }, at: at(8) },
 ]
 
 describe('ConversationPane kit composition', () => {
@@ -86,7 +85,7 @@ describe('ConversationPane kit composition', () => {
     expect(html).toContain('Worked for 7s')
   })
 
-  it('omits unsupported event kinds and repeats no truncation wording', () => {
+  it('omits known internal event kinds and repeats no truncation wording', () => {
     source.feed = observed(scenario, true)
     const html = render()
     expect(html).not.toContain('custom')

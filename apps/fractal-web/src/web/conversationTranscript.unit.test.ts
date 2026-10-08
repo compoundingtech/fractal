@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
 import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
-import { mapConversationFeed, transcriptRuntimeOptions, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
+import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptRuntimeOptions, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
 
 const at = (seconds: number) => `2026-10-08T12:00:${String(seconds).padStart(2, '0').slice(-2)}.000Z`
 const sender = { kind: 'human', label: 'Reader' } as const
@@ -12,15 +12,14 @@ const prompt = (id: string, text: string, seconds: number, sendState?: SendState
   ...(sendState === undefined ? {} : { sendState }),
 })
 
-/** A scenario native page: two prompt-owned turns around omitted kinds and a truncation marker. */
+/** A native page: two prompt-owned turns around known internal bookkeeping. */
 const scenario: readonly ConversationItem[] = [
   prompt('p1', 'Keep the row projection readable.', 0),
   { _tag: 'ToolCall', id: 'read', callId: 'c1', name: 'read', input: { path: 'src/rows.ts' }, status: 'success', callSeen: true, result: { content: 'export const rows = []', mediaType: 'text/typescript', isError: false, at: at(3) }, at: at(1) },
   { _tag: 'Reasoning', id: 'reasoning', text: 'Compare the observed selection first.', streaming: false, durationMs: 120, at: at(4) },
   { _tag: 'Text', id: 'answer', role: 'assistant', text: 'The projection keeps **visible rows** together.', attachments: [], streaming: false, at: at(5) },
   { _tag: 'Status', id: 'status', status: 'completed', detail: 'Finished', at: at(7) },
-  { _tag: 'UnknownEvent', id: 'custom', eventType: 'custom', data: { kind: 'custom' }, at: at(8) },
-  { _tag: 'Notice', id: 'truncated', kind: 'truncation', text: 'Older history unavailable in this transcript window', detail: 'retained · sequences 0–40 omitted', at: at(9) },
+  { _tag: 'UnknownEvent', id: 'custom', eventType: 'custom', data: { raw: { type: 'custom', customType: 'tool_execution_start' } }, at: at(8) },
   prompt('p2', 'And verify the fix.', 10, { _tag: 'Pending' }),
   { _tag: 'ToolCall', id: 'run', callId: 'c2', name: 'bash', input: { command: 'pnpm test rows' }, status: 'running', callSeen: true, at: at(11) },
 ]
@@ -41,6 +40,16 @@ const statuses: readonly SyncStatus[] = [
 ]
 
 describe('kit transcript turn mapping', () => {
+  it('prepares the leading assistant tail as a prompt-less turn without losing its work', () => {
+    const leading = [scenario[1]!, scenario[2]!, scenario[3]!]
+    const prepared = prepareTranscriptTurns([...leading, ...scenario], { firstTurnComplete: false })
+    expect(prepared).toHaveLength(3)
+    expect(prepared[0]!.prompt).toBeUndefined()
+    expect(prepared[0]!.items).toEqual(leading)
+    expect(prepared[0]!.work.foldable).toBe(false)
+    expect(prepared[1]!.prompt).toBe(scenario[0])
+    expect(transcriptTurnsForItems([...leading, ...scenario], { firstTurnComplete: false })).toHaveLength(3)
+  })
   it('splits the page into prompt-owned turns and keeps payloads by reference', () => {
     const turns = transcriptTurnsForItems(scenario, { agentName: 'Example Agent', firstTurnComplete: true })
     expect(turns.map(turn => turn.id)).toEqual(['p1', 'p2'])
@@ -49,22 +58,27 @@ describe('kit transcript turn mapping', () => {
     expect(turns[1]!.items.map(item => item.id)).toEqual(['run'])
   })
 
-  it('omits unsupported event kinds and truncation notices structurally, not by text', () => {
-    const turns = transcriptTurnsForItems(scenario, { firstTurnComplete: true })
-    const items = turns.flatMap(turn => [turn.prompt, ...turn.items])
-    expect(items.some(item => item._tag === 'UnknownEvent')).toBe(false)
-    expect(items.some(item => item._tag === 'Notice' && item.kind === 'truncation')).toBe(false)
-    const kept = transcriptTurnsForItems([
-      { _tag: 'UnknownEvent', id: 'pin', eventType: 'credential_pin', data: {}, at: at(1) },
-      { _tag: 'UnknownEvent', id: 'renamed', eventType: 'title_change', data: {}, at: at(2) },
-      { _tag: 'Notice', id: 'kept', kind: 'redaction', text: 'Withheld 4 bytes', at: at(3) },
+  it.each(['credential_pin', 'title_change', 'model_change', 'thinking_level_change'])('omits known internal kind %s', eventType => {
+    const turns = transcriptTurnsForItems([
+      prompt('p', 'Hello', 0),
+      { _tag: 'UnknownEvent', id: 'internal', eventType, data: {}, at: at(1) },
     ], { firstTurnComplete: true })
-    expect(kept).toEqual([])
-    const notices = transcriptTurnsForItems([
-      prompt('p', 'Hello', 1),
-      { _tag: 'Notice', id: 'redaction', kind: 'redaction', text: 'Withheld 4 bytes', at: at(2) },
+    expect(turns[0]!.items).toEqual([])
+  })
+
+  it('omits custom tool execution bookkeeping by structural sub-kind, never the custom bucket', () => {
+    const turns = transcriptTurnsForItems([
+      prompt('p', 'Hello', 0),
+      scenario[5]!,
+      { _tag: 'UnknownEvent', id: 'future-custom', eventType: 'custom', data: { raw: { customType: 'future_kind' } }, at: at(1) },
+      { _tag: 'UnknownEvent', id: 'missing-subkind', eventType: 'custom', data: {}, at: at(2) },
+      { _tag: 'UnknownEvent', id: 'future', eventType: 'future_kind', data: { text: 'credential_pin' }, at: at(3) },
+      { _tag: 'UnknownEvent', id: 'exit', eventType: 'custom', data: { raw: { customType: 'session_exit' } }, at: at(4) },
+      { _tag: 'Notice', id: 'redaction', kind: 'redaction', text: 'Withheld 4 bytes', at: at(5) },
     ], { firstTurnComplete: true })
-    expect(notices[0]!.items.map(item => item._tag)).toEqual(['Notice'])
+    expect(turns[0]!.items.map(item => item.id)).toEqual(['future-custom', 'missing-subkind', 'future', 'exit', 'redaction'])
+    for (const item of turns[0]!.items.filter(item => item._tag === 'UnknownEvent'))
+      expect(convertConversationItem(item).metadata?.custom?.item).toBe(item)
   })
 
   it('groups tool calls into the kit work log with host-owned classification', () => {
@@ -92,7 +106,7 @@ describe('kit transcript turn mapping', () => {
       { _tag: 'Status', id: 's1', status: 'waiting', at: at(1) },
     ], { firstTurnComplete: true })
     expect(live[0]!.work.running).toBe(true)
-    const unsignalled = transcriptTurnsForItems([scenario[0]!, scenario[8]!], { firstTurnComplete: true })
+    const unsignalled = transcriptTurnsForItems([scenario[0]!, scenario[7]!], { firstTurnComplete: true })
     expect(unsignalled[0]!.work.running).toBe(true)
   })
 
@@ -101,10 +115,21 @@ describe('kit transcript turn mapping', () => {
     expect(turns[1]!.prompt).toMatchObject({ id: 'p2', sendState: { _tag: 'Pending' } })
   })
 
-  it('passes a failed send through 1:1 with its classified reason and detail', () => {
-    const failed = prompt('p3', 'Retry me.', 12, { _tag: 'Failed', reason: 'stale-fence', detail: 'The conversation moved while sending.' })
-    const turns = transcriptTurnsForItems([failed, { _tag: 'Text', id: 'answer', role: 'assistant', text: 'Later answer.', attachments: [], streaming: false, at: at(13) }], { firstTurnComplete: true })
-    expect(turns[0]!.prompt.sendState).toEqual({ _tag: 'Failed', reason: 'stale-fence', detail: 'The conversation moved while sending.' })
+  it.each([
+    ['rejected', 'Rejected'],
+    ['ungranted', 'Ungranted'],
+    ['invalid', 'Invalid'],
+    ['failed', 'Failed'],
+    ['stale-fence', 'StaleFence'],
+    ['snapshot-unavailable', 'SnapshotUnavailable'],
+  ] as const)('maps failed send %s to the kit reason tag %s without losing detail', (reason, tag) => {
+    const failed = prompt('p3', 'Retry me.', 12, { _tag: 'Failed', reason, detail: 'The source refused this send.' })
+    const turns = transcriptTurnsForItems([failed], { firstTurnComplete: true })
+    expect(turns[0]!.prompt?.sendState).toEqual({ _tag: 'Failed', reason: { _tag: tag }, detail: 'The source refused this send.' })
+  })
+
+  it.each(['future-reason', 'constructor', '__proto__'])('maps unclassified send failure %s to the generic kit failure', reason => {
+    expect(transcriptSendFailureReason(reason)).toEqual({ _tag: 'Failed' })
   })
 
   it('captions assistant answers with the roster name and never invents one', () => {
@@ -122,7 +147,7 @@ describe('kit transcript turn mapping', () => {
   })
 
   it('renders every kept item through the kit converter unchanged', () => {
-    const items = transcriptTurnsForItems(scenario, { firstTurnComplete: true }).flatMap(turn => [turn.prompt, ...turn.items])
+    const items = transcriptTurnsForItems(scenario, { firstTurnComplete: true }).flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items])
     for (const item of items) {
       const message = convertConversationItem(item)
       expect(message.id).toBe(item.id)
@@ -147,10 +172,9 @@ describe('conversation feed mapping', () => {
     expect(JSON.stringify(state)).not.toContain('sequences')
   })
 
-  it('treats a truncation marker as the older-history boundary even without hasOlder', () => {
-    const truncationOnly = scenario.filter(item => item.id !== 'custom')
-    const state = mapConversationFeed({ _tag: 'Observed', freshness: 'live', value: { items: truncationOnly, hasOlder: false } }, {})
-    expect(state).toMatchObject({ history: { _tag: 'HasOlder' } })
+  it('uses the native page history signal, not a fabricated notice', () => {
+    const state = mapConversationFeed({ _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false } }, {})
+    expect(state).toMatchObject({ history: { _tag: 'Complete' } })
   })
 
   it('marks a filtered-empty page and routes its copy through the kit empty state', () => {
@@ -176,8 +200,9 @@ describe('transcript sync mapping', () => {
   })
 
   it('stays read-only and exposes no mutation capabilities', async () => {
-    const runtime = transcriptRuntimeOptions(scenario, true)
-    expect(runtime.messages).toBe(scenario)
+    const items = transcriptTurnsForItems(scenario, { firstTurnComplete: true }).flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items])
+    const runtime = transcriptRuntimeOptions(items, true)
+    expect(runtime.messages).toBe(items)
     expect(runtime.isRunning).toBe(true)
     expect(runtime.isDisabled).toBe(true)
     expect(runtime.onEdit).toBeUndefined()
@@ -188,5 +213,15 @@ describe('transcript sync mapping', () => {
       metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
     })).rejects.toThrow('read-only')
     expect(transcriptRuntimeOptions()).toMatchObject({ messages: [], isRunning: false, isDisabled: true })
+  })
+})
+
+describe('image handoff', () => {
+  it('opens only http(s) image URLs from agent text', () => {
+    expect(openableImageUrl('https://example.com/a.png')).toBe('https://example.com/a.png')
+    expect(openableImageUrl('http://example.com/a.png')).toBe('http://example.com/a.png')
+    for (const src of ['javascript:alert(1)', 'JAVASCRIPT:alert(1)', 'data:image/svg+xml,<svg/>', 'blob:https://example.com/x', 'file:///etc/passwd', '/relative.png', 'not a url']) {
+      expect(openableImageUrl(src)).toBeUndefined()
+    }
   })
 })
