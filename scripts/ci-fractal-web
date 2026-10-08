@@ -45,3 +45,8 @@ lane "App typecheck" pnpm --filter fractal-web typecheck
 lane "App unit tests" pnpm --filter fractal-web test
 lane "UI kit typecheck" pnpm --filter @smalltalk/fractal-ui typecheck
 lane "UI kit Storybook" pnpm --filter @smalltalk/fractal-ui build-storybook
+lane "Scenario typecheck" pnpm --filter @smalltalk/st3-scenarios typecheck
+lane "Scenario tests" pnpm --filter @smalltalk/st3-scenarios test
+lane "Scenario freshness" pnpm --filter @smalltalk/st3-scenarios emit:check
+lane "Scenario decode" pnpm --filter @smalltalk/st3-scenarios decode
+lane "Scenario privacy" pnpm --filter @smalltalk/st3-scenarios scan
