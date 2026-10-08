@@ -4,10 +4,10 @@ import { liveSource } from '../data/liveSource.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
-const createPageRuntime = () => {
+export const createPageRuntime = () => {
   // Dogfood records 100% of pages: budget roots and their SDK detail cannot disappear at 10%.
   const telemetry = makeTelemetry({
-    otlpTracesUrl: `${window.location.origin}/otlp/v1/traces`,
+    otlpTracesUrl: import.meta.env.VITE_OTLP_TRACES_URL?.trim() || undefined,
     production: !import.meta.env.DEV,
     resourceAttributes: {
       'service.version': buildIdentity.machineVersion,
