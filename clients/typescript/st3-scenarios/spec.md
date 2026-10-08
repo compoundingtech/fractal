@@ -312,6 +312,8 @@ replay.actions  // actions the client submitted, in order, for test assertions
 
 - **Seams:** the generated client already accepts `fetchImpl` and `socket`; the fractal-web SDK
   passes them through `St3Options.fetch` and `St3Options.socket`. Replay adds no other hook.
+  The socket accepts and ignores command keys it does not use, such as the `trace` field the
+  web client adds to a subscribe command.
 - **Frames:** the replay materializes frames from slice state, honoring each subscription's
   limit and the collections protocol: the first reply is a `snapshot` with at most 200 items in
   display order; each timeline event becomes a `changes` frame with `upserts`, `removes`, the
@@ -446,7 +448,7 @@ scenario fails in the same pull request.
 | Consumer | Owner | Contract |
 | --- | --- | --- |
 | fractal-ui Storybook | `agent/dotfiles/fractal` | `preview.ts` installs `scenarioGlobalTypes` and `withScenario`. Every story declares `parameters.scenario`; a story-index test enforces it. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
-| fractal-web dev, tests, e2e | `agent/dotfiles/fractal-web-dev3` | A dedicated Vite mode builds the data layer from a scenario entry module that passes `replay.socket` and `replay.fetch` to `St3Options`; it also routes or disables any early inline socket. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on the measurement bundle-exclusion check, fails when the production bundle contains scenario-kit code. e2e runs on replay; the earlier `scripts/synthetic-fixtures` generator is retired. |
+| fractal-web dev, tests, e2e | `agent/dotfiles/fractal-web-dev3` | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | `agent/compoundingtech/misc` | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
 | iOS app | `agent/compoundingtech/misc` | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
 | Swift `St3Client` | `agent/compoundingtech/misc` | Tests decode every committed scenario file with the Swift models, applying the rebase rule. |
