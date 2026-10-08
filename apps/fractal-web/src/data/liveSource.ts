@@ -24,6 +24,8 @@ import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { undeclared } from '../monitor/source.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
 import { instrumentFetch } from '../telemetry/transport.ts'
+import type { UxTelemetry } from '../telemetry/ux.ts'
+import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
 import { gatewayTerminalResize } from '../terminal/terminal-resize-port.ts'
 import { gatewayAttachments } from './attachmentPort.ts'
@@ -52,6 +54,10 @@ import { gatewaySubjectReads, SubjectReadPort, subjectReaderFromAtom } from './s
 export interface LiveSource {
   readonly source: DataSource
   readonly registry: AtomRegistry.AtomRegistry
+  /** Selection owns the real data-ready read, not a claim that a transcript is painted. */
+  readonly selectConversation: (ref: string) => void
+  /** Initialize the shared tracer before the first DOM commit. */
+  readonly ready: Promise<void>
   readonly dispose: () => Promise<void>
 }
 
@@ -69,16 +75,20 @@ interface RetainedFeed<A> {
 export const liveSource = ({
   options,
   telemetryLayer,
+  ux,
 }: {
   readonly options: St3Options
   /** Browser root owns sampling and observers; the SDK shares its scoped tracer/exporter. */
   readonly telemetryLayer?: Layer.Layer<never> | undefined
+  readonly ux?: () => UxTelemetry
 }): LiveSource => {
   const { baseUrl } = options
-  const fetch = instrumentFetch(nativeAgentFetch({
-    origin: typeof location === 'undefined' ? new URL(baseUrl).origin : location.origin,
-    fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis),
-  }))
+  const origin = typeof location === 'undefined' ? new URL(baseUrl).origin : location.origin
+  const fetch = instrumentFetch({
+    fetchImpl: nativeAgentFetch({ origin, fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis) }),
+    origin,
+    traceContext: options.traceContext,
+  })
   const deniedReaders = new Set<(message: string) => void>()
   let readRejection: string | undefined
   let connectionAttempt = 1
@@ -106,7 +116,7 @@ export const liveSource = ({
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
   const resources = gatewayResources({
     baseUrl,
-    fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis),
+    fetchImpl: fetch,
   })
   const subjectReads = gatewaySubjectReads({
     options: { baseUrl, fetchImpl: fetch },
@@ -167,6 +177,7 @@ export const liveSource = ({
     onCommit,
     explicitInterest = false,
     onVisibilityChange,
+    telemetryKind = 'window',
   }: {
     readonly resolve: (get: Atom.AtomContext) => Effect.Effect<TSpec, AttachFailure>
     readonly follow: (args: {
@@ -177,6 +188,7 @@ export const liveSource = ({
     readonly onCommit?: (value: A) => void
     readonly explicitInterest?: boolean
     readonly onVisibilityChange?: (visible: boolean) => void
+    readonly telemetryKind?: 'window' | 'conversation' | 'terminal'
   }) => {
     let visible = false
     let ended = false
@@ -217,12 +229,14 @@ export const liveSource = ({
       const commit = () => {
         if (active) {
           if (latest._tag === 'Observed') onCommit?.(latest.value)
+          ux?.().observeSync({ key: syncData, kind: telemetryKind, status: syncLatest.sync.status })
           registry.set(data, latest)
           registry.set(syncData, syncLatest)
         }
       }
       const setSync = (status: SyncStatus) => {
         if (terminalFailure && status._tag !== 'Failed') return
+        ux?.().observeSync({ key: syncData, kind: telemetryKind, status })
         syncLatest = transitionFeedSync(syncLatest, status, Date.now())
         if (status._tag !== 'Live' && latest._tag === 'Observed')
           latest = { ...latest, freshness: 'stale' }
@@ -469,6 +483,7 @@ export const liveSource = ({
     let changedFrom = Infinity
     return retain<ConversationPage, Extract<FollowSpec, { _tag: 'Conversation' }>>({
       keepAlive: false,
+      telemetryKind: 'conversation',
       explicitInterest: true,
       resolve: () => Effect.succeed({ _tag: 'Conversation', ref }),
       onCommit: (page) => {
@@ -485,6 +500,7 @@ export const liveSource = ({
         st3.followConversation(spec).pipe(
           Stream.map((event) => {
             if (event._tag !== 'Observed') return event
+            ux?.().switchDataReady(ref)
             const previousSize = timeline.size
             timeline.apply(event.value)
             // Entries are identity-deduplicated by the retained timeline, not counted per chunk.
@@ -524,6 +540,16 @@ export const liveSource = ({
   }
   const conversation = (ref: string) => retainConversation(ref).atom
   const conversationSync = (ref: string) => retainConversation(ref).sync
+  let releaseSelection: (() => void) | undefined
+  const selectConversation = (ref: string) => {
+    releaseSelection?.()
+    const entry = retainConversation(ref)
+    const snapshot = registry.get(entry.snapshot)
+    const warm = snapshot._tag === 'Observed'
+    ux?.().beginSwitch({ ref, warm, slotCount: getDebug('Wf.activeFollows') })
+    releaseSelection = registry.mount(entry.interest)
+    if (warm) ux?.().switchDataReady(ref)
+  }
   const terminalFamily = Atom.family((ref: string) => {
     const agentRef = `agent/${ref.slice('terminal/'.length)}`
     const runtimes = Atom.make((get): readonly string[] | undefined => {
@@ -545,6 +571,7 @@ export const liveSource = ({
     )
     return retain<TerminalScreen, Extract<FollowSpec, { _tag: 'Terminal' }>>({
       explicitInterest: true,
+      telemetryKind: 'terminal',
       resolve: (get) => {
         const ids = get(runtimes)
         const authority = ids === undefined ? get(agents) : undefined
@@ -601,6 +628,7 @@ export const liveSource = ({
           st3.gatewaySyncStatus.pipe(
             Stream.runForEach((status) => Effect.sync(() => {
               current = transitionFeedSync(current, status, Date.now())
+              ux?.().observeSync({ key: gatewaySync, kind: 'gateway', status })
               get.setSelf(current.sync)
             })),
           ),
@@ -641,7 +669,9 @@ export const liveSource = ({
     }),
   )
   return {
+    selectConversation,
     registry,
+    ready: runtime.runPromise(Effect.void),
     source: {
       mode: 'live',
       subjectReads,
@@ -695,6 +725,7 @@ export const liveSource = ({
       },
     },
     dispose: async () => {
+      releaseSelection?.()
       ingest.dispose()
       for (const entry of recentConversations.values()) entry.release()
       recentConversations.clear()
