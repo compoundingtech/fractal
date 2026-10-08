@@ -4,7 +4,7 @@ Every pushed Git tag runs **Smalltalk tag release**. Both native builds must pas
 GitHub release is published. A release is also published once a day when `main` changed since the
 last one (see [Daily releases](#daily-releases)). Each release contains:
 
-- `smalltalk-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, built on Ubuntu 22.04 (glibc 2.35 or newer).
+- `smalltalk-x86_64-unknown-linux-gnu.tar.gz`: Linux x86_64, linked for glibc 2.35 or newer (Ubuntu 22.04+).
 - `smalltalk-aarch64-apple-darwin.tar.gz`: Apple Silicon, macOS 15 or newer. The executables are
   ad-hoc signed, not Developer ID signed or notarized; macOS may require approval to open them.
 - One `.sha256` checksum per archive, combined `SHA256SUMS`, and `RELEASE.json` with the exact
@@ -62,7 +62,8 @@ only when its database, claim and driver contracts can read the current state; s
 unless the release explicitly documents a downgrade. Before upgrading a healthy populated
 store, make a [claim backup](backups.md) and preserve excluded local data separately.
 
-Run `st service install` after the first install or a changed executable path; it refreshes
+First-run `st` offers to install the background service. For an upgrade or changed
+executable path, `st service install` refreshes
 service definitions and restarts daemon and replication services. `st service restart` suffices
 when those definitions already point at the intended binaries. Schedule that restart, compare
 `st --version --json` with the daemon's `machine_version` in `st doctor --json`, and verify peer
