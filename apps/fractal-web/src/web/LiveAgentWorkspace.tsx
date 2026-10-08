@@ -1,4 +1,5 @@
 import { sidebarRow } from './sidebarRow.ts'
+import { ConversationPane } from './ConversationPane.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -164,10 +165,12 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                 <div {...stylex.props(styles.body)}>
                   {current === '' ? (
                     <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
-                  ) : (
+                  ) : agent === undefined ? (
                     <p role="status" {...stylex.props(styles.notice)}>
-                      This subject has no available native view.
+                      Waiting for the selected agent.
                     </p>
+                  ) : (
+                    <ConversationPane key={current} ref={current} />
                   )}
                 </div>
               </section>
