@@ -44,7 +44,8 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
 - **D8 Binding:** the kit is Effect-free. Components get props through `useScenarioSlice`.
   App-level stories and fractal-web dev/e2e replay client-v0 frames over a mock WebSocket through
   the real data layer. stui, iOS and the TUI read JSON or use the same replay.
-- **D9 Catalog:** the fourteen worlds listed under [Catalog](#catalog-d9).
+- **D9 Catalog:** seven narratives and the edge states listed under [Catalog](#catalog-d9);
+  failed sync has one world per cause.
 - **D10 Storybook:** a global Scenario toolbar selects the world. Stories declare
   `parameters.scenario.slices`. Controls override one slice; fixed stories pin a world. Deep links
   use `?globals=scenario:<world>&args=<slice>:<variant>`. Explorer pickers (rendering) stay
@@ -169,14 +170,19 @@ time model. A streaming entry is emitted as revisions with `final: false` until 
 A slice holds the state at `now` (offset 0) and a timeline of events after `now` (offset > 0).
 Events at or before `now` are folded into the state. State values are client-v0 wire values.
 
+A timeline event is **frame-shaped**: it groups exactly the changes one server frame or one HTTP
+response carries. A synthetic event usually holds one change; an event imported from a recording
+keeps the recorded grouping, so page and revision boundaries survive (see
+[Recording fidelity](#recording-fidelity)).
+
 | Slice | State | Timeline events |
 | --- | --- | --- |
-| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `order: Id[]` | `upsert`, `remove`, `reorder` |
-| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them) | `upsert`, `remove` |
-| `attention` | `attention: Attention[]`, `messages: Message[]` (sources the cards load) | `upsert`, `remove` |
-| `conversation` | per agent: `session_id`, newest-first-paged `items: TimelineEntry[]`, `has_more` | `entry` (append or revise), `replace` (new session or replay window) |
-| `terminal` | per terminal: owner, incarnation, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `screen`, `end` (exit), `incarnation` (restart) |
-| `sync` | `capabilities` envelope, connection script | `open`, `close {code, reason}`, `http-error {route, status, envelope}`, `resync {selector, code, message}`, `subscription-error {selector, envelope}`, `sync-notice {notice}`, `hold {selector}` |
+| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `order: Id[]` | `changes {upserts, removes, order?}` |
+| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them) | `changes {upserts, removes, order?}` |
+| `attention` | `attention: Attention[]`, `messages: Message[]` (sources the cards load) | `changes {upserts, removes, order?}` |
+| `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
+| `terminal` | per terminal: owner, `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `screen`, `unavailable`, `end`, `incarnation` |
+| `sync` | `capabilities` envelope, the [sync script](#sync-matrix) and the `expected` sync status per surface | see [Replay dispatch](#replay-dispatch) |
 
 `selector` names a subscription by its collection and filter, for example
 `{ collection: 'conversation', conversation: 'agent/example/atlas/builder' }`.
@@ -190,8 +196,8 @@ so an override never introduces strangers. Variants per slice:
 | `details` | `default`, `empty`, `loading`, `stalled`, `failed` |
 | `attention` | `default`, `none`, `one-of-each-kind`, `many` |
 | `conversation` | `default`, `empty`, `loading`, `streaming`, `long`, `tool-heavy`, `failed-tools`, `remote-only-mail` |
-| `terminal` | `default`, `none`, `running`, `exited`, `restarted` |
-| `sync` | `live`, `connecting`, `reconnecting`, and one variant per failed-sync cause |
+| `terminal` | `default`, `none`, `running`, `unavailable`, `exited`, `restarted` |
+| `sync` | one variant per row of the [sync matrix](#sync-matrix) |
 
 `world.with({ conversation: 'long' })` returns a new world with that variant. A world may also
 pass a slice value built by its own factories: `world.with({ sync: customSync })`.
@@ -216,18 +222,52 @@ daemon itself produced the screens. This keeps a terminal emulator out of the ki
 
 ## Time (D5)
 
-- Every committed file is written at one fixed anchor, `2030-01-01T12:00:00Z`, which stands for
-  `now`. Past events lie before it; future events (lease expiry, scheduled reconnects, timeline
-  events) lie after it.
-- **Rebase rule:** when a world is loaded with `now`, every JSON string value that fully matches
-  the client-v0 `date-time` pattern is shifted by `now − anchor`. The result keeps the original
-  fractional-second precision and is written in UTC with `Z`. Strings that only contain a time
-  (for example an incarnation id) are opaque and stay unchanged. Rust and Swift readers implement
-  the same rule in a few lines; each slice file names its anchor.
-- Timeline events carry `at_ms`, an offset from `now`. Replay schedules them on its clock.
+### Anchor and offsets
+
+- Every committed file is written at one fixed anchor, `2030-01-01T12:00:00.000Z`, which stands
+  for `now`. Past instants lie before it; future instants (lease expiry, scheduled reconnects,
+  timeline events) lie after it.
+- Kit-only fields are offsets and never rebased: timeline `at_ms`, terminal `started_at_ms`, and
+  asciicast event times (seconds from the cast start).
 - `loadWorld(id, { now })` defaults `now` to the load time. Screenshots and snapshot tests pin it:
   Storybook uses the `scenarioNow` global, Playwright installs its clock, and tests pass `now`.
   With `now` equal to the anchor, loaded values equal the committed bytes.
+
+### Timestamp locations
+
+Only schema-declared instants move. The client-v0 schema marks them: `$ref: Timestamp`
+(`x-st-codec: timestamp`, an RFC 3339 string) and `x-st-codec: epoch-ms` (an integer). Durations
+(`duration-ms`, `duration-s`) and every other value are never shifted.
+
+- `scripts/emit.ts` walks each wire value against its schema definition and writes the JSON
+  pointers of every instant it contains into the slice file's `times` list, with the codec of
+  each pointer (`timestamp` or `epoch-ms`). The pointers cover `state` and `timeline`.
+- A reader shifts exactly the listed locations by `now − anchor`. It needs no schema and no pattern
+  matching, so Rust and Swift readers stay small.
+- Content is opaque: message text, tool output, terminal screens, titles and ids never move, even
+  when a string looks like a timestamp. Authored content therefore never states an absolute
+  date or clock time. A vocabulary rule rejects date and clock patterns in bank entries; relative
+  phrases ("about an hour ago") are allowed and stay as written.
+
+### Precision and range
+
+- One canonical precision: milliseconds, as the server emits (`YYYY-MM-DDTHH:MM:SS.sssZ`).
+  Emitted `timestamp` values always have exactly three fractional digits; `epoch-ms` values are
+  integers. Imported recordings with finer precision are truncated to milliseconds on import.
+- `now` is an integer number of epoch milliseconds; a finer clock is truncated.
+- Every shifted instant stays in `0001-01-01T00:00:00.000Z`..`9999-12-31T23:59:59.999Z` (and, for
+  `epoch-ms`, within the safe-integer range). A `now` that would move any listed instant outside
+  this range is rejected with an error naming the pointer.
+- Readers accept any RFC 3339 precision on input and always write three fractional digits, so a
+  shift never rounds and differences between instants stay exact.
+
+### Shared vectors
+
+`fixtures/scenarios/_vectors/rebase.json` holds cases of `{ input, times, anchor, now, expected }`.
+They cover: second, millisecond and microsecond inputs side by side; a `now` with nonzero
+milliseconds; `epoch-ms` integers; content strings and ids equal to a timestamp (unchanged);
+durations (unchanged); range errors. The TypeScript kit, the Rust reader in `crates/st3-client`
+and the Swift reader in `St3Client` each run all vectors in their own tests.
 
 ## Committed fixtures (D6)
 
@@ -239,11 +279,15 @@ daemon itself produced the screens. This keeps a terminal emulator out of the ki
   "world": "fleet-mid-refactor",
   "slice": "roster",
   "variant": "default",
-  "anchor": "2030-01-01T12:00:00Z",
+  "anchor": "2030-01-01T12:00:00.000Z",
   "source": { "_tag": "synthetic", "seed": 1 },
   "decode": "strict",
+  "times": [
+    { "pointer": "/state/agents/0/since", "codec": "timestamp" },
+    { "pointer": "/timeline/0/upserts/0/updated_at", "codec": "timestamp" }
+  ],
   "state": { "agents": [], "runtimes": [], "machines": [], "order": [] },
-  "timeline": [{ "at_ms": 4000, "_tag": "upsert", "resource": {} }]
+  "timeline": [{ "at_ms": 4000, "_tag": "changes", "upserts": [], "removes": [] }]
 }
 ```
 
@@ -276,28 +320,63 @@ st3 scenario recorder (Rust test binary, run on demand)
   ├─ starts a scratch daemon in a fresh temporary state directory
   ├─ declares the cast's agents with the scripted fake harness (pattern: terminal_binding tests)
   ├─ the fake harness writes a native transcript and terminal output step by step from the script
-  └─ a client-v0 client subscribes to every collection, conversation and terminal, and records
-     every frame and HTTP read
+  └─ a client-v0 client sends a fixed list of subscribe commands and HTTP reads, and records each
+     command, frame and HTTP exchange with its receive time
         │
         ▼
-recordings/<name>.frames.jsonl       raw frames, scratch identities only
-        │  scripts/emit.ts (import step)
+recordings/<name>.recording.jsonl    raw commands, frames and exchanges, scratch identities only
+        │  scripts/emit.ts (import = normalization N, below)
         ▼
-slice state + timeline, rebased to the anchor, ids mapped to the world's namespace
+recordings/<name>.normalized.json    the fidelity oracle
+        │
+        ▼
+slices of the recording's own world, and recorded slices reused by narrative worlds
 ```
 
 - The recorder refuses to run against any daemon it did not start, and against any state
   directory it did not create. No live host data can enter.
 - A script is generated from the world's cast, so the recorded agents are the cast members.
 - Recording is not part of CI: it needs a built daemon. Committed recordings are inputs to
-  `emit`; the freshness, decode and privacy gates cover their output. A re-recording that changes
-  the wire shape is a reviewed diff.
-- **Replay fidelity test:** replaying a recorded world with the recorded subscribe commands
-  yields frames equal to the recording, except snapshot fences.
+  `emit`; the freshness, decode, privacy and fidelity gates cover them. A re-recording that
+  changes the wire shape is a reviewed diff.
 
-Narrative worlds take `conversation` and `terminal` from a recording where the fake harness can
-produce them; their other slices come from factories over the same cast. Edge-state worlds are
-synthetic.
+### Normalization
+
+`N` turns a raw recording into its normalized form. It is deterministic and applies to commands,
+frames and HTTP exchanges alike:
+
+1. **Identities:** scratch ids map to the world's namespace through one id map, built from the
+   script. An id without a mapping fails the import.
+2. **Time:** receive times become offsets from the recording's last pre-timeline frame, rounded
+   to milliseconds. Schema instants are rebased to the anchor as in [Time](#time-d5).
+3. **Fences and cursors:** snapshot ids and `store_index` values become ordinal tokens
+   (`fence#1`, `fence#2`, …) in order of first appearance; page cursors become `cursor#n`.
+   Equal raw values get equal tokens.
+4. Nothing else changes: payloads, order, `has_more`, revisions and frame boundaries stay as
+   recorded.
+
+### Recording fidelity
+
+Each recording has a **fidelity world**, `recorded-<name>`: every slice comes from the recording,
+none from factories. Fidelity worlds are test-only; they are not in the catalog or in
+`fixtures/scenarios`.
+
+The fidelity test replays `recorded-<name>` with `now` pinned to the anchor, sends the normalized
+commands and HTTP reads at their recorded offsets, normalizes the replay output with the same
+`N`, and compares with the normalized recording:
+
+- per subscription: the sequence of frames, each with its kind, boundaries (which items one frame
+  carries), items, revisions, `order`, `has_more` and fence token;
+- per HTTP read: route, query, status and body, with cursor tokens.
+
+Fences are compared as tokens, so the oracle checks correlation (the same recorded fence maps to
+the same replayed fence) without equal raw values. Separately, replayed `store_index` values must
+increase strictly on each socket.
+
+Narrative worlds reuse a recording's `conversation` and `terminal` slices and generate their
+other slices from the same cast. The fidelity oracle covers the recorded slices through the
+fidelity world; the narrative world's synthetic slices are covered by the decode and consumer
+gates. Edge-state worlds are synthetic.
 
 ## Replay (D8)
 
@@ -314,24 +393,101 @@ replay.actions  // actions the client submitted, in order, for test assertions
   passes them through `St3Options.fetch` and `St3Options.socket`. Replay adds no other hook.
   The socket accepts and ignores command keys it does not use, such as the `trace` field the
   web client adds to a subscribe command.
-- **Frames:** the replay materializes frames from slice state, honoring each subscription's
-  limit and the collections protocol: the first reply is a `snapshot` with at most 200 items in
-  display order; each timeline event becomes a `changes` frame with `upserts`, `removes`, the
-  complete new `order`, `has_more` and a new snapshot fence. Fences use a monotonically increasing
-  `store_index`. Conversation subscriptions get a `replace: true` frame with the newest page,
-  then deltas without `has_more`. Terminal subscriptions get one `screen` frame per screen.
+- **Windows:** the first reply to a collection subscription is a `snapshot` with the slice state
+  filtered by the subscription's filters, in display order, cut to its `limit` (1–200). Fences use
+  a strictly increasing `store_index` per socket.
 - **HTTP:** `fetch` answers `GET` reads from the same state, paging by cursor within the advertised
-  bounds. `terminal.attach` returns a capability that the socket accepts. Other actions are
-  recorded in `replay.actions` and answered with an accepted `ActionResult` and an operation that
-  completes; a world may declare a different answer per action. Replay does not simulate the
-  effects of actions.
-- **Sync events:** `close` closes the socket with that code; `http-error` makes the named route
-  return that status and `ErrorEnvelope`; `resync` and `subscription-error` send those frames;
-  `hold` never answers the selected subscription (the loading state).
+  bounds. `terminal.attach` returns the terminal's current incarnation and a capability that the
+  socket accepts. Other actions are recorded in `replay.actions` and answered with an accepted
+  `ActionResult` and an operation that completes; a world may declare a different answer per
+  action. Replay does not simulate the effects of actions.
 - **Clocks:** `realClock()` schedules with timers; `manualClock()` exposes `advance(ms)` for unit
   tests. Replay never waits on its own; it runs only what the clock releases.
-- **Folding check:** applying replayed frames with the client's `applyWindow` yields the slice
-  state at every timeline step. A property test checks this for every world and variant.
+
+### Replay dispatch
+
+Every timeline event tag has exactly one transport behavior. The dispatch function is exhaustive
+over the event union (a `never` check), and each row has a test through the real client handler.
+
+| Slice | Event | Transport behavior |
+| --- | --- | --- |
+| roster, details, attention | `changes` | Updates the state. For every open subscription whose filtered, limited window changes: one `changes` frame with `upserts`, `removes` (including rows leaving the window), the complete new `order`, `has_more` and a new fence. Unaffected subscriptions get nothing. |
+| conversation | `entries` | One `conversation` frame with `replace: false` and those entries, without `has_more`, to subscribers of that agent or session. |
+| conversation | `replace` | One `conversation` frame with `replace: true`, the newest page (`page_size`) and `has_more`. |
+| terminal | `screen` | One `screen` frame with the `TerminalScreen` to subscribers holding the current incarnation. |
+| terminal | `unavailable` | An `error` frame, code `terminal-unavailable`, `retryable: true`. A later subscribe with the same lease resumes with the current screen. |
+| terminal | `end` | An `error` frame, code `terminal-ended`, `retryable: false`, to every subscriber. Later attaches and subscribes return `terminal-ended`. |
+| terminal | `incarnation` | Sets a new incarnation. Current subscribers get an `error` frame, code `stale-fence`. A subscribe with the old incarnation gets `stale-fence`; `terminal.attach` returns the new incarnation and a new capability. |
+| sync | `open-refused {status, envelope}` | The next socket open fails the upgrade with that HTTP status and `ErrorEnvelope`. |
+| sync | `close {code, reason}` | Closes the open socket with that WebSocket close code. |
+| sync | `reopen {after_ms}` | Allows a new socket open again after `after_ms`; until then opens fail with close code 1006. |
+| sync | `http-error {route, status, envelope}` | That route returns the status and `ErrorEnvelope` until `http-ok {route}`. |
+| sync | `hold {selector}` / `release {selector}` | Withholds / then sends the selected subscription's first reply. |
+| sync | `resync {selector, code?, message?}` | A `resync` frame with `retryable: true`; `code` and `message` only when given (uncoded resync is the legacy shape). |
+| sync | `error {selector?, code?, message, retryable}` | An `error` frame. With no `selector`, it carries no `collection` (the legacy uncoded subscription-cap shape). |
+| sync | `notice {peers}` / `notice-clear` | Sets / clears the `SyncNotice` that every subsequent page response (`Page`, `ArrangementPage`, `ResourcesPage`) carries in `sync`. No socket frame. |
+| sync | `progress {selector, stage, …}` | A `progress` frame. Active only when the world's capabilities advertise `sync-status.v1` and the frame is in the client-v0 schema. |
+| sync | `heartbeat` / `silence {ms}` | A `heartbeat` frame / no frame of any kind for `ms`. Same activation as `progress`. |
+
+Events marked "same activation" are rejected by the emitter until the client-v0 schema defines
+those frames, so no scenario sends a frame the strict decode gate cannot check.
+
+### Consumer folds
+
+Each stream is checked with the consumer that really folds it, at every clock step of every
+world and variant, against the expected state the slice defines:
+
+| Stream | Real consumer | Expected |
+| --- | --- | --- |
+| collection windows | the client's `applyWindow`, per subscription | slice state filtered, ordered and cut to that subscription's limit |
+| conversations | the conversation reducer in `@smalltalk/st3-views` (`sessionView`) | the slice's entries for that agent, joined as the reducer documents |
+| terminals | the generated client's terminal follow on the collections socket | the latest screen; the end with `terminal-ended` or `stale-fence` at the dispatched step |
+| sync | the SDK sync fold in `@st3/sdk/effect` | the [sync matrix](#sync-matrix) `expected` status per surface |
+
+The first three run in this package's tests. The sync fold check runs in the SDK package, which
+takes the kit as a development dependency (see [Consumer contracts](#consumer-contracts-d2-d8)).
+`huge` checks windows and pages, not a full 1,000-agent window.
+
+## Sync matrix
+
+The `sync` slice's variants are rows of this matrix. Each row names a trigger (a wire script the
+replay dispatches, or a local condition the consumer test creates) and the `SyncStatus` the SDK
+must report. `SyncStatus` is the portable Amendment v2 contract of `@st3/sdk/effect`
+(`sync-status.ts`). Times in `expected` are offsets from `now`. "Pending" rows wait for server
+frames (PR A: heartbeat, coded reasons, `subscription-limit` code; PR B: progress) to enter the
+client-v0 schema; until then they are excluded from committed fixtures and the gates.
+
+| Variant | Trigger | Expected `SyncStatus` |
+| --- | --- | --- |
+| `live` | snapshot / first conversation frame | `Live{since}` |
+| `connecting` | socket open held | `Connecting{attempt: 1}` |
+| `requested` | open; `hold` on the surface's subscription | `Requested{since}` (view tier derives Stalled after 5 s) |
+| `socket-dropped` | after Live: `close {1006}`, opens keep failing | `Stale{Reconnecting{attempt n, nextAt, issue}, lastLiveAt}` |
+| `reconnected` | `socket-dropped`, then `reopen` | `Stale{Reconnecting}`, then `Live` from the new snapshot |
+| `closed-unknown` | close without a scheduled retry | `Stale{Unknown}` |
+| `resync-coded` | `resync {code: remote-unavailable, message}` over a live conversation | `Stale{Resync{code, message, attempt}}`, content kept |
+| `resync-uncoded` | `resync` without code | `Stale{Unknown}` |
+| `forbidden` | `open-refused` / capabilities `http-error`: 403, code `forbidden` | `Failed{Server{forbidden}}`; reconnecting stops |
+| `rejected-uncoded` | `open-refused` 403 without an envelope code | `Failed{Unknown}` |
+| `subscription-error` | `error {selector, code: not-found, retryable: false}` | `Failed{Server{not-found}}` on that surface only; others stay `Live` |
+| `subscription-limit-local` | local: capabilities without `collections` v1 (cap 8), the test opens 9 visible follows | `Failed{Local{subscription-limit, cap: 8}}` |
+| `subscription-limit-legacy` | `error` without code or collection until the lowered cap is full | `Failed{Unknown}` |
+| `evicted` | local: a hidden follow loses its slot to a visible one | `Stale{Evicted}` (never shown) |
+| `capability-absent` | capabilities omit the surface's capability (e.g. `terminal.attach`) | the surface's unsupported failure as the web source reports it today |
+| `rate-limited` | `http-error {route, 429, rate-limited}` on a list read | `Failed{Server{rate-limited}}` for that HTTP-only surface |
+| `cursor-gap` | `http-error` with `cursor-gap` / `page-cursor-expired` on paging | `Failed{Server{cursor-gap}}` for the older-page read; live window unaffected |
+| `subscription-limit-coded` (pending PR A) | `error {code: subscription-limit}` | `Failed{Server{subscription-limit}}` |
+| `quiet` (pending PR A) | Live, then `silence {15000}` | `Stale{Quiet{lastFrameAt}}`; at 25 s close and reconnect |
+| `progress` (pending PR B) | `progress` queued → resolving → routing{host} → reading{done,total} | `Progress{stage, elapsedMs, stageSince, reportedAt, host?, done?, total?}` per stage |
+| `progress-absent` | no `sync-status.v1` capability, slow first snapshot | `Requested` → `Live`; no invented stage; quiet detection off |
+
+Where an `expected` value depends on SDK details this document does not fix (the
+`capability-absent` failure, `attempt` numbering), the SDK's current behavior is recorded in the
+row on first adoption and changes only with the SDK contract.
+
+**Replication divergence is not a sync failure.** A `SyncNotice` with state `diverged` says the
+host projects a different graph from the same envelopes; the transport is healthy. It has its own
+edge world, `replication-diverged`, and the header shows it as the UI contract describes.
 
 ## React binding (D8)
 
@@ -343,9 +499,21 @@ replay.actions  // actions the client submitted, in order, for test assertions
 const rows = useScenarioSlice('roster', toSidebarRows)
 ```
 
-- `useScenarioSlice(slice, select?)` returns the slice's state at the current replay time,
-  rebased, typed by the client-v0 models. `select` maps it to a component's props. Mapping
-  functions belong to the consumer, because component props are consumer-owned.
+The kit hands out **wire state**, not decoded values:
+
+- `useScenarioSlice(slice)` returns `WireSlice<slice>`: the slice state at the current replay
+  time, rebased, typed by `Models.generated.ts` (timestamps are strings, nullable fields are
+  `null`, unknown enum values stay strings). For `sync` it returns the plain portable
+  `SyncStatus` per surface from the matrix, which needs no decoding.
+- `useScenarioSlice(slice, project)` returns `project(wireSlice)`. A projection turns wire state
+  into a component's props (its DTO). Projections and DTOs belong to the consumer, because
+  component props are consumer-owned.
+- A consumer whose app decodes with the Effect codecs (`@smalltalk/st3-client/schema`) or folds
+  with the SDK uses those same functions inside its projection. The consumer may import Effect;
+  the kit does not. So a story and the app derive props through one source of truth.
+- **Conformance:** for every world, the consumer tests that its story projection and its app
+  projection (through replay and the real data layer) produce equal props for each component
+  that has both.
 - The provider owns a manual or real clock, so a story can advance time (streaming text, a
   reconnect) without timers in components.
 - Components under the provider never import the kit's factories; they receive props.
@@ -374,13 +542,30 @@ export const Huge = { parameters: { scenario: { world: 'huge' } } } // pinned
   `default` replaces that slice through `world.with`.
 - Deep links use Storybook's own URL state: `?globals=scenario:ci-failing-fix&args=conversation:long`.
 - `withScenario` wraps the story in `ScenarioProvider` and renders `data-scenario="<world>"` and
-  `data-scenario-slices="<slice>:<variant>,…"` on its wrapper for play-function assertions.
+  `data-scenario-slices="<slice>:<variant>,…"` on its wrapper.
 - Explorer pickers (theme, density, layout variants) are separate globals or args. A scenario
   selection never changes rendering options, and the reverse.
 - App-level stories use `createReplay` instead of `useScenarioSlice` and render through the real
   data layer.
-- **Coverage rule:** every story declares `parameters.scenario`. A story-index test in the
-  consumer fails for a story without it.
+
+### Consumption check
+
+An annotation alone proves nothing, so the kit tracks reads. The provider records each slice a
+story reads through `useScenarioSlice`, and each slice whose collections an app-level story's
+replay serves. `scenarioStoryCheck(story)` renders a story through Storybook's portable stories
+and fails unless all hold:
+
+1. Every declared slice was read; no undeclared slice was read.
+2. Each world exposes **markers** per slice: display names and short texts that appear only in
+   that world's slice (an agent name, a commit title). Rendered under two different worlds, the
+   story shows each world's markers and not the other's.
+3. Each slice arg changes the rendered content to that variant's markers.
+4. A pinned world renders its own markers whatever the toolbar global is.
+5. Rendering from the URL state (`globals` and `args`) equals rendering from the same values
+   set directly.
+
+The kit's own tests include a negative case: a story that declares slices but renders fixed text
+fails checks 1 and 2.
 
 ## Catalog (D9)
 
@@ -401,58 +586,55 @@ Edge states:
 | World | Content |
 | --- | --- |
 | `empty` | Live connection, zero resources in every collection. |
-| `loading` | Discovery succeeds; every first snapshot is held. |
+| `loading` | Discovery succeeds; every first reply is held. |
 | `unknown-fields` | Future enum values, extra keys, unknown resource and entry kinds. Decoded tolerant; strict decoding fails exactly at the declared paths. |
-| `failed-sync-<cause>` | One world per cause, below. |
+| `failed-sync-<cause>` | One world per failed or stale [sync matrix](#sync-matrix) row that is not pending: `socket-dropped`, `resync-coded`, `forbidden`, `rejected-uncoded`, `subscription-error`, `subscription-limit-local`, `subscription-limit-legacy`, `capability-absent`, `rate-limited`, `cursor-gap`. Each uses `fleet-mid-refactor`'s cast and other slices. Pending rows become worlds when their frames land. |
+| `replication-diverged` | Healthy transport; page responses carry a `diverged` sync notice for one peer. |
 | `huge` | 1,000 agents across many hosts and missions; one conversation of 10,000 turns; served in protocol-sized windows and pages. |
 | `unicode` | RTL, CJK, emoji, combining marks, zero-width joiners, 200-character names and long paths in every slice. |
 
-Failed-sync causes:
-
-| World | What the client meets |
-| --- | --- |
-| `failed-sync-unauthorized` | Discovery and the socket return 401. Reconnecting stops. |
-| `failed-sync-forbidden` | A revoked device: 403 `forbidden`. |
-| `failed-sync-unsupported-capability` | Capabilities advertise a required capability version the client does not know. |
-| `failed-sync-socket-dropped` | The socket closes abnormally on every attempt; backoff continues. |
-| `failed-sync-remote-unavailable` | The conversation owner's host is unreachable: retryable `resync` with `remote-unavailable` over a stale copy. |
-| `failed-sync-subscription-error` | A permanent `error` frame ends one subscription; the others stay live. |
-| `failed-sync-diverged` | Pages carry a `diverged` sync notice for one peer. |
-| `failed-sync-cursor-gap` | Event and page cursors expire (`cursor-gap`, `page-cursor-expired`). |
-| `failed-sync-rate-limited` | Reads return `rate-limited` with retry guidance. |
+`evicted`, `quiet` and `progress` stay variants: they need a local condition or a pending frame.
 
 ## Gates (D4, D6)
 
 One path-filtered CI job runs for changes under `clients/typescript/st3-scenarios`,
-`fixtures/scenarios`, `docs/st3/client-v0/schemas` and `clients/typescript/st3-client`:
+`fixtures/scenarios`, `docs/st3/client-v0/schemas`, `clients/typescript/st3-client` and
+`clients/typescript/st3-views`:
 
-1. Typecheck and unit/property tests: determinism (same seed, same bytes), rebase (any `now`
-   keeps every value valid and preserves order and differences), replay folding, replay fidelity
-   against recordings, size budget, no `Math.random`/`Date.now` in generators, no Effect import
-   in runtime exports.
-2. Freshness: `emit --check`.
+1. Typecheck and unit/property tests: determinism (same seed, same bytes); rebase (the shared
+   vectors, and for any `now` every listed instant stays valid with exact differences, and no
+   unlisted value changes); replay dispatch (one test per event row); consumer folds for windows,
+   conversations and terminals; recording fidelity; consumption check, including its negative
+   case; size budget; no `Math.random`/`Date.now` in generators; no Effect import in runtime
+   exports.
+2. Freshness: `emit --check`, including each file's `times` list.
 3. Decode: every wire value in every committed slice and in every in-process variant is decoded
    with `@smalltalk/st3-client/schema` in strict mode, once at the anchor and once rebased to a
    random `now`. `unknown-fields` decodes tolerant and fails strict at exactly its declared paths.
 4. Privacy: `scripts/check-public-repo` covers the committed files; `scripts/scan.ts` adds the
-   token, credential, host and home-path rules of the earlier synthetic-fixtures scan and checks
-   that every subject reference is in the [identity namespace](#identity-namespace).
-5. Consumers: stui's contract test, the Swift client tests and the fractal-web bundle check run in
-   their own jobs (see below).
+   token, credential, host and home-path rules of the earlier synthetic-fixtures scan, checks
+   that every subject reference is in the [identity namespace](#identity-namespace), and rejects
+   date and clock patterns in vocabulary banks.
+5. Consumers: the SDK sync-matrix fold, stui's contract test, the Rust and Swift rebase vectors
+   and the fractal-web bundle check run in their own jobs (see below).
 
-Any change to the client-v0 schema re-runs the decode gate, so a contract change that breaks a
-scenario fails in the same pull request.
+Every gate has a test that plants one violation (a strict-invalid value, a stale file, a
+denylisted host, a story that ignores its data, a wrong sync expectation) and shows that the gate
+fails. Any change to the client-v0 schema re-runs the decode gate, so a contract change that
+breaks a scenario fails in the same pull request.
 
 ## Consumer contracts (D2, D8)
 
 | Consumer | Owner | Contract |
 | --- | --- | --- |
-| fractal-ui Storybook | `agent/dotfiles/fractal` | `preview.ts` installs `scenarioGlobalTypes` and `withScenario`. Every story declares `parameters.scenario`; a story-index test enforces it. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
-| fractal-web dev, tests, e2e | `agent/dotfiles/fractal-web-dev3` | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; the earlier `scripts/synthetic-fixtures` generator is retired. |
+| fractal-ui Storybook | `agent/dotfiles/fractal` | `preview.ts` installs `scenarioGlobalTypes` and `withScenario`. Every story declares `parameters.scenario` and passes `scenarioStoryCheck`. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Hand-typed fixtures (`Workshop` data, `embrace-fixtures`, `sync-fixtures`) are replaced by slices. |
+| `@st3/sdk/effect` | `agent/dotfiles/fractal-web-dev3` | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. |
+| fractal-web dev, tests, e2e | `agent/dotfiles/fractal-web-dev3` | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a runtime built with `adoptEarlyCollections: false` that passes `replay.socket` and `replay.fetch` to `St3Options`. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | stui | `agent/compoundingtech/misc` | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through stui's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
 | iOS app | `agent/compoundingtech/misc` | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
-| Swift `St3Client` | `agent/compoundingtech/misc` | Tests decode every committed scenario file with the Swift models, applying the rebase rule. |
-| fractal TUI | `agent/dotfiles/fractal` | Reads `fixtures/scenarios/<world>/<slice>.json` from a pinned smalltalk revision through its Rust adapter; its snapshot tests derive from those files. |
+| Rust `st3-client` | `agent/compoundingtech/misc` | Provides the rebase reader and passes the shared vectors. |
+| Swift `St3Client` | `agent/compoundingtech/misc` | Provides the rebase reader, passes the shared vectors, and decodes every committed scenario file with the Swift models. |
+| fractal TUI | `agent/dotfiles/fractal` | Reads `fixtures/scenarios/<world>/<slice>.json` from a pinned smalltalk revision through its Rust adapter and the Rust rebase reader; its snapshot tests derive from those files. |
 
 ## Non-goals
 
@@ -464,9 +646,11 @@ scenario fails in the same pull request.
 
 ## Acceptance
 
-- Every fractal-ui story renders a scenario world, and the Scenario toolbar switches it.
+- Every fractal-ui story renders a scenario world, passes `scenarioStoryCheck`, and the Scenario
+  toolbar switches it.
 - fractal-web e2e runs on replay; the production bundle contains no scenario-kit code.
+- The SDK fold matches every non-pending sync matrix row.
 - The stui demo shows the generated `fleet-mid-refactor` world.
-- fractal TUI and iOS show the same generated data.
-- CI decode, freshness and privacy gates are green, and each fails on a seeded violation
-  (a strict-invalid value, a stale file, a denylisted host).
+- fractal TUI and iOS show the same generated data; Rust and Swift pass the rebase vectors.
+- CI decode, freshness, privacy, fidelity and consumption gates are green, and each fails on a
+  planted violation.
