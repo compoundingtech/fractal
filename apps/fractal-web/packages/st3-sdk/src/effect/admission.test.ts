@@ -14,6 +14,7 @@ import {
   type FollowEvent,
   type FollowSpec,
   followKey,
+  type St3Diagnostic,
   St3,
   St3Live,
   type WindowValue,
@@ -154,6 +155,7 @@ const run = (
   maxFollows: number,
   test: (gateway: FakeGateway) => Effect.Effect<void, never, St3>,
   autoOpen = true,
+  onDiagnostics?: (event: St3Diagnostic) => void,
 ) => {
   const gateway = new FakeGateway()
   gateway.autoOpen = autoOpen
@@ -164,6 +166,7 @@ const run = (
     fetch: gateway.fetch,
     onSubscribeSent: (id) => gateway.sentSubscribeIds.push(id),
     onFollowSubscribeSent: (event) => gateway.sentFollowSubscribes.push(event),
+    ...(onDiagnostics === undefined ? {} : { onDiagnostics }),
   })
   return Effect.gen(function* () {
     yield* settle
@@ -176,6 +179,58 @@ const tags = (consumer: Consumer) => consumer.events.map((event) => event._tag)
 describe('follow admission', () => {
   beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }))
   afterEach(() => vi.useRealTimers())
+
+  it('reports a rejected mission row once per revision across frames and resync', async () => {
+    const diagnostics: St3Diagnostic[] = []
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await run(1, (gateway) => Effect.gen(function* () {
+        const consumer = yield* mount(windowSpec('missions'))
+        const row = {
+          kind: 'mission' as const, id: 'mission/example', revision: '1',
+          updated_at: snapshot.created_at, title: 'Example', state: 'running',
+          mission_revision: '1', runs: [], run_generations: {},
+          run_details: [{
+            id: 'mission-run/example', requester: 'person/example', status: 'running',
+            phase: 'normal', progress: { done: 0, total: 1 }, current_steps: [],
+            must_act: 'you', state_since: snapshot.created_at,
+            steps: [{
+              id: 'step-run/example/ask', path: 'ask', state: 'ready', attempt: 1,
+              since: snapshot.created_at, assignee: 'person/example',
+            }],
+          }],
+        }
+        const send = (revision: string, title: string) => gateway.send({
+          kind: 'snapshot', id: gateway.idOf('missions'), collection: 'missions',
+          has_more: false, items: [{ ...row, revision, title }], order: [row.id], snapshot,
+        })
+        send('1', 'First frame')
+        yield* settle
+        // Changed wire contents force decoding; the same revision must not report again.
+        send('1', 'Second frame')
+        yield* settle
+        expect(diagnostics.filter((event) => String(event._tag) === 'RowDecode')).toEqual([
+          { _tag: 'RowDecode', collection: 'missions', rowId: row.id, revision: '1' },
+        ])
+        gateway.send({ kind: 'resync', id: gateway.idOf('missions'), reason: 'test' })
+        yield* settle
+        send('1', 'After resync')
+        yield* settle
+        send('2', 'New revision')
+        yield* settle
+        expect(diagnostics.filter((event) => String(event._tag) === 'RowDecode')).toEqual([
+          { _tag: 'RowDecode', collection: 'missions', rowId: row.id, revision: '1' },
+          { _tag: 'RowDecode', collection: 'missions', rowId: row.id, revision: '2' },
+        ])
+        expect(consumer.events.filter((event) => event._tag === 'Observed').every(
+          (event) => event._tag === 'Observed' && event.value.items.length === 0,
+        )).toBe(true)
+        expect(warn).not.toHaveBeenCalled()
+      }), true, (event) => diagnostics.push(event))
+    } finally {
+      warn.mockRestore()
+    }
+  })
 
   it('correlates actual subscribe sends through queued open and reconnect', () =>
     run(1, (gateway) =>
