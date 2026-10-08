@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "fractal-web binds the conversation pane to the composition Transcript, keeps the last verified transcript visible while refreshing, and re-opens an ended follow when its interest is re-acquired.",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "UI composition and client follow-lifecycle changes only; no server protocol change. Availability, history, send state, and empty state pass to the composition Transcript."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No installation action required. Refreshing does not replace the last verified transcript with an empty view. Returning to a conversation retries an ended follow while retained content stays honestly stale; a refused read reports its own failure without looping."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}
