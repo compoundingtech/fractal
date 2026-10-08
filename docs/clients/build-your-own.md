@@ -77,6 +77,20 @@ The shared views have no React, React Native, Expo or native key-store dependenc
 return `person`/`green` color tokens; map them through your palette. Pass your product name,
 version and build to `clientName`, and a device label to `signatureRefusal` if desired.
 
+## Fractal web browser telemetry
+
+Browser trace export is opt-in. Set `VITE_OTLP_TRACES_URL` to the complete OTLP/HTTP
+traces endpoint when building the Fractal web app with Vite (or in its Vite `.env`
+file). For example, a deployment build can set
+`VITE_OTLP_TRACES_URL=https://collector.example.test/v1/traces`. Vite embeds this
+public URL in the browser bundle; changing it requires rebuilding the bundle.
+The collector must accept browser OTLP/JSON requests and allow the app origin
+through CORS. Do not put credentials in this public configuration.
+
+With the key unset or blank, the browser installs no exporter and sends no OTLP
+requests. In-process tracing remains available. Configured deployments retain
+100% dogfood sampling. The app server does not proxy OTLP requests.
+
 ## Connect, follow and send
 
 Rust local clients use `Client::unix` or `unix_as`. A paired Unix gateway uses `unix_gateway`;
