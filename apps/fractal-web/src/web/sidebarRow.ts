@@ -12,7 +12,7 @@ export const sidebarRow = ({ agent, stale, now }: {
     : !agent.connected ? 'offline' : agent.activity === 'errored' ? 'stale' : agent.activity
   const validTimestamp = (value: number | undefined) => value !== undefined && Number.isFinite(value) &&
     Number.isFinite(now) && value <= now && value >= 0 && value <= 8640000000000000 ? value : undefined
-  const lastActivityAt = validTimestamp(agent.lastActivityAt)
+  const lastActivityAt = validTimestamp(agent.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined)
   const statusSince = validTimestamp(agent.statusSince)
   return {
     ref: agent.ref, id: agent.ref, title: agent.name, host: agent.host, status,
