@@ -172,6 +172,8 @@ pub(crate) mod client_summary;
 mod unread_mail;
 mod agent_messages;
 mod coordination;
+#[cfg(test)]
+mod message_thread_candidate_contract_tests;
 pub mod agent_view;
 mod conversation_reads;
 mod usage_period;
