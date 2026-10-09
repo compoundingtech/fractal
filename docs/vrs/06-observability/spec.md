@@ -564,6 +564,7 @@ values map to `other`; routes are matched templates, not raw paths.
 | Reconcile `task` | `pass`, `deadline` |
 | Wake `cause`, FIFO `queue`, startup `phase`, replication `result` | Closed registries |
 | Replication `peer` | Fleet node membership |
+| Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -873,6 +874,59 @@ timings. No new IPC or derived timing math is added.
 There are no replication backlog or lag gauges: the worker has no
 `peer_only`/`local_only` counts and the store belongs to the daemon. This
 surface adds no store scans or queries to manufacture those observations.
+
+### Daemon process and allocator memory
+
+The `st-daemon` SDK meter registers these instruments only when metrics export is enabled.
+The CLI, hooks, and replication worker do not register them. The SDK's periodic reader
+samples them at export time (60 seconds by default; the standard
+`OTEL_METRIC_EXPORT_INTERVAL` override applies). They share the existing resource and
+have no point attributes except the heap gauge's closed `state` vocabulary.
+
+| Instrument | Type | Unit | Source / attributes |
+| --- | --- | --- | --- |
+| `st.process.memory.rss` | Observable gauge | `By` | Linux `/proc/self/statm` resident pages × system page size; no attributes |
+| `st.allocator.heap` | Observable gauge | `By` | Linux glibc `mallinfo2`; `state` = `allocated`, `free`, `mmapped`, `arena`, `releasable` |
+| `st.allocator.reclaim.count` | Observable counter | `{attempt}` | Process-lifetime checkpoint reclamation attempts; no attributes |
+| `st.allocator.reclaim.duration` | Observable counter | `s` | Cumulative checkpoint reclamation elapsed time; no attributes |
+
+One heap callback calls `mallinfo2` once and emits all five states. glibc visits
+arenas under their locks, not at an atomic all-arena instant. `allocated` is
+`uordblks`, allocated non-mmapped heap bytes including allocator overhead and
+tcache-retained chunks, not live application payload.
+`free` is `fordblks`, free bytes retained inside arenas; `mmapped` is `hblkhd`,
+separate mmapped allocations. `arena` is the total non-mmapped bytes obtained from
+the system and overlaps `allocated` and `free`. `releasable` is `keepcost`, an
+estimate of the main arena's top-most releasable block, not all free or reclaimable
+pages across arenas. These states are not a mutually exclusive partition.
+RSS also includes non-heap memory. The direct `mallinfo2` link requires glibc 2.33
+or newer for the Linux GNU binary even when metrics export is disabled; the documented
+Linux archive runtime floor is glibc 2.35+. RSS is registered only on Linux, and
+the heap gauge only on Linux GNU targets; unsupported targets do not report
+fabricated memory values. An unreadable RSS sample is omitted.
+
+The smallclaims public `allocator_reclaim_stats()` accessor reads relaxed atomic totals
+for attempts, actual native trim calls, and cumulative elapsed time without calling the
+allocator. An attempt occurs when an armed outermost checkpoint completion scope drops;
+nested work triggers one attempt, and skipped work triggers none. The exported count
+is attempts (including no-op unsupported platforms), not trim successes. The existing
+thread-local test counters remain isolated from concurrent completion proofs.
+The producer still takes the existing pair of clock readings and updates relaxed
+atomic totals when metrics export is disabled; only SDK registration and collection
+are opt-in. Observation adds no reclamation calls or changes to checkpoint cleanup.
+
+Proof: the completion-scope unit test checks production totals increase. Source
+review verifies the callback's single `mallinfo2` call. The Linux GNU `otel_export`
+integration test captures all five closed states with a common collection timestamp
+and positive `allocated` heap and RSS from an isolated daemon using `test_bin!("st3")`;
+the timestamp proves a common SDK collection, not the number of native calls.
+A fresh-test-process proof initializes real daemon telemetry with traces enabled and
+metrics disabled, asserting no meter provider is created; it does not infer absence
+from elapsed time or daemon termination. A companion CLI proof checks non-daemon omission.
+The ignored `mallinfo2_fragmented_heap_cost` test measures
+101 snapshots after allocating and touching about 1 GiB in 4 KiB blocks and freeing
+alternate blocks; it reports median, p95, and maximum elapsed time without touching a
+live daemon.
 
 ### Attribute and context policy
 
