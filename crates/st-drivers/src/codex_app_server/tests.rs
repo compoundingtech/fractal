@@ -8350,6 +8350,24 @@ fn native_codex_login_recovery_requires_a_successful_current_thread_turn() {
 }
 
 #[test]
+fn an_unticked_setup_box_leaves_codex_its_own_approval_defaults_in_both_modes() {
+    use crate::access::AccessMode;
+    let socket = Some("/run/example/st.sock");
+    let workspace = Path::new("/work/example");
+    let plain: Vec<String> = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
+    for mode in [AccessMode::Auto, AccessMode::Bypass] {
+        let ticked = managed_codex_argv_asking(mode, false, socket, workspace, plain.clone()).unwrap();
+        let asking = managed_codex_argv_asking(mode, true, socket, workspace, plain.clone()).unwrap();
+        assert!(ticked.len() > asking.len(), "{mode:?}: the install default adds permission arguments");
+        assert_eq!(
+            asking,
+            ["codex", "--dangerously-bypass-hook-trust", "--model", "gpt-example", "boot"],
+            "{mode:?}: only hook trust is added; no sandbox bypass, profile or reviewer"
+        );
+    }
+}
+
+#[test]
 fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resume() {
     use crate::access::AccessMode;
     let socket = Some("/run/example/st.sock");
