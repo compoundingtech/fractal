@@ -132,6 +132,7 @@ Rows render reported facts only; unreported fields are omitted — never shown a
 
 The status glyph column holds the glyph only; elapsed time in status stays in the accessible details. Each row is the containing block for its visually hidden details trigger, so a long roster overflows only its scroll pane, never the document. `ThreadHeader` omits the breadcrumb folder when the host reports none.
 Row fitting is batched: every mounted row registers with one shared animation-frame pass that restores line-one fields, reads every cohort, then writes every cohort, so each drop step and the subtitle signal fit force at most one synchronous layout regardless of roster size. **Fractal UI / Sidebar/Roster** `HundredAgentRender` mounts 100 rows and records the render's long tasks.
+After the drop steps shrink the cohort track, three batched restoration rounds reconsider scope, subagent count, then tokens. The selected track must leave a restored field's title at least 60% of the row and avoid a subagent collision; a field is not lost merely because a peer's earlier oversized track forced an intermediate drop. `pnpm check:sidebar-fitting` covers the mixed cohort around roster row 91, both row orders and a second fit's fixed point. `HundredAgentRender` also asserts that row's scope is retained.
 
 ### Markdown and the thinking disclosure
 
