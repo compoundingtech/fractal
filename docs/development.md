@@ -146,6 +146,13 @@ serve the static directory with a loopback static server, open each story's
 transcript/composer assertions succeed. Do not infer play success from a story
 label or a loaded iframe.
 
+The synthetic-fixture privacy scanner selects repository inputs using
+`git ls-files --cached --others --exclude-standard`: committed files and
+untracked non-ignored files remain in scope, including tracked files under
+an ignored directory. Gitignored build outputs (such as `storybook-static`)
+are not publication inputs. Fixture roots outside Git are still scanned in
+full; this rule adds no filename, vendor or content-hash exemptions.
+
 ## fractal-web Content Security Policy
 
 The app server and Vite's development/preview servers set an enforcing
