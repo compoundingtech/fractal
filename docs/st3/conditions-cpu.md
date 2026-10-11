@@ -21,7 +21,10 @@ supplies `route "person-read"` or a measured path. CPU and route metrics accept
 `window "1m"`, `"5m"` or `"1h"`; route defaults to one hour and daemon CPU to five
 minutes. No new endpoint, collector, SLO window or performance budget is added.
 Native process enumeration is bounded and can omit processes beyond its cap;
-CPU requires two samples of the same PID/start time. Process names removed from
+Executable names longer than the 15 bytes kept by `/proc/PID/comm` are
+rejected. CPU requires two samples of the same PID/start time; children that
+start and exit between samples are undercounted. The per-PID scan cost is
+unmeasured in production. Process names removed from
 declarations are pruned from the sampler. Native memory/process readings may be
 unavailable on platforms without the supported kernel facts. Missing readings
 interrupt a hold and preserve an established breach.
@@ -39,7 +42,7 @@ while catching up or with less than an hour of coverage. Precise readings and
 hold phases remain local. Only entry/recovery transitions replicate, and every
 locally authored transition is copied atomically for the existing OTLP exporter.
 
-The finite Operations [hetz protocol](conditions-measurement.md) measures the
+The finite Operations [production node protocol](conditions-measurement.md) measures the
 whole daemon plus evaluator SQL. No local test proves zero production overhead.
 The [retention contract](condition-retention-contract.md) separates retained
 state from permanent negatives, messages, pending deliveries and daily transport

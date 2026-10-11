@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "Ordinary restart; holds restart and standing breaches restore silently. Evaluator cadence stays 30 seconds, database size remains hourly, spend cache five minutes; native process CPU needs two PID/start-time samples. No new service, collector or load generator."
+    "detail": "Ordinary restart; holds restart and standing breaches restore silently. Evaluator cadence stays 30 seconds, database size remains hourly, spend cache five minutes; native process CPU needs two PID/start-time samples. No new service, collector or load generator. Executable names longer than 15 bytes are rejected; short-lived children between samples are undercounted and the per-PID scan cost remains unmeasured."
   },
   "manual": {
     "status": "changed",

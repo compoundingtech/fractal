@@ -435,7 +435,7 @@ pub fn parse_condition(subject: &str, desired: &Value) -> Result<ConditionDecl, 
         (Scope::Process, None) => return Err("a process condition needs a `process`".into()),
         (Scope::Process, Some(name)) if name.len() > 15 => {
             return Err(format!(
-                "process `{name}` is longer than the 15 characters /proc/PID/comm keeps"
+                "process `{name}` is longer than the 15 bytes /proc/PID/comm keeps"
             ));
         }
         (Scope::Process, Some(_)) | (_, None) => {}
@@ -1129,7 +1129,7 @@ mod tests {
                 2,
                 json!({"name": "process", "arguments": ["a-process-name-too-long"]})
             )
-            .contains("15 characters")
+            .contains("15 bytes")
         );
         assert!(replace(4, json!({"name": "recover", "arguments": [1]})).contains("needs `for`"));
         assert!(
