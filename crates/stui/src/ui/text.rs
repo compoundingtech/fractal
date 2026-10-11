@@ -4,7 +4,8 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 #[cfg(test)]
 pub use st3_conversation_ui::text::plain;
-pub use st3_conversation_ui::text::{Run, run, sanitize, truncate, width, wrap};
+pub use st3_conversation_ui::pane::truncate;
+pub use st3_conversation_ui::text::{Run, run, sanitize, width, wrap};
 
 pub fn inline(text: &str, base: Style) -> Vec<Run> {
     st3_conversation_ui::text::inline(text, base, &super::theme::conversation())

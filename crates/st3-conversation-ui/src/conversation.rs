@@ -193,7 +193,7 @@ fn call_line(entry: &Entry, width: usize, spinner: &str, theme: &Theme) -> Doc {
         width: width as u16,
         hit: PaneIntent::Expand(entry.id.clone()),
     });
-    let title = text::truncate(&text::sanitize(title), width.saturating_sub(6));
+    let title = crate::pane::truncate(&text::sanitize(title), width.saturating_sub(6));
     doc.line(Line::from(vec![
         Span::styled("▎ ", theme::fg(color)),
         Span::styled(format!("{glyph} "), theme::fg(color)),
@@ -228,14 +228,14 @@ fn mail_lines(entry: &Entry, width: usize, theme: &Theme) -> Doc {
     } else {
         format!("{from} → {to}")
     };
-    let head = text::truncate(&head, width.saturating_sub(2));
+    let head = crate::pane::truncate(&head, width.saturating_sub(2));
     let at = format!("  {}", entry.at);
     // The subject gets what the names and the time leave.
     let room = width.saturating_sub(2 + text::width(&head) + text::width(&at) + 4);
     let mut spans = vec![bar(), Span::styled(head, from_style)];
     if !subject.is_empty() && room > 1 {
         spans.push(Span::styled(
-            format!("  {}", text::truncate(&text::sanitize(subject), room)),
+            format!("  {}", crate::pane::truncate(&text::sanitize(subject), room)),
             fg(look.text, theme),
         ));
     }
@@ -247,7 +247,7 @@ fn mail_lines(entry: &Entry, width: usize, theme: &Theme) -> Doc {
     let mut lines = body.lines().map(str::trim).filter(|line| !line.is_empty());
     let first = lines.next().unwrap_or_default();
     let more = lines.next().is_some();
-    let first = text::truncate(
+    let first = crate::pane::truncate(
         &format!("{}{}", text::sanitize(first), if more { " …" } else { "" }),
         width.saturating_sub(2),
     );
@@ -330,7 +330,10 @@ fn bundle_line(
         let room = width.saturating_sub(used + 9);
         if room > 8 {
             spans.push(Span::styled(
-                format!(" · last: {}", text::truncate(&text::sanitize(title), room)),
+                format!(
+                    " · last: {}",
+                    crate::pane::truncate(&text::sanitize(title), room)
+                ),
                 fg(rules.last, theme),
             ));
         }
@@ -419,7 +422,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             let preview_head = title.starts_with("write ") || title.starts_with("compaction");
             let child_name = title.split(" · ").next().unwrap_or(title);
             let recovered = title.starts_with("assistant error · recovered");
-            let title = text::truncate(&text::sanitize(title), width.saturating_sub(6));
+            let title = crate::pane::truncate(&text::sanitize(title), width.saturating_sub(6));
             doc.targets.push(Target {
                 line: 0,
                 column: 0,
@@ -722,7 +725,7 @@ fn render_entry(entry: &Entry, width: usize, open: bool, spinner: &str, theme: &
             } else {
                 format!(" {} · {} ", text::sanitize(event), entry.at)
             };
-            let label = text::truncate(&label, width.saturating_sub(1));
+            let label = crate::pane::truncate(&label, width.saturating_sub(1));
             let side = width.saturating_sub(text::width(&label)) / 2;
             doc.line(Line::from(vec![
                 Span::styled("─".repeat(side.min(6)), fg(RULES.event.rule, theme)),

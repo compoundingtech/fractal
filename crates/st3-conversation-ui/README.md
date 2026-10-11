@@ -3,7 +3,8 @@
 The default build is a renderer-independent model with no ratatui dependency. It provides
 timeline updates and older pages (`Timeline`, `Frame`, `Older`), conversation entries and
 delivery/markup cleaning (`adapt`, `clean_message_text`), pane state and intents, display-column
-selection text, density/fold identities, and serializable style rules. The shared transcript
+selection text and ellipsis truncation (`pane::truncate`), conversation header rows (`header::row`),
+density/fold identities, and serializable style rules. The shared transcript
 fixtures in `fixtures/clients/transcripts` are the contract with the phone's TypeScript model.
 
 Exposed status, usage, redaction, truncation and unsupported timeline variants remain visible
