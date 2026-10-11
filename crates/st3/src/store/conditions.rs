@@ -34,12 +34,27 @@ CREATE TABLE IF NOT EXISTS local_condition_notifications (
     store_index INTEGER PRIMARY KEY,
     payload TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS local_condition_claim_bytes (
+    hour_unix_ms INTEGER PRIMARY KEY,
+    claims INTEGER NOT NULL,
+    bytes INTEGER NOT NULL
+);
 "#;
 
 const HEADS_CURSOR: &str = "condition_heads_cursor";
+const BYTES_CURSOR: &str = "condition_bytes_cursor";
+const BYTES_SINCE: &str = "condition_bytes_since";
 /// State claims one fold reads at most.
 pub(crate) const HEADS_PAGE: i64 = 50;
 pub(crate) const HEADS_PAGES_PER_TICK: usize = 40;
+/// Claims one byte-count read covers, by store index. A read of this many rows takes a few
+/// milliseconds, so no read holds its connection long.
+const BYTES_PAGE: i64 = 2_000;
+/// Reads one tick makes at most while catching up on byte counts.
+const BYTES_PAGES_PER_TICK: usize = 25;
+const HOUR_MS: u128 = 3_600_000;
+const DAY_MS: u128 = 24 * HOUR_MS;
+
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     // An earlier development cache has no origin key. Rebuild only this disposable cache.
     let old: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_condition_heads')) AND NOT EXISTS(SELECT 1 FROM pragma_table_info('local_condition_heads') WHERE name='origin')", [], |row| row.get(0))?;
@@ -1501,6 +1516,129 @@ impl Store {
         }
         Ok(items)
     }
+    /// Count the bytes of claims this member wrote since the last count, a bounded number of short
+    /// reads per call. The first count starts a day back.
+    pub fn fold_condition_claim_bytes(&self, now: u128) -> Result<()> {
+        let origin = self.origin().to_owned();
+        let (mut cursor, since) = {
+            let connection = self.readers.get();
+            (
+                meta_integer(&connection, BYTES_CURSOR)?,
+                meta_integer(&connection, BYTES_SINCE)?,
+            )
+        };
+        let mut since = since;
+        if cursor.is_none() {
+            let start = now.saturating_sub(DAY_MS);
+            let connection = self.readers.get();
+            // SQLite cannot turn a row-value comparison containing an expression into a
+            // two-column range seek. Seek the matching digit length first, then longer
+            // timestamps only when that range is empty.
+            let same_length = connection
+                .query_row(
+                    "SELECT store_index FROM claims INDEXED BY claims_accepted_order_index
+                 WHERE length(accepted_at_unix_ms)=length(?1) AND accepted_at_unix_ms>=?1
+                 ORDER BY length(accepted_at_unix_ms),accepted_at_unix_ms,store_index LIMIT 1",
+                    [start.to_string()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let first = match same_length {
+                Some(index) => Some(index),
+                None => connection
+                    .query_row(
+                        "SELECT store_index FROM claims INDEXED BY claims_accepted_order_index
+                     WHERE length(accepted_at_unix_ms)>length(?1)
+                     ORDER BY length(accepted_at_unix_ms),accepted_at_unix_ms,store_index LIMIT 1",
+                        [start.to_string()],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?,
+            };
+            cursor = Some(first.map_or(self.index()? as i64, |index| index - 1));
+            since = Some(i64::try_from(start).unwrap_or(i64::MAX));
+        }
+        let mut cursor = cursor.unwrap_or(0);
+        let top = self.index()? as i64;
+        let mut hours = BTreeMap::<i64, (i64, i64)>::new();
+        for _ in 0..BYTES_PAGES_PER_TICK {
+            if cursor >= top {
+                break;
+            }
+            let end = (cursor + BYTES_PAGE).min(top);
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(
+                "SELECT accepted_at_unix_ms,
+                        length(CAST(body AS BLOB)) + length(CAST(id AS BLOB)) + length(CAST(subject AS BLOB)) + length(CAST(kind AS BLOB)) + length(CAST(predecessors AS BLOB))
+                   FROM claims
+                  WHERE store_index > ?1 AND store_index <= ?2 AND origin=?3",
+            )?;
+            let rows = statement.query_map(params![cursor, end, origin], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (accepted, bytes) = row?;
+                let accepted = accepted.parse::<i64>().unwrap_or(0);
+                let hour = accepted - accepted.rem_euclid(HOUR_MS as i64);
+                let entry = hours.entry(hour).or_default();
+                entry.0 += 1;
+                entry.1 += bytes;
+            }
+            cursor = end;
+        }
+        let since = since.unwrap_or(0);
+        let oldest = i64::try_from(now.saturating_sub(2 * DAY_MS)).unwrap_or(0);
+        self.connection
+            .batched(move |transaction| {
+                for (hour, (claims, bytes)) in &hours {
+                    transaction.execute(
+                        "INSERT INTO local_condition_claim_bytes(hour_unix_ms, claims, bytes)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(hour_unix_ms) DO UPDATE
+                           SET claims=claims+excluded.claims, bytes=bytes+excluded.bytes",
+                        params![hour, claims, bytes],
+                    )?;
+                }
+                transaction.execute(
+                    "DELETE FROM local_condition_claim_bytes WHERE hour_unix_ms < ?1",
+                    [oldest],
+                )?;
+                set_meta_integer(transaction, BYTES_CURSOR, cursor)?;
+                set_meta_integer(transaction, BYTES_SINCE, since)
+            })
+            .map_err(|error| anyhow::anyhow!("{error}"))??;
+        Ok(())
+    }
+
+    /// Bytes of claims this member wrote in the last 24 hours. Until a day has been counted, the
+    /// hours counted so far are scaled to a day; under an hour of counting has no reading, and
+    /// neither has a count still catching up.
+    pub fn condition_claim_bytes_per_day(&self, now: u128) -> Result<Option<f64>> {
+        let connection = self.readers.get();
+        let (Some(cursor), Some(since)) = (
+            meta_integer(&connection, BYTES_CURSOR)?,
+            meta_integer(&connection, BYTES_SINCE)?,
+        ) else {
+            return Ok(None);
+        };
+        if (cursor as u64) + (BYTES_PAGE as u64) < self.index()? {
+            return Ok(None);
+        }
+        let start = now.saturating_sub(DAY_MS);
+        let counted_from = start.max(u128::try_from(since).unwrap_or(0));
+        let covered = now.saturating_sub(counted_from);
+        if covered < HOUR_MS {
+            return Ok(None);
+        }
+        // The hour that holds the start counts whole: hourly buckets cannot split it.
+        let first_hour = start - start % HOUR_MS;
+        let bytes: i64 = connection.query_row(
+            "SELECT coalesce(sum(bytes), 0) FROM local_condition_claim_bytes WHERE hour_unix_ms >= ?1",
+            [i64::try_from(first_hour).unwrap_or(0)],
+            |row| row.get(0),
+        )?;
+        Ok(Some(bytes as f64 * DAY_MS as f64 / covered as f64))
+    }
 }
 
 #[cfg(test)]
@@ -1547,6 +1685,19 @@ condition "fleet/database" {
             }
             fn filesystem_of(&mut self, _: &str) -> Option<crate::disk::DiskSpace> {
                 None
+            }
+            fn memory_available_percent(&mut self) -> Option<f64> {
+                None
+            }
+            fn processes(
+                &mut self,
+                _: &[&str],
+                _: u128,
+            ) -> BTreeMap<String, crate::conditions::probe::ProcessReading> {
+                BTreeMap::new()
+            }
+            fn slo_windows(&mut self) -> Value {
+                json!({})
             }
             fn database_bytes(&mut self) -> Option<f64> {
                 Some(1000.0)
@@ -2877,5 +3028,57 @@ condition "fleet/database" {
         );
         fold_all(&store);
         assert!(store.condition_attention_items(None).unwrap().is_empty());
+    }
+    #[test]
+    fn the_first_authored_byte_seek_uses_the_accepted_order_index() {
+        let (_directory, store) = store();
+        let connection = store.readers.get();
+        for predicate in [
+            "length(accepted_at_unix_ms)=length(?1) AND accepted_at_unix_ms>=?1",
+            "length(accepted_at_unix_ms)>length(?1)",
+        ] {
+            let sql = format!(
+                "EXPLAIN QUERY PLAN SELECT store_index FROM claims INDEXED BY claims_accepted_order_index WHERE {predicate} ORDER BY length(accepted_at_unix_ms), accepted_at_unix_ms, store_index LIMIT 1"
+            );
+            let mut statement = connection.prepare(&sql).unwrap();
+            let plan = statement
+                .query_map(["1700000000000"], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|line| line.contains("SEARCH claims USING")
+                    && line.contains("claims_accepted_order_index")),
+                "{plan:?}"
+            );
+            assert!(
+                !plan.iter().any(|line| line.starts_with("SCAN claims")),
+                "{plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_bytes_count_only_this_members_claims_in_the_last_day() {
+        let (_directory, store) = store();
+        let now = now_ms();
+        assert_eq!(store.condition_claim_bytes_per_day(now).unwrap(), None);
+        store.fold_condition_claim_bytes(now).unwrap();
+        // A day back from now covers every claim the test wrote, all from this member.
+        let counted = store.condition_claim_bytes_per_day(now).unwrap().unwrap();
+        assert!(counted > 0.0);
+        let disk = decl(&store, "condition/fleet/disk");
+        let mut tracker = Tracker::default();
+        tracker.observe(&disk, 40.0, now);
+        record(&store, &disk, "alder:/", &tracker, None, now);
+        store.fold_condition_claim_bytes(now).unwrap();
+        let more = store.condition_claim_bytes_per_day(now).unwrap().unwrap();
+        assert!(more > counted, "{more} > {counted}");
+        // An hour later the same bytes are scaled over a longer covered span.
+        let later = store
+            .condition_claim_bytes_per_day(now + 3_600_000)
+            .unwrap()
+            .unwrap();
+        assert!(later <= more);
     }
 }

@@ -1,9 +1,8 @@
 //! The host facts conditions need that the daemon does not otherwise measure: free space on each
-//! local filesystem, and the physical database size. Each is read
-//! from the kernel by plain code, only for a condition that asks for it.
-//! Disk space is sampled every 30 seconds; physical database size is cached for an hour.
+//! local filesystem, available memory, and the CPU and memory of processes by name. Each is read
+//! from the kernel by plain code, once per evaluation and only for a condition that asks for it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::disk::{DiskSpace, disk_space};
@@ -364,7 +363,178 @@ pub(crate) fn free_percent(space: &DiskSpace) -> f64 {
     space.available as f64 * 100.0 / space.total as f64
 }
 
-/// The physical database and WAL bytes, sampled in the background.
+/// `MemAvailable` as a percent of `MemTotal`, from `/proc/meminfo` text.
+pub fn memory_available_percent(meminfo: &str) -> Option<f64> {
+    let field = |name: &str| {
+        meminfo.lines().find_map(|line| {
+            let rest = line.strip_prefix(name)?.strip_prefix(':')?;
+            rest.split_whitespace().next()?.parse::<f64>().ok()
+        })
+    };
+    let total = field("MemTotal")?;
+    let available = field("MemAvailable")?;
+    (total > 0.0).then(|| available * 100.0 / total)
+}
+
+pub fn read_memory_available_percent() -> Option<f64> {
+    memory_available_percent(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// What `/proc/PID/stat` says of one process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessStat {
+    /// User and system CPU, in clock ticks.
+    pub cpu_ticks: u64,
+    /// When it started, in clock ticks after boot: with the PID, it names one process.
+    pub start_ticks: u64,
+    pub rss_pages: u64,
+}
+
+/// Parse `/proc/PID/stat`. The name in parentheses can hold spaces and parentheses, so the fields
+/// are counted from the last `)`.
+pub fn parse_stat(text: &str) -> Option<ProcessStat> {
+    let rest = &text[text.rfind(')')? + 1..];
+    let fields = rest.split_whitespace().collect::<Vec<_>>();
+    // After the name: state is field 3, utime 14, stime 15, starttime 22, rss 24.
+    let field = |number: usize| fields.get(number - 3)?.parse::<u64>().ok();
+    Some(ProcessStat {
+        cpu_ticks: field(14)?.saturating_add(field(15)?),
+        start_ticks: field(22)?,
+        rss_pages: field(24)?,
+    })
+}
+
+/// One reading of the processes with a given name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProcessReading {
+    /// Cores used since the previous reading, or None on the first.
+    pub cpu_cores: Option<f64>,
+    pub rss_bytes: f64,
+}
+
+type ProcessTicks = HashMap<(u32, u64), u64>;
+
+/// Samples processes by name, keeping each process's CPU from the last sample so the next can
+/// tell how much it used in between.
+pub struct ProcessSampler {
+    root: PathBuf,
+    ticks_per_second: f64,
+    page_size: f64,
+    /// Per name: when it was last read and each process's CPU ticks then.
+    last: HashMap<String, (u128, ProcessTicks)>,
+}
+
+impl Default for ProcessSampler {
+    fn default() -> Self {
+        // SAFETY: sysconf reads a constant.
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+        // SAFETY: as above.
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as f64;
+        Self::new(PathBuf::from("/proc"), ticks, page)
+    }
+}
+
+impl ProcessSampler {
+    pub(crate) fn retain_names(&mut self, names: &std::collections::HashSet<&str>) {
+        self.last.retain(|name, _| names.contains(name.as_str()));
+    }
+
+    pub fn new(root: PathBuf, ticks_per_second: f64, page_size: f64) -> Self {
+        Self {
+            root,
+            ticks_per_second,
+            page_size,
+            last: HashMap::new(),
+        }
+    }
+
+    /// Read every process whose `comm` is one of `names`, in one pass over the process table.
+    /// A name with no running process has no reading.
+    pub fn sample(&mut self, names: &[&str], now: u128) -> BTreeMap<String, ProcessReading> {
+        let names_set = names
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        self.last
+            .retain(|name, _| names_set.contains(name.as_str()));
+        let mut found: HashMap<&str, HashMap<(u32, u64), ProcessStat>> = HashMap::new();
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten().take(16_384) {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                let directory = entry.path();
+                let Ok(comm) = std::fs::read_to_string(directory.join("comm")) else {
+                    continue;
+                };
+                let comm = comm.trim_end_matches('\n');
+                let Some(name) = names_set.get(comm) else {
+                    continue;
+                };
+                let Some(stat) = std::fs::read_to_string(directory.join("stat"))
+                    .ok()
+                    .and_then(|text| parse_stat(&text))
+                else {
+                    continue;
+                };
+                found
+                    .entry(name)
+                    .or_default()
+                    .insert((pid, stat.start_ticks), stat);
+            }
+        }
+        let mut readings = BTreeMap::new();
+        for name in names {
+            let Some(processes) = found.remove(name) else {
+                self.last.remove(*name);
+                continue;
+            };
+            let previous = self.last.get(*name);
+            let cpu_cores = previous.and_then(|(at, ticks)| {
+                let seconds = now.saturating_sub(*at) as f64 / 1_000.0;
+                (seconds > 0.0).then(|| {
+                    // A process that started since the last sample counts from zero.
+                    let used = processes
+                        .iter()
+                        .map(|(key, stat)| {
+                            stat.cpu_ticks
+                                .saturating_sub(ticks.get(key).copied().unwrap_or(0))
+                        })
+                        .sum::<u64>();
+                    used as f64 / self.ticks_per_second / seconds
+                })
+            });
+            let rss_bytes = processes
+                .values()
+                .map(|stat| stat.rss_pages as f64 * self.page_size)
+                .sum();
+            self.last.insert(
+                (*name).to_owned(),
+                (
+                    now,
+                    processes
+                        .iter()
+                        .map(|(key, stat)| (*key, stat.cpu_ticks))
+                        .collect(),
+                ),
+            );
+            readings.insert(
+                (*name).to_owned(),
+                ProcessReading {
+                    cpu_cores,
+                    rss_bytes,
+                },
+            );
+        }
+        readings
+    }
+}
+
+/// The claim database and its write-ahead log, in bytes.
 pub fn database_bytes(database: &Path) -> Option<f64> {
     let main = std::fs::metadata(database).ok()?.len();
     let mut wal = database.as_os_str().to_owned();
@@ -428,6 +598,70 @@ mod tests {
         assert!(started.is_ok());
         assert!(reads.is_empty());
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn memory_is_available_over_total() {
+        let meminfo =
+            "MemTotal:       16000000 kB\nMemFree:  100 kB\nMemAvailable:    4000000 kB\n";
+        assert_eq!(memory_available_percent(meminfo), Some(25.0));
+        assert_eq!(memory_available_percent("MemTotal: 1 kB\n"), None);
+    }
+
+    #[test]
+    fn a_stat_line_is_read_past_a_name_with_spaces_and_parentheses() {
+        let line = "1234 (my (odd) proc) S 1 1234 1234 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 4 0 9876 123456789 2048 18446744073709551615";
+        assert_eq!(
+            parse_stat(line),
+            Some(ProcessStat {
+                cpu_ticks: 300,
+                start_ticks: 9876,
+                rss_pages: 2048,
+            })
+        );
+        assert_eq!(parse_stat("garbage"), None);
+    }
+
+    #[test]
+    fn processes_are_sampled_by_name_and_cpu_counts_from_the_previous_sample() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |pid: u32, comm: &str, ticks: u64, start: u64| {
+            let directory = root.path().join(pid.to_string());
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("comm"), format!("{comm}\n")).unwrap();
+            std::fs::write(
+                directory.join("stat"),
+                format!(
+                    "{pid} ({comm}) S 1 1 1 0 -1 0 0 0 0 0 {ticks} 0 0 0 20 0 1 0 {start} 1000 10 0"
+                ),
+            )
+            .unwrap();
+        };
+        write(10, "collector", 100, 5);
+        write(11, "collector", 50, 6);
+        write(12, "other", 999, 7);
+        std::fs::create_dir_all(root.path().join("self")).unwrap();
+        let mut sampler = ProcessSampler::new(root.path().to_path_buf(), 100.0, 4096.0);
+        let first = sampler.sample(&["collector", "absent"], 0);
+        assert_eq!(first["collector"].cpu_cores, None);
+        assert_eq!(first["collector"].rss_bytes, 2.0 * 10.0 * 4096.0);
+        assert!(!first.contains_key("absent"));
+        // Ten seconds later the two used 150 and 50 more ticks: 2 seconds of CPU in 10 seconds.
+        write(10, "collector", 250, 5);
+        write(11, "collector", 100, 6);
+        let second = sampler.sample(&["collector"], 10_000);
+        assert_eq!(second["collector"].cpu_cores, Some(0.2));
+        // A PID reused by a new process counts from zero, not from the old one's ticks.
+        write(11, "collector", 30, 60);
+        let third = sampler.sample(&["collector"], 20_000);
+        assert_eq!(third["collector"].cpu_cores, Some(0.03));
+        // Undeclaring every process must drop its baseline without another sample.
+        sampler.retain_names(&std::collections::HashSet::new());
+        write(10, "collector", 500, 5);
+        assert_eq!(
+            sampler.sample(&["collector"], 30_000)["collector"].cpu_cores,
+            None
+        );
     }
 
     #[test]
