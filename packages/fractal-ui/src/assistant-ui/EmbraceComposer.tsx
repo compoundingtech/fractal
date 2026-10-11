@@ -104,7 +104,7 @@ const styles = stylex.create({
   },
   primary: { backgroundColor: accent.primary, color: accent.onPrimary },
   submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, minWidth: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full },
-  historyIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full, backgroundColor: surface.transparent, borderColor: surface.transparent },
+  historyIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlMd, height: g.controlMd, minHeight: g.controlMd, padding: 0, borderRadius: r.full, backgroundColor: surface.transparent, borderColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover } },
   menu: {
     backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline,
     borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.base,

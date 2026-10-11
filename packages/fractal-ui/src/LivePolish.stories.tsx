@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { LiveActivity, Transcript } from './assistant-ui/composition/Transcript'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
@@ -47,6 +47,7 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   const message = longPromptCanvas.getByTestId('user-message')
   const promptText = message.ownerDocument.getElementById(expand.getAttribute('aria-controls')!)!
   await expect(promptText.textContent!.length).toBeLessThan(longPrompt.length)
+  await expect(message.getBoundingClientRect().height).toBeLessThanOrEqual(176)
   await userEvent.click(expand)
   await expect(expand).toHaveFocus()
   await expect(expand).toHaveAttribute('aria-expanded', 'true')
@@ -55,10 +56,12 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   await expect(expand).toHaveFocus()
   await expect(expand).toHaveAttribute('aria-expanded', 'false')
   await expect(promptText.textContent!.length).toBeLessThan(longPrompt.length)
+  await expect(message.getBoundingClientRect().height).toBeLessThanOrEqual(176)
   const history = within(canvas.getByRole('region', { name: 'History action example' })).getByRole('button', { name: 'Recall previous message' })
   await expect(history).toBeEnabled()
   await expect(getComputedStyle(history).opacity).toBe('1')
-  await expect(history.getBoundingClientRect().width).toBe(32)
+  await expect(history.getBoundingClientRect().width).toBe(28)
+  await expect(getComputedStyle(history).backgroundColor).toBe('rgba(0, 0, 0, 0)')
   const dock = within(canvas.getByRole('region', { name: 'Composer dock example' })).getByTestId('workbench-composer-dock')
   const composer = within(dock).getByTestId('composer')
   await expect(dock.getBoundingClientRect().height - composer.getBoundingClientRect().height).toBeLessThanOrEqual(12)
@@ -73,6 +76,11 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   if (args.scheme === 'light') await expect(getComputedStyle(dock).backgroundColor).toBe('rgb(252, 252, 252)')
   const advanced = await mount(<meta.render {...args} now={clock + 1000} />)
   await expect(within(advanced.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent('Working for 13s')
+  const restoredDock = within(advanced.getByRole('region', { name: 'Composer dock example' })).getByTestId('workbench-composer-dock')
+  await waitFor(() => {
+    expect(within(restoredDock).getByTestId('composer-input')).toHaveValue('Keep the selected resource visible.')
+    expect(within(restoredDock).queryByTestId('composer-placeholder')).toBeNull()
+  })
 } }
 export const Light1440: Story = { ...Dark1440, args: { scheme: 'light' } }
 export const Dark440: Story = { ...Dark1440, args: { narrow: true } }
