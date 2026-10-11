@@ -3,9 +3,12 @@ use serde_json::{Value, json};
 
 fn fields(out: &mut Value, source: &Value, names: &[(&str, &str)]) {
     for &(target, native) in names {
-        if let Some(value) = source.get(native).filter(|value| match target {
+        let Some(value) = source.get(native) else {
+            continue;
+        };
+        let projected = match target {
             "fallback" | "timed_out" | "case" | "hidden" | "gitignore" | "reset" | "truncated" => {
-                value.is_boolean()
+                value.is_boolean().then(|| value.clone())
             }
             "timeout_s"
             | "exit_code"
@@ -33,13 +36,30 @@ fn fields(out: &mut Value, source: &Value, names: &[(&str, &str)]) {
             | "match_count"
             | "file_count"
             | "file_limit_reached"
-            | "per_file_limit_reached" => value.is_number(),
-            "started_at" | "ended_at" => value.is_string() || value.is_number(),
-            _ => value.is_string(),
-        }) {
-            out[target] = value.clone();
+            | "per_file_limit_reached" => value.is_number().then(|| value.clone()),
+            "started_at" | "ended_at" => timestamp(value).map(Value::String),
+            _ => value.is_string().then(|| value.clone()),
+        };
+        if let Some(projected) = projected {
+            out[target] = projected;
         }
     }
+}
+
+/// A native instant as the contract's `Timestamp`: RFC 3339 UTC with milliseconds and `Z`.
+/// Natives write epoch milliseconds or RFC 3339 text; anything else is dropped, not passed on.
+fn timestamp(value: &Value) -> Option<String> {
+    let instant = match value {
+        Value::Number(number) => {
+            let millis = number
+                .as_i64()
+                .or_else(|| number.as_f64().filter(|ms| ms.is_finite() && ms.fract() == 0.0).map(|ms| ms as i64))?;
+            chrono::DateTime::from_timestamp_millis(millis)?
+        }
+        Value::String(text) => chrono::DateTime::parse_from_rfc3339(text).ok()?.to_utc(),
+        _ => return None,
+    };
+    Some(instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 fn rows(source: &Value, key: &str, project: impl Fn(&Value) -> Value) -> Value {
@@ -723,6 +743,32 @@ mod tests {
             tool_output_view("read", "r", true, None),
             json!({"type":"generic","tool":"read","call_id":"r","is_error":true})
         );
+    }
+
+    #[test]
+    fn native_instants_become_contract_timestamps_or_are_dropped() {
+        let jobs = tool_output_view(
+            "hub",
+            "h",
+            false,
+            Some(&json!({"op":"list","jobs":[
+                {"jobId":"epoch","state":"exited","startedAt":1791408489859_u64,"exitedAt":1791408490000.0},
+                {"jobId":"text","state":"exited","startedAt":"2026-10-07T23:28:09.86+02:00","endedAt":"yesterday"},
+                {"jobId":"odd","state":"running","startedAt":true,"endedAt":1.5}
+            ]})),
+        )["jobs"]
+            .clone();
+        assert_eq!(jobs[0]["started_at"], "2026-10-07T21:28:09.859Z");
+        assert_eq!(jobs[0]["ended_at"], "2026-10-07T21:28:10.000Z");
+        assert_eq!(jobs[1]["started_at"], "2026-10-07T21:28:09.860Z");
+        for (job, field) in [(1, "ended_at"), (2, "started_at"), (2, "ended_at")] {
+            assert!(jobs[job].get(field).is_none(), "{job} {field}: {}", jobs[job]);
+        }
+        let (_, start, _) = omp_record_view(
+            &json!({"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"c","toolName":"bash","startedAt":1791408489859_u64}}),
+        )
+        .unwrap();
+        assert_eq!(start["started_at"], "2026-10-07T21:28:09.859Z");
     }
 
     #[test]

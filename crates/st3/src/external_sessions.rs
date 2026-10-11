@@ -4770,7 +4770,7 @@ mod tests {
             let header = crate::conversation_header::derive(head, true);
             assert_eq!(header["cost"]["value"], json!({"usd": 0.5, "window": true}));
             assert_eq!(header["model"]["value"], "latest-model");
-            assert_eq!(header["context"]["value"], json!({"tokens": 23, "window": true}));
+            assert_eq!(header["context"]["value"], json!({"tokens": 23, "window": null}));
             for field in ["cost", "model", "context"] {
                 assert_eq!(header[field]["as_of"], "2026-10-06T00:00:01Z");
             }

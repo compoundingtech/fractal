@@ -151,12 +151,12 @@ pub(crate) fn derive(items: &[Value], window_truncated: bool) -> Value {
         header.insert("model".into(), field(value, &at));
     }
     if let Some((tokens, at)) = context {
+        // `window` is the model's context-window size (contract §3). No native record st
+        // normalizes carries one (OMP's usage and contextSnapshot hold only token counts), so
+        // it is null; a truncated transcript window is said on `cost`, never here.
         header.insert(
             "context".into(),
-            field(
-                json!({"tokens": tokens, "window": window_truncated.then_some(true)}),
-                &at,
-            ),
+            field(json!({"tokens": tokens, "window": null}), &at),
         );
     }
     if let Some((usd, at)) = cost {
@@ -460,13 +460,14 @@ mod tests {
         assert_eq!(header.as_object().unwrap().len(), 7);
 
         // An answered ask settles to null at the answer's timestamp, and a truncated window
-        // marks what it can only partially see.
+        // marks the cost it can only partially see. `context.window` is the model's window
+        // size (an integer or null), never the truncation flag.
         let answered = derive(&items[..4], true);
         assert_eq!(answered["ask"]["value"], Value::Null);
         assert_eq!(answered["ask"]["as_of"], "2026-10-06T12:00:00Z");
         assert_eq!(
             answered["context"]["value"],
-            json!({"tokens": 1000, "window": true})
+            json!({"tokens": 1000, "window": null})
         );
         assert_eq!(answered["cost"]["value"]["window"], json!(true));
         assert!(answered.get("jobs").is_none());
