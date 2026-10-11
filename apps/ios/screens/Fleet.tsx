@@ -89,7 +89,7 @@ export function FleetScreen() {
       <SectionHeader title="this connection" />
       <View style={{ paddingHorizontal: 12, gap: 2 }}>
         <T>{caps ? `${caps.session_actor} · ${caps.transport}` : 'reconnecting'}</T>
-        <T dim selectable>{url}</T>
+        <T dim selectable>{carrierInfo.route.kind === 'fabric' ? `saved gateway, if fabric cannot connect · ${url}` : url}</T>
         {gatewayTransport(url) === 'lan' ? <T color={theme.waiting}>{LAN_HTTP_WARNING}</T> : null}
         <T>route · {carrierInfo.routeText}</T>
         {carrierInfo.route.fellBack && carrierInfo.route.why ? <T color={theme.waiting}>{carrierInfo.route.why}</T> : null}
