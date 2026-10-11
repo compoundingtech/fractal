@@ -132,6 +132,11 @@ fn fault_snapshot_removes_one_history_select_and_standalone_gate_still_folds() {
         &store, "ordinary", "pending", "person/operator", "observed", vec!["daemon/node".into()],
     );
     let as_of = now_ms();
+    // The scope counts connection-setup PRAGMAs too. Exercise both complete paths
+    // outside the scopes so the first reader's nested pool growth is not charged
+    // only to the independently folded path. This compares steady-state reads.
+    independently_folded_faults(&store, as_of).unwrap();
+    store.fault_snapshot(as_of).unwrap();
     let old_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     let expected = independently_folded_faults(&store, as_of).unwrap();
     let old_work = old_scope.finish();
@@ -143,6 +148,9 @@ fn fault_snapshot_removes_one_history_select_and_standalone_gate_still_folds() {
     assert_eq!(old_work.statements, shared_work.statements + 1);
 
     let (_, failures) = store.operational_attention_items_with_failures(None, as_of).unwrap();
+    // Warm both gate paths before their separate scoped comparison as well.
+    store.broken_gate_items_from_failures(None, as_of, failures.clone()).unwrap();
+    store.broken_gate_items(None, as_of).unwrap();
     let shared_gate_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     store.broken_gate_items_from_failures(None, as_of, failures).unwrap();
     let shared_gate_work = shared_gate_scope.finish();
