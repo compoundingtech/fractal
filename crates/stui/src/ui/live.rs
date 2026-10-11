@@ -208,6 +208,7 @@ enum Fetched {
     /// The Fleet tab's machines and paired devices.
     Machines(Collection),
     Terminals(Vec<super::resource_sidebar::ResourceRow>, bool),
+    Observations { generation: u64, outcome: Result<(Vec<st3_client::ResourceObservation>, bool), String> },
     /// Token spend over a period of this many hours, or why st could not say.
     Usage(u64, Result<st3_client::UsagePeriod, String>),
     /// The clients connected to this member, or why they could not be read.
@@ -391,6 +392,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
     let mut shown_tab = usize::MAX;
+    let mut resources_shown = false;
+    let mut resource_pane = None;
+    let mut resources_stale = true;
+    let mut resources_reading = false;
+    let mut resources_generation = 0_u64;
     // Whether the feed was last told to follow the missions window, and until when the last time
     // one was on screen keeps it followed.
     let mut missions_sent = false;
@@ -443,6 +449,7 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::GlassesVersion(version) => super::set_glasses_version(version),
                 feed::Update::Connected(member) => {
                     client = member;
+                    resources_generation += 1; resources_stale = true;
                     machines_stale = true;
                     extras.live = false;
                     attached = None;
@@ -732,6 +739,12 @@ pub fn run(context: Context) -> Result<()> {
                     machines_reading = false;
                     ui.flash(format!("Could not load machines: {why}"));
                 }
+                Fetched::Observations { generation, outcome } => {
+                    resources_reading = false;
+                    if generation == resources_generation { match outcome {
+                    Ok((rows, has_more)) => { ui.resource_sidebar.observations = rows; ui.resource_sidebar.observations_has_more = has_more; ui.resource_sidebar.observations_issue = None; }
+                    Err(error) => ui.resource_sidebar.observations_issue = Some(error),
+                }}},
                 Fetched::Terminals(rows, has_more) => {
                     ui.resource_sidebar.terminals = rows;
                     ui.resource_sidebar.terminals_has_more = has_more;
@@ -854,6 +867,19 @@ pub fn run(context: Context) -> Result<()> {
         let (tab, selected) = ui.focus();
         // What a tab needs when it opens: harness sessions st did not start (Agents), and the
         // machines and devices (Fleet). They are read then, never on a timer.
+        let showing_resources = ui.glasses.as_ref().is_some_and(|g| g.sidebar.shown);
+        let focused_resource = match ui.focused_pane() { Some(super::pane::Pane::Resource(id)) => Some(id), _ => None };
+        if tab != shown_tab || showing_resources && !resources_shown || focused_resource.is_some() && focused_resource != resource_pane { resources_stale = true; }
+        resource_pane = focused_resource.clone();
+        if ui.glasses.is_some() && extras.live && resources_stale && !resources_reading {
+            resources_stale = false; resources_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.plain()));
+                let _ = tx.send(Fetched::Observations { generation, outcome });
+            });
+        }
+        resources_shown = showing_resources;
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
             // pauses it, and coming back shows the current screen first.

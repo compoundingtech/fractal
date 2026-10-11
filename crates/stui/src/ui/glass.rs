@@ -769,13 +769,18 @@ impl Ui {
             }
             Mode::Add { folder } => {
                 let mut seen = BTreeSet::new();
-                self.choices(query).into_iter().filter_map(|mut choice| {
+                let mut rows = self.choices(query).into_iter().filter_map(|mut choice| {
                     let Action::Open(pane) = &choice.action else { return None; };
                     let subject = self.sidebar_subject(pane)?;
-                    if self.resource_sidebar.location(&subject) == Some(folder.as_str()) || !seen.insert(subject.clone()) { return None; }
+                    if subject.starts_with("session/") || subject.starts_with("pty/") || self.resource_sidebar.location(&subject) == Some(folder.as_str()) || !seen.insert(subject.clone()) { return None; }
                     choice.action = Action::SidebarMode(Mode::ConfirmPlace { subject, folder: Some(folder.clone()) });
                     choice.detail = "choose".into(); Some(choice)
-                }).collect()
+                }).collect::<Vec<_>>();
+                let subject = query.trim();
+                if subject.contains('/') && !subject.chars().any(|c| c.is_whitespace() || c.is_control()) && !subject.starts_with("session/") && !subject.starts_with("pty/") && self.resource_sidebar.location(subject) != Some(folder.as_str()) && !seen.contains(subject) {
+                    rows.push(choice(format!("File {subject}"), "choose", Action::SidebarMode(Mode::ConfirmPlace { subject: subject.into(), folder: Some(folder.clone()) })));
+                }
+                rows
             }
             Mode::ConfirmPlace { subject, folder } => vec![choice(format!("{} → {}", subject, folder.as_ref().and_then(|id| self.resource_sidebar.folders().into_iter().find(|(folder, _)| folder == id).map(|(_, name)| name)).unwrap_or_else(|| "Everything else".into())), "m: move", Action::SidebarPreview)],
             Mode::ConfirmCreate { subject, name } => vec![choice(format!("{subject} → new folder “{name}”"), "m: move", Action::SidebarPreview)],
@@ -786,7 +791,7 @@ impl Ui {
     }
     fn sidebar_subject(&self, pane: &Pane) -> Option<String> {
         match pane {
-            Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id)) => Some(id.clone()),
+            Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id)) | Pane::Resource(id) => Some(id.clone()),
             Pane::Terminal(id) => self.resource_sidebar.resources().into_iter().find(|row| row.kind == "Terminals" && row.open == *id).map(|row| row.id).or_else(|| id.starts_with("agent/").then(|| id.clone())),
             _ => None,
         }
@@ -876,6 +881,12 @@ impl Ui {
         }
         for row in self.resource_sidebar.resources().into_iter().filter(|row| row.kind == "Terminals" && !row.missing) {
             open(1, ("⌨", theme::OVERLAY1), row.title, "terminal".into(), Pane::Terminal(row.open));
+        }
+        for row in &self.resource_sidebar.observations {
+            open(1, ("◇", theme::OVERLAY1), super::observed_resources::title(row), super::observed_resources::kind(row).into(), Pane::Resource(row.id.clone()));
+        }
+        if id.starts_with("resource/") && !self.resource_sidebar.observations.iter().any(|row| row.id == id) {
+            open(1, ("◇", theme::OVERLAY1), id.into(), "graph resource".into(), Pane::Resource(id.into()));
         }
         for mission in screens::mission_order(&self.world, true) {
             open(
@@ -2376,6 +2387,7 @@ impl Ui {
                     .unwrap_or(id)
             }
             Pane::Machine(id) => find(id).trim_start_matches("machine/").to_owned(),
+            Pane::Resource(id) => self.resource_sidebar.observations.iter().find(|row| &row.id == id).map(super::observed_resources::title).unwrap_or_else(|| id.clone()),
             Pane::Usage(None) => "Usage".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
@@ -4083,6 +4095,8 @@ pub(crate) fn pane_for(id: &str) -> Option<Pane> {
         Some(Pane::Mission(Some(id)))
     } else if id.starts_with("agent/") || id.starts_with("session/") {
         Some(Pane::Agent(Some(id)))
+    } else if id.starts_with("resource/") {
+        Some(Pane::Resource(id))
     } else if id.starts_with("machine/") {
         Some(Pane::Machine(Some(id)))
     } else {
@@ -4207,6 +4221,37 @@ mod tests {
         assert!(ui.effects.is_empty(), "finder selection only previews filing");
         press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
         assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))));
+    }
+
+    #[test]
+    fn sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        ui.sidebar_place("session/temporary", None, None);
+        assert!(ui.effects.is_empty(), "ephemeral sessions only navigate");
+        let subject = "resource/github/acme/garden/issue/9";
+        ui.resource_sidebar.observations.push(serde_json::from_value(serde_json::json!({
+            "id":subject,"kind":"vcs.pull-request","facts":{"title":"Build garden","number":9},
+            "observed_at":"2026-10-11T00:00:00Z","opened_by":null,"opened_by_run":null
+        })).unwrap());
+        ui.resource_sidebar.observe(&ui.world);
+        let index = ui.resource_sidebar.rows().iter().position(|row| matches!(row, resource_sidebar::Row::Resource(row) if row.id == subject)).unwrap();
+        ui.open_resource_row(index);
+        assert_eq!(ui.focused_pane(), Some(Pane::Resource(subject.into())));
+        assert!(ui.effects.is_empty(), "opening a resource only navigates");
+        assert!(screen(&ui).contains("Build garden"));
+        ui.open_sidebar_palette(Mode::Add { folder: "folder-demo".into() }); typed(&mut ui, subject);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty(), "Enter cannot commit filing");
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject: id, .. } if id == subject))));
+        ui.effects.clear(); ui.resource_sidebar.writing = false;
+        ui.open_sidebar_palette(Mode::Add { folder: "folder-demo".into() }); typed(&mut ui, "doc/garden-notes");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty());
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject, .. } if subject == "doc/garden-notes"))));
     }
 
     fn glass() -> Ui {

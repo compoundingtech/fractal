@@ -26,6 +26,8 @@ pub enum Pane {
     Usage(Option<String>),
     /// The new mission form.
     NewMission,
+    /// An observed graph resource, with open vocabulary facts.
+    Resource(String),
 }
 
 impl Pane {
@@ -44,6 +46,7 @@ impl Pane {
             Pane::Worktree(subject) => with("worktree", subject),
             Pane::Usage(subject) => with("usage", subject),
             Pane::NewMission => "new-mission:".into(),
+            Pane::Resource(id) => format!("resource:{id}"),
         }
     }
 
@@ -66,6 +69,7 @@ impl Pane {
             "worktree" => Pane::Worktree(subject),
             "usage" => Pane::Usage(subject),
             "new-mission" => Pane::NewMission,
+            "resource" => Pane::Resource(subject?),
             _ => return None,
         })
     }
@@ -92,6 +96,7 @@ mod tests {
             Pane::Usage(some("mission/example/harbor/audit")),
             Pane::Usage(None),
             Pane::NewMission,
+            Pane::Resource("resource/github/acme/garden/issue/9".into()),
         ] {
             assert_eq!(
                 Pane::parse(&pane.key()),

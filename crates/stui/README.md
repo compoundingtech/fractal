@@ -128,3 +128,15 @@ Folder grips reorder folders, and dragging rows moves or reorders resources. Dra
 a space tab onto a folder files its resource while keeping the tab open. Clicks and
 Enter still open resources or toggle groups. Position edits include dormant placement
 keys, and colliding concurrent keys are rekeyed atomically rather than dropping rows.
+
+The sidebar also offers pull requests, repositories and other observed graph resources using
+the existing optional `resources.list` read. Opening the sidebar or changing a tab refreshes
+three bounded 200-item windows (all observations, PRs and repositories); a truncation note
+names any limit. There is no resource polling or added collection subscription. A connection
+without that read keeps the existing browser and shows its reason. Resource tabs show the
+observed vocabulary kind and facts; their links use the existing Open link action. The folder
+finder can explicitly file a typed graph subject before it appears in a window. Missing
+subjects stay marked, and spaces keep their resource tabs.
+
+Opening a resource tab also reads that exact subject with the existing prefix filter so
+a catalog limit does not make an available detail vanish. Session and PTY IDs only navigate.

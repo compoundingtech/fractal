@@ -23,6 +23,7 @@ import { AttentionScreen, HomeScreen } from './screens/Home';
 import { LaunchScreen, MissionScreen, NewMissionScreen } from './screens/Missions';
 import { TerminalScreen } from './screens/Terminal';
 import { GlassesScreen, SpaceScreen } from './screens/Glasses';
+import { ResourceScreen } from './screens/Resource';
 import { SidebarScreen } from './screens/Sidebar';
 import { FabricProofScreen } from './screens/FabricProof';
 import { parseFabricProofLink, type FabricProofInput } from './fabricProof';
@@ -59,6 +60,7 @@ function TabStack({ tab }: { tab: Tab }) {
      tab === 'Fleet' ? <Stack.Screen name="FleetRoot" component={FleetScreen} options={{ title: 'Fleet' }} /> :
      <Stack.Screen name="SpacesRoot" component={GlassesScreen} options={{ title: 'Spaces' }} />}
 
+    <Stack.Screen name="Resource" component={ResourceScreen} options={{ title: 'Resource' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />

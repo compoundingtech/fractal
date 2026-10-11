@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActionSheetIOS, Alert, Modal, PanResponder, Pressable, ScrollView, View } from 'react-native';
+import { ActionSheetIOS, Alert, Modal, PanResponder, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Crypto from 'expo-crypto';
 import { openAlerts } from '@smalltalk/st3-views';
 import type { ArrangementOperation } from '../../../clients/typescript/st3-client';
-import { Banners, StatusLine, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
+import { Banners, StatusLine, useListsOnFocus, useMissionsOnFocus } from '../chrome';
 import { agentGlyph, agentRows } from '../agentsView';
 import { missionTitle, missionWord, wordStyle } from '../missionsView';
 import type { RootScreen } from '../navigation';
 import { rememberResources, sidebarGroups, type SidebarChoices, type SidebarResource } from '../sidebarView';
+import { resourceRow, subjectToFile } from '../sidebarResources';
 import { folderCreate, folderName, folderLocation, moveFolder, placeResource, sidebarArrangement, uuid7 } from '../sidebarEdits';
 import { useStore } from '../store';
 import { Button, Field, ListRow, Note, Screen, T } from '../ui';
@@ -32,10 +33,15 @@ function DragHandle({ title, onBegin, onEnd, onDrop }: { title: string; onBegin:
 }
 
 export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
-  const { data, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarSeen, url, caps, status, hasSynced, busy, actions, loadErrors, truncated, gatewayHost, error } = useStore();
+  const { data, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources, loadLists, sidebarSeen, url, caps, status, hasSynced, busy, actions, loadErrors, truncated, gatewayHost, error } = useStore();
   useListsOnFocus(['machines', 'sessions']); useMissionsOnFocus();
   useFocusEffect(useCallback(() => { if (status === 'online') void loadSidebarTerminals(); }, [status, loadSidebarTerminals]));
-  const refresh = useRefresh(['machines', 'sessions']);
+  useFocusEffect(useCallback(() => { if (status === 'online') void loadSidebarResources(); }, [status, loadSidebarResources]));
+  const [refreshing, setRefreshing] = useState(false);
+  const refresh = <RefreshControl refreshing={refreshing} tintColor={theme.overlay1} onRefresh={() => {
+    setRefreshing(true); if (status !== 'online') actions.reconnect();
+    void Promise.all([loadLists(['machines', 'sessions']), loadSidebarTerminals(), loadSidebarResources()]).finally(() => setRefreshing(false));
+  }} />;
   const [filter, setFilter] = useState(''), [choices, setChoices] = useState<SidebarChoices>({}), [loadedKey, setLoadedKey] = useState('');
   const [form, setForm] = useState<Form | null>(null), [name, setName] = useState(''), [issue, setIssue] = useState(''), [dragging, setDragging] = useState(false);
   const scroll = useRef<ScrollView>(null), scrollY = useRef(0), screenY = useRef(0), positions = useRef(new Map<string, { y: number; height: number }>());
@@ -50,7 +56,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
         if (Array.isArray(parsed.resources)) {
           const saved = parsed.resources.filter((row: unknown): row is SidebarResource => !!row && typeof row === 'object'
             && typeof (row as SidebarResource).id === 'string' && typeof (row as SidebarResource).title === 'string'
-            && typeof (row as SidebarResource).target === 'string' && ['Agents', 'Missions', 'Terminals', 'Machines', 'Unavailable'].includes((row as SidebarResource).kind));
+            && typeof (row as SidebarResource).target === 'string' && ['Agents', 'Missions', 'Terminals', 'Machines', 'Pull requests', 'Repositories', 'Resources', 'Unavailable'].includes((row as SidebarResource).kind));
           sidebarSeen.current = new Map([...saved.map((row: SidebarResource) => [row.id, { ...row, missing: true }] as const), ...sidebarSeen.current]);
         }
       } catch { setChoices({}); }
@@ -60,6 +66,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
   }, [storageKey]);
   const agents = agentRows(data.agents, data.sessions, gatewayHost || '?', Date.now(), data.missions);
   const current: SidebarResource[] = [
+    ...sidebarResources.map(resourceRow),
     ...agents.map(agent => ({ id: agent.id, title: agent.name, kind: 'Agents' as const, target: agent.target })),
     ...data.missions.map(mission => ({ id: mission.id, title: missionTitle(mission), kind: 'Missions' as const, target: mission.id })),
     ...sidebarTerminals.map(terminal => ({ id: terminal.id, title: terminal.owner_id, kind: 'Terminals' as const, target: terminal.terminal_id! })),
@@ -70,7 +77,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
   const editable = status === 'online' && !busy && (caps?.capabilities.some(c => c.id === 'arrangements' && c.state === 'granted') ?? false);
   useEffect(() => {
     if (loadedKey === storageKey) void AsyncStorage.setItem(storageKey, JSON.stringify({ collapsed: choices, resources: [...sidebarSeen.current.values()] })).catch(() => {});
-  }, [loadedKey, storageKey, choices, data.agents, data.sessions, data.missions, data.machines, sidebarTerminals, arrangements]);
+  }, [loadedKey, storageKey, choices, data.agents, data.sessions, data.missions, data.machines, sidebarTerminals, sidebarResources, arrangements]);
   const toggle = (id: string, collapsed: boolean) => setChoices(value => ({ ...value, [id]: !collapsed }));
   const submit = async (build: () => ArrangementOperation[]) => {
     if (!editable) return false;
@@ -91,6 +98,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     else if (row.kind === 'Missions') navigation.navigate('Mission', { id: row.target, title: row.title });
     else if (row.kind === 'Terminals') navigation.navigate('Terminal', { terminalId: row.target, title: row.title });
     else if (row.kind === 'Machines') navigation.navigate('FleetRoot');
+    else navigation.navigate('Resource', { id: row.id, title: row.title });
   };
   const move = (row: SidebarResource) => {
     const folders = view.groups.filter(g => g.folder);
@@ -132,11 +140,11 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
       void submit(() => placeResource(arrangement, source.resource!.id, target.folder, after ? undefined : target.resource?.id, after ? target.resource?.id : undefined));
     }
   };
-  const handle = (target: DragTarget) => editable ? <DragHandle title={target.title} onBegin={() => { setDragging(true); scroll.current?.getNativeScrollRef()?.measureInWindow((_: number, y: number) => { screenY.current = y; }); }} onEnd={() => setDragging(false)} onDrop={y => drop(target, y)} /> : null;
+  const handle = (target: DragTarget) => editable && !/^(session|pty)\//.test(target.id) ? <DragHandle title={target.title} onBegin={() => { setDragging(true); scroll.current?.getNativeScrollRef()?.measureInWindow((_: number, y: number) => { screenY.current = y; }); }} onEnd={() => setDragging(false)} onDrop={y => drop(target, y)} /> : null;
   const row = (resource: SidebarResource, folder: string | null) => {
     const target = { id: resource.id, folder, resource, title: resource.title }, glyph = mark(resource);
     return <View key={resource.id} onLayout={e => positions.current.set(resource.id, e.nativeEvent.layout)} style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <View style={{ flex: 1 }}><ListRow glyph={glyph.glyph} glyphColor={glyph.color} title={resource.title} right={needs.has(resource.id) ? <T color={theme.person}>●</T> : undefined} second={resource.missing ? `${resource.id} · unavailable` : resource.kind} onPress={resource.missing ? undefined : () => open(resource)} onLongPress={editable ? () => move(resource) : undefined} /></View>{handle(target)}
+      <View style={{ flex: 1 }}><ListRow glyph={glyph.glyph} glyphColor={glyph.color} title={resource.title} right={needs.has(resource.id) ? <T color={theme.person}>●</T> : undefined} second={resource.missing ? `${resource.id} · unavailable` : resource.kind} onPress={resource.missing ? undefined : () => open(resource)} onLongPress={editable && !/^(session|pty)\//.test(resource.id) ? () => move(resource) : undefined} /></View>{handle(target)}
     </View>;
   };
   const heading = (id: string, title: string, count: number, collapsed: boolean, folder?: string) => <View key={id} onLayout={e => positions.current.set(id, e.nativeEvent.layout)} style={{ flexDirection: 'row', alignItems: 'center' }}>
@@ -149,6 +157,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     <StatusLine />
     {issue ? <Note tone="warning">{issue}</Note> : null}
     {arrangementsIssue ? <Note tone="warning">{arrangementsIssue}</Note> : null}
+    {sidebarResourcesIssue ? <Note tone="warning">{sidebarResourcesIssue}</Note> : null}
     {sidebarTerminalsIssue ? <Note tone="warning">{sidebarTerminalsIssue}</Note> : null}
     {loadErrors.missions ? <Note tone="warning">{loadErrors.missions}</Note> : null}
     {truncated.agents || truncated.missions ? <Note tone="warning">More resources exist beyond this window.</Note> : null}
@@ -162,7 +171,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
       {issue || error ? <Note tone="fault">{issue || error}</Note> : null}
       {form?.kind === 'place' ? <><T bold>Move {form.resource.title} to {form.title}?</T><Button label="Move" disabled={!editable} onPress={() => void submit(() => placeResource(arrangement, form.resource.id, form.folder)).then(done => { if (done) setForm(null); })} /></> : <><T bold>{form?.kind === 'add' ? `Add to ${form.title}` : form?.kind === 'rename' ? `Rename ${form.title}` : 'New folder'}</T>
       <Field accessibilityLabel={form?.kind === 'add' ? 'Find a resource to add' : 'Folder name'} value={name} onChangeText={setName} autoFocus onSubmitEditing={form?.kind !== 'add' ? () => void makeFolder() : undefined} />
-      {form?.kind === 'add' ? <ScrollView style={{ maxHeight: 360 }}>{[...sidebarSeen.current.values()].filter(resource => !resource.missing && folderLocation(arrangement, resource.id) !== form.id && (resource.title.toLowerCase().includes(name.toLowerCase()) || resource.id.toLowerCase().includes(name.toLowerCase()))).map(resource => <ListRow key={resource.id} title={resource.title} onPress={editable ? () => openForm({ kind: 'place', resource, folder: form.id, title: form.title }) : undefined} />)}</ScrollView> : <Button label="Save" disabled={!editable || !name.trim()} onPress={() => void makeFolder()} />}</>}
+      {form?.kind === 'add' ? <ScrollView style={{ maxHeight: 360 }}>{subjectToFile(name, sidebarSeen.current) ? <ListRow title={`File ${name.trim()}`} onPress={editable ? () => openForm({ kind: 'place', resource: subjectToFile(name, sidebarSeen.current)!, folder: form.id, title: form.title }) : undefined} /> : null}{[...sidebarSeen.current.values()].filter(resource => !resource.missing && !/^(session|pty)\//.test(resource.id) && folderLocation(arrangement, resource.id) !== form.id && (resource.title.toLowerCase().includes(name.toLowerCase()) || resource.id.toLowerCase().includes(name.toLowerCase()))).map(resource => <ListRow key={resource.id} title={resource.title} onPress={editable ? () => openForm({ kind: 'place', resource, folder: form.id, title: form.title }) : undefined} />)}</ScrollView> : <Button label="Save" disabled={!editable || !name.trim()} onPress={() => void makeFolder()} />}</>}
       <Button label="Cancel" onPress={() => setForm(null)} />
     </View></View></Modal>
   </Screen>;
