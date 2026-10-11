@@ -32,7 +32,7 @@ export function StatusLine() {
     <T color={color}>{glyph} {word}</T>
     {gatewayHost ? <T dim numberOfLines={1} style={{ flex: 1 }}>  {gatewayHost}{caps?.session_actor ? ` · ${caps.session_actor.replace(/^person\//, '')}` : ''}</T> : null}
     </View>
-    {fresh ? <T dim>nothing running yet · Home → New → New terminal</T> : null}
+    {fresh ? <T dim>nothing running yet · Now → New → New terminal</T> : null}
   </View>;
 }
 

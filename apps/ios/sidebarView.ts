@@ -34,7 +34,7 @@ export function sidebarGroups(arrangements: Arrangement[], resources: Map<string
   const groups = folders.map(([id, folder]) => group(`folder/${id}`, folder.name.value, [...catalog.values()].filter(row => location(row.id) === id).sort((a, b) => compare(arrangement!.body.placements[a.id].value.key, arrangement!.body.placements[b.id].value.key) || compare(a.id, b.id)), true));
   const unfiled = [...catalog.values()].filter(row => !location(row.id));
   for (const kind of kinds) {
-    const rows = unfiled.filter(row => row.kind === kind).sort((a, b) => compare(a.title, b.title) || compare(a.id, b.id));
+    const rows = unfiled.filter(row => row.kind === kind).sort((a, b) => compare(arrangement?.body.placements[a.id]?.value.key ?? "~", arrangement?.body.placements[b.id]?.value.key ?? "~") || compare(a.title, b.title) || compare(a.id, b.id));
     if (rows.length) groups.push(group(`kind/${kind}`, kind, rows, false));
   }
   return { groups, everythingCollapsed: !query && (choices.everything ?? unfiled.length > 30), unfiledCount: unfiled.length };

@@ -2324,6 +2324,15 @@
       "verification": "live UI adapter plus daemon restart"
     },
     {
+      "effect": "EditArrangement",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_drag_files_tabs_and_resources_and_reorders_folders_only_after_motion",
+        "crates/stui/src/ui/live.rs::sidebar_register_edits_merge_and_survive_daemon_restart"
+      ],
+      "verification": "UI keyboard and mouse reducers plus real Unix-socket daemon edits, idempotent replay and disk restart"
+    },
+    {
       "effect": "SaveGlass",
       "tests": [
         "crates/stui/src/ui/glass.rs::layouts_cross_the_wire_unchanged",
@@ -2438,6 +2447,38 @@
     }
   ],
   "palette_actions": [
+    {
+      "action": "SidebarMode",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
+    {
+      "action": "SidebarNew",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
+    {
+      "action": "SidebarRename",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
+    {
+      "action": "SidebarPreview",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
     {
       "action": "Open",
       "tests": [

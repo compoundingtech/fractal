@@ -34,6 +34,10 @@ pub enum Hit {
     SidebarRow(usize),
     ResourceRow(usize),
     ResourceFilter,
+    ResourceNewFolder,
+    ResourceAdd(String),
+    ResourceFolderMenu(String),
+    ResourceFolderDrag(String),
     /// One of the sidebar's sections across its top.
     SidebarSection(usize),
     /// Glasses: the top bar's usage slot, which shows and hides the sidebar's Usage.
