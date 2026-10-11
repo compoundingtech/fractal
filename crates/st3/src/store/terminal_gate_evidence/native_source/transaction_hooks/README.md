@@ -117,3 +117,57 @@ had zero fullscan, sorts and autoindex rows. These are private fixture SQL work,
 not production or elapsed-time evidence, and do not transfer execution to the
 corrected successor. Required linux-tests was red only on the append fixture;
 optional perf-cost separately failed messaging_faults::link_minutes recovery.
+
+Private operator disposition successor (all new outcomes UNRUN): managed fixtures
+now install a TerminalGates-delegating operator with a versioned policy fingerprint
+and one adapter-owned error cell. The original fourteen still use the unchanged
+TerminalGates and default NativeSource::attach. No Installer/Operator API, hook
+library, Runtime, Store factory or public Doctor is changed. The private source
+factory accepts the managed fixture's Installer before its EMPTY publication;
+matching reopen uses the same fingerprint and cannot adopt the old policy.
+
+The callback's primary SQLite code, with the extended code preserved, determines
+the private result: BUSY/LOCKED/NOMEM/READONLY/INTERRUPT/IOERR/CORRUPT/FULL/CANTOPEN/
+NOTADB preserve the original error and abort through the existing outer finalizer;
+CONSTRAINT and its extended variants fence loudly and retain UNKNOWN while valid
+source admission commits; other typed SQL/no-code rusqlite errors abort as
+UNCLASSIFIED. Pure logical shape/completeness/cap and pre-apply version errors keep
+the existing logical fence behavior. Errors in Installer/source SQL outside apply
+retain their existing propagation policy. This is not a blanket change to all
+SQLite failures; the old root-publication ABORT remains an outer transaction
+failure control, not callback infrastructure proof.
+
+Prepare clears stale error memory before any job. Finalize drains the cell EVEN
+IF source.finish failed, so an original FULL wins over subsequent missing-savepoint
+cleanup errors. First abort-required error wins; reentry and poisoned cells refuse.
+There is no global cell, Store/connection retention, error-history collection or
+read-side reset. Constraint metadata additionally persists a fixed bounded numeric
+reason in the private guard/root (two extra error-path SQL writes); normal work
+ceilings remain unchanged. Logical faults never become healthy or silently vanish.
+
+Six new managed_operator_error_* controls cover typed/extended/synthetic inputs,
+real FULL/all-caller rollback/recovery, real witness CONSTRAINT/admission/UNKNOWN,
+first-fault/reentry/lent reset/isolation, bootstrap/reopen/lifetime, and old-policy
+refusal. The real FULL probe is one fixed 64KiB zeroblob INSERT in a private probe
+table INSIDE apply, not a real-disk or witness-insert-specific failure. Setup creates
+the table after native seed, VACUUMs the small private fixture, requires zero free
+pages, then caps max_page_count to page_count. It prints page_count/max/free/page
+size/journal mode before and after fault and recovery. An earlier native failure,
+wrong fault code/origin, or missing fault is a failed control, never a success.
+Only the inherited four-attempt fresh batch-LAYOUT setup may repeat. Semantic
+assertions never retry. The two queued caller jobs must both finish their native
+updates, share one finalizer, receive Err, and leave all committed SQL state equal.
+The limit is restored and an actual public batched native append must subsequently
+commit; memory/root restoration alone is insufficient writer recovery evidence.
+One anchored nextest success-output override exposes this setup; it changes no
+selection, retry, thread or ceiling. All original14 and managed8 plus new6 must have
+source-bound hosted outcomes; no prior result transfers to this successor.
+
+Held for production: aborting all unclassified SQLite errors (ERROR/SCHEMA/MISUSE,
+for example) may turn an adapter SQL bug into an outage for every writer caller.
+The private fail-closed choice requires its own production review, as do error-cell
+allocation/message bounds, source completeness, trigger/index cost, binding/reopen,
+storage-version/canonical_audit/digests, writer hold/latency and Doctor activation.
+Library root/cleanup errors still do not supply an abort-only capability to arbitrary
+callers which catch an Err. Shared policy consolidation is deferred unless another
+operator needs it. Source review and rustfmt are not Rust/SQLite execution.
