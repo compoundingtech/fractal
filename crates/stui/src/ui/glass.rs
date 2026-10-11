@@ -2010,7 +2010,11 @@ impl Ui {
             })
             .count();
         // A fresh workspace names its host and where to start instead of counting nothing.
-        let fresh = self.world.attention.ready().is_some()
+        // Until st has sent the first real state, the bar says only how it is connected: a
+        // placeholder that turns into the counts a moment later reads as flicker (Nathan, 2026-10-11).
+        let settled = self.world.settled;
+        let fresh = settled
+            && self.world.attention.ready().is_some()
             && alerts == 0
             && self.world.agents.ready().is_some_and(|agents| {
                 !agents
@@ -2027,7 +2031,7 @@ impl Ui {
             ));
         }
         let mut machines_shown = false;
-        if !fresh {
+        if settled && !fresh {
             let mut x;
             if alerts > 0 {
                 spans.push(Span::styled(" · ", bar(theme::dim())));
@@ -2069,22 +2073,17 @@ impl Ui {
             // Missions with work open: running, waiting their turn, or waiting on someone.
             // The count comes from the mission rows: with the window not followed there is no count to
             // show, and the bar says so rather than a stale number.
-            let active = (self.world.missions_followed && self.world.missions.ready().is_some()).then(|| {
-                screens::mission_order(&self.world, false)
-                    .iter()
-                    .filter(|mission| {
-                        matches!(
-                            mission.word,
-                            Word::Working
-                                | Word::Queued
-                                | Word::Decision
-                                | Word::Stalled
-                                | Word::Unstaffed
-                                | Word::Unclaimed
-                        )
-                    })
-                    .count()
-            });
+            let followed = self.world.missions_followed && self.world.missions.ready().is_some();
+            let counted = |keep: fn(Word) -> bool| {
+                followed.then(|| {
+                    screens::mission_order(&self.world, false)
+                        .iter()
+                        .filter(|mission| keep(mission.word))
+                        .count()
+                })
+            };
+            let active = counted(Word::is_active);
+            let stuck = counted(Word::is_stuck).filter(|stuck| *stuck > 0);
             spans.push(Span::styled(" · ", bar(theme::dim())));
             x = area.x + Line::from(spans.clone()).width() as u16;
             let active_text = match active.or(self.world.active_missions) {
@@ -2100,6 +2099,21 @@ impl Ui {
                 Hit::PaletteSection(2),
             );
             spans.push(Span::styled(active_text, bar(theme::fg(theme::SAPPHIRE))));
+            // Stuck runs are not active, and not hidden: they are named beside the count.
+            if let Some(stuck) = stuck {
+                spans.push(Span::styled(" · ", bar(theme::dim())));
+                x = area.x + Line::from(spans.clone()).width() as u16;
+                let stuck_text = format!("▲ {stuck} stuck");
+                self.hit(
+                    Rect {
+                        x,
+                        width: text::width(&stuck_text) as u16,
+                        ..area
+                    },
+                    Hit::PaletteSection(2),
+                );
+                spans.push(Span::styled(stuck_text, bar(theme::fg(theme::FAULT))));
+            }
             let machines = self.world.machines.items();
             machines_shown = !machines.is_empty();
             if machines_shown {
@@ -6286,6 +6300,96 @@ mod tests {
         // st's own count stands in for the rows it does not send.
         ui.world.active_missions = Some(57);
         assert!(top(&ui).contains("◇ 57 active"), "{}", top(&ui));
+    }
+
+    #[test]
+    fn the_top_bar_prints_only_the_connection_until_st_has_sent_the_first_state() {
+        let mut ui = glass();
+        let top = |ui: &Ui| screen(ui).lines().next().unwrap().to_owned();
+        // A cached copy is not st's answer: no placeholder, no counts to flip a moment later.
+        ui.world.settled = false;
+        ui.world.attention = Load::Ready(vec![]);
+        let bar = top(&ui);
+        for word in ["working", "active", "nothing running", "alert", "Ctrl+K"] {
+            assert!(!bar.contains(word), "{word}: {bar}");
+        }
+        assert!(bar.contains("live"), "{bar}");
+        ui.world.settled = true;
+        assert!(top(&ui).contains("working"), "{}", top(&ui));
+    }
+
+    #[test]
+    fn the_top_bar_counts_only_missions_that_are_running_and_names_the_stuck_ones() {
+        let mut ui = glass();
+        let words = [
+            Word::Working,
+            Word::Queued,
+            Word::Decision,
+            Word::Stalled,
+            Word::Unstaffed,
+            Word::Unclaimed,
+            Word::Watching,
+            Word::Held,
+            Word::Idle,
+            Word::Done,
+            Word::Failed,
+            Word::Cancelled,
+        ];
+        if let Load::Ready(missions) = &mut ui.world.missions {
+            let template = missions[0].clone();
+            *missions = words
+                .iter()
+                .enumerate()
+                .map(|(index, word)| Mission {
+                    id: format!("mission/example/m{index}"),
+                    title: format!("Mission {index}"),
+                    word: *word,
+                    system: false,
+                    updated_at: chrono::Local::now().to_rfc3339(),
+                    ..template.clone()
+                })
+                .collect();
+        }
+        let bar = screen(&ui).lines().next().unwrap().to_owned();
+        assert!(bar.contains("◇ 2 active"), "{bar}");
+        assert!(bar.contains("▲ 3 stuck"), "{bar}");
+    }
+
+    #[test]
+    fn the_missions_list_reads_running_first_and_ages_finished_runs_out() {
+        let mut world = demo::world();
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).to_rfc3339();
+        if let Load::Ready(missions) = &mut world.missions {
+            let template = missions[0].clone();
+            *missions = [
+                (Word::Done, "Done yesterday", yesterday.clone()),
+                (Word::Stalled, "Stuck", chrono::Local::now().to_rfc3339()),
+                (Word::Working, "Running", chrono::Local::now().to_rfc3339()),
+                (Word::Decision, "Asks you", chrono::Local::now().to_rfc3339()),
+                (Word::Cancelled, "Stopped yesterday", yesterday),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (word, title, at))| Mission {
+                id: format!("mission/example/m{index}"),
+                title: title.into(),
+                word,
+                system: false,
+                updated_at: at,
+                ..template.clone()
+            })
+            .collect();
+        }
+        let list = screens::missions_list(&world, 60, "⠋", false);
+        let titles: Vec<String> = list
+            .ids
+            .iter()
+            .filter_map(|id| world.missions.items().iter().find(|m| &m.id == id))
+            .map(|m| m.title.clone())
+            .collect();
+        assert_eq!(titles, ["Running", "Asks you", "Stuck"]);
+        let all = screens::missions_list(&world, 60, "⠋", true);
+        assert_eq!(all.ids.len(), 5);
     }
 
     #[test]

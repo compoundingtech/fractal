@@ -512,12 +512,18 @@ pub fn run(context: Context) -> Result<()> {
                         sync: None,
                     };
                     match window {
-                        Window::Attention => model.now = collection,
+                        Window::Attention => {
+                            model.now = collection;
+                            extras.attention_live = true;
+                        }
                         Window::Missions => {
                             model.missions = collection;
                             extras.missions_followed = true;
                         }
-                        Window::Agents => model.agents = collection,
+                        Window::Agents => {
+                            model.agents = collection;
+                            extras.agents_live = true;
+                        }
                         Window::Glasses | Window::Summary | Window::Arrangements => {}
                     }
                     extras.live = true;

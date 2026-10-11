@@ -159,7 +159,7 @@ fn native_lean_mission_membership_matches_full_cards() {
         })
         .unwrap();
     let step = run.steps.first().unwrap().subject.clone();
-    store.set_step_state(&step, "ready", None).unwrap();
+    store.set_step_state(&step, "working", None).unwrap();
     let now = client_now_ms();
     store
         .read_snapshot(|index| {
@@ -335,7 +335,7 @@ async fn summary_socket_tiny_snapshot_count_delta_silence_and_person_refusal() {
     assert_eq!(first["order"], json!(["summary/current"]));
     assert_eq!(first["has_more"], false);
     assert_eq!(first["items"][0]["active_missions"], 0);
-    writer.store.set_step_state(&step, "ready", None).unwrap();
+    writer.store.set_step_state(&step, "working", None).unwrap();
     signal_changed(&writer);
     let raw = tokio::time::timeout(Duration::from_secs(5), socket.next())
         .await
@@ -613,7 +613,7 @@ fn summary_gate_does_not_reintroduce_an_out_of_grace_native_mission() {
                     },
                 )
                 .into_iter()
-                .filter(active)
+                .filter(|m| !m.system && (active(m) || m.word == st3_ui_model::missions::Word::Decision))
                 .map(|m| m.id)
                 .collect::<BTreeSet<_>>()
             };

@@ -54,6 +54,11 @@ pub struct World {
     /// Whether the missions window is followed now. Not part of the shared contract.
     #[serde(skip)]
     pub missions_followed: bool,
+    /// Whether the attention and agents windows are st's own on this run, not a cached copy. The
+    /// top bar prints nothing about them until they are, so it never shows one picture and then
+    /// another. Not part of the shared contract.
+    #[serde(skip)]
+    pub settled: bool,
     /// The number of active missions st reports, when the mission rows are not followed.
     #[serde(skip)]
     pub active_missions: Option<usize>,

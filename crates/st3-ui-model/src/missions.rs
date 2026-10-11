@@ -29,6 +29,18 @@ pub enum Word {
 }
 
 impl Word {
+    /// Really running, or about to: an agent is doing a step now, or one waits its turn on a busy
+    /// agent. A count of "active missions" counts these and nothing else (Nathan, 2026-10-11:
+    /// "54 active", when most of them were stuck, paused or waiting on a person).
+    pub fn is_active(self) -> bool {
+        matches!(self, Word::Working | Word::Queued)
+    }
+
+    /// Open, and not moving: a step nobody takes or whose owner is not moving.
+    pub fn is_stuck(self) -> bool {
+        matches!(self, Word::Stalled | Word::Unstaffed | Word::Unclaimed)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Word::Decision => "needs you",

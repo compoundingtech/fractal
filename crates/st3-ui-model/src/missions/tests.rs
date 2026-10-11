@@ -525,3 +525,16 @@ fn duplicate_paths_keep_run_identity_and_the_actual_seat_after_pipeline_sort() {
         assert_eq!(metadata.last_progress, Some(format!("progress for {id}")));
     }
 }
+
+#[test]
+fn only_running_and_queued_missions_are_active_and_the_stuck_ones_are_named_apart() {
+    use Word::*;
+    let all = [
+        Decision, Stalled, Unstaffed, Unclaimed, Queued, Working, Watching, Held, Idle, Done,
+        Failed, Cancelled, NotStarted,
+    ];
+    let active: Vec<Word> = all.into_iter().filter(|word| word.is_active()).collect();
+    assert_eq!(active, [Queued, Working]);
+    let stuck: Vec<Word> = all.into_iter().filter(|word| word.is_stuck()).collect();
+    assert_eq!(stuck, [Stalled, Unstaffed, Unclaimed]);
+}
