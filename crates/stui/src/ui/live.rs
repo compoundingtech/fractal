@@ -155,6 +155,7 @@ pub struct Context {
     /// `stui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
     /// named glass or the last one used on this device.
     pub glass: Option<Option<String>>,
+    pub(crate) open_timing: Option<super::open_timing::Trace>,
 }
 
 /// The terminal the feed follows for the open terminal view.
@@ -304,6 +305,7 @@ pub fn run(context: Context) -> Result<()> {
         cache_path,
         cached,
         glass,
+        mut open_timing,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
     let mut model = cached.unwrap_or_default();
@@ -533,6 +535,9 @@ pub fn run(context: Context) -> Result<()> {
                     items,
                     header,
                 } => {
+                    if let Some(trace) = &mut open_timing {
+                        trace.received(&target, items.len());
+                    }
                     failed.remove(&target);
                     if replace && !timelines.get(&target).is_some_and(|timeline| timeline.older.paged) {
                         filled.remove(&target);
@@ -1014,6 +1019,9 @@ pub fn run(context: Context) -> Result<()> {
         // Every conversation on screen rides the feed's socket (the focused one first): st
         // pushes each change, so nothing here reads one again on a timer.
         let wanted = ui.live_conversations();
+        if let Some(trace) = &mut open_timing {
+            trace.intend(&wanted);
+        }
         retry_failed_opens(&mut sessions_requested, &failed, &wanted);
         for id in &wanted {
             if id.starts_with("session/")
@@ -1035,9 +1043,12 @@ pub fn run(context: Context) -> Result<()> {
             }
         }
         if wanted != conversing {
-            let _ = commands.send(Command::Converse {
+            let sent = commands.send(Command::Converse {
                 targets: wanted.clone(),
             });
+            if let Some(trace) = &mut open_timing {
+                trace.enqueue(&wanted, sent.is_ok());
+            }
             conversing = wanted;
             changed = true;
         }
@@ -1483,7 +1494,11 @@ pub fn run(context: Context) -> Result<()> {
             );
             cursor_style = style;
         }
-        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        super::open_timing::present(
+            &mut open_timing,
+            || execute!(io::stdout(), EndSynchronizedUpdate),
+            |target| ui.conversation_entry_visible(target),
+        )?;
         let visible = ui.visible_messages();
         let incoming: HashSet<_> = timelines
             .values()

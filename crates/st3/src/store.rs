@@ -3275,11 +3275,16 @@ impl Store {
                 | "work.claimed" | "work.renewed" | "work.progress" | "work.submitted"
                 | "work.failed" | "work.released" | "work.extended"
                 | "work.person-asked" | "work.person-done" | "work.person-cancelled");
-            if owner || step {
+            // Any other kind on a run, generation or step (a fault, a nudge): a card sees these
+            // subjects only through its owner and its queue, so refold the agents they own or
+            // queue, and every card's queue and membership, never the whole fleet.
+            let other = !owner && !step && ["mission-run/", "run-generation/", "step-run/"]
+                .iter().any(|prefix| subject.starts_with(prefix));
+            if owner || step || other {
                 delta.queues = true;
-                delta.membership |= owner;
+                delta.membership |= owner || other;
                 owners.insert(subject.clone());
-                if step {
+                if step || (other && subject.starts_with("step-run/")) {
                     let mut agents = connection.prepare_cached(
                         "SELECT assignee,lease_owner FROM step_runs WHERE subject=?1",
                     )?;
@@ -30578,7 +30583,20 @@ fn select_replicated_mission(
         .optional()
         .map_err(internal)?;
     let select = if let Some((current_revision, current_claim)) = current {
-        if claim_descends_from(transaction, &claim.id, &current_claim).map_err(internal)? {
+        // A runtime-created run's definition (person_work::project_minimal_run) yields to a
+        // publication of the same mission id, which that projection never replaces, so the
+        // publication wins whichever arrives first.
+        let runtime: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1
+                     AND kind IN ('work.person-asked','mission-run.created'))",
+                [&current_claim],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if runtime
+            || claim_descends_from(transaction, &claim.id, &current_claim).map_err(internal)?
+        {
             true
         } else if claim_descends_from(transaction, &current_claim, &claim.id).map_err(internal)? {
             false

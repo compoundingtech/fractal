@@ -443,6 +443,9 @@ It has a link only when its admission waited behind a holder with a valid existi
 A root started under roster admission ends when that admission is released.
 Its duration runs from cold-build start to release; `st.roster.admission.hold_ms`
 separately covers the full acquisition-to-release interval.
+Only the physical worker owning that admission may bind a rebuild to it. A concurrent
+internal reader without admission, including the startup diagnostic report, ends its
+own root at build completion and records no invented admission identity.
 Roster and page stage attributes on requests remain on the SERVER span, not children.
 
 `st.replication.projection` surrounds the post-receive projection attempt only when
@@ -528,8 +531,8 @@ because the waiter becomes the next holder. A holder without a span of its own t
 the context of a cold rebuild
 root it starts, so waiters can link to that root. Incremental refresher refolds have no
 existing span: they are attributed by class, admission id, wait duration, and holder age,
-not by a link. No root is added for those refolds. A cold root records the admission `id`
-and class, and retains any blocker link when it was itself a waiter.
+not by a link. No root is added for those refolds. An admitted cold root records its own
+admission `id` and class, and retains any blocker link when it was itself a waiter.
 The aggregate `roster/admission-wait` accounting is unchanged.
 Nonblocking try-admission uses the same holder registration and release contract, with
 zero `wait_ms` on success and no attributes on a miss. Collection readers retain their
@@ -622,11 +625,24 @@ Storage metrics are not sampled.
 A scoped thread-local `Option<Arc<WriterWait>>` shares a request accumulator across
 handler, store, action, and API blocking sections. Two relaxed atomics sum writer ACK
 wait in nanoseconds and count writer operations. Outer handler completion records
-`st.writer.wait_ms` (total ACK wait converted to milliseconds) and `st.writer.ops`
-(operation count) on the existing SERVER request span. Each scope restores the previous
-accumulator, including nested blocking sections; writer calls do not create child spans
+`st.writer.wait_ms` (total ACK wait converted to milliseconds, only when at least 1 ms)
+and `st.writer.ops` (operation count, including zero) on the existing SERVER request span.
+Each scope restores the previous accumulator, including nested blocking sections;
+writer calls do not create child spans
 or perform per-operation span-context lookup. This preserves the single-span request
 shape and adds no in-process sampling.
+
+The daemon idle-WAL worker emits a detached INTERNAL `st.db.checkpoint` root only
+when TRUNCATE was attempted or the result is abnormal. It uses the OTel API with
+an explicit empty parent context, retaining the attempt's start time without constructing
+a span for ordinary idle passes. `span.label` and `db.operation.name` are
+`checkpoint.truncate` for TRUNCATE attempts, otherwise `checkpoint.passive`;
+`db.system.name=sqlite`. A TRUNCATE result records `st.db.wal.checkpoint.duration`
+in seconds, reusing the existing instrument vocabulary without adding a metric.
+Failures, PASSIVE durations at least 1000 ms, writer waits or TRUNCATE durations
+at least 100 ms, and at least three consecutive no-progress pinned-WAL samples
+mark the root ERROR. Successful ordinary TRUNCATE leaves status UNSET.
+Span emission is independent of the diagnostic log buckets and has no links.
 
 ### Reconciler and FIFO telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
@@ -909,6 +925,12 @@ The daemon request proof checks caller trace continuity, `service.name=st-daemon
 the single-span shape (phase attributes present, no admission/handler child spans), and
 that a healthy request exports no below-WARN log record. A unit test pins the batch queue
 bounds.
+The storage-stage receiver proof exports request totals at 0, 0.999, 1, and 1.001 ms,
+checks the 1 ms attribute boundary and unchanged operation counts, and forces a real
+TRUNCATE using unpinned WAL frames in an isolated store. It checks ordinary passes emit
+no root, abnormal/failure results are ERROR, and roots remain parentless even with
+both an entered tracing span and an attached OTel context.
+
 The stage-span receiver proof compares `st.request.id` with the HTTP envelope, checks
 roster/page stage values, and links first-frame roots to the exported upgrade trace/span
 ids. It asserts that repeated rereads or changes produce no additional first-frame

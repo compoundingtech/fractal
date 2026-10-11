@@ -1193,9 +1193,7 @@ async fn response_envelope_unbounded(
                         handler_started.elapsed().as_millis() as i64,
                     );
                     if let Some(writer_wait) = writer_wait.as_ref() {
-                        let (wait_ms, ops) = writer_wait.totals();
-                        server.record("st.writer.wait_ms", wait_ms);
-                        server.record("st.writer.ops", i64::try_from(ops).unwrap_or(i64::MAX));
+                        crate::otel::record_writer_wait(server, writer_wait.totals());
                     }
                 }
                 response
@@ -1449,8 +1447,13 @@ fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
+/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+pub(crate) fn request_latency_target_windows() -> Value {
+    request_latency().lock().unwrap().targets_only(Instant::now())
+}
+
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
-fn request_latency_windows() -> Value {
+pub(crate) fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 
@@ -4818,6 +4821,9 @@ async fn client_agents(
         let filtered = query.status.is_some();
         let result = blocking_roster(move || {
             let _admission = admission;
+            if let Some(admission) = &_admission {
+                admission.enter_worker();
+            }
             reader.store.clone().read_snapshot(|index| {
                 let snapshot = if query.cursor.is_some() {
                     snapshot
@@ -6121,6 +6127,7 @@ pub fn start_agent_roster(state: &AppState) {
             let submitted = crate::otel::export_enabled().then(Instant::now);
             let refreshed = tokio::task::spawn_blocking(move || roster_worker(true, submitted, warm_attributes, || {
                 let _admission = admission;
+                _admission.enter_worker();
                 // The first fold publishes only what windows and first pages show; the rest
                 // follows at once.
                 crate::performance::task("roster/refresh", || if first {
@@ -23988,6 +23995,55 @@ mission "wake" state="ready" {
         assert_eq!(old_cold, 12);
     }
 
+    #[test]
+    fn faults_and_nudges_on_runs_and_steps_refold_only_the_cards_they_reach() {
+        let fixture = roster_claims_fixture();
+        let store = &fixture.store;
+        for history in [false, true] {
+            checked_agent_cache(store, history, store.index().unwrap());
+        }
+        let (run, step) = (&fixture.runs[1], &fixture.runs[2].steps[3]);
+        roster_fixture_work(&fixture, 23, "claim", "fault-fixture-claim");
+        for history in [false, true] {
+            checked_agent_cache(store, history, store.index().unwrap());
+        }
+        let append = |subject: &str, kind: &str, actor: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        let failure = |subject: &str, episode: &str| json!({
+            "condition": "observed", "episode": episode, "incarnation": null,
+            "reason": "Fixture fault.", "reviewer": "person/test", "severity": "warning",
+            "source_revision": null, "targets": [subject], "title": "A fixture fault",
+        });
+        for (label, subject, kind, actor, fields) in [
+            ("run fault", run.subject.as_str(), "operational.failure", "agent/st3/reconciler",
+                failure(&run.subject, "fixture-run-fault")),
+            ("step fault", step.subject.as_str(), "operational.failure", "agent/st3/reconciler",
+                failure(&step.subject, "fixture-step-fault")),
+            ("nudge", step.subject.as_str(), "work.nudged", "daemon/runtime", json!({
+                "agent": fixture.subjects[23], "attempt": 1, "idle_since_unix_ms": "1",
+                "message": "message/fixture", "reason": "quiet", "waits": [],
+            })),
+            ("report-to", run.subject.as_str(), "mission-run.report-to", "person/test",
+                json!({"report_to": "agent/node.roster-00"})),
+            ("eval verdict", run.subject.as_str(), "eval.verdict", "agent/st3/reconciler",
+                json!({"verdict": "pass", "reason": "Fixture verdict."})),
+        ] {
+            append(subject, kind, actor, fields);
+            let refolded = store.agent_resources_refolded_cards_for_test();
+            for history in [false, true] {
+                checked_agent_cache(store, history, store.index().unwrap());
+            }
+            let refolded = store.agent_resources_refolded_cards_for_test() - refolded;
+            // Run 1 owns ten agents; step 2/3's holder is one. Never all sixty, in either view.
+            assert!(refolded <= 2 * 11, "{label} refolded {refolded} cards");
+        }
+    }
+
     fn roster_fixture_person_claim(store: &Store, subject: &str, kind: &str, fields: Value) {
         store.append_claim(&ClaimInput {
             subject: subject.into(), kind: kind.into(), actor: Some("person/test".into()),
@@ -24705,6 +24761,81 @@ mission "wake" state="ready" {
             timed("refresh", &|| refresh_agent_roster(&store, false).unwrap());
             println!("roster backlog {backlog}: chunked because {reason:?}; cards refolded {}",
                 store.agent_resources_refolded_cards_for_test() - refolded);
+        }
+    }
+
+    /// What one refresh costs after one claim of each kind that moves cards, on a disposable
+    /// store copy opened in place: claims copied from `ST_ROSTER_KIND_CLAIMS` (a JSON array of
+    /// `{label, subject, kind, actor, fields}`), and bursts of `harness.observed` on that many
+    /// agents at once. Each prints the fold time, cards refolded and where the time went.
+    #[test]
+    #[ignore = "roster refresh timing by claim kind; set ST_ROSTER_BACKLOG_STORE and ST_ROSTER_KIND_CLAIMS"]
+    fn agent_roster_refresh_by_claim_kind_timing_on_a_store_copy() {
+        let (Some(database), Some(claims)) = (
+            std::env::var_os("ST_ROSTER_BACKLOG_STORE").map(PathBuf::from),
+            std::env::var_os("ST_ROSTER_KIND_CLAIMS").map(PathBuf::from),
+        ) else {
+            return;
+        };
+        let claims: Vec<Value> = serde_json::from_slice(&fs::read(claims).unwrap()).unwrap();
+        let rounds = std::env::var("ST_ROSTER_KIND_ROUNDS").map_or(5, |n| n.parse().unwrap());
+        smallclaims::profile::init_from_env();
+        let store = Store::open(&database, "bench-host").unwrap();
+        refresh_agent_roster(&store, false).unwrap();
+        let agents = store.read_snapshot(|index| Ok(client_agent_page_refs(&store, false, index)?
+            .iter().filter_map(|card| card["id"].as_str().map(str::to_owned)).collect::<Vec<_>>()))
+            .unwrap();
+        println!("roster kinds agents={}", agents.len());
+        let task_ms = || {
+            let performance = smallclaims::performance::snapshot();
+            performance["requests"].as_array().into_iter().flatten()
+                .filter_map(|row| Some((row["kind"].as_str()?.to_owned(), row["total_ms"].as_f64()?)))
+                .filter(|(kind, _)| kind.starts_with("roster/"))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let append = |subject: &str, kind: &str, actor: Option<&str>, fields: &Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: actor.map(str::to_owned),
+                fields: serde_json::from_value(fields.clone()).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).map(drop)
+        };
+        let timed = |label: &str| {
+            let before = (smallclaims::sqlite::work::total(), task_ms(),
+                store.agent_resources_refolded_cards_for_test());
+            let started = Instant::now();
+            smallclaims::profile::task("roster-kind-timing", || refresh_agent_roster(&store, false).unwrap());
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            let after = task_ms();
+            let tasks = after.iter().filter_map(|(kind, total)| {
+                let spent = total - before.1.get(kind).copied().unwrap_or(0.0);
+                (spent >= 1.0).then(|| format!("{}={spent:.0}", kind.trim_start_matches("roster/")))
+            }).collect::<Vec<_>>().join(" ");
+            println!("roster kind {label}: {ms:.1} ms; cards refolded {}; {tasks}; vm_steps={}",
+                store.agent_resources_refolded_cards_for_test() - before.2,
+                (smallclaims::sqlite::work::total() - before.0).vm_steps);
+        };
+        for round in 0..rounds {
+            append(&format!("custom/kind-timing/{round}"), "custom.test.marker", None, &json!({})).unwrap();
+            timed("no card");
+            for burst in [1, 10, 25] {
+                for (n, agent) in agents.iter().cycle().skip(round * 7).take(burst.min(agents.len())).enumerate() {
+                    append(agent, "harness.observed", None, &json!({
+                        "state": if (round + n) % 2 == 0 { "working" } else { "idle" },
+                        "driver": "codex", "incarnation_id": format!("kind-timing-{round}-{n}"),
+                    })).unwrap();
+                }
+                timed(&format!("harness.observed x{burst}"));
+            }
+            for claim in &claims {
+                let label = claim["label"].as_str().unwrap();
+                match append(claim["subject"].as_str().unwrap(), claim["kind"].as_str().unwrap(),
+                    claim["actor"].as_str(), &claim["fields"])
+                {
+                    Ok(()) => timed(label),
+                    Err(error) => println!("roster kind {label}: append refused: {error:#}"),
+                }
+            }
         }
     }
 

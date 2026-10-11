@@ -28,6 +28,7 @@ pub use glass::set_glasses_version;
 pub use lastrun::log_panics as lastrun_log_panics;
 mod glass_store;
 mod lastrun;
+pub(crate) mod open_timing;
 pub mod layout;
 pub mod live;
 pub mod pane;
@@ -427,6 +428,8 @@ pub struct Ui {
     revoke: Option<String>,
     /// Home items put off until later. Demo only: kept in memory on this machine.
     snoozed: HashSet<String>,
+    /// The conversations whose alert band the person expanded; every other one is a single line.
+    alerts_open: HashSet<String>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
     pub(crate) glasses: Option<glass::Glasses>,
@@ -540,6 +543,24 @@ fn is_address_char(c: char) -> bool {
 }
 
 impl Ui {
+    /// Inspect the rendered viewport, without interpreting a loading/header line as content.
+    /// The caller records this only after terminal presentation succeeded.
+    pub(crate) fn conversation_entry_visible(&self, target: &str) -> bool {
+        if self.help || self.popover.is_some()
+            || self.glasses.as_ref().is_some_and(|glasses| glasses.palette_open())
+        {
+            return false;
+        }
+        let frame = self.frame.borrow();
+        frame.panes.iter().any(|pane| {
+            pane.key.strip_prefix("chat:") == Some(target)
+                && pane.entries.iter().enumerate().any(|(index, (_, start))| {
+                    let end = pane.entries.get(index + 1).map_or(pane.total, |(_, line)| *line);
+                    pane.entry_visible(*start, end, &frame.covers)
+                })
+        })
+    }
+
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
         if self.help
@@ -666,6 +687,7 @@ impl Ui {
             new_mission: None,
             revoke: None,
             snoozed: HashSet::new(),
+            alerts_open: HashSet::new(),
             glasses: None,
             session_focus: None,
             build: false,
@@ -2544,8 +2566,9 @@ impl Ui {
         } else {
             composer.len() as u16 + 2 + strip
         };
-        // What waits on the person in this conversation sits above the box, never pushing the
-        // conversation below a few lines.
+        // What waits on the person in this conversation is one line above the box, a card only
+        // when asked for. The box keeps its place and its size either way: the band takes its
+        // rows from the conversation and never more than a third of the pane.
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
@@ -2554,7 +2577,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room);
+        band.truncate(room.min((area.height as usize / 3).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -2624,7 +2647,7 @@ impl Ui {
             }
         }
         if composer_height > 0 {
-            let y = body.y + body.height;
+            let y = body.y + body.height + band_height;
             buf.set_stringn(
                 area.x,
                 y,
@@ -5946,6 +5969,7 @@ impl Ui {
             Hit::Answer(index) => self.answering = Some(index),
             Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
+            Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
             Hit::Voice => {
                 self.editing = true;
                 self.start_voice();
@@ -6514,6 +6538,42 @@ fn dump(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_useful_conversation_requires_a_rendered_entry_not_a_placeholder() {
+        let mut ui = Ui::new(demo::world());
+        ui.tab = 1;
+        let target = ui.selected_id().unwrap();
+        let entries = ui.world.conversations.get(&target).unwrap().clone();
+        for state in [Load::Loading, Load::Failed("unavailable".into()), Load::Ready(Vec::new())] {
+            ui.world.conversations.insert(target.clone(), state);
+            frame(&ui, 120, 30);
+            assert!(!ui.conversation_entry_visible(&target));
+        }
+        ui.world.conversations.insert(target.clone(), entries);
+        frame(&ui, 120, 30);
+        assert!(ui.conversation_entry_visible(&target));
+        assert!(!ui.conversation_entry_visible("agent/test/other"));
+        frame(&ui, 10, 4);
+        assert!(!ui.conversation_entry_visible(&target));
+    }
+
+    #[test]
+    fn first_useful_conversation_excludes_covered_and_offscreen_entries() {
+        let (mut ui, target) = expand_all_viewport_fixture();
+        assert!(ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().covers.push((Rect::new(0, 0, 40, 4), 0));
+        assert!(!ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().covers.clear();
+        ui.frame.borrow_mut().panes[0].entries = vec![("offscreen".into(), 5)];
+        assert!(!ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().panes[0].entries = vec![("visible".into(), 0)];
+        ui.frame.borrow_mut().panes[0].rect.width = 0;
+        assert!(!ui.conversation_entry_visible(&target));
+        ui.frame.borrow_mut().panes[0].rect.width = 40;
+        ui.help = true;
+        assert!(!ui.conversation_entry_visible(&target));
+    }
 
     fn expand_all_viewport_fixture() -> (Ui, String) {
         let mut ui = Ui::new(demo::world());

@@ -344,3 +344,16 @@ assert.equal(cleanMessageText(rawText, SHOW_EVERYTHING), rawText);
   const hydrated = fetchedConversationEntries(entry, reference, { ...view, content: 'first\nlast' });
   assert.deepEqual(hydrated[0].body.output, ['first', 'last'], 'view-only continuations hydrate written content through the typed adapter');
 }
+
+// A conversation says how fresh it is, and that the phone is asking again.
+{
+  const { freshnessLine } = await import('@smalltalk/st3-views/conversationView');
+  const base = { issue: '', loaded: true, refreshing: false, lastFrame: 1_000, now: 61_000 };
+  assert.deepEqual(freshnessLine(base), { text: '● live · updated 1m ago', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, now: 5_000 }), { text: '● live · updated 4s ago', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, now: 7_300_000 }), { text: '● live · updated 2h ago', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, refreshing: true }), { text: '↻ refreshing… · updated 1m ago', tone: 'refreshing' });
+  assert.deepEqual(freshnessLine({ ...base, loaded: false, lastFrame: null }), { text: '↻ loading…', tone: 'refreshing' });
+  assert.deepEqual(freshnessLine({ ...base, lastFrame: null }), { text: '● live · waiting for st', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, issue: 'unreachable' }), { text: '⚠ retrying · updated 1m ago', tone: 'warn' });
+}
