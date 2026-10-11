@@ -16,6 +16,8 @@ pub enum AlertTap {
     Answer(String),
     /// Open the alert's whole card in Now, where every kind is answered.
     Open,
+    /// Expand or collapse the band: the `Hit` names the agent's conversation, not an alert.
+    Toggle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
