@@ -172,7 +172,7 @@ export const QuestionSummary = ({ request, ageLabel, locale, timeZone }: { reado
     const absolute = Number.isFinite(answeredAt) ? absoluteFormat.format(answeredAt) : undefined
     return <section {...stylex.props(styles.summary)} aria-label="Question outcome">
       <Disclosure>{({ isExpanded }) => <>
-        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{ageLabel !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta)}>{ageLabel}</time> : null}<span aria-hidden="true">{isExpanded ? '⌄' : '›'}</span></Button>
+        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{ageLabel !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta, styles.summaryAge)}>{ageLabel}</time> : null}<span aria-hidden="true" {...stylex.props(styles.summaryChevron)}>{isExpanded ? '⌄' : '›'}</span></Button>
         <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<details><summary>Original questions</summary><OriginalQuestions request={request} /></details></> : null}</DisclosurePanel>
       </>}</Disclosure>
     </section>
@@ -205,6 +205,8 @@ const styles = stylex.create({
   summaryTrigger: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minHeight: g.toolRow, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
   summaryLabel: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meta: { color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  summaryAge: { width: g.ageTrack, flexShrink: 0, whiteSpace: 'nowrap', textAlign: 'right' },
+  summaryChevron: { width: g.icon, flexShrink: 0, textAlign: 'right' },
   selectedDescription: { color: textVars.fgSoft },
   chip: { color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, paddingInline: s.xs, paddingBlock: s.xs2, backgroundColor: surfaceVars.rowActive, borderRadius: r.sm },
   button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },

@@ -128,15 +128,15 @@ export const Failed: Story = { args: { request: { ...questionRequest, answerable
   await expect(args.onRetry).toHaveBeenCalledTimes(1)
   await expect(args.onDecline).not.toHaveBeenCalled()
 } }
-export const Answered: Story = { args: { request: { ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', where: 'web', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2 minutes ago' }, play: async ({ canvasElement }) => {
+export const Answered: Story = { args: { request: { ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', where: 'web', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2m' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const row = canvas.getByRole('region', { name: 'Question outcome' })
   const trigger = canvas.getByRole('button', { name: /Answered.*This thread/ })
   await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
   await expect(trigger).toHaveAttribute('aria-expanded', 'false')
   await expect(canvas.queryByText(questionRequest.questions[0]!.prompt)).toBeNull()
-  await expect(canvas.getByText('2 minutes ago')).toHaveAttribute('title', new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'long', timeZone: 'America/New_York' }).format(new Date('2026-10-11T15:41:00Z')))
-  await expect(canvas.getByText('2 minutes ago')).not.toHaveAttribute('title', '2026-10-11T15:41:00Z')
+  await expect(canvas.getByText('2m')).toHaveAttribute('title', new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'long', timeZone: 'America/New_York' }).format(new Date('2026-10-11T15:41:00Z')))
+  await expect(canvas.getByText('2m')).not.toHaveAttribute('title', '2026-10-11T15:41:00Z')
   await expect(canvas.queryByText('2026-10-11T15:41:00Z')).toBeNull()
   await userEvent.click(trigger)
   await expect(trigger).toHaveAttribute('aria-expanded', 'true')
@@ -149,7 +149,7 @@ export const Answered: Story = { args: { request: { ...questionRequest, state: {
 export const AnsweredLight440: Story = { ...Answered, parameters: { scheme: 'light', width: 440 } }
 export const AnsweredDark1440: Story = { ...Answered, parameters: { scheme: 'dark', width: 1440 } }
 export const AnsweredLight1440: Story = { ...Answered, parameters: { scheme: 'light', width: 1440 } }
-export const AnsweredMultiple: Story = { args: { request: { ...questionRequest, questions: questionKinds.slice(0, 3), state: { _tag: 'answered', answers: { single: { selected: ['thread'] }, multi: { selected: [] }, text: { selected: [], other: 'Accessibility review' } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2 minutes ago' }, play: async ({ canvasElement }) => {
+export const AnsweredMultiple: Story = { args: { request: { ...questionRequest, questions: questionKinds.slice(0, 3), state: { _tag: 'answered', answers: { single: { selected: ['thread'] }, multi: { selected: [] }, text: { selected: [], other: 'Accessibility review' } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2m' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const row = canvas.getByRole('region', { name: 'Question outcome' })
   const trigger = canvas.getByRole('button', { name: /Answered.*3 questions/ })
@@ -306,6 +306,10 @@ export const AnsweredLongChoice: Story = { ...Answered, args: { ...Answered.args
   await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
   await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
   await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
+  const age = canvas.getByText('2m')
+  await expect(getComputedStyle(age).whiteSpace).toBe('nowrap')
+  await expect(getComputedStyle(age).flexShrink).toBe('0')
+  await expect(age.getBoundingClientRect().height).toBeLessThan(row.getBoundingClientRect().height)
   await expect(row.getBoundingClientRect().width).toBeLessThanOrEqual(canvasElement.getBoundingClientRect().width)
   await userEvent.click(trigger)
   await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
