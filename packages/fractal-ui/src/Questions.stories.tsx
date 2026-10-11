@@ -37,7 +37,7 @@ export const Keyboard: Story = { args: { request: { ...questionRequest, answerab
 export const AllStates: Story = { render: () => <>
   {questionKinds.map(kind => <section key={kind.id}><h2>{kind.id}</h2><QuestionForm request={{ ...questionRequest, id: `readonly-${kind.id}`, questions: [kind] }} onOpenTerminal={fn()} />{questionStates.map((state, index) => <QuestionForm key={index} request={{ ...questionRequest, id: `${kind.id}-${index}`, questions: [kind], answerable: true, state }} draft={{ [kind.id]: { selected: [kind.options[0]?.id ?? ''], other: kind.kind === 'text' ? 'Release review' : undefined } }} onOpenTerminal={fn()} onSubmit={fn()} onDraftChange={fn()} onDecline={fn()} onRetry={fn()} />)}</section>)}
   <QuestionForm request={{ ...questionRequest, questions: questionKinds, answerable: true }} onDraftChange={fn()} onSubmit={fn()} onDecline={fn()} />
-  <QuestionSummary request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Johannes', where: 'terminal', at: '15:41 UTC' } }} />
+  <QuestionSummary request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Reviewer', where: 'terminal', at: '15:41 UTC' } }} />
   <NeedsYouBar requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} expanded={false} onToggle={fn()} />
   <NeedsYouBar requests={[questionRequest]} expanded onToggle={fn()}><QuestionForm request={questionRequest} variant="pinned" onOpenTerminal={fn()} /></NeedsYouBar>
   <NeedsYouInbox requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} onShowInThread={fn()} onOpenTerminal={fn()} />
@@ -47,7 +47,7 @@ export const NegativeControls: Story = { render: () => <>
   <NeedsYouBar requests={[]} expanded={false} onToggle={fn()} />
   <NeedsYouInbox requests={[]} onShowInThread={fn()} onOpenTerminal={fn()} />
   <NeedsYouBar requests={[questionRequest]} transcriptVisibility={0.6} expanded={false} onToggle={fn()} />
-  <QuestionSummary request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Johannes', at: '15:41 UTC' } }} />
+  <QuestionSummary request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Reviewer', at: '15:41 UTC' } }} />
 </>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.queryByRole('button', { name: 'Open terminal' })).toBeNull()
@@ -85,7 +85,7 @@ export const AnsweredElsewhere: Story = { args: { request: { ...questionRequest,
   await expect(canvas.queryByText(/Unsent draft must not survive/)).toBeNull()
   await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
 } }
-export const PartiallyAnswered: Story = { args: { request: { ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Johannes', at: '15:41 UTC' } } } }
+export const PartiallyAnswered: Story = { args: { request: { ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: '15:41 UTC' } } } }
 export const TimedOutAuto: Story = { args: { request: { ...questionRequest, state: questionStates[6]! } } }
 export const TimedOutNone: Story = { args: { request: { ...questionRequest, state: questionStates[7]! } } }
 export const Cancelled: Story = { args: { request: { ...questionRequest, state: questionStates[8]! } } }
