@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A runtime-created mission's definition follows its canonically first claim's revision, so independent updates with different reasons converge however they arrive.",
+  "replay": {
+    "status": "changed",
+    "detail": "Incremental person-work projection now gives the definition the revision and source a full replay already gives: the canonically first claim's. A definition projected earlier from a later claim is corrected the next time that run tree is rebuilt or the graph is fully replayed; no new replay trigger is added."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, index, trigger or storage-version change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Claim admission, person authority, idempotency keys, run state, checkpoint rules and revision history are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client schema or API change. A published mission's definition is never replaced by this path; only a definition of the same revision, or one another runtime-created run wrote, is."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart or startup migration is required by the change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual database repair or new operational command is required."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "The definition's revision and source change together inside the projecting transaction. Failure rolls both back; revision history rows are unchanged."
+  }
+}

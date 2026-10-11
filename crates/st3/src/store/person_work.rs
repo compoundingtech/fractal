@@ -1049,23 +1049,30 @@ pub(super) fn project_minimal_run(
         .map_err(internal)?;
     }
     tx.execute("INSERT OR IGNORE INTO mission_definitions(mission_id,revision,state,claim_id) VALUES(?1,?2,'ready',?3)", params![mission.id, mission.revision, claim.id]).map_err(internal)?;
-    // A run-tree rebuild retains this definition too. Canonicalize its source only for
-    // the same revision; this does not elect another revision or change definition state.
-    let definition_source: Option<String> = tx
+    // A run-tree rebuild retains this definition too, and a full replay keeps the canonically
+    // first claim's. Independent daemons can write different revisions of one internal mission:
+    // each words an ended ask's reason from its own view. So the canonically first claim gives
+    // the revision as well as the source, over a definition of the same revision or one another
+    // minimal run wrote; this does not change definition state or a published definition.
+    let definition_source: Option<(String, bool)> = tx
         .query_row(
-            "SELECT claim_id FROM mission_definitions WHERE mission_id=?1 AND revision=?2",
+            "SELECT claim_id, revision=?2 OR EXISTS(SELECT 1 FROM claims
+                 WHERE claims.id=mission_definitions.claim_id
+                 AND claims.kind IN ('work.person-asked','mission-run.created'))
+             FROM mission_definitions WHERE mission_id=?1",
             params![mission.id, mission.revision],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(internal)?;
-    if let Some(previous) = definition_source
+    if let Some((previous, replaceable)) = definition_source
+        && replaceable
         && previous != claim.id
         && canonical::claim_key(tx, &claim.id).map_err(internal)?
             < canonical::claim_key(tx, &previous).map_err(internal)?
     {
         tx.execute(
-            "UPDATE mission_definitions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2",
+            "UPDATE mission_definitions SET revision=?2, claim_id=?3 WHERE mission_id=?1",
             params![mission.id, mission.revision, claim.id],
         )
         .map_err(internal)?;
