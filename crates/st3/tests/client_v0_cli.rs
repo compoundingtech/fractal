@@ -3037,9 +3037,9 @@ mission "reported-work" state="ready" {
             .contains("Submitted incarnation: reporter:1")
     );
     let shown = value(&run_cli(&socket, &["work", "show", &docs.subject]).await);
-    assert_eq!(shown["submitted_incarnation"], "reporter:1");
-    assert!(shown["claimant"].is_null());
-    assert!(shown["claim_incarnation"].is_null());
+    assert_eq!(shown["value"]["submitted_incarnation"], "reporter:1");
+    assert!(shown["value"]["claimant"].is_null());
+    assert!(shown["value"]["claim_incarnation"].is_null());
     let client = st3_client::Client::unix_as(&socket, "person/requester");
     let resource = client.work_get(&docs.subject).await.unwrap().value;
     let st3_client::Resource::Work(work) = resource else {
