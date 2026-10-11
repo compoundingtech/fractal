@@ -150,6 +150,34 @@ pub fn expand_login(path: &str, home: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
+/// The harness a canonical agent body declares, whether or not its block binds an account.
+pub fn harness_driver(desired: &Value) -> Option<&str> {
+    first_argument(child(desired, "harness")?)
+}
+
+/// The declared account whose login directory on `host` is `directory`. A seat that sets its
+/// harness's login variable to a declared login runs on that account even when its block binds
+/// nothing, so what it reports belongs to the account, whatever identity the provider shows.
+pub fn account_by_login<'a>(
+    accounts: &'a [AccountDecl],
+    driver: &str,
+    host: &str,
+    directory: &Path,
+    home: Option<&Path>,
+) -> Option<&'a AccountDecl> {
+    let same = |left: &Path, right: &Path| {
+        left == right
+            || matches!((left.canonicalize(), right.canonicalize()), (Ok(left), Ok(right)) if left == right)
+    };
+    accounts.iter().find(|account| {
+        account.driver() == Some(driver)
+            && account
+                .login_for(host)
+                .and_then(|login| expand_login(login, home))
+                .is_some_and(|login| same(&login, directory))
+    })
+}
+
 /// What a pooled seat's choice reads of one account.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
@@ -204,6 +232,19 @@ mod tests {
             Some(PathBuf::from("/srv/home-one/.claude-ada-1"))
         );
         assert_eq!(expand_login("~/x", None), None);
+    }
+
+    #[test]
+    fn a_login_directory_names_the_declared_account_that_owns_it_on_that_host() {
+        let accounts = [parse_account("account/ada/claude-1", &account()).unwrap()];
+        let find = |driver: &str, host: &str, directory: &str| {
+            account_by_login(&accounts, driver, host, Path::new(directory), Some(Path::new("/srv/home-one")))
+                .map(|account| account.name.as_str())
+        };
+        assert_eq!(find("claude", "alder", "/srv/logins/ada-1"), Some("ada/claude-1"));
+        assert_eq!(find("claude", "birch", "/srv/home-one/.claude-ada-1/"), Some("ada/claude-1"));
+        assert_eq!(find("claude", "birch", "/srv/logins/ada-1"), None, "another host's login");
+        assert_eq!(find("codex", "alder", "/srv/logins/ada-1"), None, "another harness");
     }
 
     #[test]
