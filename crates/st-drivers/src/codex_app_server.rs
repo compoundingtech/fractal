@@ -2769,9 +2769,8 @@ pub fn run_controlled_paths(
     );
     let mode = crate::access::AccessMode::from_environment()?;
     let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
-    let endpoint = std::env::var("ST3_ENDPOINT").context("managed Codex needs ST3_ENDPOINT")?;
-    let socket = endpoint.strip_prefix("unix://").unwrap_or(&endpoint);
-    let codex_argv = managed_codex_argv(mode, Path::new(socket), &workspace, codex_argv)?;
+    let endpoint = std::env::var("ST3_ENDPOINT").ok();
+    let codex_argv = managed_codex_argv(mode, endpoint.as_deref(), &workspace, codex_argv)?;
     // Install before any protocol preflight child exists, exactly as the catalog entry point does.
     crate::provider_session::install_signal_handler();
     let producer_version = ensure_supported_protocol(&codex_argv[0])?;
@@ -2845,7 +2844,7 @@ pub fn run_controlled_paths(
 }
 
 /// Defaults apply only at the st3 launch entry point, before fresh/resume policy projection.
-fn managed_codex_argv(mode: crate::access::AccessMode, socket: &Path, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
+fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
     let boundary = interactive_root_prefix_end(&argv[1..])?;
     let authored = &argv[1..1 + boundary];
     let mut explicit_permissions = false;
@@ -2862,6 +2861,10 @@ fn managed_codex_argv(mode: crate::access::AccessMode, socket: &Path, workspace:
         { explicit_permissions = true; }
         index += if matches!(arg, "-c" | "--config" | "--enable" | "--disable" | "--remote-auth-token-env" | "-m" | "--model" | "--local-provider" | "-p" | "--profile" | "-s" | "--sandbox" | "-C" | "--cd" | "--add-dir" | "-a" | "--ask-for-approval") { 2 } else { 1 };
     }
+    let socket = if mode == crate::access::AccessMode::Auto && !explicit_permissions {
+        let endpoint = endpoint.context("managed auto Codex needs ST3_ENDPOINT")?;
+        Some(Path::new(endpoint.strip_prefix("unix://").unwrap_or(endpoint)))
+    } else { None };
     let mut defaults = crate::access::codex_defaults(mode, socket, workspace, explicit_permissions)?;
     if authored_bypasses_hook_trust(authored)? {
         defaults.retain(|arg| arg != "--dangerously-bypass-hook-trust");

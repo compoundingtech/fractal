@@ -7,6 +7,9 @@ keeps its existing default and accepts `services.smalltalk.accessMode = "auto"`
 for a new installation. Restart the daemon after changing the mode; `st doctor`
 shows the mode that daemon actually started with.
 
+Auto is not a security boundary. It reduces accidents; it does not isolate seats.
+Real sandboxing is separate later work. Codex hook trust is bypassed in both modes.
+
 | Mode | Codex | Claude |
 | --- | --- | --- |
 | bypass, including a missing key | `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-bypass-hook-trust` | `--dangerously-skip-permissions` |

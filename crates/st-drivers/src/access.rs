@@ -54,7 +54,7 @@ pub fn codex_profile(socket: &Path, workspace: &Path) -> Result<String> {
 
 pub fn codex_defaults(
     mode: AccessMode,
-    socket: &Path,
+    socket: Option<&Path>,
     workspace: &Path,
     explicit_permissions: bool,
 ) -> Result<Vec<String>> {
@@ -66,7 +66,10 @@ pub fn codex_defaults(
             }
             AccessMode::Auto => defaults.extend([
                 "-c".into(),
-                codex_profile(socket, workspace)?,
+                codex_profile(
+                    socket.context("managed auto Codex needs ST3_ENDPOINT")?,
+                    workspace,
+                )?,
                 "-c".into(),
                 format!("default_permissions=\"{CODEX_PROFILE}\""),
                 "-a".into(),

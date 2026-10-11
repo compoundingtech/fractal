@@ -7498,7 +7498,7 @@ fn doctor_report_with_operation_drift(
     let access_mode = if auto { "auto" } else { "bypass" };
     checks.push(DoctorCheck {
         name: "harness-access-mode".into(), status: "pass".into(),
-        message: format!("{access_mode}: managed provider permissions; legacy authored options remain authoritative"),
+        message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
     });
 
     match state.store.index() {

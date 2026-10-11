@@ -8352,7 +8352,7 @@ fn native_codex_login_recovery_requires_a_successful_current_thread_turn() {
 #[test]
 fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resume() {
     use crate::access::AccessMode;
-    let socket = Path::new("/run/example/st.sock");
+    let socket = Some("/run/example/st.sock");
     let workspace = Path::new("/work/example");
     let plain = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
     let bypass = managed_codex_argv(AccessMode::Bypass, socket, workspace, plain.clone()).unwrap();
@@ -8393,4 +8393,18 @@ fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resu
     let prompt = vec!["codex".into(), "--".into(), "--dangerously-bypass-approvals-and-sandbox".into()];
     let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, prompt).unwrap();
     assert!(merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+}
+
+#[test]
+fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
+    use crate::access::AccessMode;
+    let workspace = Path::new("/work/example");
+    let plain = vec!["codex".into(), "boot".into()];
+    let bypass = managed_codex_argv(AccessMode::Bypass, None, workspace, plain.clone()).unwrap();
+    assert!(bypass.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    let authored = vec!["codex".into(), "--dangerously-bypass-approvals-and-sandbox".into(), "boot".into()];
+    let preserved = managed_codex_argv(AccessMode::Auto, None, workspace, authored.clone()).unwrap();
+    assert!(preserved.ends_with(&authored[1..]));
+    let error = managed_codex_argv(AccessMode::Auto, None, workspace, plain).unwrap_err();
+    assert!(error.to_string().contains("ST3_ENDPOINT"));
 }
