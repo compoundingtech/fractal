@@ -330,6 +330,26 @@ export const AnsweredLongestAge: Story = { ...AnsweredLongChoice, args: { ...Ans
   await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
   await expect(getComputedStyle(age).whiteSpace).toBe('nowrap')
   await expect(getComputedStyle(age).flex).toBe('0 0 auto')
+  const assertAgeContained = async () => {
+    await expect(age.scrollWidth).toBeLessThanOrEqual(age.clientWidth)
+    const range = document.createRange()
+    range.selectNodeContents(age)
+    const textBox = range.getBoundingClientRect()
+    const track = age.getBoundingClientRect()
+    await expect(textBox.left).toBeGreaterThanOrEqual(track.left)
+    await expect(textBox.right).toBeLessThanOrEqual(track.right)
+    await expect(textBox.top).toBeGreaterThanOrEqual(track.top)
+    await expect(textBox.bottom).toBeLessThanOrEqual(track.bottom)
+  }
+  await assertAgeContained()
+  const previousWidth = age.style.width
+  try {
+    age.style.width = '4ch'
+    await expect(assertAgeContained()).rejects.toThrow()
+  } finally {
+    age.style.width = previousWidth
+  }
+  await assertAgeContained()
   await expect(label.getBoundingClientRect().right).toBeLessThanOrEqual(age.getBoundingClientRect().left)
   await expect(age.getBoundingClientRect().right).toBeLessThanOrEqual(chevron.getBoundingClientRect().left)
   await expect(chevron.getBoundingClientRect().right).toBeLessThanOrEqual(trigger.getBoundingClientRect().right)
