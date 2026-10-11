@@ -24021,6 +24021,8 @@ mission "wake" state="ready" {
             })),
             ("report-to", run.subject.as_str(), "mission-run.report-to", "person/test",
                 json!({"report_to": "agent/node.roster-00"})),
+            ("eval verdict", run.subject.as_str(), "eval.verdict", "agent/st3/reconciler",
+                json!({"verdict": "pass", "reason": "Fixture verdict."})),
         ] {
             append(subject, kind, actor, fields);
             let refolded = store.agent_resources_refolded_cards_for_test();
