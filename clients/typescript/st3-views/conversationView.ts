@@ -339,6 +339,9 @@ export function toolTitle(name: string, args: unknown): string {
   return ['Bash', 'bash', 'shell', 'exec_command'].includes(name) ? `$ ${first}` : `${name} ${first}`;
 }
 
+// Keep this line budget and marker in sync with st3-conversation-ui's tool_output.
+const PREVIEW_LINES = 400;
+
 export function toolOutput(content: unknown, full = false): string[] {
   let text: string;
   if (typeof content === 'string') text = content;
@@ -349,7 +352,11 @@ export function toolOutput(content: unknown, full = false): string[] {
   const lines = text ? text.split('\n') : [];
   while (lines.length && !lines[0]?.trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1]?.trim()) lines.pop();
-  return full ? lines : lines.slice(0, 400);
+  if (full || lines.length <= PREVIEW_LINES) return lines;
+  return [
+    ...lines.slice(0, PREVIEW_LINES),
+    `… ${lines.length - PREVIEW_LINES} more lines not shown in the timeline preview`,
+  ];
 }
 
 function contentText(body: unknown): string {

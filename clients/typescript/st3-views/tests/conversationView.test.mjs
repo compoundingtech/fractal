@@ -66,6 +66,21 @@ assert.equal(shownToolLines(tool, false).lines.at(-1), 'line 19');
 assert.equal(shownToolLines(tool, true).lines.length, 20);
 assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'failed calls fold too, as in stui');
 
+// Timeline previews name the lines beyond the shared 400-line budget; full output stays intact.
+{
+  const lines = Array.from({ length: 407 }, (_, n) => `synthetic line ${n}`);
+  const result = e('tool_result', 'tool', { call_id: 'preview-call', status: 'success', content: `\n${lines.join('\n')}\n\n` });
+  const preview = conversationEntries([result], names, DEFAULT_FILTERS, false)[0].body;
+  assert.equal(preview.kind, 'tool');
+  assert.deepEqual(preview.output.slice(0, 400), lines.slice(0, 400));
+  assert.equal(preview.output.length, 401);
+  assert.equal(preview.output.at(-1), '… 7 more lines not shown in the timeline preview');
+  const full = conversationEntries([result], names, DEFAULT_FILTERS, true)[0].body;
+  assert.deepEqual(full.output, lines);
+  const withinBudget = e('tool_result', 'tool', { call_id: 'within-budget', status: 'success', content: lines.slice(0, 400).join('\n') });
+  assert.deepEqual(conversationEntries([withinBudget], names)[0].body.output, lines.slice(0, 400));
+}
+
 // Half a conversation is not shown: st's notice that it could not read the transcript becomes
 // one reason, with the transcript's path.
 {
