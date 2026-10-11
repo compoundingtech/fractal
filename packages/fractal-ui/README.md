@@ -32,6 +32,7 @@ Stories:
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
 - **Fractal UI / Questions**: harness-neutral read-only and answerable questions, all settled outcomes, attention surfaces, and keyboard/negative-control stories at 440 and 1440 pixels in both schemes. Drafts and callbacks are host-owned; the terminal hand-off is explicit.
+- **Fractal UI / Agent Messages**: promoted incoming messages and folded outgoing sends, with via chips, parent/child identifiers, per-recipient receipts, bounded long-message disclosure, and source-preview transitions. State-specific plays include the quoted-message and file-path negative controls.
 
 ### Harness questions
 
@@ -50,6 +51,14 @@ Read-only pending questions retain radio/checkbox choice affordances; archived o
 The generic `EmbraceToolCall`/`EmbraceToolItem` seam is explicitly read-only: its `ReadOnlyToolQuestion` type cannot carry a web-answer capability. Singular `{question, options}` and batched `{questions}` arguments keep their options; structured result `details.results`/flat `selectedOptions` facts render `QuestionSummary`. Calls that closed without recorded answer facts use `unrecorded`, not an invented answer. Live adapters supply richer typed requests and the terminal callback.
 
 The ACH model is retained with small display extensions: `autoSelected` records per-question timeout picks; `answered.where` labels terminal/web provenance; `chat-redirected` represents the catalog outcome; `unrecorded` keeps archived missing-result facts honest. Optional `variant` defaults to transcript; `composerTyping` labels held composer text; `onAttach` hands real selected files to the host instead of implementing upload/storage in the kit.
+
+### Agent messages
+
+`AgentMessage` is a card with pure sender, recipient, via and tagged body props. The host owns fetching, copying and reply navigation. Long complete messages render only a bounded excerpt until disclosed; full output scrolls within the card. A clicked full-body action remains focusable as the host replaces its preview with the loaded body. Missing full-body access has an explicit keyboard-reachable reason.
+
+`OutgoingMessageRow` is one work-log line per send, including broadcasts. Recipient count is a reported fact, not a guess from partial receipts. Each reported recipient gets its own injected/queued/revived/failed receipt; missing status is omitted. Failed receipts expose their reason through keyboard focus and the expanded body. The host counts `data-work-kind="messages-sent"` rows in its turn fold.
+
+These components replace the incoming `HarnessNotice` Irc/Delivery presentations and outgoing peer-message/file-change presentations in application adapters. The kit does not parse message envelopes or resolve recipient receipts.
 
 ## Families
 
