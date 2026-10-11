@@ -1,5 +1,10 @@
 @import 'tailwindcss';
 
+:root {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 @theme inline {
   --color-canvas: var(--canvas);
   --color-panel: var(--panel);

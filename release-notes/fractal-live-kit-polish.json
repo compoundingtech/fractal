@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add clock-driven live activity labels, accessible long-message disclosure, circular composer actions, a compact composer dock, lighter light-theme borders, and antialiased root text. Composer shapes remain unchanged.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "changed", "detail": "Long operator messages initially show at most eight lines and 600 characters. Hosts supply the existing Transcript now clock for live elapsed labels. Shared composer Send is now icon-only with an accessible name." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

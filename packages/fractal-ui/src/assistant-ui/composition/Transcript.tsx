@@ -68,7 +68,21 @@ function TranscriptMessage() {
 const messageComponents = { Message: TranscriptMessage }
 export function UserMessage({ item }: { readonly item: TextItem & { readonly role: 'user' } }) {
   const onRetrySend = React.useContext(RetrySend)
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span {...stylex.props(styles.userText)}>{item.text}</span>{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
+  const [expanded, setExpanded] = React.useState(false)
+  const [overflows, setOverflows] = React.useState(false)
+  const text = React.useRef<HTMLSpanElement>(null)
+  const textId = React.useId()
+  const long = item.text.length > 600 || item.text.split('\n').length > 8
+  React.useLayoutEffect(() => {
+    const element = text.current
+    if (element === null || expanded) return
+    const measure = () => setOverflows(element.scrollHeight > element.clientHeight)
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    measure()
+    return () => observer.disconnect()
+  }, [item.text, expanded])
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 /** Settled metadata remains below the prose; unknown time is omitted rather than invented. */
 export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string }) {
@@ -142,16 +156,22 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
+const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
   const reasoning = turn.items.filter(item => item._tag === 'Reasoning')
   return <section data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
     {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} text={item.text} streaming={item.streaming} />)} />}
     {turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning').map(item => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></SenderCaption.Provider>)}
-    {turn.work.running && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.liveActivity)}><span aria-hidden="true">◌</span></div>}
+    {turn.work.running && <LiveActivity startedAt={turn.work.startedAt} now={now} />}
   </section>
 })
+/** Host clock keeps elapsed labels deterministic and pauses with the conversation clock. */
+export function LiveActivity({ startedAt, now }: { readonly startedAt?: string; readonly now: number }) {
+  const started = Date.parse(startedAt ?? '')
+  const elapsed = Number.isFinite(started) && started <= now ? ` for ${Math.floor((now - started) / 1000)}s` : ''
+  return <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.liveActivity)}><span aria-hidden="true" {...stylex.props(styles.liveRing)} /><span {...stylex.props(styles.liveLabel)}>Working{elapsed}</span></div>
+}
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
@@ -224,11 +244,13 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
     </header>
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
       {history._tag === 'HasOlder' && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
-      {committed.length === 0 ? empty : <div {...stylex.props(styles.timeline)}>{committed.map(turn => <PreparedTurn key={turn.id} turn={turn} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</div>}
+      {committed.length === 0 ? empty : <div {...stylex.props(styles.timeline)}>{committed.map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</div>}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider>
 }
 const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
+const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })
+const liveShimmer = stylex.keyframes({ from: { opacity: 0.55 }, to: { opacity: 1 } })
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
@@ -238,6 +260,7 @@ const styles = stylex.create({
   content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
+  userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: g.userClamp, overflow: 'hidden' },
   answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fgSoft, flexShrink: 0 }, sender: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   semanticText: { minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
@@ -247,6 +270,8 @@ const styles = stylex.create({
   runningProgress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm, overflow: 'hidden', backgroundColor: surface.rowActive },
   runningSegment: { display: 'block', width: '25%', height: '100%', backgroundColor: accent.primary, animationName: runSweep, animationDuration: m.pulse, animationTimingFunction: m.linear, animationIterationCount: 'infinite', animationDirection: 'alternate', '@media (prefers-reduced-motion: reduce)': { animationName: 'none', transform: 'translateX(150%)' } },
   liveActivity: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.uiSize },
+  liveRing: { width: g.status, height: g.status, boxSizing: 'border-box', flexShrink: 0, borderRadius: r.full, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderTopColor: ink.fgMuted, animationName: liveSpin, animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
+  liveLabel: { animationName: liveShimmer, animationDuration: m.pulse, animationDirection: 'alternate', animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
   preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginBlock: s.sm, marginInlineStart: s.md, backgroundColor: surface.codeBg, borderRadius: r.sm, padding: s.md, gap: s.xs },
   output: { margin: 0, width: '100%', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.metaLeading, color: ink.fgSoft }, outputCode: { fontFamily: t.fontMono, fontSize: t.codeSize },
   command: { boxSizing: 'border-box', marginBlockEnd: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.codeBg, color: ink.fg },

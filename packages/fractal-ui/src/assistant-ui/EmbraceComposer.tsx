@@ -103,7 +103,8 @@ const styles = stylex.create({
     ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
   },
   primary: { backgroundColor: accent.primary, color: accent.onPrimary },
-  submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.controlMd, paddingInline: s.xs },
+  submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, minWidth: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full },
+  historyIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full, backgroundColor: surface.transparent, borderColor: surface.transparent },
   menu: {
     backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline,
     borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.base,
@@ -243,7 +244,7 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
     inputStyle: [styles.input, styles.growingEditor, props.inputStyle],
     fieldStyle: [stacked ? styles.field : styles.fieldRow, props.fieldStyle],
     footerStyle: [styles.adaptiveFooter, props.footerStyle],
-    submitIcon: compact ? <Icon name="send" /> : props.submitIcon,
+    submitIcon: props.submitIcon ?? <Icon name="send" />,
   }
   return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
     {(props.plainText ?? props.variant === 'C1') || props.input !== undefined ? <PlainComposer {...composerProps} /> : <TokenComposer {...composerProps} />}
@@ -560,7 +561,7 @@ function TokenComposer({
         <div {...stylex.props(styles.grow)} />
         {variant === 'C3' && toolbar === undefined ? <>
           <Button isDisabled={readOnly || history.length === 0} onPress={() => recallHistory('previous')}
-            aria-label="Recall previous message" aria-description="ArrowUp on an empty field" {...stylex.props(styles.button)}><Icon name="clock" /></Button>
+            aria-label="Recall previous message" aria-description="ArrowUp on an empty field" {...stylex.props(styles.button, styles.historyIcon)}><Icon name="clock" /></Button>
           <ComposerPrimitive.Cancel disabled={readOnly || !canCancel} title={canCancel ? undefined : cancelUnavailableReason} {...stylex.props(styles.button, styles.cancelVisibility)}>Cancel run</ComposerPrimitive.Cancel>
         </> : null}
         {/* A controlled TokenField can contain a draft before runtime text is bridged.

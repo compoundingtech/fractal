@@ -543,7 +543,7 @@ const fillTheme = stylex.createTheme(g, { lane: '100%', proseMax: '90ch' })
 const dockTheme = stylex.createTheme(g, { blur: '0px' })
 
 const styles = stylex.create({
-  root: { display: 'flex', width: '100%', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', backgroundColor: sf.canvas, color: tx.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  root: { display: 'flex', width: '100%', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', backgroundColor: sf.canvas, color: tx.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, WebkitFontSmoothing: 'antialiased', MozOsxFontSmoothing: 'grayscale' },
   split: { display: 'flex', flexDirection: 'row', flexGrow: 1, minWidth: 0, minHeight: 0 },
   splitBelow: { flexDirection: 'column' },
   splitPane: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, overflow: 'hidden', flexBasis: 'calc(var(--split-ratio) * 100%)', flexGrow: 0, flexShrink: 0 },
@@ -586,7 +586,7 @@ const styles = stylex.create({
   paneScroll: { flexGrow: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' },
   paneCenter: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.sm },
   threadFrame: { flex: '1 1 0', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
-  composerDock: { flexShrink: 0, paddingBlock: s.lg, backgroundColor: sf.canvas },
+  composerDock: { flexShrink: 0, paddingBlock: s.sm, backgroundColor: sf.canvas },
   composerLane: { width: '100%', maxWidth: g.lane, boxSizing: 'border-box', paddingInline: s.lg, marginInline: 'auto' },
   placeholderUri: { fontFamily: t.fontMono, fontSize: t.codeSize, color: tx.fgMuted },
   placeholderHint: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: tx.fgFaint },
