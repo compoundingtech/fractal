@@ -11891,8 +11891,10 @@ mission "queue-parity" state="ready" {
     #[tokio::test]
     async fn collections_socket_keeps_sixteen_windows_and_refuses_the_seventeenth() {
         use futures_util::{SinkExt as _, StreamExt as _};
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
         assert!(
-            capabilities(&ClientSession::local(None).unwrap())
+            capabilities(&state, &ClientSession::local(None).unwrap())
                 .iter()
                 .any(|capability| {
                     capability["id"] == "collections"
@@ -11900,8 +11902,6 @@ mission "queue-parity" state="ready" {
                         && capability["state"] == "granted"
                 })
         );
-        let root = tempfile::tempdir().unwrap();
-        let state = test_state(root.path());
         let app = axum::Router::new().route(
             "/stream",
             axum::routing::get(move |upgrade: WebSocketUpgrade| {
