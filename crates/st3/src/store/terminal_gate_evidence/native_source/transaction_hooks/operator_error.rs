@@ -104,7 +104,7 @@ impl Cell {
             origin,
         };
         let mut state = self.state()?;
-        if state.error.is_none() {
+        if state.observed.is_none() {
             state.observed = Some(observed);
         }
         if disposition == Disposition::Fence {

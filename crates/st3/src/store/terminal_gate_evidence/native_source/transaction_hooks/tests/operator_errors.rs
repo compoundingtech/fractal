@@ -267,6 +267,22 @@ fn managed_operator_error_witness_constraint_fences_without_aborting_admission()
 
 #[test]
 fn managed_operator_error_first_fault_reentry_and_lent_reset_are_private() {
+    let fenced = Cell::default();
+    assert!(
+        fenced
+            .preserve(sqlite(ffi::SQLITE_CONSTRAINT_TRIGGER), Origin::Witness)
+            .unwrap()
+            .is_some()
+    );
+    let first_reason = fenced.constraint_reason().unwrap().unwrap();
+    assert!(
+        fenced
+            .preserve(anyhow::anyhow!("later logical refusal"), Origin::Witness)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(fenced.constraint_reason().unwrap().unwrap(), first_reason);
+    assert!(fenced.take().unwrap().is_none());
     let cell = Arc::new(Cell::default());
     assert!(
         cell.preserve(sqlite(ffi::SQLITE_FULL), Origin::Probe)
