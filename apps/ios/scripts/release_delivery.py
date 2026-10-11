@@ -26,21 +26,29 @@ def git(repo, *args):
 
 
 def local_packages(repo, commit):
-    """Dependency-first closure of repository-local npm runtime dependencies."""
+    """Dependency-first closure of repository-local runtime dependencies."""
     found = []
     visiting = set()
+    manifests = {}
+    for path in git(repo, "ls-tree", "-r", "--name-only", commit).splitlines():
+        if path.endswith("/package.json"):
+            manifest = json.loads(git(repo, "show", f"{commit}:{path}"))
+            if "name" in manifest:
+                manifests[manifest["name"]] = str(Path(path).parent)
 
     def visit(package):
         if package in found or package in visiting:
             return
         visiting.add(package)
         manifest = json.loads(git(repo, "show", f"{commit}:{package}/package.json"))
-        for dependency in manifest.get("dependencies", {}).values():
+        for name, dependency in manifest.get("dependencies", {}).items():
             if dependency.startswith("file:"):
                 resolved = os.path.normpath(f"{package}/{dependency[5:]}")
                 if resolved.startswith("../") or os.path.isabs(resolved):
                     raise ValueError("Local dependency escapes the repository")
                 visit(resolved)
+            elif dependency.startswith("workspace:"):
+                visit(manifests[name])
         visiting.remove(package)
         found.append(package)
 
@@ -52,8 +60,10 @@ def content_key(repo, commit, identity):
     """Identity of the signed app: app-affecting trees plus external build inputs."""
     trees = {package: git(repo, "rev-parse", f"{commit}:{package}")
              for package in local_packages(repo, commit)}
-    return hashlib.sha256(json.dumps({"trees": trees, "inputs": identity},
-                                     sort_keys=True).encode()).hexdigest()
+    workspace = git(repo, "ls-tree", commit, "--", "package.json",
+                    "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
+    return hashlib.sha256(json.dumps({"trees": trees, "workspace": workspace,
+                                     "inputs": identity}, sort_keys=True).encode()).hexdigest()
 
 
 def save(path, data):
@@ -81,7 +91,7 @@ def build_identity(args):
     """
     identity = {
         "developer_dir": args.developer_dir,
-        "tools": {name: shutil.which(name) for name in ("node", "npm", "npx", "pod")},
+        "tools": {name: shutil.which(name) for name in ("node", "pnpm", "pod")},
         "env": {key: value for key, value in sorted(os.environ.items())
                 if key.startswith("EXPO_PUBLIC_") and key != "EXPO_PUBLIC_ST3_BUILD"},
         "pinned": DAILY_BUILD_ENV,
@@ -110,25 +120,24 @@ def build_release(args):
     js_env = {key: value for key, value in env.items() if key.startswith("EXPO_PUBLIC_")}
     started = time.monotonic()
     packages = local_packages(repo, args.commit)
-    identities = {}
-    # Locked installations stay in the dedicated checkout. Reinstalling identical
-    # node_modules changes native-header mtimes and defeats Xcode's build cache.
-    for package in packages:
-        identity = hashlib.sha256((git(repo, "ls-tree", args.commit, "--",
-            f"{package}/package.json", f"{package}/package-lock.json")
-            + str(shutil.which("node"))).encode()).hexdigest()
-        identities[package] = identity
-        if (inputs.get("packages", {}).get(package) != identity
-                or not (repo / package / "node_modules").is_dir()):
-            command = ["npm", "ci", "--no-audit", "--no-fund"]
-            if package != "apps/ios":
-                command.append("--ignore-scripts")
-            run(command, cwd=repo / package, env=env)
-            inputs.setdefault("packages", {})[package] = identity
-            save(inputs_file, inputs)
-        else:
-            print(f"Reusing locked npm dependencies: {package}", flush=True)
-    config = json.loads(run(["npx", "--no-install", "expo", "config", "--type", "public", "--json"],
+    # One frozen workspace installation retains native-header mtimes when its
+    # dependency inputs are unchanged.
+    manifest_paths = [path for path in git(repo, "ls-tree", "-r", "--name-only",
+                                           args.commit).splitlines()
+                      if path == "package.json" or path.endswith("/package.json")]
+    identity = hashlib.sha256((git(repo, "ls-tree", args.commit, "--",
+        *manifest_paths, "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
+        + str(shutil.which("node")) + str(shutil.which("pnpm"))).encode()).hexdigest()
+    identities = {"workspace": identity}
+    if (inputs.get("packages") != identities
+            or any(not (repo / package / "node_modules").is_dir()
+                   for package in ["", *packages])):
+        run(["pnpm", "install", "--frozen-lockfile"], cwd=repo, env=env)
+        inputs["packages"] = identities
+        save(inputs_file, inputs)
+    else:
+        print("Reusing locked pnpm workspace dependencies", flush=True)
+    config = json.loads(run(["pnpm", "exec", "expo", "config", "--type", "public", "--json"],
                             cwd=app, env=env, capture=True))
     if config["ios"]["bundleIdentifier"] != BUNDLE_ID:
         raise ValueError("Tracked ref lacks the daily app variant; refusing to replace Debug")
@@ -145,7 +154,7 @@ def build_release(args):
                   or not list((app / "ios").glob("*.xcworkspace"))
                   or not (app / "ios/Podfile.lock").exists())
     if regenerate:
-        run(["npx", "--no-install", "expo", "prebuild", "--platform", "ios", "--clean", "--no-install"],
+        run(["pnpm", "exec", "expo", "prebuild", "--platform", "ios", "--clean", "--no-install"],
             cwd=app, env=env)
         run(["pod", "install"], cwd=app / "ios", env=env)
         inputs = {"packages": identities, "native": native_identity}
@@ -174,6 +183,7 @@ def build_release(args):
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True, exist_ok=True)
     derived = cache / "derived"
+    run(["pnpm", "run", "export:ios"], cwd=app, env=env)
     run(["xcodebuild", "-workspace", str(workspace), "-scheme", workspace.stem,
          "-configuration", "Release", "-sdk", "iphoneos", "-destination", "generic/platform=iOS",
          "-derivedDataPath", str(derived), "-jobs", "4",

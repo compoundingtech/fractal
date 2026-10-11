@@ -79,7 +79,7 @@ verify the installed build independently of pairing or proof-only UI.
 The embedded `EXPO_PUBLIC_ST3_BUILD` revision also appears in connected-client
 diagnostics.
 
-Prerequisites are Python 3, Git, Node/npm, CocoaPods, Xcode, and `gate-slot`
+Prerequisites are Python 3, Git, Node 24, pnpm 12.7.0, CocoaPods, Xcode, and `gate-slot`
 in the scheduler's PATH. The build takes a heavy admission slot, runs under
 `taskpolicy -c utility` and `nice -n 19`, and caps Xcode parallelism at four jobs.
 Utility QoS yields to interactive work without restricting a native build to
@@ -88,20 +88,24 @@ background QoS or low-priority I/O: `taskpolicy -c utility` is a clamp, not an
 elevation from background. Missing admission tooling refuses the build; it
 never silently bypasses host limits.
 An advisory lock makes scheduled and manual invocations single-flight.
-Locked npm installs follow the app's recursive `file:` runtime dependencies
-(currently `clients/typescript/st3-views` and `clients/typescript/st3-client`).
-Only changes under that closure or `apps/ios` cause a build, including changes
-to its configuration and lockfiles; server-only changes do not.
+One root `pnpm install --frozen-lockfile` installs the workspace. Delivery follows
+the app's recursive `workspace:` and `file:` runtime dependencies (currently
+`clients/typescript/st3-views` and `clients/typescript/st3-client`). Changes under
+that closure or `apps/ios`, or to root `package.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, or `.npmrc`, cause a build; server-only changes do not.
 
-The dedicated checkout retains npm installations and generated native inputs.
+The dedicated checkout retains pnpm installations and generated native inputs.
 `build-cache/` stores their input identities and shared Xcode DerivedData,
-including partial compilation from unsuccessful attempts. npm installs rerun
-only when their manifest/lock or Node path changes,
-or `node_modules` is missing. Native generation and CocoaPods rerun only when
+including partial compilation from unsuccessful attempts. The frozen workspace
+install reruns only when a package manifest, root lock/workspace configuration,
+or Node/pnpm path changes, or `node_modules` is missing. Native generation and CocoaPods rerun only when
 the package locks/manifests, evaluated app configuration, config plugins,
 native modules, assets, or immutable toolchain paths change, or their generated
-workspace/lock is missing. JS-only changes reuse the native cache. Metro
-inlines `EXPO_PUBLIC_*` values into each transformed module, so the build runs
+workspace/lock is missing. JS-only changes reuse the native cache.
+The worker uses `pnpm exec expo config` and clean `pnpm exec expo prebuild`,
+then `pnpm run export:ios`, all with `APP_VARIANT=daily` and the daily fabric
+settings pinned before invoking Xcode.
+Metro inlines `EXPO_PUBLIC_*` values into each transformed module, so the build runs
 with a delivery-scoped `TMPDIR` under `build-cache/tmp` and resets that
 transform cache whenever the inlined values change; a successful build also
 fails if the bundle does not embed the current revision. Each

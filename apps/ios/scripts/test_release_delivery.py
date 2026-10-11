@@ -50,15 +50,15 @@ if name == "taskpolicy":
 if name == "nice":
     assert args[:2] == ["-n", "19"], args
     os.execvpe(args[2], args[2:], os.environ)
-if name == "npm":
-    expected = ["ci", "--no-audit", "--no-fund"]
-    if Path.cwd().parts[-2:] != ("apps", "ios"):
-        expected.append("--ignore-scripts")
-    assert args == expected, args
-    (Path.cwd() / "node_modules").mkdir(exist_ok=True)
-    sys.exit(0)
-if name == "npx":
-    assert args[:2] == ["--no-install", "expo"], args
+if name == "pnpm":
+    if args == ["install", "--frozen-lockfile"]:
+        for package in ("", "apps/ios", "clients/typescript/st3-views", "clients/typescript/st3-client"):
+            (Path.cwd() / package / "node_modules").mkdir(parents=True, exist_ok=True)
+        sys.exit(0)
+    if args == ["run", "export:ios"]:
+        assert os.environ["APP_VARIANT"] == "daily"
+        sys.exit(0)
+    assert args[:2] == ["exec", "expo"], args
     if "config" in args:
         print(json.dumps({"name": control.get("expo_name", "Smalltalk"), "slug": "smalltalk", "ios": {
             "bundleIdentifier": "com.compoundingtech.smalltalk"}}))
@@ -159,7 +159,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.control_path = self.root / "control.json"
         self.control_path.write_text("{}")
         self.command_log = self.root / "commands.jsonl"
-        for name in ("gate-slot", "taskpolicy", "nice", "npm", "npx", "pod", "xcodebuild", "xcrun", "codesign", "st", "node"):
+        for name in ("gate-slot", "taskpolicy", "nice", "pnpm", "pod", "xcodebuild", "xcrun", "codesign", "st", "node"):
             executable = self.tools / name
             executable.write_text(f"#!{sys.executable}\n" + textwrap.dedent(COMMAND_FIXTURE))
             executable.chmod(0o755)
@@ -181,16 +181,18 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.git("config", "user.email", "delivery-test@example.invalid")
         self.git("remote", "add", "origin", str(self.origin))
         packages = {
-            "apps/ios": {"@smalltalk/st3-views": "file:../../clients/typescript/st3-views"},
-            "clients/typescript/st3-views": {"@smalltalk/st3-client": "file:../st3-client"},
+            "apps/ios": {"@smalltalk/st3-views": "workspace:*"},
+            "clients/typescript/st3-views": {"@smalltalk/st3-client": "workspace:*"},
             "clients/typescript/st3-client": {},
         }
         for relative, dependencies in packages.items():
             self.write_source(f"{relative}/package.json", json.dumps({
-                "name": Path(relative).name, "version": "1.0.0", "dependencies": dependencies,
+                "name": "@smalltalk/" + Path(relative).name, "version": "1.0.0", "dependencies": dependencies,
             }))
-            self.write_source(f"{relative}/package-lock.json", "{}")
             self.write_source(f"{relative}/index.ts", "export const fixture = 1;\n")
+        self.write_source("package.json", '{"private": true, "packageManager": "pnpm@12.7.0"}')
+        self.write_source("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n")
+        self.write_source("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
         self.write_source("apps/ios/app.json", json.dumps({"expo": {
             "name": "Smalltalk", "slug": "smalltalk", "ios": {"bundleIdentifier": BUNDLE_ID},
         }}))
@@ -249,7 +251,10 @@ class ReleaseDeliveryTests(unittest.TestCase):
         return [entry for entry in self.commands("xcrun") if action in entry["args"]]
 
     def prebuild_commands(self):
-        return [entry for entry in self.commands("npx") if "prebuild" in entry["args"]]
+        return [entry for entry in self.commands("pnpm") if "prebuild" in entry["args"]]
+
+    def install_commands(self):
+        return [entry for entry in self.commands("pnpm") if "install" in entry["args"]]
 
     def change_js(self, marker):
         self.write_source("apps/ios/index.ts", f"export const marker = {json.dumps(marker)};\n")
@@ -290,11 +295,8 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.assertEqual(len(self.commands("xcodebuild")), 4)
         self.assertEqual(len(self.device_commands("install")), 4)
         self.assertEqual(len(self.device_commands("launch")), 4)
-        first_installs = self.commands("npm")[:3]
-        self.assertEqual([Path(entry["cwd"]).relative_to(self.state / "checkout").as_posix()
-                          for entry in first_installs], [
-            "clients/typescript/st3-client", "clients/typescript/st3-views", "apps/ios",
-        ])
+        self.assertEqual(len(self.install_commands()), 1)
+        self.assertEqual(Path(self.install_commands()[0]["cwd"]), self.state / "checkout")
         self.assertEqual(len(self.commands("gate-slot")), 4)
         self.assertEqual(len(self.commands("taskpolicy")), 4)
         self.assertEqual(len(self.commands("nice")), 4)
@@ -688,7 +690,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.env.update(ST3_FABRIC_PROOF="1", ST3_FABRIC_OFFLINE_DEBUG="1", APP_VARIANT="dev")
         self.reconcile()
         native = [entry["native_env"] for entry in self.commands()
-                  if entry["command"] in ("npx", "pod", "xcodebuild")]
+                  if entry["command"] in ("pnpm", "pod", "xcodebuild")]
         self.assertTrue(native)
         for observed in native:
             self.assertEqual(observed, {"APP_VARIANT": "daily", "ST3_FABRIC_PROOF": "0",
@@ -924,7 +926,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
                 self.assertEqual(sentinel.read_text(), "keep incremental outputs")
                 success = json.loads((self.state / "artifacts" / commit / "success.json").read_text())
                 self.assertFalse(success["native_regenerated"])
-        self.assertEqual(len(self.commands("npm")), 3)
+        self.assertEqual(len(self.install_commands()), 1)
         self.assertEqual(len(self.prebuild_commands()), 1)
         self.assertEqual(len(self.commands("pod")), 1)
         builds = self.commands("xcodebuild")
@@ -933,22 +935,23 @@ class ReleaseDeliveryTests(unittest.TestCase):
                           for entry in builds}, {str(derived)})
         self.assertEqual(self.device_commands("install"), [])
 
-    def test_package_manifest_and_lock_changes_invalidate_only_changed_package(self):
+    def test_package_manifest_and_workspace_lock_changes_invalidate_installation(self):
         self.reconcile("--build-only")
         changes = (
             ("clients/typescript/st3-client/package.json",
-             json.dumps({"name": "st3-client", "version": "2.0.0", "dependencies": {}})),
-            ("apps/ios/package-lock.json", '{"lockfileVersion": 3}'),
+             json.dumps({"name": "@smalltalk/st3-client", "version": "2.0.0", "dependencies": {}})),
+            ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
+            ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
+            ("package.json", '{"private": true, "packageManager": "pnpm@12.7.0", "version": "2.0.0"}'),
         )
         for count, (relative, contents) in enumerate(changes, start=1):
             with self.subTest(path=relative):
                 self.write_source(relative, contents)
                 commit = self.commit(f"Update dependency input {relative}")
                 self.reconcile("--build-only")
-                installs = self.commands("npm")
-                self.assertEqual(len(installs), 3 + count)
-                self.assertEqual(Path(installs[-1]["cwd"]),
-                                 self.state / "checkout" / Path(relative).parent)
+                installs = self.install_commands()
+                self.assertEqual(len(installs), 1 + count)
+                self.assertEqual(Path(installs[-1]["cwd"]), self.state / "checkout")
                 self.assertEqual(len(self.prebuild_commands()), 1 + count)
                 self.assertEqual(len(self.commands("pod")), 1 + count)
                 self.assertEqual(self.saved_state()["pending"]["commit"], commit)
@@ -968,7 +971,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
                 self.write_source(relative, contents)
                 commit = self.commit(f"Update native input {relative}")
                 self.reconcile("--build-only")
-                self.assertEqual(len(self.commands("npm")), 3)
+                self.assertEqual(len(self.install_commands()), 1)
                 self.assertEqual(len(self.prebuild_commands()), 1 + count)
                 self.assertEqual(len(self.commands("pod")), 1 + count)
                 self.assertEqual(self.saved_state()["pending"]["commit"], commit)
@@ -978,7 +981,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.configure(expo_name="Runtime config changed")
         self.change_js("evaluated-config")
         self.reconcile("--build-only")
-        self.assertEqual(len(self.commands("npm")), 3)
+        self.assertEqual(len(self.install_commands()), 1)
         self.assertEqual(len(self.prebuild_commands()), 2)
         self.assertEqual(len(self.commands("pod")), 2)
 
@@ -988,8 +991,8 @@ class ReleaseDeliveryTests(unittest.TestCase):
         shutil.rmtree(checkout / "clients/typescript/st3-client/node_modules")
         self.change_js("missing-node-modules")
         self.reconcile("--build-only")
-        self.assertEqual(len(self.commands("npm")), 4)
-        self.assertEqual(Path(self.commands("npm")[-1]["cwd"]), checkout / "clients/typescript/st3-client")
+        self.assertEqual(len(self.install_commands()), 2)
+        self.assertEqual(Path(self.install_commands()[-1]["cwd"]), checkout)
         self.assertEqual(len(self.prebuild_commands()), 1)
         (checkout / "apps/ios/ios/smalltalk.xcworkspace").rmdir()
         self.change_js("missing-workspace")
@@ -1000,7 +1003,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.reconcile("--build-only")
         self.assertEqual(len(self.prebuild_commands()), 3)
         self.assertEqual(len(self.commands("pod")), 3)
-        self.assertEqual(len(self.commands("npm")), 4)
+        self.assertEqual(len(self.install_commands()), 2)
 
     def test_toolchain_path_changes_invalidate_their_cache_inputs(self):
         self.reconcile("--build-only")
@@ -1010,16 +1013,16 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.env["PATH"] = f"{relocated}{os.pathsep}{self.env['PATH']}"
         self.change_js("relocated-node")
         self.reconcile("--build-only")
-        self.assertEqual(len(self.commands("npm")), 6)
+        self.assertEqual(len(self.install_commands()), 2)
         self.assertEqual(len(self.prebuild_commands()), 2)
         shutil.copy2(self.tools / "pod", relocated / "pod")
         self.change_js("relocated-pod")
         self.reconcile("--build-only")
-        self.assertEqual(len(self.commands("npm")), 6)
+        self.assertEqual(len(self.install_commands()), 2)
         self.assertEqual(len(self.prebuild_commands()), 3)
         self.change_js("different-xcode")
         self.reconcile("--build-only", "--developer-dir", str(self.root / "OtherXcode/Developer"))
-        self.assertEqual(len(self.commands("npm")), 6)
+        self.assertEqual(len(self.install_commands()), 2)
         self.assertEqual(len(self.prebuild_commands()), 4)
 
     def test_failed_build_preserves_partial_cache_and_appends_retry_logs(self):
@@ -1044,7 +1047,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
         self.configure(build_exit=0)
         self.reconcile()
         self.assert_installed(self.initial_commit)
-        self.assertEqual(len(self.commands("npm")), 3)
+        self.assertEqual(len(self.install_commands()), 1)
         self.assertEqual(len(self.prebuild_commands()), 1)
         self.assertEqual(len(self.commands("pod")), 1)
         self.assertEqual(len(self.commands("xcodebuild")), 3)
