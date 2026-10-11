@@ -1,4 +1,4 @@
-import { toolFields, toolString } from './embrace-tool-preview'
+import { toolFields, toolOutput, toolString } from './embrace-tool-preview'
 import type { Answers, QuestionRequestView, QuestionState, QuestionView } from './question-model'
 
 /** The generic transcript tool seam is a terminal hand-off, never a web-answer transport. */
@@ -43,7 +43,7 @@ export const questionRequestFromTool = ({ name, id, input, output, status, at, a
       const selected = Array.isArray(result.selectedOptions) ? result.selectedOptions.flatMap(label => typeof label === 'string' ? [question.options.find(option => option.label === label)?.id ?? label] : []) : []
       answers[question.id] = { selected, ...(typeof result.customInput === 'string' ? { other: result.customInput } : {}), ...(typeof result.note === 'string' ? { note: result.note } : {}), ...(result.timedOut === true ? { autoSelected: true } : {}) }
     }
-    state = Object.keys(answers).length > 0 ? { _tag: 'answered', answers, by: toolString(details, ['by']), at: toolString(details, ['at']) || at || '' } : { _tag: 'unrecorded', reason: status === 'interrupted' ? 'Interrupted before an answer was recorded.' : status === 'error' ? 'The question tool failed before an answer was recorded.' : 'Answer details were not recorded.' }
+    state = Object.keys(answers).length > 0 ? { _tag: 'answered', answers, by: toolString(details, ['by']), at: toolString(details, ['at']) || at || '' } : { _tag: 'unrecorded', reason: status === 'interrupted' ? toolOutput(output) || 'Interrupted' : status === 'error' ? toolOutput(output) : '' }
   }
   return { id, source: name, agentLabel: agentLabel ?? 'Agent', askedAt: at ?? '', questions, state, answerable: false, allowChatRedirect: false }
 }

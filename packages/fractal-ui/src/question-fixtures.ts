@@ -21,6 +21,6 @@ export const questionStates: readonly QuestionState[] = [
   { _tag: 'expired', at: '15:42 UTC' },
   { _tag: 'cancelled', reason: 'Skipped · turn ended', at: '15:41 UTC' },
   { _tag: 'chat-redirected', message: 'Discuss the release before choosing.', at: '15:41 UTC' },
-  { _tag: 'unrecorded', reason: 'Answer details were not recorded.' },
+  { _tag: 'unrecorded', reason: '' },
 ]
 export const questionRequest: QuestionRequestView = { id: 'ask-release-1', source: 'omp · ask', agentLabel: 'orbit', askedAt: '15:40 UTC', questions: [questionKinds[0]!], state: { _tag: 'pending' }, answerable: false, allowChatRedirect: false }
