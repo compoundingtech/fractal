@@ -5,7 +5,7 @@ A small, independent UI kit for the Fractal web client, built on React Aria Comp
 It has two layers:
 
 - `.` (`kit.tsx`, `tokens.css`): token-driven component families. The workshop renders them in three switchable visual directions (**Folio**, **Relay**, **Orbit**), each with light and dark palettes and two densities.
-- `./assistant-ui` and its subpaths: the dark-first application surfaces the web app composes, built on assistant-ui 0.15.25. They cover the transcript, composer, tool calls and previews, the sidebar agent row and status glyph, the thread header, resizable splits, resource cards, the work log, the sync line and the workbench layout model, plus rich markdown with highlighted code, the thinking disclosure and the dismissible failure layer. Every surface is controlled: the host supplies data, clock and transport, and unknown values render as unknown.
+- `./assistant-ui` and its subpaths: the dark-first application surfaces the web app composes, built on assistant-ui 0.15.25. They cover the transcript, composer, tool calls and previews, the sidebar agent row and status glyph, the thread header, resizable splits, resource cards, the work log, the sync line, Details and the workbench layout model, plus rich markdown with highlighted code, the thinking disclosure and the dismissible failure layer. Hosts own data, clock and transport; unavailable observations are omitted or explained rather than rendered as a literal “Unknown”.
 
 ## Run
 
@@ -31,6 +31,30 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Details Tab Strip**: the production Workbench, Details pane and resource tabs. `Wide`, `Threshold`, `ManyTabs`, mounted 159/160px first/last selection cases and `AllStates` cover real resource identities, measured label/icon hysteresis, whole painted representations, keyboard selection, tooltips and focus recovery. `RawStability`, `RawStability159` and `RawStability160` assert raw layout-shift zero across Details loading/failure/recovery; each play includes a failing control.
+
+## Details and TabStrip
+
+`DetailsPane` exports its variant, layout-intent, pending-shape and trace contracts through `./assistant-ui`. It preserves independent content and transport observations: `syncStatus` and `hasPriorContent` do not replace a host's retained trace. The current overview/resource states use deterministic kit fixtures; the web client does not consume this pane. Live overview/resource provider integration is not implied by the trace API. `onIntentChange`, `onOpen` and `onRetry` remain host-owned actions.
+
+The Workbench mounts `TabStrip` inside its React Aria `Tabs` provider and keeps selection and resource panels host-owned. Resource kind determines the icon and the full accessible label is preserved in either representation. The measured strip collapses labels below its content budget (at least 360px), and restores them with 16px of headroom. Overflow reveals the selected resource whole; the fractional clipping calculation uses the actual painted intersection, including ancestor clips. A group-owned fixed header reserves Details status/actions even when another resource is selected, so recovery never repacks the tab strip. Existing Workbench props and thread-resource contracts remain unchanged.
+
+Pure policy tests are part of web CI:
+
+```sh
+pnpm -C packages/fractal-ui run test:tab-strip
+```
+
+The browser gates run against the built production Storybook. Supply the managed Playwright module with `PLAYWRIGHT_MODULE` and its browser executable with `CHROMIUM_PATH` when they are not the toolchain defaults. The output directory contains JSON receipts and screenshots:
+
+```sh
+node packages/fractal-ui/scripts/details-run-gates.mjs "$BASE_URL" "$OUTPUT/canonical" canonical
+node packages/fractal-ui/scripts/details-run-gates.mjs "$BASE_URL" "$OUTPUT/painted" painted
+node packages/fractal-ui/scripts/details-run-gates.mjs "$BASE_URL" "$OUTPUT/raw0" raw0
+```
+
+Canonical plays run at 1440×900 and 1280×720 in both schemes and must emit successful `storyFinished`, without exceptions or page/console errors. Only the exact mocker-entry and favicon 404s are allowed. The painted sweep checks complete SVG/text paint inside the effective clip and proves its displacement control rejects. Raw stability records every shift without the recent-input CLS exclusion and proves an intentional displacement produces a positive shift; resource-body initialization is reported separately, not silently included in the zero claim.
+
 
 ## Families
 

@@ -3,11 +3,18 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, DialogTrigger, Popover, Tooltip, TooltipTrigger } from 'react-aria-components'
 import { syncLine, type SyncLineInput } from './sync-line'
+import type { SyncFailureCause } from './sync-status'
 import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 
 /** The host owns the clock and decodes its own transport into the portable tagged union. */
 export interface SyncLineProps extends SyncLineInput { readonly onRetry?: () => void; readonly compact?: boolean; readonly pill?: boolean }
 const pulse = stylex.keyframes({ from: { opacity: 0.5 }, to: { opacity: 1 } })
+/** Shared decoded diagnostics; recovery wording remains owned by the calling surface. */
+export const SyncFailureDetails = ({ cause }: { readonly cause: SyncFailureCause }): React.ReactNode => cause._tag === 'Server'
+  ? <><strong>{cause.code}</strong><p {...stylex.props(styles.detail)}>{cause.message}</p></>
+  : cause._tag === 'Local'
+    ? <><strong>{cause.kind}</strong>{cause.detail?.cap !== undefined && <p {...stylex.props(styles.detail)}>Cap: {cause.detail.cap}</p>}{cause.detail?.message !== undefined && <p {...stylex.props(styles.detail)}>{cause.detail.message}</p>}</>
+    : <p {...stylex.props(styles.detail)}>Failure cause not reported.</p>
 /** Always occupies its existing 24px slot; Live and Evicted leave the slot empty, never add a band. */
 export const SyncLine = React.memo(function SyncLine({ status: observation, label, now, observedAt, gateway, socket, onRetry, compact = false, pill = false }: SyncLineProps) {
   const line = syncLine({ status: observation, label, now, observedAt, gateway, socket })
@@ -19,7 +26,7 @@ export const SyncLine = React.memo(function SyncLine({ status: observation, labe
     </Button>{line !== undefined && <Tooltip {...stylex.props(styles.tooltip)}>{line.text}</Tooltip>}</TooltipTrigger>
     <div {...stylex.props(styles.actions, !failed && styles.hidden, pill && !failed && styles.noActions)}>
       <Button data-command-id="sync.retry" aria-label={`Retry loading ${label}`} isDisabled={!retryable || onRetry === undefined} onPress={onRetry} {...stylex.props(styles.button, !retryable && styles.hidden)}>Retry</Button>
-      <DialogTrigger><Button aria-label={`Sync details for ${label}`} isDisabled={!failed} {...stylex.props(styles.button)}>Details</Button><Popover {...stylex.props(styles.popover)}><Dialog aria-label={`Sync details for ${label}`} {...stylex.props(styles.dialog)}>{failed && <>{observation.cause._tag === 'Server' ? <><strong>{observation.cause.code}</strong><p {...stylex.props(styles.detail)}>{observation.cause.message}</p></> : observation.cause._tag === 'Local' ? <><strong>{observation.cause.kind}</strong>{observation.cause.detail?.cap !== undefined && <p {...stylex.props(styles.detail)}>Cap: {observation.cause.detail.cap}</p>}{observation.cause.detail?.message !== undefined && <p {...stylex.props(styles.detail)}>{observation.cause.detail.message}</p>}</> : <p {...stylex.props(styles.detail)}>Failure cause unknown.</p>}{gateway !== undefined && <p {...stylex.props(styles.detail)}>Gateway: {gateway}</p>}{socket !== undefined && <p {...stylex.props(styles.detail)}>Socket: {String(socket)}</p>}</>}</Dialog></Popover></DialogTrigger>
+      <DialogTrigger><Button aria-label={`Sync details for ${label}`} isDisabled={!failed} {...stylex.props(styles.button)}>Details</Button><Popover {...stylex.props(styles.popover)}><Dialog aria-label={`Sync details for ${label}`} {...stylex.props(styles.dialog)}>{failed && <><SyncFailureDetails cause={observation.cause}/>{gateway !== undefined && <p {...stylex.props(styles.detail)}>Gateway: {gateway}</p>}{socket !== undefined && <p {...stylex.props(styles.detail)}>Socket: {String(socket)}</p>}</>}</Dialog></Popover></DialogTrigger>
     </div>
   </div>
 })

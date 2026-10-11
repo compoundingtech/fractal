@@ -1,0 +1,163 @@
+import * as React from 'react'
+import * as stylex from '@stylexjs/stylex'
+import { Button, Checkbox, Dialog, DialogTrigger, Heading, Popover, ProgressBar } from 'react-aria-components'
+import { DetailsResources, DetailsLabelContext } from './DetailsResources'
+import { makeDetailsFixture, type DetailsState } from './fixtures'
+import { DetailsCharts, DetailsChartsPending, hasDetailsChartData, pendingShapeFromTrace, type DetailsPendingShape } from './DetailsCharts'
+import type { TraceSeries } from './trace-series'
+import { traceForDetailsState } from './session-trace-provider'
+import { PaneSyncStatus } from '../st3-views/PaneSyncStatus'
+import { PaneHeaderAccessory } from '../workbench/PaneLayer'
+import type { SyncStatus } from '../st3-views/sync-status'
+import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
+import { Icon } from '../composition/Icons'
+import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g } from '../composition-tokens.stylex'
+
+export interface DetailsVariants {
+  overview: 'O1'|'O2'|'O3'; context:'C1'|'C2'|'C3'; spend:'S1'|'S2'|'S3'; resources:'R1'|'R2'|'R3'; empty:'E1'|'E2'|'E3'
+}
+export interface DetailsLayoutIntent { readonly hiddenSections: readonly string[] }
+const live = { _tag:'Live', since:1799999999000 } as const
+const loading = { _tag:'Connecting', attempt:1, since:1799999999000 } as const
+const failed = { _tag:'Failed', cause:{ _tag:'Unknown' } } as const
+function Section({title,children,hidden}:{title:string;children:React.ReactNode;hidden:boolean}) {
+  const labelPrefix=React.useContext(DetailsLabelContext)
+  const [collapsed,setCollapsed]=React.useState(false)
+  const id=React.useId()
+  if(hidden) return null
+  return <section aria-label={`${labelPrefix}${title}`} {...stylex.props(styles.section)}>
+    <div {...stylex.props(styles.sectionHeader)}>
+      <Button data-details-heading aria-expanded={!collapsed} aria-controls={id} onPress={()=>setCollapsed(v=>!v)} {...stylex.props(styles.sectionTitle)}><Icon name={collapsed?'chevron-right':'chevron-down'}/>{title}</Button>
+    </div>
+    <div id={id} hidden={collapsed}>{children}</div>
+  </section>
+}
+export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry,trace:providedTrace,pendingShape:suppliedPendingShape,syncStatus:providedSyncStatus,hasPriorContent:providedHasPriorContent}:{
+  variants:DetailsVariants;state:DetailsState;intent:DetailsLayoutIntent;onIntentChange:(intent:DetailsLayoutIntent)=>void;
+  onOpen:(uri:string,split:boolean)=>void;onRetry:()=>void;trace?:TraceSeries;pendingShape?:DetailsPendingShape;
+  /** Hosts keep content state/trace unchanged while controlling the independent transport observation. */
+  syncStatus?:SyncStatus;hasPriorContent?:boolean
+}) {
+  const syncStatus=providedSyncStatus??(state==='error'?failed:state==='loading'?loading:live)
+  const hasPriorContent=providedHasPriorContent??(state!=='loading'&&state!=='error'&&state!=='new')
+  const noPriorFailure=syncStatus._tag==='Failed'&&!hasPriorContent
+  // Only the host's decoded message is a cause; the kit never substitutes diagnostic copy.
+  const failureCause=syncStatus._tag==='Failed'?syncStatus.cause:undefined
+  const failureMessage=failureCause?._tag==='Server'?failureCause.message:failureCause?._tag==='Local'?failureCause.detail?.message:undefined
+  const [detailsOpen,setDetailsOpen]=React.useState(false)
+  const paneRef=React.useRef<HTMLDivElement>(null)
+  const retry=()=>{
+    setDetailsOpen(false)
+    onRetry()
+    // Let the closing popover restore its scope first; the stable pane tab then owns recovery focus.
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      paneRef.current?.closest('[data-testid="tab-group"]')?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({preventScroll:true})
+    }))
+  }
+  const pending=state==='loading'||state==='error'||noPriorFailure
+  const contentState=pending?'loading':state
+  const overview=makeDetailsFixture(contentState).overview
+  const trace=providedTrace??traceForDetailsState(contentState)
+  /** Loading reserves the footprint of the populated projection; a host can pass its last observed shape. */
+  const pendingTrace=React.useMemo(()=>traceForDetailsState('busy'),[])
+  const defaultPendingShape=React.useMemo(()=>pendingShapeFromTrace(pendingTrace),[pendingTrace])
+  const currentPendingShape=suppliedPendingShape??defaultPendingShape
+  const lastPendingShape=React.useRef(currentPendingShape)
+  // A failed observation cannot replace the last committed pending footprint.
+  React.useLayoutEffect(()=>{if(pending&&!noPriorFailure)lastPendingShape.current=currentPendingShape},[pending,noPriorFailure,currentPendingShape])
+  const pendingShape=noPriorFailure?lastPendingShape.current:currentPendingShape
+  const sectionControlsVisible=!pending&&(syncStatus._tag==='Live'||syncStatus._tag==='Stale')
+  const sectionNames=['Overview','Context','Spend',...makeDetailsFixture(contentState).sections.map(section=>section.title)]
+  const context=trace.meters.context
+  const spend=trace.meters.spend
+  const dataOnly=variants.empty==='E3'
+  const consolidateUnavailable=state==='new'&&dataOnly
+  const glyphStatus=state==='busy'||state==='absent'||state==='partial'?'working':state==='idle'?'idle':state==='new'?'pending':'unobserved'
+  const knownIdentity=[overview.machine,overview.model].filter(Boolean).join(' · ')
+  const fields=[['Status',overview.status],['Machine',overview.machine],['Harness',overview.harness],['Model',overview.model],['Status since',overview.since],['Incarnation age',overview.age]] as const
+  const pendingOverview=makeDetailsFixture('busy').overview
+  // Reserve the populated strings' actual wrapping, not approximate unbreakable ch-width ink.
+  const pendingFields=[['Status',pendingOverview.status],['Machine',pendingOverview.machine],['Harness',pendingOverview.harness],['Model',pendingOverview.model],['Status since',pendingOverview.since],['Incarnation age',pendingOverview.age]] as const
+  const pendingSpend=pendingTrace.meters.spend.totalUsd
+  const pendingContext=pendingTrace.meters.context
+  const pendingOverviewLine=[pendingOverview.harness,pendingOverview.age].filter(Boolean).join(' · ')+(pendingSpend._tag==='Known'?` · $${pendingSpend.value.toFixed(2)}`:'')
+  const pendingContextLine=`Context ${pendingContext.usedTokens._tag==='Known'&&pendingContext.windowTokens._tag==='Known'?Math.round(pendingContext.usedTokens.value/pendingContext.windowTokens.value*100):0}%`
+  // First-load failure overlays the unchanged pending footprint with a human reason and a direct recovery action.
+  return <div ref={paneRef} data-testid="details-pane" data-details-pane-state={state} data-details-sync-state={syncStatus._tag} data-details-has-prior-content={hasPriorContent} aria-label="Agent details" role={noPriorFailure?'group':undefined} {...stylex.props(styles.root)}>
+    {/* Status and section visibility live in the pane's fixed header row; Overview starts at the top of the pane. */}
+    <PaneHeaderAccessory>
+      <PaneSyncStatus status={syncStatus} label="agent details" now={1800000000000} observedAt={1799999999000} detailsOpen={detailsOpen} onDetailsOpenChange={setDetailsOpen} onRetry={retry}/>
+      {/* Without settled content the control's slot stays reserved, so the header's action group never resizes. */}
+      {sectionControlsVisible?<DialogTrigger><Button aria-label="Visible sections" data-details-visible-sections {...stylex.props(styles.iconButton)}><Icon name="gear"/></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Dialog aria-label="Visible sections" {...stylex.props(styles.sectionSettings)}>{sectionNames.map(title=><Checkbox key={title} isSelected={!intent.hiddenSections.includes(title)} onChange={visible=>onIntentChange({hiddenSections:visible?intent.hiddenSections.filter(section=>section!==title):[...intent.hiddenSections,title]})} {...stylex.props(styles.sectionOption)}>{({isSelected})=><><span aria-hidden="true" {...stylex.props(styles.checkBox)}>{isSelected&&<Icon name="check"/>}</span>{title}</>}</Checkbox>)}</Dialog></Popover></DialogTrigger>:<span aria-hidden="true" {...stylex.props(styles.iconSlot)}/>}
+    </PaneHeaderAccessory>
+    <div data-details-content-slot {...stylex.props(styles.contentSlot)}>
+    <div aria-hidden={noPriorFailure||undefined} inert={noPriorFailure} {...stylex.props(noPriorFailure&&styles.hiddenPending)}>
+    <Section title="Overview" hidden={intent.hiddenSections.includes('Overview')}>
+    {state==='new'&&<p data-details-orientation {...stylex.props(styles.orientation)}>When this agent starts working, its overview, context, spend and resources will appear here.</p>}
+      {/* While loading only the placeholders are aria-hidden; the already-known identity (title, machine, model) stays readable. */}
+      <div {...stylex.props(styles.overview)} data-details-chart={variants.overview} data-details-skeleton={pending?'overview':undefined}>
+        {pending?<>
+        {overview.title!==undefined&&<strong>{overview.title}</strong>}
+        {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{pendingFields.map(([name,value])=>{
+          if(value===undefined)return null
+          const identity=name==='Machine'?overview.machine:name==='Model'?overview.model:undefined
+          return <React.Fragment key={name}><dt aria-hidden={identity===undefined||undefined} {...stylex.props(styles.muted)}>{identity!==undefined?name:<span inert {...stylex.props(styles.pendingText)}>{name}</span>}</dt><dd aria-hidden={identity===undefined||undefined} {...stylex.props(styles.value)}>{identity??<span inert {...stylex.props(styles.pendingText)}>{value}</span>}</dd></React.Fragment>
+        })}</dl>:<>
+          <div {...stylex.props(styles.line)}><StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="unobserved"/><span>{knownIdentity}<span aria-hidden="true" {...stylex.props(styles.pendingText)}>{knownIdentity!==''?' · ':''}{pendingOverview.since}</span></span></div>
+          {variants.overview==='O2'&&<>
+            <div aria-hidden="true" {...stylex.props(styles.line)}><span {...stylex.props(styles.pendingText)}>{pendingOverviewLine}</span></div>
+            <div aria-hidden="true"><span {...stylex.props(styles.muted)}><span {...stylex.props(styles.pendingText)}>{pendingContextLine}</span></span><div {...stylex.props(meterStyles.track)}/></div>
+          </>}
+        </>}
+        </>:<>
+        {overview.title!==undefined&&<strong>{overview.title}</strong>}
+        {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{fields.map(([name,value])=>value===undefined?null:<React.Fragment key={name}><dt {...stylex.props(styles.muted)}>{name}</dt><dd {...stylex.props(styles.value)}>{value}</dd></React.Fragment>)}</dl>:<>
+          <div {...stylex.props(styles.line)}><StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness={state==='unknown'?'unobserved':'live'}/> {[overview.machine,overview.model,overview.since].filter(Boolean).join(' · ')}</div>
+          {variants.overview==='O2'&&<>
+            <div {...stylex.props(styles.line)}>{[overview.harness,overview.age].filter(Boolean).join(' · ')}{spend.totalUsd._tag==='Known'&&<> · ${spend.totalUsd.value.toFixed(2)}</>}</div>
+            {context.usedTokens._tag==='Known'&&context.windowTokens._tag==='Known'&&context.windowTokens.value>0&&<ProgressBar aria-label="Context window" value={context.usedTokens.value} maxValue={context.windowTokens.value}>{({percentage})=><><span {...stylex.props(styles.muted)}>Context {Math.round(percentage??0)}%</span><div {...stylex.props(meterStyles.track)}><div {...stylex.props(meterStyles.fill(percentage??0))}/></div></>}</ProgressBar>}
+          </>}
+        </>}
+        </>}
+      </div>
+    </Section>
+    {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
+      ?<DetailsChartsPending context={variants.context} spend={variants.spend} empty={variants.empty} section={title==='Context'?'context':'spend'} shape={pendingShape}/>
+      :<DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section={title==='Context'?'context':'spend'} empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/>}</Section>)}
+    <DetailsResources state={contentState} trace={trace} form={variants.resources} empty={variants.empty} onOpen={onOpen} hiddenSections={intent.hiddenSections}/>
+    </div>
+    {noPriorFailure&&syncStatus._tag==='Failed'&&<div data-details-error {...stylex.props(styles.errorBlock)}>
+      {overview.title!==undefined&&<strong>{overview.title}</strong>}
+      {[overview.machine,overview.harness,overview.model].some(value=>value!==undefined)&&<p {...stylex.props(styles.errorText)}>{[overview.machine,overview.harness,overview.model].filter(Boolean).join(' · ')}</p>}
+      <Heading level={2} data-details-error-reason {...stylex.props(styles.errorHeading)}>Couldn't load agent details</Heading>
+      {failureMessage&&<p data-details-error-cause title={failureMessage} {...stylex.props(styles.errorText,styles.errorCause)}>{failureMessage}</p>}
+      <div aria-hidden={detailsOpen||undefined} inert={detailsOpen} {...stylex.props(styles.retrySlot,detailsOpen&&styles.hiddenPending)}><Button data-command-id="sync.retry.body" onPress={retry} {...stylex.props(styles.retryButton)}>Retry</Button></div>
+    </div>}
+    </div>
+  </div>
+}
+const styles=stylex.create({
+  root:{height:'100%',minHeight:0,minWidth:0,overflowY:'auto',overflowX:'hidden',backgroundColor:sf.raised,color:tx.fg,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
+  iconButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0,width:g.controlSm,height:g.controlSm,padding:s.zero,borderWidth:0,borderRadius:r.sm,backgroundColor:sf.transparent,color:tx.fgMuted,cursor:'pointer',':hover':{backgroundColor:sf.rowHover,color:tx.fg},':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  iconSlot:{flexShrink:0,width:g.controlSm,height:g.controlSm},
+  popover:{maxWidth:g.tooltipMax,backgroundColor:sf.raised,color:tx.fg,borderRadius:r.sm,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},
+  contentSlot:{position:'relative',minWidth:0},
+  hiddenPending:{visibility:'hidden',opacity:0,pointerEvents:'none'},
+  section:{borderBottomWidth:g.hairline,borderBottomStyle:'solid',borderBottomColor:bd.border,padding:s.md},
+  sectionHeader:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:s.md},
+  sectionTitle:{display:'flex',alignItems:'center',gap:s.xs,flex:1,minHeight:g.controlSm,padding:s.zero,borderWidth:0,backgroundColor:sf.transparent,color:tx.fg,fontFamily:t.fontSans,fontSize:t.metaSize,fontWeight:t.weightSemibold,textAlign:'left',cursor:'pointer',':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  sectionSettings:{display:'flex',flexDirection:'column',gap:s.sm,padding:s.md,outline:'none',fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
+  sectionOption:{display:'inline-flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,cursor:'pointer',':focus-within':{outline:`2px solid ${ac.primary}`}},
+  checkBox:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:g.icon,height:g.icon,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},
+  overview:{display:'flex',flexDirection:'column',gap:s.xs,paddingBlock:s.sm,minWidth:0},
+  line:{display:'flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,minWidth:0,overflowWrap:'anywhere'},grid:{display:'grid',gridTemplateColumns:g.descriptionColumns,gap:s.xs,margin:s.zero},muted:{color:tx.fgMuted},value:{margin:s.zero,minWidth:0,overflowWrap:'anywhere'},
+  orientation:{margin:s.zero,paddingInline:s.zero,paddingBlock:s.sm,color:tx.fgSoft,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'anywhere'},
+  errorBlock:{position:'absolute',inset:s.zero,boxSizing:'border-box',display:'flex',flexDirection:'column',alignItems:'flex-start',gap:s.sm,padding:s.md,overflowY:'auto',overflowX:'hidden'},
+  errorText:{margin:s.zero,color:tx.fgMuted,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'anywhere'},
+  errorHeading:{margin:s.zero,color:tx.fg,fontSize:t.metaSize,lineHeight:t.metaLeading,fontWeight:t.weightSemibold},
+  errorCause:{display:'-webkit-box',WebkitBoxOrient:'vertical',WebkitLineClamp:2,maxWidth:'100%',minWidth:0,overflow:'hidden'},
+  retrySlot:{minHeight:g.controlMd},
+  retryButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',minHeight:g.controlMd,paddingInline:s.md,borderWidth:g.hairline,borderStyle:'solid',borderColor:ac.primary,borderRadius:r.control,backgroundColor:ac.primary,color:ac.onPrimary,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,cursor:'pointer',':focus-visible':{outline:`2px solid ${ac.primary}`,outlineOffset:g.focusOffset}},
+  pendingText:{color:'transparent',backgroundImage:`linear-gradient(${bd.borderStrong}, ${bd.borderStrong})`,backgroundSize:`100% ${s.md}`,backgroundPosition:'center',backgroundRepeat:'no-repeat',boxDecorationBreak:'clone'},
+})
+const meterStyles=stylex.create({track:{height:g.progressSm,width:'100%',backgroundColor:sf.controlFill},fill:(percentage:number)=>({height:'100%',width:`${percentage}%`,backgroundColor:ac.primary})})
