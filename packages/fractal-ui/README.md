@@ -31,6 +31,17 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Harness Delivery Group**, **Agent Result Card**, **Background Job Row**, and **Terminal Tail**: production-mounted delivery states and negative controls, each framed at 440 and 1440 pixels in light and dark.
+
+## Harness deliveries
+
+`HarnessDeliveryGroup`, `AgentResultCard`, `BackgroundJobRow`, and `TerminalTail` are exported from `./assistant-ui`. Their pure typed contracts live in `delivery-model.ts`; applications normalize harness records and supply navigation/full-output callbacks. No transport or harness parser is part of the kit.
+
+A delivery preserves child order. Failed, cancelled and aborted results, non-zero command exits, and commands without a reported exit open initially. A single child renders directly without summary chrome. Agent reports reuse Markdown; raw JSON is independently disclosed as a per-node tree. Open thread is a host callback; unavailable navigation, Message and Resume have visible reasons.
+
+Background exit chips use only the reported exit fact. An absent exit has no chip, even if output prints `rc=1`. The bg_40 control has exit 0 and diagnostic cross-mark lines: only those literal terminal lines receive a tint. Terminal output never goes through Markdown.
+
+These components replace the old batch notice, `HarnessNotice.SubagentResult`, and background-result notice presentations in the consuming application's dispatcher; the dispatcher is not present on this branch.
 
 ## Families
 
