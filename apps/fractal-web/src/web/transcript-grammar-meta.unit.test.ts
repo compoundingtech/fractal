@@ -101,16 +101,21 @@ describe('transcript relative age formatting', () => {
     expect(formatRelativeAge(0, elapsedMs).label).toBe(expected)
   })
 
-  it('uses explicit clocks and a deterministic full UTC tooltip', () => {
+  it('uses explicit clocks and an explicitly deterministic UTC tooltip', () => {
     const timestamp = Date.UTC(2026, 0, 2, 3, 4, 5, 678)
-    const first = formatRelativeAge(timestamp, timestamp + 45_000)
+    const options = { locale: 'en-US', timeZone: 'UTC' }
+    const first = formatRelativeAge(timestamp, timestamp + 45_000, options)
     expect(first).toEqual({
       label: '45s',
       dateTime: '2026-01-02T03:04:05.678Z',
-      absolute: '2026-01-02 03:04:05.678 UTC',
+      absolute: new Intl.DateTimeFormat(options.locale, {
+        dateStyle: 'full',
+        timeStyle: 'long',
+        timeZone: options.timeZone,
+      }).format(new Date(timestamp)),
     })
-    expect(formatRelativeAge(timestamp, timestamp + 180_000)).toEqual({ ...first, label: '3m' })
-    expect(formatRelativeAge(timestamp, timestamp + 45_000)).toEqual(first)
+    expect(formatRelativeAge(timestamp, timestamp + 180_000, options)).toEqual({ ...first, label: '3m' })
+    expect(formatRelativeAge(timestamp, timestamp + 45_000, options)).toEqual(first)
   })
 
   it.each([
@@ -163,13 +168,34 @@ describe('transcript relative age formatting', () => {
     }))
   })
 
-  it('is pure across the entire Date range and preserves ISO/tooltip correspondence', () => {
+  it('preserves ISO and default viewer Intl correspondence across the entire Date range', () => {
+    const formatter = new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'long' })
     fc.assert(fc.property(dateMilliseconds, dateMilliseconds, (timestamp, now) => {
       const result = formatRelativeAge(timestamp, now)
       expect(formatRelativeAge(timestamp, now)).toEqual(result)
       expect(result.dateTime).toBe(new Date(timestamp).toISOString())
-      expect(result.absolute.replace(' ', 'T').replace(' UTC', 'Z')).toBe(result.dateTime)
+      expect(result.absolute).toBe(formatter.format(new Date(timestamp)))
       expect(new Date(result.dateTime).getTime()).toBe(new Date(timestamp).getTime())
     }))
+  })
+
+  it('honors explicit locale and time zone without changing ISO or relative labels', () => {
+    fc.assert(fc.property(
+      dateMilliseconds,
+      dateMilliseconds,
+      fc.constantFrom('en-US', 'de-DE', 'ja-JP'),
+      fc.constantFrom('UTC', 'America/Los_Angeles', 'Asia/Tokyo'),
+      (timestamp, now, locale, timeZone) => {
+        const defaults = formatRelativeAge(timestamp, now)
+        const result = formatRelativeAge(timestamp, now, { locale, timeZone })
+        expect(result.label).toBe(defaults.label)
+        expect(result.dateTime).toBe(defaults.dateTime)
+        expect(result.absolute).toBe(new Intl.DateTimeFormat(locale, {
+          dateStyle: 'full',
+          timeStyle: 'long',
+          timeZone,
+        }).format(new Date(timestamp)))
+      },
+    ))
   })
 })

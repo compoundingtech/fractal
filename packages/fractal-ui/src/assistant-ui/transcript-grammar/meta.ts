@@ -19,10 +19,11 @@ const assertDateMilliseconds = (value: number, name: string): void => {
   }
 }
 
-/** Both clocks accept the inclusive Date range; future ages clamp to zero. No ambient clock or locale. */
+/** Explicit clocks accept the inclusive Date range; future ages clamp to zero. Tooltips use the viewer's locale and time zone unless overridden in options. */
 export const formatRelativeAge = (
   timestamp: number,
   now: number,
+  options: { timeZone?: string; locale?: string } = {},
 ): { label: string; dateTime: string; absolute: string } => {
   assertDateMilliseconds(timestamp, 'Timestamp')
   assertDateMilliseconds(now, 'Now')
@@ -35,6 +36,12 @@ export const formatRelativeAge = (
       : seconds < 86_400
         ? `${Math.floor(seconds / 3_600)}h`
         : `${Math.floor(seconds / 86_400)}d`
-  const dateTime = new Date(timestamp).toISOString()
-  return { label, dateTime, absolute: `${dateTime.replace('T', ' ').replace('Z', '')} UTC` }
+  const date = new Date(timestamp)
+  const dateTime = date.toISOString()
+  const absolute = new Intl.DateTimeFormat(options.locale, {
+    dateStyle: 'full',
+    timeStyle: 'long',
+    timeZone: options.timeZone,
+  }).format(date)
+  return { label, dateTime, absolute }
 }

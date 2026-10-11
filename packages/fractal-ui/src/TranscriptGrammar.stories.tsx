@@ -10,7 +10,7 @@ import { TranscriptCard, TranscriptGlyph, TranscriptMarker, TranscriptRow, forma
 import { transcriptVars as grammar } from './assistant-ui/transcript-grammar/tokens.stylex'
 
 const now = Date.parse('2026-04-08T14:30:00Z')
-const eventMeta = { timestamp: now - 120_000, now, durationMs: 12_400 }
+const eventMeta = { timestamp: now - 120_000, now, durationMs: 12_400, timeZone: 'UTC', locale: 'en-US' }
 const tones: readonly TranscriptTone[] = ['neutral', 'running', 'attention', 'danger']
 const promotions: readonly { caption: string; cards: readonly TranscriptCardProps[] }[] = [
   { caption: 'Failure or abort · Explain the interruption and preserve the next step.', cards: [
@@ -38,6 +38,7 @@ function Tier({ label, caption, children }: { label: string; caption: string; ch
 function GrammarPreview({ scheme = 'dark', width = 'compact', injectFailure = false }: { scheme?: Scheme; width?: 'compact' | 'wide'; injectFailure?: boolean }) {
   const [expanded, setExpanded] = React.useState(false)
   const [localFailure, setLocalFailure] = React.useState(false)
+  const [reviewed, setReviewed] = React.useState(false)
   const failed = injectFailure || localFailure
   const resultId = React.useId()
   return <main aria-label="Transcript grammar preview" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
@@ -52,10 +53,13 @@ function GrammarPreview({ scheme = 'dark', width = 'compact', injectFailure = fa
           <Tier label="Row" caption="Verb, subject, optional excerpt. Routine activity stays compact.">
             <TranscriptRow glyph="fileChange" verb="Updated" subject="navigation.ts" excerpt="Labels are unchanged; focus order follows the visible controls." meta={eventMeta} />
             <TranscriptRow glyph="tool" verb="Reading" subject="Layout notes" tone="running" tag={{ label: '3 files' }} />
-            <TranscriptRow glyph="agentResult" verb="Reviewed" subject="Keyboard access" disclosure={{ expanded, onExpandedChange: setExpanded, controls: resultId, label: 'Show review result' }} />
-            <div id={resultId} hidden={!expanded} data-testid="disclosed-result">
-              {expanded && <TranscriptCard promotion="expanded-result" header={{ glyph: 'agentResult', verb: 'Opened', subject: 'Keyboard review' }} body="Every visible action is reachable with the keyboard. Focus returns to the disclosure after the result is closed." />}
+            <div data-testid="disclosed-result">
+              <TranscriptCard promotion="expanded-result" header={{ glyph: 'agentResult', verb: 'Reviewed', subject: 'Keyboard access' }} disclosure={{ expanded, onExpandedChange: setExpanded, controls: resultId, label: 'Show review result' }} body={reviewed ? 'Keyboard review acknowledged. Every visible action remains reachable with the keyboard.' : 'Every visible action is reachable with the keyboard. Focus stays on the same disclosure when the result opens or closes.'} actions={[{ label: 'Mark reviewed', onPress: () => setReviewed(true) }]} />
             </div>
+          </Tier>
+          <Tier label="Truncation priority" caption="The excerpt gives way first. A short subject stays whole; a long subject truncates only when space runs out.">
+            <div data-testid="short-subject"><TranscriptRow glyph="fileChange" verb="Updated" subject="nav.ts" excerpt={'The navigation keeps every visible action in keyboard order. '.repeat(8)} /></div>
+            <div data-testid="long-subject"><TranscriptRow glyph="fileChange" verb="Checking destination permissions" subject={'navigation-destination-permissions-'.repeat(8)} excerpt={'The destination retains the current keyboard order. '.repeat(8)} meta={eventMeta} /></div>
           </Tier>
           <Tier label="Negative control" caption="Failure words in successful output must not promote a routine row.">
             <div data-testid="negative-control"><TranscriptRow glyph="command" verb="Passed" subject="Failure-message copy check" excerpt={`The words failed and aborted are expected copy, not an event status. ${'very-long-output-identifier-'.repeat(12)}`} /></div>
@@ -120,21 +124,35 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
   await expect(frame.querySelector('[data-transcript-tier="card"] [data-transcript-tier="card"]'), 'Promotions are never nested').toBeNull()
 
   const disclosure = canvas.getByRole('button', { name: 'Show review result' })
+  const disclosedResult = canvas.getByTestId('disclosed-result')
+  const resultBody = within(disclosedResult).getByText('Every visible action is reachable with the keyboard. Focus stays on the same disclosure when the result opens or closes.')
   await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
-  await expect(disclosure).toHaveAttribute('aria-controls', canvas.getByTestId('disclosed-result').id)
+  await expect(disclosure).toHaveAttribute('aria-controls', resultBody.id)
+  await expect(disclosedResult.querySelector('[data-promotion="expanded-result"]')).toBeNull()
   disclosure.focus()
   await userEvent.keyboard('{Enter}')
   await expect(disclosure).toHaveAttribute('aria-expanded', 'true')
-  await expect(canvas.getByTestId('disclosed-result')).toBeVisible()
-  await expect(canvas.getByTestId('disclosed-result').querySelector('[data-promotion="expanded-result"]')).not.toBeNull()
-  await userEvent.click(disclosure)
+  await expect(canvas.getByRole('button', { name: 'Show review result' })).toBe(disclosure)
+  await expect(disclosure).toHaveFocus()
+  await expect(resultBody).toBeVisible()
+  await expect(disclosedResult.querySelector('[data-promotion="expanded-result"]')).not.toBeNull()
+  await userEvent.keyboard(' ')
   await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
-  await expect(canvas.getByTestId('disclosed-result')).not.toBeVisible()
+  await expect(canvas.getByRole('button', { name: 'Show review result' })).toBe(disclosure)
+  await expect(disclosure).toHaveFocus()
+  await expect(resultBody).not.toBeVisible()
+  await expect(disclosedResult.querySelector('[data-promotion="expanded-result"]')).toBeNull()
+  await userEvent.keyboard('{Enter}')
+  await userEvent.click(within(disclosedResult).getByRole('button', { name: 'Mark reviewed' }))
+  await expect(resultBody).toHaveTextContent('Keyboard review acknowledged.')
+  disclosure.focus()
+  await userEvent.keyboard(' ')
+  await expect(disclosure).toHaveFocus()
 
-  const time = canvas.getByRole('button', { name: 'Event time' })
+  const time = within(canvas.getByRole('region', { name: 'Row' })).getByRole('button', { name: 'Event time' })
   time.focus()
   const tooltip = await within(canvasElement.ownerDocument.body).findByRole('tooltip')
-  await expect(tooltip).toHaveTextContent(formatRelativeAge(eventMeta.timestamp, now).absolute)
+  await expect(tooltip).toHaveTextContent(formatRelativeAge(eventMeta.timestamp, now, { timeZone: eventMeta.timeZone, locale: eventMeta.locale }).absolute)
   await userEvent.keyboard('{Escape}')
   disclosure.focus()
   await waitFor(() => expect(within(canvasElement.ownerDocument.body).queryByRole('tooltip')).toBeNull())
@@ -146,6 +164,23 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
   await userEvent.click(canvas.getByRole('button', { name: 'Clear injected failure' }))
   await expect(injected.querySelector(args.injectFailure ? '[data-promotion="failed"]' : '[data-transcript-tier="row"]')).not.toBeNull()
   await expect(negative.querySelector('[data-promotion]')).toBeNull()
+  if (args.width === 'compact') {
+    await canvasElement.ownerDocument.fonts.ready
+    const shortRow = canvas.getByTestId('short-subject')
+    const longRow = canvas.getByTestId('long-subject')
+    const shortSubject = shortRow.querySelector<HTMLElement>('[data-transcript-slot="subject"]')!
+    const shortExcerpt = shortRow.querySelector<HTMLElement>('[data-transcript-slot="excerpt"]')!
+    const longSubject = longRow.querySelector<HTMLElement>('[data-transcript-slot="subject"]')!
+    const longExcerpt = longRow.querySelector<HTMLElement>('[data-transcript-slot="excerpt"]')!
+    await expect(frame.getBoundingClientRect().width).toBeLessThanOrEqual(440)
+    await expect(shortSubject.scrollWidth, 'The short subject stays whole').toBeLessThanOrEqual(shortSubject.clientWidth)
+    await expect(shortExcerpt.scrollWidth, 'The long excerpt overflows its allotted space').toBeGreaterThan(shortExcerpt.clientWidth)
+    await expect(getComputedStyle(shortExcerpt).textOverflow).toBe('ellipsis')
+    await expect(getComputedStyle(shortExcerpt).overflow).toBe('hidden')
+    await expect(longExcerpt.getBoundingClientRect().width, 'The excerpt yields its space before the long subject truncates').toBeLessThanOrEqual(1)
+    await expect(longSubject.scrollWidth, 'The long subject is the negative control: it eventually truncates too').toBeGreaterThan(longSubject.clientWidth)
+    await expect(getComputedStyle(longSubject).textOverflow).toBe('ellipsis')
+  }
   await expect(frame.scrollWidth, 'Long output must not widen the preview').toBeLessThanOrEqual(frame.clientWidth)
   await expect(canvasElement.ownerDocument.documentElement.scrollWidth, 'The preview must fit the actual viewport').toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
   // The configured accessibility addon runs axe color-contrast after this play,
@@ -164,7 +199,7 @@ const styles = stylex.create({
   compact: { width: grammar.storyWidthCompact },
   wide: { width: grammar.storyWidthWide },
   pairing: { display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${grammar.storyWidthCompact}), 1fr))`, gap: space.section, alignItems: 'start' },
-  stack: { display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0 },
+  stack: { display: 'flex', flexDirection: 'column', gap: grammar.itemGap, minWidth: 0 },
   tier: { display: 'flex', flexDirection: 'column', gap: grammar.itemGap, minWidth: 0 },
   title: { margin: 0, fontSize: type.headingSize, lineHeight: type.headingLeading, fontWeight: 600 },
   heading: { margin: 0, fontSize: grammar.labelSize, lineHeight: grammar.labelLeading, fontWeight: 600 },

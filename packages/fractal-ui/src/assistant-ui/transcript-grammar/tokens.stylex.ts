@@ -1,5 +1,5 @@
 import * as stylex from '@stylexjs/stylex'
-import { geometryVars, spaceVars, typeVars, statusVars } from '../composition-tokens.stylex'
+import { geometryVars, spaceVars, typeVars } from '../composition-tokens.stylex'
 
 /** Transcript roles derive from the composition scale; geometry stays invariant across themes. */
 export const transcriptVars = stylex.defineVars({
@@ -20,7 +20,6 @@ export const transcriptVars = stylex.defineVars({
   glyphSize: geometryVars.status,
   glyphBox: geometryVars.icon,
   chevronSize: geometryVars.iconSm,
-  attentionBorder: statusVars.attention,
   storyWidthCompact: '440px',
   storyWidthWide: '1440px',
 })

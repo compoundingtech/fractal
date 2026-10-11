@@ -6,7 +6,13 @@ import { formatDuration, formatRelativeAge } from './meta'
 import { transcriptVars } from './tokens.stylex'
 
 export interface TranscriptTagProps { readonly label: string; readonly tone?: TranscriptTone }
-export interface TranscriptMetaProps { readonly timestamp: number; readonly now: number; readonly durationMs?: number }
+export interface TranscriptMetaProps {
+  readonly timestamp: number
+  readonly now: number
+  readonly durationMs?: number
+  readonly timeZone?: string
+  readonly locale?: string
+}
 export interface TranscriptDisclosure {
   readonly expanded: boolean
   readonly onExpandedChange: (expanded: boolean) => void
@@ -43,8 +49,8 @@ export function TranscriptTag({ label, tone = 'neutral' }: TranscriptTagProps) {
   return <span {...stylex.props(styles.tag, tagTones[tone])} data-transcript-tag={tone}>{label}</span>
 }
 
-export function TranscriptMeta({ timestamp, now, durationMs }: TranscriptMetaProps) {
-  const age = formatRelativeAge(timestamp, now)
+export function TranscriptMeta({ timestamp, now, durationMs, timeZone, locale }: TranscriptMetaProps) {
+  const age = formatRelativeAge(timestamp, now, { timeZone, locale })
   return <span {...stylex.props(styles.meta)}>
     {durationMs !== undefined && <span {...stylex.props(styles.duration)}>{formatDuration(durationMs)}</span>}
     <TooltipTrigger delay={0}>
@@ -67,8 +73,8 @@ export function TranscriptRow({ glyph, verb, subject, excerpt, tone = 'neutral',
   return <div {...stylex.props(styles.row)} data-transcript-tier="row">
     <span {...stylex.props(styles.glyphBox)}><TranscriptGlyph name={glyph} tone={tone} /></span>
     <span {...stylex.props(styles.verb)}>{verb}</span>
-    <span {...stylex.props(styles.subject)} title={subject}>{subject}</span>
-    {excerpt && <span {...stylex.props(styles.excerpt)}>{excerpt}</span>}
+    <span {...stylex.props(styles.subject)} title={subject} data-transcript-slot="subject">{subject}</span>
+    {excerpt && <span {...stylex.props(styles.excerpt)} data-transcript-slot="excerpt">{excerpt}</span>}
     {tag && <span {...stylex.props(styles.rowTag)}><TranscriptTag {...tag} /></span>}
     {disclosure && <Button {...stylex.props(styles.disclosure, styles.focus)} aria-label={disclosure.label} aria-expanded={disclosure.expanded} aria-controls={disclosure.controls} onPress={() => disclosure.onExpandedChange(!disclosure.expanded)}>
       <span {...stylex.props(styles.chevron, disclosure.expanded && styles.expanded)}><TranscriptGlyph name="chevron" /></span>
@@ -80,21 +86,21 @@ export function TranscriptRow({ glyph, verb, subject, excerpt, tone = 'neutral',
 /** A text-only body and typed actions prohibit nested cards by construction. */
 export function TranscriptCard({ header, promotion, body, actions, disclosure }: TranscriptCardProps) {
   const tone = promotion === 'failed' || promotion === 'aborted' ? 'danger' : promotion === 'open-question' ? 'attention' : header.tone ?? 'neutral'
-  if (disclosure && !disclosure.expanded) return <TranscriptRow {...header} tone={tone} disclosure={disclosure} />
-  return <section {...stylex.props(styles.card, cardTones[tone])} data-transcript-tier="card" data-promotion={promotion} aria-label={`${header.verb} ${header.subject}`}>
+  const expanded = disclosure?.expanded ?? true
+  return <div {...stylex.props(expanded && styles.card, expanded && cardTones[tone])} data-transcript-tier={expanded ? 'card' : undefined} data-promotion={expanded ? promotion : undefined} role={expanded ? 'region' : undefined} aria-label={expanded ? `${header.verb} ${header.subject}` : undefined}>
     <TranscriptRow {...header} tone={tone} disclosure={disclosure} />
-    <div id={disclosure?.controls} {...stylex.props(styles.body)}>{body}</div>
-    {actions && actions.length > 0 && <div {...stylex.props(styles.actions)}>
+    <div id={disclosure?.controls} hidden={!expanded} {...stylex.props(styles.body, !expanded && styles.hidden)}>{body}</div>
+    {expanded && actions && actions.length > 0 && <div {...stylex.props(styles.actions)}>
       {actions.map(action => <Button key={action.label} onPress={action.onPress} {...stylex.props(styles.action, styles.focus)}>{action.label}</Button>)}
     </div>}
-  </section>
+  </div>
 }
 
 const styles = stylex.create({
   row: { display: 'flex', alignItems: 'center', gap: transcriptVars.itemGap, height: transcriptVars.rowHeight, minWidth: 0, maxWidth: '100%', overflow: 'hidden', whiteSpace: 'nowrap', fontFamily: typeVars.fontSans, fontSize: transcriptVars.labelSize, lineHeight: transcriptVars.labelLeading, fontWeight: typeVars.weightRegular, color: textVars.fgMuted, borderRadius: radiusVars.sm, backgroundColor: { default: surfaceVars.transparent, ':hover': surfaceVars.rowHover } },
   glyphBox: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: transcriptVars.glyphBox, height: transcriptVars.glyphBox, flexShrink: 0 },
   verb: { flexShrink: 0, color: textVars.fgMuted },
-  subject: { flexShrink: 1, minWidth: 0, maxWidth: '55%', overflow: 'hidden', textOverflow: 'ellipsis', color: textVars.fgSoft },
+  subject: { flexShrink: 1, minWidth: 'min(55%, 12ch)', maxWidth: '55%', overflow: 'hidden', textOverflow: 'ellipsis', color: textVars.fgSoft },
   excerpt: { flexShrink: 9999, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', color: textVars.fgFaint, fontSize: transcriptVars.metaSize, lineHeight: transcriptVars.metaLeading },
   rowTag: { flexShrink: 0, display: { default: 'inline-flex', '@media (max-width: 30rem)': 'none' } },
   tag: { display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', paddingInline: spaceVars.xs, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderRadius: radiusVars.sm, backgroundColor: surfaceVars.transparent, fontFamily: typeVars.fontSans, fontSize: transcriptVars.tagSize, lineHeight: transcriptVars.tagLeading },
@@ -106,24 +112,25 @@ const styles = stylex.create({
   chevron: { display: 'flex', width: transcriptVars.chevronSize, height: transcriptVars.chevronSize, alignItems: 'center', justifyContent: 'center' },
   expanded: { transform: 'rotate(90deg)' },
   focus: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: statusVars.runningFg, outlineOffset: geometryVars.focusOffset },
-  marker: { display: 'flex', alignItems: 'center', gap: spaceVars.md, height: transcriptVars.markerHeight, minWidth: 0, fontFamily: typeVars.fontSans, fontSize: transcriptVars.metaSize, lineHeight: transcriptVars.metaLeading, color: textVars.fgMuted },
+  marker: { display: 'flex', alignItems: 'center', gap: transcriptVars.itemGap, height: transcriptVars.markerHeight, minWidth: 0, fontFamily: typeVars.fontSans, fontSize: transcriptVars.metaSize, lineHeight: transcriptVars.metaLeading, color: textVars.fgMuted },
   centerMarker: { fontSize: transcriptVars.tagSize },
   markerLabel: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   rule: { flexGrow: 1, borderTopWidth: spaceVars.hairline, borderTopStyle: 'solid', borderTopColor: borderVars.border, minWidth: spaceVars.md },
   card: { minWidth: 0, backgroundColor: surfaceVars.raised, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderRadius: radiusVars.md, paddingTop: spaceVars.xs2, paddingInline: spaceVars.md, paddingBottom: spaceVars.sm },
   body: { marginTop: spaceVars.xs, fontFamily: typeVars.fontSans, fontSize: transcriptVars.proseSize, lineHeight: transcriptVars.proseLeading, fontWeight: typeVars.weightRegular, color: textVars.fgSoft, display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
-  actions: { display: 'flex', alignItems: 'center', gap: spaceVars.xs2, height: transcriptVars.rowHeight, marginTop: spaceVars.xs },
+  hidden: { display: 'none' },
+  actions: { display: 'flex', alignItems: 'center', gap: transcriptVars.itemGap, height: transcriptVars.rowHeight, marginTop: spaceVars.xs },
   action: { height: transcriptVars.rowHeight, paddingBlock: 0, paddingInline: spaceVars.sm, borderWidth: 0, borderRadius: radiusVars.sm, backgroundColor: { default: surfaceVars.transparent, ':hover': surfaceVars.rowHover }, color: textVars.fgSoft, fontFamily: typeVars.fontSans, fontSize: transcriptVars.metaSize, lineHeight: transcriptVars.metaLeading, cursor: 'pointer' },
 })
 const tagTones = stylex.create({
   neutral: { color: textVars.fgMuted, borderColor: borderVars.borderStrong },
   running: { color: statusVars.runningFg, borderColor: statusVars.runningFg },
-  attention: { color: statusVars.attention, borderColor: transcriptVars.attentionBorder },
+  attention: { color: statusVars.attention, borderColor: statusVars.attention },
   danger: { color: statusVars.dangerFg, borderColor: statusVars.dangerMuted },
 })
 const cardTones = stylex.create({
   neutral: { borderColor: borderVars.border },
   running: { borderColor: borderVars.border },
-  attention: { borderColor: transcriptVars.attentionBorder },
+  attention: { borderColor: statusVars.attention },
   danger: { borderColor: statusVars.dangerMuted },
 })
