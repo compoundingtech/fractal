@@ -16,7 +16,7 @@ export const TraceSeriesSchema=Schema.Struct({
  agentId:Schema.String,nativeSessionId:fact(Schema.String),
  meters:Schema.Struct({context:Schema.Struct({usedTokens:fact(count),windowTokens:fact(count),compactions:fact(count),lastCompactionMs:fact(timestamp)}),spend:Schema.Struct({scope:spendScope,totalUsd:fact(amount),mainUsd:fact(amount),subagentUsd:fact(amount),tokens:fact(count),tokensWindow:fact(accumulationWindow),split:fact(cost)})}),
  series:fact(buckets),turns:fact(turns),subagents:fact(Schema.Array(subagent)),history:fact(Schema.Array(Schema.Struct({nativeSessionId:Schema.String,startedMs:timestamp,endedMs:Schema.NullOr(timestamp),usd:amount,compactions:count}))),
-}).annotate({identifier:'Fractal.TraceSeries'})
+})
 type Equal<A,B>=(<T>()=>T extends A?1:2) extends (<T>()=>T extends B?1:2)?true:false
 type Assert<T extends true>=T
 export type TraceSeriesSchemaMatchesProjection=Assert<Equal<typeof TraceSeriesSchema.Type,TraceSeries>>
