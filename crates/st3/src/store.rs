@@ -14599,9 +14599,10 @@ impl Store {
     /// only for what only a person can give.
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
         let mut items = self.subscription_fault_items(as_of)?;
-        items.extend(self.operational_attention_items(None, as_of)?);
+        let (operational, failures) = self.operational_attention_items_with_failures(None, as_of)?;
+        items.extend(operational);
         items.extend(
-            self.broken_gate_items(None, as_of)?
+            self.broken_gate_items_from_failures(None, as_of, failures)?
                 .into_iter()
                 .filter(|item| !item.person.starts_with("person/")),
         );
@@ -34343,6 +34344,11 @@ mod tests {
     mod canonical_audit {
         use super::*;
         include!("store/canonical_audit.rs");
+    }
+
+    mod fault_history_tests {
+        use super::*;
+        include!("store/fault_history_tests.rs");
     }
 
     #[test]
