@@ -47,6 +47,11 @@ export const Dark: Story = {
       for (const [name, weightClass] of [['QuestionForm', 'card'], ['QuestionSummary', 'row'], ['NeedsYouBar', 'shell'], ['NeedsYouInbox', 'shell']] as const) {
         await expect(canvas.getByTestId(`harness-weight-${weight}`).querySelector(`[data-component-name="${name}"]`)).toHaveAttribute('data-weight-class', weightClass)
       }
+      const specimens = canvas.getByTestId(`harness-weight-${weight}`)
+      await expect(within(specimens.querySelector('[data-component-name="QuestionForm"]') as HTMLElement).getByRole('button', { name: 'Open terminal' })).toBeVisible()
+      await expect(within(specimens.querySelector('[data-component-name="QuestionSummary"]') as HTMLElement).getByText('Answered')).toBeVisible()
+      await expect(within(specimens.querySelector('[data-component-name="NeedsYouBar"]') as HTMLElement).getByRole('button', { name: /is waiting on you/ })).toHaveAttribute('aria-expanded', 'false')
+      await expect(within(specimens.querySelector('[data-component-name="NeedsYouInbox"]') as HTMLElement).getByRole('region', { name: 'Needs you inbox' }).querySelector('details')).not.toHaveAttribute('open')
     }
     const read = within(canvas.getByTestId('harness-weight-row')).getByRole('button', { name: 'Read summary' })
     await userEvent.click(read)

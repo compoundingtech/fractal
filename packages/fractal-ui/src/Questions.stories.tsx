@@ -13,12 +13,12 @@ import { darkTheme } from './assistant-ui/embrace-theme'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
 import { questionKinds, questionRequest, questionStates } from './question-fixtures'
 
-function ComposerRoutingExample({ routing }: { readonly routing: NonNullable<QuestionFormProps['composerRouting']> }) {
+function ComposerRoutingExample({ routing, storyId }: { readonly routing: NonNullable<QuestionFormProps['composerRouting']>; readonly storyId: string }) {
   const [sent, setSent] = React.useState<readonly string[]>([])
   const options = React.useMemo<ConversationRuntimeOptions>(() => ({ messages: [], onNew: async message => setSent(previous => [...previous, message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')]) }), [])
   return <EmbraceRuntimeProvider options={options}>
     <QuestionForm request={questionRequest} composerTyping composerRouting={routing} onOpenTerminal={fn()} />
-    <Composer agent={questionRequest.agentLabel} draftKey={`question-routing.${routing._tag}`} onSend={text => setSent(previous => [...previous, text])} />
+    <Composer agent={questionRequest.agentLabel} draftKey={`question-routing.${storyId}.${routing._tag}`} onSend={text => setSent(previous => [...previous, text])} />
     <output aria-label="Composer fixture submissions">{sent.join('\n')}</output>
   </EmbraceRuntimeProvider>
 }
@@ -212,12 +212,13 @@ export const SettledWithoutAnswerFacts: Story = {
 export const SettledWithoutAnswerFactsLight440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 440 } }
 export const SettledWithoutAnswerFactsDark1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'dark', width: 1440 } }
 export const SettledWithoutAnswerFactsLight1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 1440 } }
-export const ComposerRouting: Story = { render: () => <><ComposerRoutingExample routing={{ _tag: 'HeldUntilAnswered' }} /><ComposerRoutingExample routing={{ _tag: 'ChatAboutQuestion' }} /></>, play: async ({ canvasElement }) => {
+export const ComposerRouting: Story = { render: (_args, context) => <><ComposerRoutingExample storyId={context.id} routing={{ _tag: 'HeldUntilAnswered' }} /><ComposerRoutingExample storyId={context.id} routing={{ _tag: 'ChatAboutQuestion' }} /></>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByText('delivered after the question is answered')).toBeVisible()
   await expect(canvas.getByText('Your message goes to the agent as a note about this question')).toBeVisible()
   const composers = canvas.getAllByRole('textbox').filter(element => element.closest('form') !== null)
   await expect(composers).toHaveLength(2)
+  for (const composer of composers) await userEvent.clear(composer)
   await userEvent.type(composers[0]!, 'Please clarify the scope')
   await expect(composers[0]).toHaveValue('Please clarify the scope')
   await expect(composers[1]).not.toHaveValue('Please clarify the scope')
