@@ -857,14 +857,16 @@ mod tests {
             .unwrap();
         let decl = store.declared_conditions().unwrap().remove(0).decl.unwrap();
         for n in 0..6u128 {
-            let mut tracker = Tracker::default();
-            tracker.phase = if n % 2 == 0 {
-                Phase::Breach
-            } else {
-                Phase::Clear
+            let mut tracker = Tracker {
+                phase: if n % 2 == 0 {
+                    Phase::Breach
+                } else {
+                    Phase::Clear
+                },
+                phase_since: n * 420_000,
+                breach_since: Some(n.saturating_sub(n % 2) * 420_000),
+                ..Tracker::default()
             };
-            tracker.phase_since = n * 420_000;
-            tracker.breach_since = Some(n.saturating_sub(n % 2) * 420_000);
             tracker
                 .values
                 .push_back((n * 420_000, if n % 2 == 0 { 10.0 } else { 20.0 }));
@@ -897,15 +899,16 @@ mod tests {
         collector.status.store(200, Ordering::SeqCst);
         assert_eq!(exporter.export_once(&store).await.unwrap().exported, 6);
         assert_eq!(store.otlp_export_cursor().unwrap(), 6);
-        let requests = collector.requests.lock().unwrap();
-        let logs = records(&requests.last().unwrap().1);
-        assert_eq!(logs.len(), 6);
-        assert!(logs.iter().all(|log| log["eventName"] == "condition.state"));
-        let fields = store.local_observations_after(0, 10).unwrap();
-        for (log, source) in logs.iter().zip(fields) {
-            assert_eq!(log["body"], any_value(&source.body["fields"]));
+        {
+            let requests = collector.requests.lock().unwrap();
+            let logs = records(&requests.last().unwrap().1);
+            assert_eq!(logs.len(), 6);
+            assert!(logs.iter().all(|log| log["eventName"] == "condition.state"));
+            let fields = store.local_observations_after(0, 10).unwrap();
+            for (log, source) in logs.iter().zip(fields) {
+                assert_eq!(log["body"], any_value(&source.body["fields"]));
+            }
         }
-        drop(requests);
         assert_eq!(exporter.export_once(&store).await.unwrap().exported, 0);
     }
 

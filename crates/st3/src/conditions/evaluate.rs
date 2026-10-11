@@ -132,10 +132,10 @@ impl Probe for HostProbe {
     fn database_bytes(&mut self) -> Option<f64> {
         // Physical size is sampled on the evaluator worker, once an hour when requested.
         // Read-only condition/status requests use the latest stored observation.
-        if let Some((at, value)) = self.database_sample {
-            if at.elapsed() < std::time::Duration::from_secs(3600) {
-                return value;
-            }
+        if let Some((at, value)) = self.database_sample
+            && at.elapsed() < std::time::Duration::from_secs(3600)
+        {
+            return value;
         }
         let value = probe::database_bytes(&self.database);
         self.database_sample = Some((std::time::Instant::now(), value));

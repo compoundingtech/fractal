@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "Ordinary restart; breaches resume silently, holds restart. Evaluation every 30 seconds; physical file+WAL size reads cached hourly; one disk worker with stale diagnostics. CPU/process/memory/cost/SLO adapters are a separate PR."
+    "detail": "Ordinary restart; breaches resume silently, holds restart. Evaluation every 30 seconds; physical file+WAL size reads cached hourly; one disk worker with stale diagnostics. CPU/process/memory/cost/SLO adapters are a separate PR. Equivalent cache control flow; OTLP retry tests release the collector lock before awaiting another export."
   },
   "manual": {
     "status": "changed",
