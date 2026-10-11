@@ -2,6 +2,10 @@
 use super::*;
 
 fn post_update(store: &Store) -> ClaimRecord {
+    post_update_because(store, "The requesting work ended.")
+}
+
+fn post_update_because(store: &Store, reason: &str) -> ClaimRecord {
     let update = store
         .connection
         .batched(|tx| {
@@ -10,7 +14,7 @@ fn post_update(store: &Store) -> ClaimRecord {
                 "daemon/runtime",
                 "person/avery",
                 "Ask ended",
-                "The requesting work ended.",
+                reason,
                 "same-ended-ask",
                 &json!({"version": 1, "type": "update", "about": "step-run/fixture/ask"}),
             )
@@ -269,4 +273,170 @@ fn person_definition_source_repairs_even_when_revision_history_is_already_canoni
     target.replay_replication_graph().unwrap();
     assert_eq!(definition_row(&target, &spec), expected);
     assert_eq!(revision_row(&target, &spec), history);
+}
+
+#[test]
+fn independent_person_updates_of_two_revisions_select_the_canonical_definition_however_they_arrive()
+{
+    // Each daemon words an ended ask's reason from its own view, so one update key can carry two
+    // revisions of the same internal mission.
+    let alder = Store::open_memory("alder").unwrap();
+    let birch = Store::open_memory("birch").unwrap();
+    let a = post_update_because(&alder, "The requester was stopped or retired.");
+    let b = post_update_because(&birch, "The run it belonged to ended.");
+    assert_eq!(a.subject, b.subject);
+    let (spec_a, spec_b) = (mission(&a), mission(&b));
+    assert_eq!(spec_a.id, spec_b.id);
+    assert_ne!(spec_a.revision, spec_b.revision);
+
+    // One claim per exchange, in both arrival orders. `receive` also asserts after each exchange
+    // that every projected table equals a full replay's.
+    let mut members = Vec::new();
+    for (first, second) in [(&alder, &birch), (&birch, &alder)] {
+        let target = Store::open_memory("cedar").unwrap();
+        target.project_replication_backlog().unwrap();
+        super::tests::receive(first, &target);
+        super::tests::receive(second, &target);
+        members.push(target);
+    }
+    // Both claims in one exchange, from a member that already holds them.
+    let dove = Store::open_memory("dove").unwrap();
+    dove.project_replication_backlog().unwrap();
+    super::tests::receive(&birch, &dove);
+    super::tests::receive(&alder, &dove);
+    let elm = Store::open_memory("elm").unwrap();
+    elm.project_replication_backlog().unwrap();
+    super::tests::receive(&dove, &elm);
+    members.push(elm);
+    members.push(dove);
+    // Each writer projected its own claim when it wrote it, then receives the other's. A writer
+    // has no healthy graph frontier until it first projects, so that initial replay is
+    // intentional and happens before it receives, as for every other target.
+    alder.project_replication_backlog().unwrap();
+    birch.project_replication_backlog().unwrap();
+    super::tests::receive(&birch, &alder);
+    super::tests::receive(&alder, &birch);
+
+    let (canonical, _) = ordered_claims(&alder, &a, &b);
+    let expected = (
+        mission(&canonical).revision,
+        "ready".to_owned(),
+        canonical.id.clone(),
+    );
+    let digest = projection_digest::tables(&alder.readers.get()).unwrap();
+    for member in members.iter().chain([&birch]) {
+        assert_eq!(definition_row(member, &spec_a), expected);
+        // Both revisions stay in history, each from its own claim.
+        assert_eq!(revision_row(member, &spec_a).2, a.id);
+        assert_eq!(revision_row(member, &spec_b).2, b.id);
+        assert_eq!(
+            projection_digest::tables(&member.readers.get()).unwrap(),
+            digest
+        );
+    }
+    assert_eq!(definition_row(&alder, &spec_a), expected);
+    alder.replay_replication_graph().unwrap();
+    assert_eq!(
+        projection_digest::tables(&alder.readers.get()).unwrap(),
+        digest
+    );
+}
+
+/// Publish `mission_id` on `store` with a revision below `below`: the order in which comparing
+/// (revision, claim id) alone would keep a runtime definition already projected.
+fn publish_below(store: &Store, mission_id: &str, below: &str) -> MissionSpec {
+    let (source, intent) = (0..)
+        .map(|attempt| {
+            let source = format!(
+                "version 2\nmission {mission_id:?} state=\"ready\" {{\n  goal \"Published under a \
+                 runtime update's id ({attempt}).\";\n  step \"update\" {{ agentless }}\n}}\n"
+            );
+            let intent = crate::graph::parse_intent(&source, "birch").unwrap();
+            (source, intent)
+        })
+        .find(|(_, intent)| intent.missions[mission_id].revision.as_str() < below)
+        .unwrap();
+    let planned = store
+        .mission(
+            &intent,
+            crate::model::IntentInput {
+                kdl: source,
+                source_name: None,
+            },
+        )
+        .unwrap();
+    store
+        .apply(&intent, &planned.subject_tokens, "same-id-publication")
+        .unwrap();
+    intent.missions[mission_id].clone()
+}
+
+#[test]
+fn a_published_definition_of_a_runtime_missions_id_stays_whichever_claim_arrives_first() {
+    // A synthetic guard fixture: runtime missions use hash-named ids such as person-update/…,
+    // which nothing reserves, so only a deliberately named publication can share one. Its
+    // definition must stay even when a runtime update of that id is canonically earlier.
+    let alder = Store::open_memory("alder").unwrap();
+    let birch = Store::open_memory("birch").unwrap();
+    let runtime = post_update(&alder);
+    let runtime_spec = mission(&runtime);
+    let published = publish_below(&birch, &runtime_spec.id, &runtime_spec.revision);
+    assert_ne!(published.revision, runtime_spec.revision);
+    let publication = definition_row(&birch, &published).2;
+
+    let mut members = Vec::new();
+    for (first, second) in [(&alder, &birch), (&birch, &alder)] {
+        let target = Store::open_memory("cedar").unwrap();
+        target.project_replication_backlog().unwrap();
+        // `receive` also asserts after each exchange that every projected table equals a full
+        // replay's.
+        super::tests::receive(first, &target);
+        super::tests::receive(second, &target);
+        members.push(target);
+    }
+    // A writer has no healthy graph frontier until it first projects, so that initial replay is
+    // intentional and happens before it receives, as for every other target.
+    alder.project_replication_backlog().unwrap();
+    birch.project_replication_backlog().unwrap();
+    super::tests::receive(&birch, &alder);
+    super::tests::receive(&alder, &birch);
+    {
+        let reader = alder.readers.get();
+        assert!(
+            canonical::claim_key(&reader, &runtime.id).unwrap()
+                < canonical::claim_key(&reader, &publication).unwrap(),
+            "the runtime update is canonically first"
+        );
+    }
+
+    let expected = (published.revision.clone(), "ready".to_owned(), publication);
+    let digest = projection_digest::tables(&alder.readers.get()).unwrap();
+    for member in members.iter().chain([&alder, &birch]) {
+        assert_eq!(definition_row(member, &published), expected);
+        // The definition's revision still finds its body, and the runtime revision keeps its
+        // history row from its own claim.
+        let body: String = member
+            .readers
+            .get()
+            .query_row(
+                "SELECT r.body FROM mission_definitions d JOIN mission_revisions r
+                 ON r.mission_id=d.mission_id AND r.revision=d.revision WHERE d.mission_id=?1",
+                [&published.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let body: MissionSpec = serde_json::from_str(&body).unwrap();
+        assert_eq!(body.revision, published.revision);
+        assert_eq!(revision_row(member, &runtime_spec).2, runtime.id);
+        assert_eq!(
+            projection_digest::tables(&member.readers.get()).unwrap(),
+            digest
+        );
+    }
+    alder.replay_replication_graph().unwrap();
+    assert_eq!(definition_row(&alder, &published), expected);
+    assert_eq!(
+        projection_digest::tables(&alder.readers.get()).unwrap(),
+        digest
+    );
 }
