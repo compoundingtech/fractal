@@ -831,7 +831,7 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
     })
 }
 
-/// The single-const discriminator shared by every branch, if all values are unique.
+/// The required single-const discriminator shared by every branch, if all values are unique.
 fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     let resolved: Vec<&Value> = branches
         .iter()
@@ -844,6 +844,12 @@ fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
     first
         .keys()
         .find(|key| {
+            if !resolved.iter().all(|branch| {
+                branch.get("required").and_then(Value::as_array)
+                    .is_some_and(|required| required.iter().any(|name| name.as_str() == Some(key.as_str())))
+            }) {
+                return false;
+            }
             let values: Option<Vec<&Value>> = resolved
                 .iter()
                 .map(|branch| branch.get("properties")?.get(key.as_str())?.get("const"))
@@ -1349,6 +1355,7 @@ mod tests {
         let rendered = models(&schema).unwrap();
         assert!(rendered.contains("Schema.Never"));
         assert!(rendered.contains("Schema.Union"));
+        assert!(!rendered.contains("Schema.toTaggedUnion(\"grant_kind\")"));
         assert_eq!(recursive_type(&Value::Bool(false), false).unwrap(), "never");
     }
 
