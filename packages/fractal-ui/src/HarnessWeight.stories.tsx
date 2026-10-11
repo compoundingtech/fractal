@@ -1,13 +1,15 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import { HarnessNotice } from './assistant-ui/composition/HarnessNotice'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
 import type { HarnessWeight } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { QuestionForm, QuestionSummary, NeedsYouBar, NeedsYouInbox } from './assistant-ui/QuestionForm'
+import { questionRequest } from './question-fixtures'
 
 /** q106 pairing: the production HarnessNotice at both weights over the same eight fictional events. */
 const variants: readonly { readonly weight: HarnessWeight; readonly name: string; readonly note: string }[] = [
@@ -21,6 +23,12 @@ export function HarnessWeightComparison({ scheme = 'dark' }: { readonly scheme?:
       <header {...stylex.props(styles.header)}><h2 {...stylex.props(styles.title)}>{variant.name}</h2><p {...stylex.props(styles.note)}>{variant.note}</p></header>
       <p {...stylex.props(styles.prose)}>The retry change is ready for review. I’m collecting the review and background check results.</p>
       <div {...stylex.props(styles.list)}>{harnessWeightExamples.map(item => <HarnessNotice key={item.id} item={item} weight={variant.weight} />)}</div>
+      <section aria-label="Questions specimens" {...stylex.props(styles.list)}>
+        <div data-component-name="QuestionForm" data-weight-class="card"><QuestionForm request={questionRequest} onOpenTerminal={fn()} /></div>
+        <div data-component-name="QuestionSummary" data-weight-class="row"><QuestionSummary request={{ ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: 'a moment ago' } }} /></div>
+        <div data-component-name="NeedsYouBar" data-weight-class="shell"><NeedsYouBar requests={[questionRequest]} expanded={false} onToggle={fn()} /></div>
+        <div data-component-name="NeedsYouInbox" data-weight-class="shell"><NeedsYouInbox requests={[questionRequest]} onShowInThread={fn()} onOpenTerminal={fn()} /></div>
+      </section>
     </section>)}
   </section>
 }
@@ -36,6 +44,9 @@ export const Dark: Story = {
       const column = within(canvas.getByTestId(`harness-weight-${weight}`))
       await expect(column.getAllByTestId('harness-notice')).toHaveLength(8)
       await expect(column.queryByText(/<system-notice>|<irc|<task-result|## Goal/)).toBeNull()
+      for (const [name, weightClass] of [['QuestionForm', 'card'], ['QuestionSummary', 'row'], ['NeedsYouBar', 'shell'], ['NeedsYouInbox', 'shell']] as const) {
+        await expect(canvas.getByTestId(`harness-weight-${weight}`).querySelector(`[data-component-name="${name}"]`)).toHaveAttribute('data-weight-class', weightClass)
+      }
     }
     const read = within(canvas.getByTestId('harness-weight-row')).getByRole('button', { name: 'Read summary' })
     await userEvent.click(read)
