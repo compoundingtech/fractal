@@ -128,7 +128,7 @@ class ViewportController {
     const saved = this.pendingAnchor
     if (element === null || saved === undefined) return false
     let row: HTMLElement | undefined
-    for (const candidate of element.querySelectorAll<HTMLElement>(keyedRowSelector)) if (candidate.dataset.testid !== 'transcript-turn' && rowKey(candidate) === saved.id) { row = candidate; break }
+    for (const candidate of element.querySelectorAll<HTMLElement>(keyedRowSelector)) if (candidate.dataset.testid !== 'transcript-turn' && rowKey(candidate) === saved.id && (saved.memberId === undefined || rowMembers(candidate).includes(saved.memberId))) { row = candidate; break }
     if (row === undefined && saved.memberId !== undefined) {
       for (const candidate of element.querySelectorAll<HTMLElement>('[data-scroll-anchor-members]')) {
         if (rowMembers(candidate).includes(saved.memberId)) { row = candidate; break }

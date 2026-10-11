@@ -695,3 +695,38 @@ test('a renamed summary keeps its member anchor through partial and complete unm
   await renderConversation(store, 'b', b)
   assert.deepEqual(store.get('a').anchor, { id: 'a/fallback', offset: 299 })
 })
+
+test('a reconciled summary follows its captured member when prompt backfill splits the old turn', async () => {
+  const store = new ViewportStore()
+  const summary = id => JSON.stringify(['work-summary', id])
+  const away = { height: 3000, rows: [{ id: 'away/reply', top: 2800 }] }
+  const initial = { height: 3000, rows: [{ id: summary('tool-b'), top: 925, kind: 'work summary', turnId: 'tool-b', turnTop: 900, members: ['tool-b'] }] }
+  const lane = await renderConversation(store, 'reading', initial, ['tool-b'], { _tag: 'Partial' })
+  await flush()
+  await act(async () => {
+    lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -900 }))
+    lane.scrollTop = 901
+    lane.dispatchEvent(new Event('scroll'))
+  })
+  await flush()
+  await renderConversation(store, 'away', away)
+  assert.deepEqual(store.get('reading').anchor, { id: summary('tool-b'), offset: 24, memberId: 'tool-b' })
+
+  const prepended = { height: 3000, rows: [{ id: summary('tool-a'), top: 1525, kind: 'work summary', turnId: 'tool-a', turnTop: 900, members: ['tool-a', 'tool-b'] }] }
+  await renderConversation(store, 'reading', prepended, ['tool-a', 'tool-b'], { _tag: 'Partial' })
+  await flush()
+  assert.equal(lane.scrollTop, 1501)
+  await renderConversation(store, 'away', away)
+  assert.deepEqual(store.get('reading').anchor, { id: summary('tool-a'), offset: 24, memberId: 'tool-b' })
+
+  const split = { height: 3000, rows: [
+    { id: summary('tool-a'), top: 925, kind: 'work summary', turnId: 'tool-a', turnTop: 900, members: ['tool-a'] },
+    { id: summary('prompt-p'), top: 1825, kind: 'work summary', turnId: 'prompt-p', turnTop: 1800, members: ['tool-b'] },
+  ] }
+  await renderConversation(store, 'reading', split, ['tool-a', 'prompt-p', 'tool-b'], { _tag: 'Complete', ids: ['tool-a', 'prompt-p', 'tool-b'] })
+  await flush()
+  assert.equal(lane.scrollTop, 1801)
+  assert.equal([...lane.querySelectorAll('[data-scroll-anchor-id]')].find(row => row.dataset.scrollAnchorId === summary('prompt-p')).getBoundingClientRect().top, 24)
+  await renderConversation(store, 'away', away)
+  assert.deepEqual(store.get('reading').anchor, { id: summary('prompt-p'), offset: 24, memberId: 'tool-b' })
+})
