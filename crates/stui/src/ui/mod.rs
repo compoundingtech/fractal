@@ -433,6 +433,8 @@ pub struct Ui {
     pub(crate) drafts_path: Option<std::path::PathBuf>,
     /// The drafts as last read from or written to that file.
     drafts_saved: HashMap<String, String>,
+    /// The conversations whose alert band the person expanded; every other one is a single line.
+    alerts_open: HashSet<String>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
     pub(crate) glasses: Option<glass::Glasses>,
@@ -692,6 +694,7 @@ impl Ui {
             snoozed: HashSet::new(),
             drafts_path: None,
             drafts_saved: HashMap::new(),
+            alerts_open: HashSet::new(),
             glasses: None,
             session_focus: None,
             build: false,
@@ -2599,8 +2602,9 @@ impl Ui {
         } else {
             composer.len() as u16 + 2 + strip
         };
-        // What waits on the person in this conversation sits above the box, never pushing the
-        // conversation below a few lines.
+        // What waits on the person in this conversation is one line above the box, a card only
+        // when asked for. The box keeps its place and its size either way: the band takes its
+        // rows from the conversation and never more than a third of the pane.
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
@@ -2609,7 +2613,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room);
+        band.truncate(room.min((area.height as usize / 3).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -2680,8 +2684,8 @@ impl Ui {
         }
         // A pane too short for the box shows as much of it as fits, and never draws below itself.
         let bottom = area.y + area.height;
-        if composer_height > 0 && body.y + body.height < bottom {
-            let y = body.y + body.height;
+        if composer_height > 0 && body.y + body.height + band_height < bottom {
+            let y = body.y + body.height + band_height;
             buf.set_stringn(
                 area.x,
                 y,
@@ -6010,6 +6014,7 @@ impl Ui {
             Hit::Answer(index) => self.answering = Some(index),
             Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
+            Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
             Hit::Voice => {
                 self.editing = true;
                 self.start_voice();

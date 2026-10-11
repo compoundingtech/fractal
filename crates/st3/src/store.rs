@@ -30583,7 +30583,20 @@ fn select_replicated_mission(
         .optional()
         .map_err(internal)?;
     let select = if let Some((current_revision, current_claim)) = current {
-        if claim_descends_from(transaction, &claim.id, &current_claim).map_err(internal)? {
+        // A runtime-created run's definition (person_work::project_minimal_run) yields to a
+        // publication of the same mission id, which that projection never replaces, so the
+        // publication wins whichever arrives first.
+        let runtime: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1
+                     AND kind IN ('work.person-asked','mission-run.created'))",
+                [&current_claim],
+                |row| row.get(0),
+            )
+            .map_err(internal)?;
+        if runtime
+            || claim_descends_from(transaction, &claim.id, &current_claim).map_err(internal)?
+        {
             true
         } else if claim_descends_from(transaction, &current_claim, &claim.id).map_err(internal)? {
             false
