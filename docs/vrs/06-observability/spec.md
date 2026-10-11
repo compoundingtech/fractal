@@ -443,6 +443,9 @@ It has a link only when its admission waited behind a holder with a valid existi
 A root started under roster admission ends when that admission is released.
 Its duration runs from cold-build start to release; `st.roster.admission.hold_ms`
 separately covers the full acquisition-to-release interval.
+Only the physical worker owning that admission may bind a rebuild to it. A concurrent
+internal reader without admission, including the startup diagnostic report, ends its
+own root at build completion and records no invented admission identity.
 Roster and page stage attributes on requests remain on the SERVER span, not children.
 
 `st.replication.projection` surrounds the post-receive projection attempt only when
@@ -528,8 +531,8 @@ because the waiter becomes the next holder. A holder without a span of its own t
 the context of a cold rebuild
 root it starts, so waiters can link to that root. Incremental refresher refolds have no
 existing span: they are attributed by class, admission id, wait duration, and holder age,
-not by a link. No root is added for those refolds. A cold root records the admission `id`
-and class, and retains any blocker link when it was itself a waiter.
+not by a link. No root is added for those refolds. An admitted cold root records its own
+admission `id` and class, and retains any blocker link when it was itself a waiter.
 The aggregate `roster/admission-wait` accounting is unchanged.
 Nonblocking try-admission uses the same holder registration and release contract, with
 zero `wait_ms` on success and no attributes on a miss. Collection readers retain their

@@ -4821,6 +4821,9 @@ async fn client_agents(
         let filtered = query.status.is_some();
         let result = blocking_roster(move || {
             let _admission = admission;
+            if let Some(admission) = &_admission {
+                admission.enter_worker();
+            }
             reader.store.clone().read_snapshot(|index| {
                 let snapshot = if query.cursor.is_some() {
                     snapshot
@@ -6124,6 +6127,7 @@ pub fn start_agent_roster(state: &AppState) {
             let submitted = crate::otel::export_enabled().then(Instant::now);
             let refreshed = tokio::task::spawn_blocking(move || roster_worker(true, submitted, warm_attributes, || {
                 let _admission = admission;
+                _admission.enter_worker();
                 // The first fold publishes only what windows and first pages show; the rest
                 // follows at once.
                 crate::performance::task("roster/refresh", || if first {
