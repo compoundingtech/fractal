@@ -85,3 +85,14 @@ created only on the first edit.
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored
 tab orders are intentionally retired. A fresh workspace names its host and points to
 Now → New → New terminal; New mission is available there too.
+
+Pull requests, repositories and other observed graph resources are available through the
+existing optional `resources.list` route. Resources refreshes three bounded 200-item windows
+when it opens or is pulled to refresh; there is no catalog polling or additional collection
+subscription. Truncation or an unsupported read is visible while the ordinary browser stays
+usable. Resource details show the observed kind and facts with an explicit Open link button,
+and resource tabs open from Spaces. The folder's + finder can also file an explicitly typed
+graph subject. Session and PTY IDs only navigate; placements require stable graph subjects.
+
+Opening a resource detail also reads its exact subject with the existing prefix filter,
+including subjects beyond the catalog windows.

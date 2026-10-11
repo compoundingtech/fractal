@@ -25,6 +25,7 @@ export type StackParams = {
   Launch: { id: string };
   NewMission: undefined;
   History: undefined;
+  Resource: { id: string; title?: string };
 };
 /** The four phone tabs. */
 export type TabParams = { [K in Tab]: NavigatorScreenParams<StackParams> | undefined };

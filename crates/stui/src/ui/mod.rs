@@ -35,6 +35,7 @@ pub mod pane;
 mod prefs;
 mod resource_sidebar;
 mod arrangement_keys;
+mod observed_resources;
 mod pty;
 pub mod screens;
 pub mod text;
@@ -2287,6 +2288,7 @@ impl Ui {
             Pane::Worktree(id) => {
                 screens::worktree_detail(&self.world, id.as_deref(), width, self.spinner())
             }
+            Pane::Resource(id) => observed_resources::detail(id, self.resource_sidebar.observations.iter().find(|row| &row.id == id), width),
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
         };
         self.pane(buf, &pane.key(), area, doc, false);

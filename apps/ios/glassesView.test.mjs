@@ -67,3 +67,5 @@ assert.deepEqual(glassGroups(glass('1', 'main', group()), lists), [{ index: 0, t
   assert.deepEqual(boxes, [[0, 0, 0.3, 1], [0.3, 0, 0.7, 0.5], [0.3, 0.5, 0.7, 0.5]]);
   assert.deepEqual(groupBoxes(group('a')), [{ x: 0, y: 0, width: 1, height: 1 }]);
 }
+
+assert.equal(paneTarget('resource:resource/github/acme/garden/issue/9', { agents: [], missions: [], attention: [], machines: [] }).kind, 'resource');

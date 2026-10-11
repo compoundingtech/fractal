@@ -1,6 +1,7 @@
 {
   "version": 1,
   "client_commands": [
+    {"command":"resources.list","tests":["crates/stui/src/ui/observed_resources.rs::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix","crates/stui/src/ui/glass.rs::sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing","crates/st3/src/api/client_v0.rs::resources_list_filters_latest_observations_and_fences_pages","crates/st3/src/api/client_v0.rs::resources_list_requires_projection_read_scope"],"behavior":"Existing optional bounded observation read; typed PR/repository/other catalog windows, canonical subjects, filing over Unix, missing rows retained, clicks only navigate, Enter only previews."},
     {"command":"observations.report","tests":["crates/st3/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/st3/src/api/client_observations.rs::observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance","crates/st3/src/api/client_observations.rs::observation_history_is_bounded_rotates_expires_and_survives_restart"],"behavior":"Paired-only local diagnostics; no graph mutation, snapshot fence, replicated ACK or durable receipt. Memory dedup/overlap survives identical retries only within bounded process retention; JSONL history persists independently."}
   ],
   "typed_actions": [

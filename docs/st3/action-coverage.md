@@ -370,3 +370,8 @@ unchanged graph index and reader/doctor population. Admission/history controls c
 atomic validation, overlap, filesystem failure, rotation, expiry and retained files across
 fresh process-memory admission state. This is local diagnostic acceptance, without a
 replicated acknowledgement or a full-day live-phone SLO claim.
+
+The sidebar's existing optional `resources.list` read is covered by
+`observed_resources::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix`
+(real Unix socket and arrangement filing), the daemon filter/fence and read-scope tests, and
+`sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing` (test backend navigation and explicit filing).
