@@ -167,6 +167,9 @@ pub struct SealedSet {
     /// `envelopes` with no claims, so a trimmed and an untrimmed node seal the same identities.
     pub envelope_tombstones: Vec<EnvelopeTombstone>,
     pub claim_tombstones: Vec<ClaimTombstone>,
+    /// Unit-test ownership probe; released only when the captured set is released.
+    #[cfg(test)]
+    pub(crate) capture_lifetime: std::sync::Arc<()>,
 }
 
 /// What a seal records of a sealed set: its digest, how many envelopes it holds, and the row it
@@ -550,6 +553,8 @@ fn status_history_diagnostics_bound_items_and_exclude_content() {
     let sealed = SealedSet {
         cut_unix_ms:DAY_MS, envelopes:Vec::new(), claims:Vec::new(), seal_rowid:7,
         envelope_tombstones:Vec::new(), claim_tombstones:Vec::new(),
+        #[cfg(test)]
+        capture_lifetime: std::sync::Arc::default(),
     };
     let plan = DropPlan {
         cut_unix_ms:DAY_MS, rules_digest:"rules".into(), sealed_envelopes:0, sealed_claims:0,
@@ -1101,6 +1106,8 @@ impl Store {
             seal_rowid,
             envelope_tombstones,
             claim_tombstones,
+            #[cfg(test)]
+            capture_lifetime: std::sync::Arc::default(),
         })
     }
 

@@ -279,12 +279,14 @@ impl Store {
                 };
                 let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
                 let mut plan = self.runtime.plan_checkpoint_drops(&sealed);
+                drop(sealed);
                 if !verified(&plan) {
                     // The set is read in pages, each its own snapshot, so a write between two
                     // pages (a repair changing a record's state) could tear one read. A torn read
                     // must not send the node to adopt a peer's manifest: read once more first.
                     let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
                     plan = self.runtime.plan_checkpoint_drops(&sealed);
+                    drop(sealed);
                 }
                 if verified(&plan) {
                     self.trim_checkpoint(
@@ -832,3 +834,6 @@ fn deletable_claim(id: String, operation_id: Option<String>) -> ClaimTombstone {
         accepted_at_unix_ms: 0,
     }
 }
+
+#[cfg(test)]
+mod capture_lifetime_tests;
