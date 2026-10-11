@@ -9,7 +9,7 @@ import { EmbraceDiffPreview, EmbraceMarkdownPreview } from './EmbraceToolPreview
 import { embraceToolKind as toolKind, embraceToolNeedsAttention, type EmbraceToolKind as ToolKind } from './embrace-tool-attention'
 export { embraceToolNeedsAttention } from './embrace-tool-attention'
 import { toolDiffs, toolHumanSummary, toolOutput, toolString } from './embrace-tool-preview'
-import { QuestionForm } from './QuestionForm'
+import { QuestionForm, type QuestionFormProps } from './QuestionForm'
 import { questionRequestFromTool, type ReadOnlyToolQuestion } from './tool-question'
 export type { ReadOnlyToolQuestion } from './tool-question'
 
@@ -34,7 +34,7 @@ const verbs: Record<ToolKind, readonly [string, string]> = {
 }
 
 /** assistant-ui Parts tools.Fallback compatible renderer; registrations share this implementation. */
-export const EmbraceToolCall = (props: ToolCallMessagePartProps & { readonly variant?: ToolVariant; readonly questionRequest?: ReadOnlyToolQuestion; readonly onOpenTerminal?: () => void; readonly composerTyping?: boolean }) => {
+export const EmbraceToolCall = (props: ToolCallMessagePartProps & { readonly variant?: ToolVariant; readonly questionRequest?: ReadOnlyToolQuestion; readonly onOpenTerminal?: () => void; readonly composerTyping?: boolean; readonly composerRouting?: QuestionFormProps['composerRouting'] }) => {
   const item = useAuiState((state) => {
     const candidate = state.message.metadata.custom.item as ConversationItem | undefined
     return candidate?._tag === 'ToolCall' && candidate.callId === props.toolCallId ? candidate : undefined
@@ -54,14 +54,15 @@ export const EmbraceToolCall = (props: ToolCallMessagePartProps & { readonly var
     questionRequest={props.questionRequest}
     onOpenTerminal={props.onOpenTerminal}
     composerTyping={props.composerTyping}
+    composerRouting={props.composerRouting}
   />
 }
 
 /** Also renders a source item outside a message scope, without manufacturing runtime callbacks. */
-export const EmbraceToolItem = ({ item, variant, questionRequest, onOpenTerminal, composerTyping }: { readonly item: EmbraceToolCallItem; readonly variant?: ToolVariant; readonly questionRequest?: ReadOnlyToolQuestion; readonly onOpenTerminal?: () => void; readonly composerTyping?: boolean }) => {
+export const EmbraceToolItem = ({ item, variant, questionRequest, onOpenTerminal, composerTyping, composerRouting }: { readonly item: EmbraceToolCallItem; readonly variant?: ToolVariant; readonly questionRequest?: ReadOnlyToolQuestion; readonly onOpenTerminal?: () => void; readonly composerTyping?: boolean; readonly composerRouting?: QuestionFormProps['composerRouting'] }) => {
   const inheritedVariant = React.useContext(EmbraceToolVariantContext)
   return <ToolPresentation name={item.name} input={item.input} output={item.result?.content}
-    mediaType={item.result?.mediaType} status={item.status} variant={variant ?? inheritedVariant} callSeen={item.callSeen} questionRequest={questionRequest} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} id={item.callId} at={item.result?.at ?? item.at} agentLabel={item.sender?.label} />
+    mediaType={item.result?.mediaType} status={item.status} variant={variant ?? inheritedVariant} callSeen={item.callSeen} questionRequest={questionRequest} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} composerRouting={composerRouting} id={item.callId} at={item.result?.at ?? item.at} agentLabel={item.sender?.label} />
 }
 
 export type EmbraceToolRunProps = {
@@ -114,7 +115,7 @@ export const EmbraceToolRun = ({ items, renderItem, variant, forceExpanded = fal
   )
 }
 
-const ToolPresentation = ({ name, input, output, mediaType, status, variant, callSeen, questionRequest, onOpenTerminal, composerTyping, id, at, agentLabel }: {
+const ToolPresentation = ({ name, input, output, mediaType, status, variant, callSeen, questionRequest, onOpenTerminal, composerTyping, composerRouting, id, at, agentLabel }: {
   readonly name: string
   readonly input: unknown
   readonly output: unknown
@@ -125,13 +126,14 @@ const ToolPresentation = ({ name, input, output, mediaType, status, variant, cal
   readonly questionRequest?: ReadOnlyToolQuestion
   readonly onOpenTerminal?: () => void
   readonly composerTyping?: boolean
+  readonly composerRouting?: QuestionFormProps['composerRouting']
   readonly id: string
   readonly at?: string
   readonly agentLabel?: string
 }) => {
   const kind = toolKind(name)
   const request = questionRequest ?? questionRequestFromTool({ name, id, input, output, status, at, agentLabel })
-  if (request !== undefined) return <QuestionForm request={request} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} />
+  if (request !== undefined) return <QuestionForm request={request} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} composerRouting={composerRouting} />
   const target = toolString(input, ['path', 'file_path', 'pattern', 'query', 'question', 'url', 'description'])
     || (kind === 'run' ? toolString(input, ['command', 'cmd']).trim().split(/\s+/).slice(0, 2).join(' ') : '')
   const label = `${verbs[kind][status === 'running' ? 1 : 0]} ${target || name}`

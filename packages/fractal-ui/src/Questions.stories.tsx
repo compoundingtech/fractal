@@ -2,8 +2,10 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
-import { useArgs } from 'storybook/preview-api'
 import { QuestionForm, QuestionSummary, NeedsYouBar, NeedsYouInbox } from './assistant-ui/QuestionForm'
+import type { Answers, QuestionFormProps } from './assistant-ui/QuestionForm'
+import { Composer } from './assistant-ui/composition/Composer'
+import { EmbraceRuntimeProvider, type ConversationRuntimeOptions } from './assistant-ui/EmbraceRuntime'
 import { EmbraceToolItem } from './assistant-ui/EmbraceToolCall'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
@@ -11,14 +13,47 @@ import { darkTheme } from './assistant-ui/embrace-theme'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
 import { questionKinds, questionRequest, questionStates } from './question-fixtures'
 
+function ComposerRoutingExample({ routing }: { readonly routing: NonNullable<QuestionFormProps['composerRouting']> }) {
+  const [sent, setSent] = React.useState<readonly string[]>([])
+  const options = React.useMemo<ConversationRuntimeOptions>(() => ({ messages: [], onNew: async message => setSent(previous => [...previous, message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')]) }), [])
+  return <EmbraceRuntimeProvider options={options}>
+    <QuestionForm request={questionRequest} composerTyping composerRouting={routing} onOpenTerminal={fn()} />
+    <Composer agent={questionRequest.agentLabel} draftKey={`question-routing.${routing._tag}`} onSend={text => setSent(previous => [...previous, text])} />
+    <output aria-label="Composer fixture submissions">{sent.join('\n')}</output>
+  </EmbraceRuntimeProvider>
+}
+
+function SharedQuestionDraft({ scrollDriven = false }: { readonly scrollDriven?: boolean }) {
+  const [drafts, setDrafts] = React.useState<Readonly<Record<string, Answers>>>({})
+  const [expanded, setExpanded] = React.useState(true)
+  const [ratio, setRatio] = React.useState(0)
+  const scroll = React.useRef<HTMLDivElement>(null)
+  const observe = React.useCallback((node: HTMLDivElement | null) => {
+    if (node === null || !scrollDriven) return
+    const observer = new IntersectionObserver(entries => setRatio(entries[0]?.intersectionRatio ?? 0), { root: scroll.current, threshold: [0, 0.6, 1] })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [scrollDriven])
+  const request = { ...questionRequest, answerable: true }
+  const shared = { draft: drafts[request.id], onDraftChange: (draft: Answers) => setDrafts(previous => ({ ...previous, [request.id]: draft })) }
+  return <>
+    <div ref={scroll} data-question-scroll {...stylex.props(styles.scroll)}>
+      <div ref={observe}><QuestionForm request={request} {...shared} /></div>
+      {scrollDriven ? <div {...stylex.props(styles.scrollSpace)}>Earlier conversation</div> : null}
+    </div>
+    <NeedsYouBar requests={[request]} expanded={expanded} onToggle={() => setExpanded(value => !value)} transcriptVisibility={scrollDriven ? ratio : 0}><QuestionForm request={request} variant="pinned" {...shared} /></NeedsYouBar>
+    {!scrollDriven ? <NeedsYouInbox requests={[request]} onShowInThread={fn()} onOpenTerminal={fn()} formProps={() => shared} /> : null}
+  </>
+}
+
 const meta = {
   title: 'Fractal UI/Questions',
   component: QuestionForm,
   parameters: { layout: 'fullscreen' },
   args: { request: questionRequest, onOpenTerminal: fn(), onDecline: fn(), onSubmit: fn(), onDraftChange: fn(), composerTyping: true },
   render: function ControlledQuestion(args) {
-    const [, updateArgs] = useArgs()
-    return <QuestionForm {...args} onDraftChange={draft => { args.onDraftChange?.(draft); updateArgs({ draft }) }} />
+    const [draft, setDraft] = React.useState(args.draft)
+    return <QuestionForm {...args} draft={draft} onDraftChange={next => { setDraft(next); args.onDraftChange?.(next) }} />
   },
   decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' ? lightTheme : darkTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>],
 } satisfies Meta<typeof QuestionForm>
@@ -177,4 +212,41 @@ export const SettledWithoutAnswerFacts: Story = {
 export const SettledWithoutAnswerFactsLight440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 440 } }
 export const SettledWithoutAnswerFactsDark1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'dark', width: 1440 } }
 export const SettledWithoutAnswerFactsLight1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 1440 } }
-const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })
+export const ComposerRouting: Story = { render: () => <><ComposerRoutingExample routing={{ _tag: 'HeldUntilAnswered' }} /><ComposerRoutingExample routing={{ _tag: 'ChatAboutQuestion' }} /></>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByText('delivered after the question is answered')).toBeVisible()
+  await expect(canvas.getByText('Your message goes to the agent as a note about this question')).toBeVisible()
+  const composers = canvas.getAllByRole('textbox').filter(element => element.closest('form') !== null)
+  await expect(composers).toHaveLength(2)
+  await userEvent.type(composers[0]!, 'Please clarify the scope')
+  await expect(composers[0]).toHaveValue('Please clarify the scope')
+  await expect(composers[1]).not.toHaveValue('Please clarify the scope')
+} }
+export const SharedDraft: Story = { render: () => <SharedQuestionDraft />, play: async ({ canvasElement }) => {
+  const cards = canvasElement.querySelectorAll('[data-question-variant]')
+  await userEvent.click(within(cards[0] as HTMLElement).getByRole('radio', { name: /Team inbox/ }))
+  await expect(within(cards[1] as HTMLElement).getByRole('radio', { name: /Team inbox/ })).toBeChecked()
+  await expect(within(cards[1] as HTMLElement).getByRole('radio', { name: /This thread/ })).not.toBeChecked()
+  const inbox = within(canvasElement).getByRole('region', { name: 'Needs you inbox' })
+  await userEvent.click(inbox.querySelector('summary')!)
+  await expect(within(inbox).getByRole('radio', { name: /Team inbox/ })).toBeChecked()
+} }
+export const ScrollAttention: Story = { render: () => <SharedQuestionDraft scrollDriven />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const scroll = canvasElement.querySelector<HTMLElement>('[data-question-scroll]')!
+  await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Needs you' })).toBeNull())
+  scroll.scrollTo({ top: scroll.scrollHeight })
+  await waitFor(() => expect(canvas.getByRole('complementary', { name: 'Needs you' })).toBeVisible())
+  scroll.scrollTo({ top: 0 })
+  await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Needs you' })).toBeNull())
+} }
+export const ComposerRoutingLight440: Story = { ...ComposerRouting, parameters: { scheme: 'light', width: 440 } }
+export const ComposerRoutingDark1440: Story = { ...ComposerRouting, parameters: { scheme: 'dark', width: 1440 } }
+export const ComposerRoutingLight1440: Story = { ...ComposerRouting, parameters: { scheme: 'light', width: 1440 } }
+export const SharedDraftLight440: Story = { ...SharedDraft, parameters: { scheme: 'light', width: 440 } }
+export const SharedDraftDark1440: Story = { ...SharedDraft, parameters: { scheme: 'dark', width: 1440 } }
+export const SharedDraftLight1440: Story = { ...SharedDraft, parameters: { scheme: 'light', width: 1440 } }
+export const ScrollAttentionLight440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 440 } }
+export const ScrollAttentionDark1440: Story = { ...ScrollAttention, parameters: { scheme: 'dark', width: 1440 } }
+export const ScrollAttentionLight1440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 1440 } }
+const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' }, scroll: { maxHeight: 1000, overflowY: 'auto', maxWidth: 720 }, scrollSpace: { height: 1600 } })

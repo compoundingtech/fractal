@@ -26,6 +26,8 @@ export interface QuestionFormProps {
   readonly onOpenTerminal?: () => void
   readonly onJump?: () => void
   readonly composerTyping?: boolean
+  readonly composerRouting?: { readonly _tag: 'HeldUntilAnswered' } | { readonly _tag: 'ChatAboutQuestion' }
+  readonly ageLabel?: string
   readonly onAttach?: (questionId: string, files: readonly File[]) => void
   readonly autoFocus?: boolean
 }
@@ -100,9 +102,9 @@ export const QuestionForm = (props: QuestionFormProps) => {
   if (!pending(request)) return <QuestionSummary request={request} />
   const initialChoice = question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.id ?? question?.options.find(option => option.recommended)?.id ?? question?.options[0]?.id
   const choices = question === undefined ? [] : [...question.options, ...(question.allowOther ? [{ id: OTHER, label: 'Other…' }] : [])]
-  return <section {...stylex.props(styles.card)} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
-    <header {...stylex.props(styles.header)}><strong>{title(request)}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span></header>
-    <div {...stylex.props(styles.meta)}>{[request.agentLabel, request.source, request.askedAt].filter(Boolean).join(' · ')}</div>
+  return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
+    <header {...stylex.props(styles.header)}><span aria-hidden="true">{request.questions[0]?.kind === 'permission' ? '◇' : request.questions[0]?.kind === 'plan' ? '≡' : '?'}</span><strong>{request.agentLabel}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span></header>
+    <div {...stylex.props(styles.meta)}>{[request.source, props.ageLabel].filter(Boolean).join(' · ')}</div>
     {props.onJump !== undefined ? <Button {...stylex.props(styles.button)} onPress={props.onJump}>Show in thread</Button> : null}
     <div ref={root} onKeyDownCapture={keys} {...stylex.props(styles.body)}>
       {request.questions.length > 1 ? <nav aria-label="Questions" {...stylex.props(styles.header)}>{request.questions.map((q, index) => <Button key={q.id} {...stylex.props(styles.button)} aria-current={step === index ? 'step' : undefined} onPress={() => go(index)}>{q.header ?? `Q${index + 1}`}</Button>)}<Button {...stylex.props(styles.button)} onPress={() => go(request.questions.length)} aria-current={review ? 'step' : undefined}>Review</Button></nav> : null}
@@ -124,15 +126,15 @@ export const QuestionForm = (props: QuestionFormProps) => {
         </RadioGroup>}
         {focusedPreview !== undefined ? <QuestionPreview preview={focusedPreview} /> : null}
         {question.allowOther && draft[question.id]?.selected.includes(OTHER) ? <TextField value={draft[question.id]?.other ?? ''} onChange={other => update(question, { other })} isDisabled={disabled}><Label>Your answer</Label><TextArea ref={otherRef} {...stylex.props(styles.field)} /></TextField> : null}
-        {question.allowNote ? <><Button {...stylex.props(styles.button)} onPress={() => { setNotesOpen({ ...notesOpen, [question.id]: !notesOpen[question.id] }); requestAnimationFrame(() => noteRef.current?.focus()) }}>Note</Button>{notesOpen[question.id] || draft[question.id]?.note !== undefined ? <TextField value={draft[question.id]?.note ?? ''} onChange={note => update(question, { note })} isDisabled={disabled}><Label>Note to the agent</Label><TextArea ref={noteRef} {...stylex.props(styles.field)} /></TextField> : null}</> : null}
+        {question.allowNote ? <><Button {...stylex.props(styles.button, styles.note)} onPress={() => { setNotesOpen({ ...notesOpen, [question.id]: !notesOpen[question.id] }); requestAnimationFrame(() => noteRef.current?.focus()) }}>Note</Button>{notesOpen[question.id] || draft[question.id]?.note !== undefined ? <TextField value={draft[question.id]?.note ?? ''} onChange={note => update(question, { note })} isDisabled={disabled}><Label>Note to the agent</Label><TextArea ref={noteRef} {...stylex.props(styles.field)} /></TextField> : null}</> : null}
         {question.allowAttachments && props.onAttach !== undefined ? <FileTrigger acceptedFileTypes={['image/*']} allowsMultiple onSelect={files => { if (files !== null) props.onAttach?.(question.id, Array.from(files)) }}><Button {...stylex.props(styles.button)} isDisabled={disabled}>Attach image</Button></FileTrigger> : null}
         {draft[question.id]?.attachments?.map(attachment => <span key={attachment} {...stylex.props(styles.chip)}>{attachment}</span>)}
       </> : null}
     </div>
     {request.state._tag === 'failed' ? <p role="alert">Couldn't deliver the answer: {request.state.error}. Your answers are kept. <Button {...stylex.props(styles.button)} onPress={props.onRetry}>Retry</Button></p> : null}
     {request.state._tag === 'pending' && request.state.expiresAt !== undefined ? <p {...stylex.props(styles.meta)}>Answer deadline · {request.state.expiresAt}</p> : null}
-    {props.composerTyping ? <p {...stylex.props(styles.meta)}>delivered after the question is answered</p> : null}
-    {!request.answerable ? <footer>{request.readOnlyReason ?? 'Answer this question in the terminal.'}<Button {...stylex.props(styles.button)} isDisabled={props.onOpenTerminal === undefined} onPress={props.onOpenTerminal}>Open terminal</Button></footer> : <footer {...stylex.props(styles.header)}>
+    {props.composerTyping ? <p {...stylex.props(styles.meta)}>{props.composerRouting?._tag === 'ChatAboutQuestion' ? 'Your message goes to the agent as a note about this question' : 'delivered after the question is answered'}</p> : null}
+    {!request.answerable ? <footer {...stylex.props(styles.header)}>{request.readOnlyReason ?? 'Answer this question in the terminal.'}<Button {...stylex.props(styles.button)} isDisabled={props.onOpenTerminal === undefined} onPress={props.onOpenTerminal}>Open terminal</Button></footer> : <footer {...stylex.props(styles.header)}>
       <span {...stylex.props(styles.meta)}>1–9 pick · ↑↓ move · Space toggle · Enter next · ⌘/Ctrl Enter submit · Esc keeps your draft</span>
       {props.onDecline !== undefined ? <Button {...stylex.props(styles.button)} isDisabled={disabled} onPress={props.onDecline}>Skip · ends the turn</Button> : null}
       {request.allowChatRedirect ? <Button {...stylex.props(styles.button)} isDisabled={disabled} onPress={props.onChat}>Chat about this</Button> : null}
@@ -170,18 +172,21 @@ export const NeedsYouBar = ({ requests, expanded, onToggle, transcriptVisibility
   if (first === undefined || transcriptVisibility >= 0.6) return null
   return <aside {...stylex.props(styles.card)} aria-label="Needs you"><Button {...stylex.props(styles.button)} aria-expanded={expanded} onPress={onToggle}>◌ {first.agentLabel} is waiting on you · {first.questions[0]?.prompt}{waiting.length > 1 ? ` · +${waiting.length - 1}` : ''} · {expanded ? 'Hide' : 'Answer'}</Button>{expanded ? children : null}</aside>
 }
-export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <QuestionForm key={request.id} {...formProps?.(request.id)} request={request} variant="inbox" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} />)}</section>
+export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <details key={request.id} {...stylex.props(styles.card)}><summary {...stylex.props(styles.inboxSummary)}>{request.agentLabel} · {request.questions[0]?.prompt}</summary><QuestionForm {...formProps?.(request.id)} request={request} variant="pinned" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} /></details>)}</section>
 
 const styles = stylex.create({
-  card: { padding: 14, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 8, backgroundColor: tokens.panel, color: tokens.ink, minWidth: 0, overflowWrap: 'anywhere' },
+  card: { padding: 12, maxWidth: 720, width: '100%', boxSizing: 'border-box', borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 8, backgroundColor: tokens.panel, color: tokens.ink, minWidth: 0, overflowWrap: 'anywhere' },
+  pinned: { padding: 0, borderWidth: 0, backgroundColor: 'transparent' },
+  note: { alignSelf: 'flex-start', borderWidth: 0, backgroundColor: 'transparent', paddingInline: 0 },
+  inboxSummary: { cursor: 'pointer', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' },
   summary: { paddingBlock: 8, color: tokens.ink, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: tokens.line },
   body: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 },
   header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   meta: { color: tokens.muted, fontSize: 12 },
-  chip: { color: tokens.muted, fontSize: 11, paddingInline: 5 },
+  chip: { color: tokens.muted, fontSize: 11, paddingInline: 5, paddingBlock: 2, backgroundColor: tokens.recess, borderRadius: 4 },
   button: { paddingBlock: 6, paddingInline: 9, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 5, backgroundColor: tokens.recess, color: tokens.ink, cursor: 'pointer', outlineColor: accentTokens.accent, outlineOffset: 2 },
   danger: { color: tokens.danger },
-  option: { padding: 8, borderRadius: 4, outlineColor: accentTokens.accent, outlineOffset: 2, cursor: 'pointer' },
+  option: { padding: 5, borderRadius: 4, outlineColor: accentTokens.accent, outlineOffset: 2, cursor: 'pointer' },
   selected: { backgroundColor: tokens.recess }, focus: { outlineWidth: 2, outlineStyle: 'solid', outlineColor: accentTokens.accent },
   field: { width: '100%', boxSizing: 'border-box', padding: 8, backgroundColor: tokens.recess, color: tokens.ink, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 4 },
   preview: { margin: 0, padding: 10, backgroundColor: tokens.recess, borderRadius: 4 },
