@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Operations reviews/deploys after disk-first is deployed and independently approved. No builder merge or deployment. First-user physical daily growth requires the shared hourly sampler and Operations baseline; existing ops missions stay until real breach/recovery and Operations agreement. Production CPU/SQL evidence remains required and unmeasured; missing native readings and bounded process enumeration remain visible limits."
+    "detail": "Operations reviews/deploys after disk-first is deployed and independently approved. No builder merge or deployment. First-user physical daily growth requires the shared hourly sampler and Operations baseline; existing ops missions stay until real breach/recovery and Operations agreement. Production CPU/SQL evidence remains required and unmeasured; missing native readings and bounded process enumeration remain visible limits. Attribution cache authority and two-day retention are documented separately from the three disk tables."
   },
   "recovery": {
     "status": "changed",
