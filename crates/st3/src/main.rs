@@ -6158,7 +6158,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1}),
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,
+                    "harness_access_auto": u8::from(config.active_access_mode() == st_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -6235,7 +6236,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup.phase("start-services");
@@ -29883,8 +29884,7 @@ mod tests {
             "--channels plugin:st-channel@st",
             "--model claude-opus-5-5",
             "--effort high",
-            "--dangerously-skip-permissions",
-            CLAUDE_SEAT_SETTINGS,
+
         ] {
             assert!(
                 joined.contains(expected),
@@ -29939,7 +29939,6 @@ mod tests {
         for expected in [
             "--model gpt-example",
             "-c model_reasoning_effort=medium",
-            "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
         ] {
             assert!(
                 joined.contains(expected),

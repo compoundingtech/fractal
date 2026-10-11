@@ -18,6 +18,7 @@
 mod ci_test_paths;
 
 pub mod account;
+pub mod access;
 pub mod catalog;
 pub mod catalog_archive;
 pub mod catalog_lock;

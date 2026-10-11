@@ -1043,6 +1043,11 @@ impl Reconciler<NativeRuntime> {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    pub fn with_access_mode(mut self, mode: st_drivers::access::AccessMode) -> Self {
+        self.runtime_environment.insert(st_drivers::access::MODE_ENV.into(), mode.as_str().into());
+        self
+    }
+
     pub fn new(store: Arc<Store>, runtime: Arc<R>, host: String, notify: Arc<Notify>) -> Self {
         Self {
             store,
@@ -3731,6 +3736,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(key.clone()),
             })?;
+            self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(), kind: "harness.diagnostic".into(),
+                actor: Some(subject.subject.clone()),
+                fields: BTreeMap::from([
+                    ("code".into(), Value::String("provider-update-available".into())),
+                    ("status".into(), Value::String("available".into())),
+                    ("driver".into(), Value::String(driver.into())),
+                    ("reason".into(), Value::String(current.text.clone())),
+                    ("incarnation_id".into(), Value::String(incarnation.into())),
+                ]),
+                evidence: vec![prompt.id.clone()], expected_subject: None,
+                idempotency_key: Some(format!("{key}:available")),
+            })?;
             // The retained prompt claim is the once-per-episode action fence.
             // Re-read the terminal rather than acting on the cached member screen.
             if fence.is_none()
@@ -5606,6 +5624,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let mut launch_member = member.clone();
         for (key, value) in &self.runtime_environment {
+            if key == st_drivers::access::MODE_ENV {
+                launch_member.environment.insert(key.clone(), value.clone());
+                continue;
+            }
             launch_member
                 .environment
                 .entry(key.clone())
@@ -34766,7 +34788,12 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             let claims = store
                 .claims_for(&subject.subject, Some("harness.diagnostic"))
                 .unwrap();
-            assert_eq!(claims.len(), 1);
+            assert_eq!(claims.len(), 2);
+            assert_eq!(claims[1].body["fields"]["code"], "provider-update-available");
+            assert_eq!(claims[1].body["fields"]["status"], "available");
+            assert!(claims[1].body["fields"].get("severity").is_none());
+            assert_eq!(claims[1].body["fields"]["reason"], claims[0].body["fields"]["reason"]);
+            assert_eq!(claims[1].body["evidence"][0], claims[0].id);
             assert_eq!(claims[0].body["fields"]["code"], "provider-update-prompt");
             assert_eq!(claims[0].body["fields"]["status"], "blocked");
             assert_eq!(
@@ -34801,7 +34828,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                     .claims_for(&subject.subject, Some("harness.diagnostic"))
                     .unwrap()
                     .len(),
-                1
+                2
             );
 
             // A cleared screen settles immediately; a menu surviving the due
@@ -34826,8 +34853,9 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             let claims = store
                 .claims_for(&subject.subject, Some("harness.diagnostic"))
                 .unwrap();
-            assert_eq!(claims[1].body["fields"]["code"], "provider-update-restored");
-            assert_eq!(claims[1].body["evidence"][0], claims[0].id);
+            assert_eq!(claims[2].body["fields"]["code"], "provider-update-restored");
+            assert_eq!(claims[2].body["evidence"][0], claims[0].id);
+            assert_eq!(claims[1].body["fields"]["status"], "available");
             *runtime.ptys.lock().unwrap() = vec![observation.clone()];
             runtime
                 .screens
@@ -34980,7 +35008,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                     .claims_for("agent/node.seat", Some("harness.diagnostic"))
                     .unwrap()
                     .len(),
-                1
+                if code == "provider-update-prompt" { 2 } else { 1 }
             );
             assert!(runtime.keys.lock().unwrap().is_empty());
 

@@ -2767,6 +2767,11 @@ pub fn run_controlled_paths(
         !codex_argv.is_empty(),
         "Codex controlled launch argv is empty"
     );
+    let mode = crate::access::AccessMode::from_environment()?;
+    let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
+    let endpoint = std::env::var("ST3_ENDPOINT").context("managed Codex needs ST3_ENDPOINT")?;
+    let socket = endpoint.strip_prefix("unix://").unwrap_or(&endpoint);
+    let codex_argv = managed_codex_argv(mode, Path::new(socket), &workspace, codex_argv)?;
     // Install before any protocol preflight child exists, exactly as the catalog entry point does.
     crate::provider_session::install_signal_handler();
     let producer_version = ensure_supported_protocol(&codex_argv[0])?;
@@ -2837,6 +2842,32 @@ pub fn run_controlled_paths(
             Err(error)
         }
     }
+}
+
+/// Defaults apply only at the st3 launch entry point, before fresh/resume policy projection.
+fn managed_codex_argv(mode: crate::access::AccessMode, socket: &Path, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
+    let boundary = interactive_root_prefix_end(&argv[1..])?;
+    let authored = &argv[1..1 + boundary];
+    let mut explicit_permissions = false;
+    let mut index = 0;
+    while index < authored.len() {
+        let arg = authored[index].as_str();
+        let config = if matches!(arg, "-c" | "--config") {
+            authored.get(index + 1).map(String::as_str)
+        } else { arg.strip_prefix("--config=").or_else(|| arg.strip_prefix("-c")) };
+        if matches!(arg, "--dangerously-bypass-approvals-and-sandbox" | "--approve-for-me" | "-s" | "--sandbox" | "-a" | "--ask-for-approval" | "-p" | "--profile")
+            || arg.starts_with("--sandbox=") || arg.starts_with("--ask-for-approval=") || arg.starts_with("--profile=")
+            || ["-s", "-a", "-p"].iter().any(|prefix| arg.starts_with(prefix) && arg.len() > prefix.len())
+            || config.is_some_and(|value| value.split_once('=').is_some_and(|(key, _)| matches!(key.trim(), "sandbox_mode" | "sandbox_workspace_write" | "default_permissions" | "approval_policy" | "approvals_reviewer")))
+        { explicit_permissions = true; }
+        index += if matches!(arg, "-c" | "--config" | "--enable" | "--disable" | "--remote-auth-token-env" | "-m" | "--model" | "--local-provider" | "-p" | "--profile" | "-s" | "--sandbox" | "-C" | "--cd" | "--add-dir" | "-a" | "--ask-for-approval") { 2 } else { 1 };
+    }
+    let mut defaults = crate::access::codex_defaults(mode, socket, workspace, explicit_permissions)?;
+    if authored_bypasses_hook_trust(authored)? {
+        defaults.retain(|arg| arg != "--dangerously-bypass-hook-trust");
+    }
+    argv.splice(1..1, defaults);
+    Ok(argv)
 }
 
 /// Resume a Codex session a predecessor driver image launched through [`run_controlled_paths`]
@@ -3647,6 +3678,7 @@ struct ResumePermissionOverrides {
     sandbox: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    permissions: Option<String>,
 }
 
 impl ResumePermissionOverrides {
@@ -3657,6 +3689,7 @@ impl ResumePermissionOverrides {
             sandbox: None,
             model: None,
             effort: None,
+            permissions: None,
         }
     }
 
@@ -3666,6 +3699,7 @@ impl ResumePermissionOverrides {
             ("approval_policy", self.approval_policy.as_deref()),
             ("approvals_reviewer", self.approvals_reviewer.as_deref()),
             ("sandbox_mode", self.sandbox.as_deref()),
+            ("default_permissions", self.permissions.as_deref()),
             ("model", self.model.as_deref()),
             ("model_reasoning_effort", self.effort.as_deref()),
         ] {
@@ -3686,6 +3720,9 @@ impl ResumePermissionOverrides {
         if let Some(sandbox) = &self.sandbox {
             params.insert("sandbox".into(), Value::String(sandbox.clone()));
         }
+        if let Some(profile) = &self.permissions {
+            params.insert("permissions".into(), Value::String(profile.clone()));
+        }
         if let Some(model) = &self.model {
             params.insert("model".into(), Value::String(model.clone()));
         }
@@ -3699,6 +3736,7 @@ impl ResumePermissionOverrides {
             "approvalPolicy": self.approval_policy,
             "approvalsReviewer": self.approvals_reviewer,
             "sandbox": self.sandbox,
+            "permissions": self.permissions,
             "model": self.model,
             "effort": self.effort,
             "requestedPolicyApplied": requested_policy_applied,
@@ -3763,6 +3801,7 @@ fn automatic_resume_permission_overrides(
         sandbox: None,
         model: None,
         effort: None,
+        permissions: None,
     };
     let mut direct = ResumePermissionOverrides {
         approval_policy: None,
@@ -3770,6 +3809,7 @@ fn automatic_resume_permission_overrides(
         sandbox: None,
         model: None,
         effort: None,
+        permissions: None,
     };
     let mut index = 0;
     while index < insertion {
@@ -3899,6 +3939,7 @@ fn automatic_resume_permission_overrides(
     Ok((overrides.approval_policy.is_some()
         || overrides.approvals_reviewer.is_some()
         || overrides.sandbox.is_some()
+        || overrides.permissions.is_some()
         || overrides.model.is_some()
         || overrides.effort.is_some())
     .then_some(overrides))
@@ -3925,6 +3966,7 @@ fn apply_resume_config_override(
             overrides.effort = Some(value.into());
         }
         "model" => overrides.model = Some(value.into()),
+        "default_permissions" => overrides.permissions = Some(value.into()),
         "sandbox_mode" => {
             validate_resume_sandbox(value)?;
             overrides.sandbox = Some(value.into());
@@ -4973,6 +5015,9 @@ fn resume_permission_overrides_applied(
                 .pointer("/result/sandbox/type")
                 .and_then(Value::as_str)
                 == Some(sandbox)
+        })
+        && expected.permissions.as_deref().is_none_or(|profile| {
+            message.pointer("/result/activePermissionProfile/id").and_then(Value::as_str) == Some(profile)
         })
         && expected.model.as_deref().is_none_or(|model| {
             message.pointer("/result/model").and_then(Value::as_str) == Some(model)

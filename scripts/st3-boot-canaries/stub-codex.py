@@ -226,6 +226,8 @@ class AppServer:
                         "workspace-write": "workspaceWrite",
                         "danger-full-access": "dangerFullAccess",
                     }[params["sandbox"]]}
+                if "permissions" in params:
+                    result["activePermissionProfile"] = {"id": params["permissions"]}
                 effort = params.get("config", {}).get("model_reasoning_effort")
                 if effort is not None:
                     result["reasoningEffort"] = effort

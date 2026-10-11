@@ -1179,21 +1179,6 @@ fn parse_planning_session_declaration(
             if let Some(effort) = &creation.planner.effort {
                 harness_body.nodes_mut().push(string_node("effort", effort));
             }
-            let arguments: &[&str] = match creation.planner.provider.as_str() {
-                "codex" => &[
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--dangerously-bypass-hook-trust",
-                ],
-                "claude" => &["--permission-mode", "bypassPermissions"],
-                _ => &[],
-            };
-            if !arguments.is_empty() {
-                let mut args = KdlNode::new("args");
-                for argument in arguments {
-                    args.entries_mut().push(kdl::KdlEntry::new(*argument));
-                }
-                harness_body.nodes_mut().push(args);
-            }
             harness.set_children(harness_body);
             agent_body.nodes_mut().push(harness);
             agent.set_children(agent_body);

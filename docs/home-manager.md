@@ -4,6 +4,7 @@ Import `inputs.smalltalk.homeManagerModules.default` and configure the user serv
 
 ```nix
 services.smalltalk = {
+  accessMode = "auto";
   enable = true;
   person = "person/ada";
   declarations = {
