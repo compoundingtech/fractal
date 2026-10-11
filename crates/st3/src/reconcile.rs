@@ -16692,6 +16692,71 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         );
     }
 
+    #[test]
+    fn unchanged_plain_harness_reapply_keeps_previous_build_revisions_and_running_seats() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/harness-access-previous-build.json"
+        )).unwrap();
+        let source = fixture["source"].as_str().unwrap();
+        let current = parse_intent(source, "canary").unwrap();
+        let mut previous = current.clone();
+        previous.source_hash = fixture["source_hash"].as_str().unwrap().into();
+        previous.normalized = fixture["normalized"].clone();
+        previous.subjects = fixture["desired_subjects"].as_array().unwrap().iter()
+            .map(|body| {
+                let desired: DesiredSubject = serde_json::from_value(body.clone()).unwrap();
+                (desired.subject.clone(), desired)
+            }).collect();
+        assert_eq!(current.source_hash, previous.source_hash);
+        assert_eq!(current.normalized, previous.normalized);
+
+        let store = Arc::new(Store::open_memory("canary").unwrap());
+        let input = || crate::model::IntentInput { kdl: source.into(), source_name: None };
+        let initial = store.mission(&previous, input()).unwrap();
+        assert!(store.apply(&previous, &initial.subject_tokens, "previous-build").unwrap().changed);
+        let mut tokens = BTreeMap::new();
+        for subject in previous.subjects.keys() {
+            assert_eq!(store.selected_desired_revision(subject).unwrap().as_deref(),
+                fixture["revisions"][subject].as_str());
+            tokens.insert(subject.clone(), store.selected_desired_token(subject).unwrap());
+        }
+
+        let runtime = Arc::new(FakeRuntime::default());
+        let old_reconciler = Reconciler::new(store.clone(), runtime.clone(), "canary".into(), Arc::new(Notify::new()));
+        old_reconciler.reconcile_once().unwrap();
+        let members = runtime.started_members.lock().unwrap().clone();
+        assert_eq!(members.len(), 5);
+        *runtime.ptys.lock().unwrap() = members.iter().enumerate().map(|(index, member)| RuntimeObservation {
+            runtime_id: member.runtime_id.clone(), terminal: member.terminal,
+            status: "running".into(), exit_code: None,
+            incarnation_id: Some(format!("previous-incarnation-{index}")),
+        }).collect();
+        old_reconciler.reconcile_once().unwrap();
+
+        let plan = store.mission(&current, input()).unwrap();
+        assert!(plan.changes.is_empty(), "{:?}", plan.changes);
+        assert!(plan.predicted_actions.is_empty(), "{:?}", plan.predicted_actions);
+        let before = store.index().unwrap();
+        let applied = store.apply(&current, &plan.subject_tokens, "unchanged-after-upgrade").unwrap();
+        assert!(!applied.changed);
+        assert!(applied.claim_ids.is_empty());
+        assert_eq!(store.index().unwrap(), before);
+
+        let upgraded = Reconciler::new(store.clone(), runtime.clone(), "canary".into(), Arc::new(Notify::new()))
+            .with_access_mode(st_drivers::access::AccessMode::Bypass);
+        upgraded.reconcile_once().unwrap();
+        upgraded.reconcile_once().unwrap();
+        for subject in previous.subjects.keys() {
+            assert_eq!(store.selected_desired_token(subject).unwrap(), tokens[subject]);
+            assert_eq!(store.selected_desired_revision(subject).unwrap().as_deref(),
+                fixture["revisions"][subject].as_str());
+        }
+        assert_eq!(runtime.started_members.lock().unwrap().len(), 5);
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert!(runtime.kills.lock().unwrap().is_empty());
+        assert!(runtime.removes.lock().unwrap().is_empty());
+    }
+
     impl RuntimeControl for FakeRuntime {
         fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {
             if let Some(before) = self.before_snapshot.lock().unwrap().as_ref() {

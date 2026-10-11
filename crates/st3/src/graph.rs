@@ -5072,9 +5072,7 @@ fn canonical_node(node: &KdlNode) -> Result<Value, St3Error> {
             serde_json::to_value(properties).expect("BTreeMap serializes"),
         );
     }
-    if !children.is_empty()
-        || (node.name().value() == "harness" && node.children().is_some())
-    {
+    if !children.is_empty() {
         output.insert("children".into(), Value::Array(children));
     }
     Ok(Value::Object(output))
@@ -6197,13 +6195,13 @@ message "external" {
             let desired = &intent.subjects["agent/node.worker"].desired;
             let body = desired["children"].as_array().unwrap()
                 .iter().find(|child| child["name"] == "harness").unwrap();
-            assert_eq!(body["children"], json!([]));
-            for legacy in [false, true] {
+            assert!(body.get("children").is_none());
+            for explicit_empty in [false, true] {
                 let mut tree = desired.clone();
-                if legacy {
+                if explicit_empty {
                     let body = tree["children"].as_array_mut().unwrap()
                         .iter_mut().find(|child| child["name"] == "harness").unwrap();
-                    body.as_object_mut().unwrap().remove("children");
+                    body.as_object_mut().unwrap().insert("children".into(), json!([]));
                 }
                 let node = render_desired_node(&tree).unwrap();
                 let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
