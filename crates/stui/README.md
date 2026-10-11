@@ -61,6 +61,38 @@ it and drags to copy; the other attaches the agent's terminal and leaves it by `
 click on its header. Use a person of their own (such as `person/<qa-name>`) so they mark nothing
 read for anyone.
 
+## One cold conversation-open timing
+
+For a supported diagnostic in a real terminal, set `STUI_OPEN_TRACE_FILE` to a new private
+file and `STUI_OPEN_TRACE_CONVERSATION` to the exact agent or session being opened. Leave
+both unset for ordinary use. The selector only observes the UI: it does not open a tab,
+change the actor/endpoint, attach a terminal or alter subscriptions. An existing file is
+never appended to or overwritten; a new file is mode 0600 on Unix.
+
+Start the installed `stui` once, using the person's ordinary pairing/configuration and
+space. Either restore a space with that conversation in front, or open it normally with
+Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
+attachment), `--demo`, or a headless test client as a conversation-render measurement.
+
+The file has at most seven content-free JSON lines (at most 2 KiB), with monotonic `at_ms`
+from entry to `main`: `process_started`, `conversation_intent`, `converse_enqueued`,
+`conversation_update`, `nonempty_update`, then `first_useful_presented`. Intent means the
+UI loop observed the selected conversation among its wanted subscriptions, not the exact
+key-press time. Enqueued means the feed command channel accepted it, not that a WebSocket
+send completed. The first update may be empty. The last marker requires an unobscured
+conversation entry and follows the successful terminal draw/flush and synchronized-update
+end; it excludes loading, starting, empty, header-only and off-screen content. This observes
+terminal presentation, not the display compositor's pixels. It includes no content, actor,
+conversation ID, address, credential or error text.
+
+A failed enqueue records `converse_enqueue_failed`. Normal exit before a useful render
+records `stopped_before_useful_render`; unwinding records `panicked_before_useful_render`.
+A killed process or failed trace write may leave a partial file. Missing final evidence is
+not a latency success. Read/write overhead perturbs the opt-in run. Retain the external
+monotonic launch/key times, exit/result, exact installed source/build, host and ordinary UI
+context separately; process loading before `main` is outside the internal clock. Do not
+equate a subscribe-to-frame `STUI_TIMING_LOG` record with useful presentation.
+
 ## Resource sidebar
 
 In spaces, Ctrl+S shows the resource sidebar beside the panes. It follows the person's
