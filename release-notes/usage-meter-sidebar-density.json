@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The usage-meter table fits a sidebar-width container: account labels, identities and window labels truncate on one line with the full text as a tooltip, narrow headers use short labels while keeping the full column names accessible, and resets no longer wrap mid-value.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Props and display facts are unchanged." },
+  "downtime": { "status": "none", "detail": "None for the public application." },
+  "manual": { "status": "none", "detail": "No public manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

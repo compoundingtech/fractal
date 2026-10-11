@@ -55,7 +55,8 @@ test('headers expose every column and aria-sort follows the controlled sort prop
   const view = await mount()
   try {
     const headers = [...view.container.querySelectorAll('[role=columnheader]')]
-    assert.deepEqual(headers.map(header => header.textContent.replace(/[↑↓]/g, '')), ['Acct', 'Window gov', 'Reset', 'Comparison', 'More'])
+    const named = header => { const copy = header.cloneNode(true); copy.querySelectorAll('[aria-hidden=true]').forEach(node => node.remove()); return copy.textContent }
+    assert.deepEqual(headers.map(named), ['Acct', 'Window gov', 'Reset', 'Comparison', 'More'])
     assert.equal(headers[1].getAttribute('aria-sort'), 'descending')
     assert.match(headers[1].textContent, /↓/)
     assert.equal(headers[2].getAttribute('aria-sort'), 'none')

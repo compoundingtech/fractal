@@ -22,12 +22,12 @@ export type UsageMeterTableComponentProps = UsageMeterTableProps & {
 /** Container width at which the comparison column is shown; mirrors the `@container (width < 36rem)` styles. */
 const comparisonMinRem = 36
 
-const columns: readonly { readonly id: UsageMeterSortKey; readonly label: string }[] = [
+const columns: readonly { readonly id: UsageMeterSortKey; readonly label: string; readonly narrowLabel?: string }[] = [
   { id: 'account', label: 'Acct' },
-  { id: 'governing', label: 'Window gov' },
+  { id: 'governing', label: 'Window gov', narrowLabel: 'gov' },
   { id: 'reset', label: 'Reset' },
   { id: 'comparison', label: 'Comparison' },
-  { id: 'more', label: 'More' },
+  { id: 'more', label: 'More', narrowLabel: '+N' },
 ]
 const isSortKey = (key: string | number): key is UsageMeterSortKey => columns.some(column => column.id === key)
 
@@ -131,12 +131,12 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
     }} {...stylex.props(styles.table)}>
       <TableHeader>
         {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting {...stylex.props(styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
-          {({ sortDirection }) => <span {...stylex.props(styles.headerContent)}>{column.label}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === 'ascending' ? '↑' : sortDirection === 'descending' ? '↓' : ''}</span></span>}
+          {({ sortDirection }) => <span {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowCount)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === 'ascending' ? '↑' : sortDirection === 'descending' ? '↓' : ''}</span></span>}
         </Column>)}
       </TableHeader>
       <TableBody renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
         {rows.map(row => <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(styles.row, selected?.id === row.id && styles.selectedRow)}>
-          <Cell {...stylex.props(styles.cell)}><span {...stylex.props(styles.accountLabel)}>{row.label}</span><span {...stylex.props(styles.identity)}>{row.identity}</span>{row.stale && <span {...stylex.props(styles.staleText)}>Stale</span>}{row.note !== undefined && <span {...stylex.props(styles.note)}>{row.note}</span>}</Cell>
+          <Cell {...stylex.props(styles.cell)}><span title={row.label} {...stylex.props(styles.accountLabel)}>{row.label}</span><span title={row.identity} {...stylex.props(styles.identity)}>{row.identity}</span>{row.stale && <span {...stylex.props(styles.staleText)}>Stale</span>}{row.note !== undefined && <span {...stylex.props(styles.note)}>{row.note}</span>}</Cell>
           <Cell {...stylex.props(styles.cell)}><Meter meter={row.governing} stale={row.stale} /></Cell>
           <Cell {...stylex.props(styles.cell)}><span {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span></Cell>
           <Cell {...stylex.props(styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} />}</Cell>
@@ -158,21 +158,21 @@ const styles = stylex.create({
   shortcut: { color: ink.fgMuted, fontFamily: type.fontMono, fontSize: type.denseSize },
   table: { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', textAlign: 'start' },
   header: { color: ink.fgMuted, fontSize: type.denseSize, fontWeight: type.weightRegular, padding: `${space.sm} ${space.xs}`, borderBottom: `1px solid ${border.borderStrong}`, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
-  headerContent: { display: 'flex', alignItems: 'center', gap: space.xs, overflowWrap: 'anywhere' },
+  headerContent: { display: 'flex', alignItems: 'center', gap: space.xs, whiteSpace: 'nowrap', overflow: 'hidden' },
   sortIndicator: { display: 'inline-block', minWidth: '1ch', color: ink.fgSoft },
-  accountColumn: { width: { default: '22%', '@container (width < 36rem)': '25%' } },
-  governingColumn: { width: { default: '29%', '@container (width < 36rem)': '38%' } },
-  resetColumn: { width: { default: '15%', '@container (width < 36rem)': '24%' } },
+  accountColumn: { width: { default: '22%', '@container (width < 36rem)': '32%' } },
+  governingColumn: { width: { default: '29%', '@container (width < 36rem)': '34%' } },
+  resetColumn: { width: { default: '15%', '@container (width < 36rem)': '20%' } },
   comparisonColumn: { width: '25%', display: { default: 'table-cell', '@container (width < 36rem)': 'none' } },
-  moreColumn: { width: { default: '9%', '@container (width < 36rem)': '13%' } },
+  moreColumn: { width: { default: '9%', '@container (width < 36rem)': '14%' } },
   row: { backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   selectedRow: { backgroundColor: surface.rowActive },
-  cell: { padding: `${space.md} ${space.xs}`, verticalAlign: 'top', borderBottom: `1px solid ${border.border}`, overflowWrap: 'anywhere', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
-  accountLabel: { display: 'block', color: ink.fg, fontWeight: type.weightMedium },
-  identity: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
+  cell: { padding: `${space.md} ${space.xs}`, verticalAlign: 'top', borderBottom: `1px solid ${border.border}`, overflow: 'hidden', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
+  accountLabel: { display: 'block', color: ink.fg, fontWeight: type.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  identity: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   note: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   meter: { minWidth: 0 },
-  windowLabel: { display: 'block', color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
+  windowLabel: { display: 'block', color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meterReading: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0 },
   reading: { flexShrink: 0, color: ink.fgSoft, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   track: { display: 'block', flexBasis: '56px', flexGrow: 1, flexShrink: 1, minWidth: 0, maxWidth: '72px', height: '4px', overflow: 'hidden', borderRadius: radius.full, backgroundColor: border.borderStrong },
@@ -184,10 +184,12 @@ const styles = stylex.create({
   dangerText: { color: status.dangerFg },
   staleText: { color: ink.fgMuted },
   staleBar: { opacity: 0.4 },
-  reset: { margin: 0, fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere' },
+  reset: { margin: 0, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   moreButton: { display: 'inline-flex', font: 'inherit', fontVariantNumeric: 'tabular-nums', color: ink.fgSoft, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, border: `1px solid ${border.borderStrong}`, borderRadius: radius.keyboard, padding: `${space.xs} ${space.xs}`, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '2px' },
   wideCount: { display: { default: 'inline', '@container (width < 36rem)': 'none' } },
   narrowCount: { display: { default: 'none', '@container (width < 36rem)': 'inline' } },
+  /** Stays the accessible column name when the container shows the short label. */
+  wideLabel: { position: { default: 'static', '@container (width < 36rem)': 'absolute' }, width: { default: 'auto', '@container (width < 36rem)': '1px' }, height: { default: 'auto', '@container (width < 36rem)': '1px' }, overflow: { default: 'visible', '@container (width < 36rem)': 'hidden' }, clipPath: { default: 'none', '@container (width < 36rem)': 'inset(50%)' } },
   empty: { display: 'block', padding: space.xl, color: ink.fgMuted },
   detail: { padding: space.lg, backgroundColor: surface.raised, borderTop: `1px solid ${border.borderStrong}` },
   detailHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: space.md },
