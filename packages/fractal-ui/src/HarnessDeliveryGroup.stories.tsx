@@ -66,5 +66,16 @@ export const SingleCommand: Story = { args: { delivery: { id: 'delivery-command'
   await expect(within(canvasElement).getAllByText('exit 0')).toHaveLength(4)
   await expect(within(canvasElement).queryByRole('button', { name: 'Copy delivery id' })).toBeNull()
 } }
-export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <>{[FiveJobMixed, AllOkEightCollapsed, CancelledFailedAborted, AllFailed, PreviewTruncatedChild, SingleJobNegativeControl, SingleCommand].map((story, index) => <HarnessDeliveryGroup key={index} delivery={story.args?.delivery ?? deliveryFixture} />)}</>) }
-export const WeightSpecimens: Story = { render: () => deliveryStoryMatrix(() => <>{deliveryWeightExamples.map(example => <section key={example.name} data-weight-class={example.weight}><h3>{example.name} · {example.weight}</h3>{example.render()}</section>)}</>) }
+export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <>{[FiveJobMixed, AllOkEightCollapsed, CancelledFailedAborted, AllFailed, PreviewTruncatedChild, SingleJobNegativeControl, SingleCommand].map((story, index) => <HarnessDeliveryGroup key={index} delivery={story.args?.delivery ?? deliveryFixture} />)}</>), play: async ({ canvasElement }) => {
+  await expect(canvasElement.querySelectorAll('[data-testid="delivery-group"]')).toHaveLength(20)
+  await expect(canvasElement.querySelectorAll('[data-testid="background-job"]')).toHaveLength(20)
+  await expect(canvasElement.querySelectorAll('[data-result-state="Failed"] [data-testid="markdown"]')).toHaveLength(12)
+  await expect(within(canvasElement).queryByRole('alert')).toBeNull()
+} }
+export const WeightSpecimens: Story = { render: () => deliveryStoryMatrix(() => <>{deliveryWeightExamples.map(example => <section key={example.name} data-weight-class={example.weight}><h3>{example.name} · {example.weight}</h3>{example.render()}</section>)}</>), play: async ({ canvasElement }) => {
+  await expect(canvasElement.querySelectorAll('[data-weight-class="card"]')).toHaveLength(8)
+  await expect(canvasElement.querySelectorAll('[data-weight-class="row"]')).toHaveLength(8)
+  await expect(canvasElement.querySelectorAll('[data-testid="delivery-group"]')).toHaveLength(4)
+  for (const tail of canvasElement.querySelectorAll('[data-testid="terminal-tail"]')) await expect(tail.querySelector('[data-testid="markdown"], ul')).toBeNull()
+  await expect(canvasElement.querySelectorAll('[data-tinted="true"]')).toHaveLength(8)
+} }

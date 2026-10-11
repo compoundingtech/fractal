@@ -59,4 +59,26 @@ export const DiffNegativeControl: Story = { args: { output: { _tag: 'Complete', 
   await expect(canvasElement.querySelectorAll('[data-tinted="true"]')).toHaveLength(4)
   await expect(canvasElement.querySelectorAll('[data-tinted="false"]')).toHaveLength(8)
 } }
-export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <><TerminalTail output={meta.args.output} /><TerminalTail output={LongOutput.args!.output!} /><TerminalTail output={Preview.args!.output!} /><TerminalTail output={FullOutputUnavailable.args!.output!} /><TerminalTail output={DiffNegativeControl.args!.output!} /></>) }
+export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <><TerminalTail output={meta.args.output} /><TerminalTail output={LongOutput.args!.output!} /><TerminalTail output={Preview.args!.output!} /><TerminalTail output={FullOutputUnavailable.args!.output!} /><TerminalTail output={DiffNegativeControl.args!.output!} /></>), play: async ({ canvasElement }) => {
+  await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(20)
+  await expect(canvasElement.querySelectorAll('[data-terminal-line]')).toHaveLength(52)
+  await expect(canvasElement.querySelector('[data-testid="markdown"], ul')).toBeNull()
+  await expect(canvasElement.querySelectorAll('[data-tinted="true"]')).toHaveLength(4)
+} }
+export const PaginationBoundaryFocus: Story = { args: { output: { _tag: 'Complete', text: Array.from({ length: 205 }, (_, index) => `boundary-line-${index}`).join('\n') } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getAllByRole('button', { name: 'Show recorded output' })[0]!)
+  const next = canvas.getByRole('button', { name: 'Next lines' })
+  next.focus()
+  await userEvent.keyboard('{Enter}{Enter}')
+  await expect(next).toHaveFocus()
+  await expect(next).toHaveAttribute('aria-disabled', 'true')
+  await expect(canvas.getByText('Lines 201–205 of 205')).toBeVisible()
+  await expect(canvas.queryByText('boundary-line-100')).toBeNull()
+  const previous = canvas.getByRole('button', { name: 'Previous lines' })
+  previous.focus()
+  await userEvent.keyboard('{Enter}{Enter}')
+  await expect(previous).toHaveFocus()
+  await expect(previous).toHaveAttribute('aria-disabled', 'true')
+  await expect(canvas.getByText('boundary-line-0')).toBeVisible()
+} }

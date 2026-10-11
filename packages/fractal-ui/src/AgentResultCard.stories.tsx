@@ -131,4 +131,55 @@ export const ProseFailureNegativeControl: Story = { args: { expanded: true }, pl
   await expect(context.canvasElement.textContent).toContain('failed check')
   await expect(context.canvasElement.querySelector('[role="alert"]')).toBeNull()
 } }
-export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <>{[Completed, Cancelled, Aborted, Failed, SchemaInvalid, PreviewTruncated, Running, StoppedResumable, Stopped, RanIsolated, ResultSubmitted, MarkdownOnly].map((story, index) => <AgentResultCard key={index} result={story.args?.result ?? resultFixture} expanded={story.args?.expanded ?? false} />)}</>) }
+export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <>{[Completed, Cancelled, Aborted, Failed, SchemaInvalid, PreviewTruncated, Running, StoppedResumable, Stopped, RanIsolated, ResultSubmitted, MarkdownOnly].map((story, index) => <AgentResultCard key={index} result={story.args?.result ?? resultFixture} expanded={story.args?.expanded ?? false} />)}</>), play: async ({ canvasElement }) => {
+  await expect(canvasElement.querySelectorAll('[data-testid="agent-result"]')).toHaveLength(48)
+  await expect(canvasElement.querySelectorAll('[data-result-state="Failed"] [data-testid="markdown"]')).toHaveLength(4)
+  await expect(canvasElement.querySelectorAll('[data-result-state="Running"] [data-testid="markdown"]')).toHaveLength(0)
+  await expect(within(canvasElement).getAllByRole('button', { name: 'Hide result' })).toHaveLength(20)
+} }
+export const MountedFailureKeepsContext: Story = { args: { result: { ...resultFixture, state: { _tag: 'Running' } } }, render: function Transition(args) {
+  const [, updateArgs] = useArgs<React.ComponentProps<typeof AgentResultCard>>()
+  // Deliver the next harness fact through a host callback while focus is inside the real card.
+  return deliveryStoryMatrix(() => <AgentResultCard {...args} result={{ ...args.result, openThread: { _tag: 'Available', onPress: () => updateArgs({ result: { ...args.result, state: { _tag: 'Failed', error: 'The running child exited.', exitCode: 2 } } }) } }} />)
+}, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getAllByRole('button', { name: 'Show result' })[0]!)
+  await userEvent.click(canvas.getAllByRole('button', { name: 'Show raw JSON' })[0]!)
+  await userEvent.click(canvas.getByRole('button', { name: /result \{\}/ }))
+  const root = canvas.getByRole('button', { name: /result \{\}/ })
+  const thread = canvas.getAllByRole('button', { name: 'Open thread' })[0]!
+  thread.focus()
+  await userEvent.keyboard('{Enter}')
+  await expect(thread).toHaveFocus()
+  await expect(root).toHaveAttribute('aria-expanded', 'true')
+  await expect(canvas.getByText('commit: "a41d90b"')).toBeVisible()
+  await expect(canvasElement.querySelectorAll('[data-result-state="Failed"]')).toHaveLength(4)
+  await userEvent.click(canvas.getAllByRole('button', { name: 'Hide result' })[0]!)
+  await expect(canvasElement.querySelectorAll('[data-testid="markdown"]')).toHaveLength(3)
+} }
+export const JsonPaginationKeepsFocus: Story = { ...LargeRawJson, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getAllByRole('button', { name: 'Show raw JSON' })[0]!)
+  await userEvent.click(canvas.getByRole('button', { name: /result \{\}/ }))
+  await userEvent.click(canvas.getByRole('button', { name: /fields \{\}/ }))
+  const fields = canvas.getByRole('button', { name: 'Show next 100 fields' })
+  fields.focus()
+  await userEvent.keyboard('{Enter}{Enter}')
+  await expect(fields).toHaveFocus()
+  await expect(fields).toHaveAttribute('aria-disabled', 'true')
+  await expect(canvas.getByText('field204: 204')).toBeVisible()
+  await expect(canvas.queryByText('field100: 100')).toBeNull()
+  const previous = canvas.getByRole('button', { name: 'Previous fields' })
+  previous.focus()
+  await userEvent.keyboard('{Enter}{Enter}')
+  await expect(previous).toHaveFocus()
+  await expect(previous).toHaveAttribute('aria-disabled', 'true')
+  await userEvent.click(canvas.getByRole('button', { name: 'Show full value' }))
+  const characters = canvas.getByRole('button', { name: 'Next characters' })
+  characters.focus()
+  await userEvent.keyboard('{Enter}{Enter}{Enter}{Enter}{Enter}')
+  await expect(characters).toHaveFocus()
+  await expect(characters).toHaveAttribute('aria-disabled', 'true')
+  await expect(canvas.getByText('Characters 5001–5003 of 5003')).toBeVisible()
+  await expect(canvasElement.textContent).toContain('END')
+} }

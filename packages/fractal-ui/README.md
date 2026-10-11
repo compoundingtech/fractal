@@ -41,6 +41,8 @@ A delivery preserves child order. Failed, cancelled and aborted results, non-zer
 
 Background exit chips use only the reported exit fact. An absent exit has no chip, even if output prints `rc=1`. The bg_40 control has exit 0 and diagnostic cross-mark lines: only those literal terminal lines receive a tint. Terminal output never goes through Markdown. The tail shows three lines, and recorded output is browsed in windows of at most 100 lines; Copy output retains access to the whole recorded text.
 
+Harness updates preserve each job's mounted identity, focus, open JSON nodes and terminal page. Disclosure tracks the last observed state alongside the local open decision, so a newly arriving failure opens without remounting the card. Pagination controls stay mounted and keyboard-reachable at the first and last page, with an accessible boundary reason.
+
 These components replace the old batch notice, `HarnessNotice.SubagentResult`, and background-result notice presentations in the consuming application's dispatcher; the dispatcher is not present on this branch.
 
 ## Families

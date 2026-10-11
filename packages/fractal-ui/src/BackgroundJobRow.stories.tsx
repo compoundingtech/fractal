@@ -85,4 +85,26 @@ export const PrintedRcNegativeControl: Story = { args: { job: { ...jobFixture, s
   await expect(within(canvasElement).getAllByText('rc=1')).toHaveLength(4)
   await expect(canvasElement.textContent?.toLowerCase()).not.toContain('unknown')
 } }
-export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <>{[ExitZero, ExitNonzero, NoReportedExit, ServiceExited, ServiceReady, MonitorEvent, Cancelled, Aborted, OutputTruncated, LongCommand].map((story, index) => <BackgroundJobRow key={index} job={story.args?.job ?? jobFixture} expanded={story.args?.expanded ?? false} />)}</>) }
+export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <>{[ExitZero, ExitNonzero, NoReportedExit, ServiceExited, ServiceReady, MonitorEvent, Cancelled, Aborted, OutputTruncated, LongCommand].map((story, index) => <BackgroundJobRow key={index} job={story.args?.job ?? jobFixture} expanded={story.args?.expanded ?? false} />)}</>), play: async ({ canvasElement }) => {
+  await expect(canvasElement.querySelectorAll('[data-testid="background-job"]')).toHaveLength(40)
+  await expect(canvasElement.querySelectorAll('[data-testid="exit-chip"]')).toHaveLength(20)
+  await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(20)
+  await expect(within(canvasElement).queryByRole('alert')).toBeNull()
+} }
+export const MountedAbortKeepsOutputContext: Story = { args: { job: { ...jobFixture, state: { _tag: 'Ready' }, output: { _tag: 'Complete', text: Array.from({ length: 205 }, (_, index) => `job-line-${index}`).join('\n') } } }, render: function Transition(args) {
+  const [, updateArgs] = useArgs<React.ComponentProps<typeof BackgroundJobRow>>()
+  return deliveryStoryMatrix(() => <BackgroundJobRow {...args} job={{ ...args.job, startedBy: { label: 'bash call #9', onPress: () => updateArgs({ job: { ...args.job, state: { _tag: 'Aborted', reason: 'The service stopped.' } } }) } }} />)
+}, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getAllByRole('button', { name: 'Output for bg_40' })[0]!)
+  await userEvent.click(canvas.getByRole('button', { name: 'Show recorded output' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Next lines' }))
+  const origin = canvas.getAllByRole('button', { name: 'Started by bash call #9' })[0]!
+  origin.focus()
+  await userEvent.keyboard('{Enter}')
+  await expect(origin).toHaveFocus()
+  await expect(canvas.getByText('Lines 101–200 of 205')).toBeVisible()
+  await expect(canvas.getByText('job-line-100')).toBeVisible()
+  await expect(canvas.queryByText('job-line-0')).toBeNull()
+  await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(4)
+} }
