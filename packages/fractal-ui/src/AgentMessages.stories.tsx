@@ -2,13 +2,12 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
-import { useArgs } from 'storybook/preview-api'
 import { AgentMessage, OutgoingMessageRow } from './assistant-ui/AgentMessage'
 import { EmbraceToolItem } from './assistant-ui/EmbraceToolCall'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { Transcript } from './assistant-ui/composition/Transcript'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
-import type { TextItem } from './assistant-ui/embrace-data/model'
+import type { TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { darkTheme } from './assistant-ui/embrace-theme'
@@ -94,8 +93,8 @@ export const AllStates: Story = { render: () => <>
   <OutgoingMessageRow {...broadcastMessage} recipients={[...broadcastMessage.recipients.slice(0, 2), { id: 'Docs', receipt: { _tag: 'Failed', reason: 'Recipient retired before delivery' } }]} />
 </>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await expect(canvasElement.querySelectorAll('[data-harness-weight=\"card\"]')).toHaveLength(12)
-  await expect(canvasElement.querySelectorAll('[data-harness-weight=\"row\"]')).toHaveLength(3)
+  await expect(canvasElement.querySelectorAll('[data-harness-weight="card"]')).toHaveLength(15)
+  await expect(canvasElement.querySelectorAll('[data-harness-weight="row"]')).toHaveLength(0)
   await expect(canvas.queryByText('End of the full release review.')).toBeNull()
   await expect(canvas.getByRole('alert')).toHaveTextContent('the preview is kept')
 } }
@@ -135,14 +134,14 @@ export const OutgoingFailed: Story = { render: () => <OutgoingMessageRow {...out
 const quotedPrompt: TextItem & { role: 'user' } = { _tag: 'Text', role: 'user', id: 'quoted-message', text: 'Explain this example: <smalltalk-message from="Review">Ready for review.</smalltalk-message>', attachments: [], streaming: false, at: '2026-10-11T15:40:00Z' }
 const quotedWork = workLogTurnFromItems([quotedPrompt], { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
 export const NegativeControls: Story = { render: () => <>
-  <EmbraceRuntimeProvider options={{ messages: [quotedPrompt], isRunning: false, onNew: fn() }}><Transcript title="Quoted example" turns={[{ id: 'quote-turn', prompt: quotedPrompt, items: [], work: quotedWork }]} sync={{ _tag: 'Live', since: 0 }} now={0} /></EmbraceRuntimeProvider>
+  <EmbraceRuntimeProvider options={{ messages: [quotedPrompt], isRunning: false, onNew: fn() }}><Transcript title="Quoted example" turns={[{ id: 'quote-turn', prompt: quotedPrompt, items: [], work: quotedWork }]} sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} /></EmbraceRuntimeProvider>
   <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'file-write', callId: 'file-write', name: 'write', input: { path: 'notes/agent-plan.md', content: 'Keep the release plan beside the report.' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} variant="cards" />
 </>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('user-message')).toHaveTextContent('<smalltalk-message')
   await expect(canvas.queryByRole('article', { name: /Message from/ })).toBeNull()
   await expect(canvasElement.querySelector('[data-work-kind="messages-sent"]')).toBeNull()
-  await expect(canvas.getByText(/notes\/agent-plan.md/)).toBeVisible()
+  await expect(canvas.getAllByText(/notes\/agent-plan.md/).find(element => element.getClientRects().length > 0)).toBeVisible()
 } }
 export const AllStatesLight440: Story = { ...AllStates, parameters: { scheme: 'light', width: 440 } }
 export const AllStatesDark1440: Story = { ...AllStates, parameters: { scheme: 'dark', width: 1440 } }
@@ -181,8 +180,8 @@ export const UnavailableFullMessage: Story = { args: { body: { _tag: 'Preview', 
 export const FullMessageTransition: Story = {
   args: { body: { _tag: 'Preview', markdown: 'The release report is ready…' } },
   render: function FullMessageArgs(args) {
-    const [, updateArgs] = useArgs()
-    return <AgentMessage {...args} onLoadFull={() => { args.onLoadFull?.(); updateArgs({ body: { _tag: 'Full', markdown: 'The complete release report is now available.' } }) }} />
+    const [body, setBody] = React.useState(args.body)
+    return <AgentMessage {...args} body={body} onLoadFull={() => { args.onLoadFull?.(); setBody({ _tag: 'Full', markdown: 'The complete release report is now available.' }) }} />
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement)
@@ -244,15 +243,15 @@ export const OutgoingFailedDark1440: Story = { ...OutgoingFailed, parameters: { 
 export const OutgoingFailedLight1440: Story = { ...OutgoingFailed, parameters: { scheme: 'light', width: 1440 } }
 export const BroadcastWithoutCount: Story = { render: () => <OutgoingMessageRow {...broadcastMessage} delivery={{ _tag: 'Broadcast' }} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await expect(canvas.getByRole('button', { name: /Broadcast.*Please review/ })).toHaveAttribute('aria-expanded', 'false')
+  await expect(canvas.getByRole('button', { name: /3 seats.*Please review/ })).toHaveAttribute('aria-expanded', 'false')
   await expect(canvas.queryByText('all seats')).toBeNull()
-  await expect(canvas.queryByText('3 seats')).toBeNull()
+  await expect(canvas.queryByText('Broadcast')).toBeNull()
 } }
 export const FetchedLongMessage: Story = {
   args: { body: { _tag: 'Preview', markdown: 'The release review is ready…' } },
   render: function FetchedLongArgs(args) {
-    const [, updateArgs] = useArgs()
-    return <AgentMessage {...args} onLoadFull={() => { args.onLoadFull?.(); updateArgs({ body: { _tag: 'Full', markdown: longAgentMessage } }) }} />
+    const [body, setBody] = React.useState(args.body)
+    return <AgentMessage {...args} body={body} onLoadFull={() => { args.onLoadFull?.(); setBody({ _tag: 'Full', markdown: longAgentMessage }) }} />
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement)
@@ -350,4 +349,33 @@ export const LastMessagePage: Story = { render: () => <OutgoingMessageRow {...ou
 export const LastMessagePageLight440: Story = { ...LastMessagePage, parameters: { scheme: 'light', width: 440 } }
 export const LastMessagePageDark1440: Story = { ...LastMessagePage, parameters: { scheme: 'dark', width: 1440 } }
 export const LastMessagePageLight1440: Story = { ...LastMessagePage, parameters: { scheme: 'light', width: 1440 } }
+export const BroadcastWithoutRecipientFacts: Story = { render: () => <OutgoingMessageRow {...broadcastMessage} recipients={[]} delivery={{ _tag: 'Broadcast' }} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByRole('button', { name: /Broadcast.*Please review/ })).toHaveAttribute('aria-expanded', 'false')
+  await expect(canvas.queryByText(/seats/)).toBeNull()
+} }
+export const BroadcastWithoutRecipientFactsLight440: Story = { ...BroadcastWithoutRecipientFacts, parameters: { scheme: 'light', width: 440 } }
+export const BroadcastWithoutRecipientFactsDark1440: Story = { ...BroadcastWithoutRecipientFacts, parameters: { scheme: 'dark', width: 1440 } }
+export const BroadcastWithoutRecipientFactsLight1440: Story = { ...BroadcastWithoutRecipientFacts, parameters: { scheme: 'light', width: 1440 } }
+const shellSend: ToolCallItem = { _tag: 'ToolCall', id: 'shell-send', callId: 'shell-send', name: 'bash', input: { command: 'message.send --to Review --body release-report' }, callSeen: true, status: 'success', at: '2026-10-11T15:40:00Z', result: { content: 'Delivered', at: '2026-10-11T15:40:01Z' } }
+const shellWork = workLogTurnFromItems([shellSend], { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })
+export const ShellSendInTranscript: Story = { render: () => <EmbraceRuntimeProvider options={{ messages: [quotedPrompt, shellSend], isRunning: false, onNew: fn() }}>
+  <Transcript title="Release review" turns={[{ id: 'send-turn', prompt: quotedPrompt, items: [shellSend], work: shellWork, outgoingMessages: { 'shell-send': outgoingMessage } }]} sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} onOpenTool={fn()} />
+</EmbraceRuntimeProvider>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const fold = await canvas.findByRole('button', { name: /Worked.*1 message sent/ })
+  await expect(canvas.queryByRole('button', { name: /Review.*Please review the release report/ })).toBeNull()
+  await expect(fold).not.toHaveTextContent('1 command')
+  await userEvent.click(fold)
+  const message = canvas.getByRole('button', { name: /Review.*Please review the release report/ })
+  await expect(message.closest('[data-work-kind="messages-sent"]')).toHaveAttribute('data-harness-weight', 'card')
+  await expect(canvas.queryByText(/message.send --to/)).toBeNull()
+  await userEvent.click(message)
+  await expect(canvas.getByText('The patch keeps the existing protocol and updates the examples.')).toBeVisible()
+  await userEvent.click(fold)
+  await expect(canvas.queryByText('The patch keeps the existing protocol and updates the examples.')).toBeNull()
+} }
+export const ShellSendInTranscriptLight440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'light', width: 440 } }
+export const ShellSendInTranscriptDark1440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'dark', width: 1440 } }
+export const ShellSendInTranscriptLight1440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })

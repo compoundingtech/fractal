@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
-import { tokens, accentTokens, density } from './embrace-tokens.stylex'
+import { surfaceVars, textVars, borderVars, accentVars, statusVars } from './composition-tokens.stylex'
 
 export type AgentMessageVia =
   | { readonly _tag: 'Irc' }
@@ -78,10 +78,10 @@ export const AgentMessage = ({ id, from, to, via, body, subject, replyTo, at, ar
     {body._tag === 'Full' && body.markdown.length > 4000 ? <Disclosure defaultExpanded={loaded}>
       {({ isExpanded }) => <>
         <Button slot="trigger" {...stylex.props(styles.button)}>{isExpanded ? 'Hide full message' : 'Show full message'}</Button>
-        {!isExpanded ? <div {...stylex.props(styles.messageBody)}><MessageBody text={preview} /></div> : null}
+        {!isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Message excerpt"><MessageBody text={preview} /></div> : null}
         <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Full message"><MessageBody text={body.markdown} /></div> : null}</DisclosurePanel>
       </>}
-    </Disclosure> : <div {...stylex.props(styles.messageBody)}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} /></div>}
+    </Disclosure> : <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label={body._tag === 'Full' ? 'Message body' : 'Message excerpt'}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} /></div>}
     {body._tag !== 'Full' || loaded ? <div {...stylex.props(styles.header)}>
       {!loaded ? <span {...stylex.props(styles.meta)}>Message preview</span> : null}
       <Button {...stylex.props(styles.button)} isPending={body._tag === 'Loading'} isDisabled={!loaded && onLoadFull === undefined} aria-disabled={loaded || undefined} aria-describedby={reasonId} onPress={loaded ? undefined : () => { setLoadRequested(true); onLoadFull?.() }}>{loaded ? 'Full message loaded' : body._tag === 'Loading' ? 'Loading full message…' : body._tag === 'Failed' ? 'Retry full message' : 'Show full message'}</Button>
@@ -109,13 +109,14 @@ export interface OutgoingMessageRowProps {
 /** One send is one work-log item, including broadcasts; receipts are per recipient. */
 export const OutgoingMessageRow = ({ message, recipients, delivery, at, defaultExpanded = false }: OutgoingMessageRowProps) => {
   const firstLine = message.slice(0, 200).split('\n', 1)[0] ?? ''
-  return <div {...stylex.props(styles.outgoing)} data-harness-weight="row" data-work-kind="messages-sent">
+  const recipientCount = delivery._tag === 'Broadcast' ? delivery.recipientCount ?? (recipients.length > 0 ? recipients.length : undefined) : undefined
+  return <div {...stylex.props(styles.card, styles.outgoing)} data-harness-weight="card" data-work-kind="messages-sent">
     <Disclosure defaultExpanded={defaultExpanded}>
       {({ isExpanded }) => <>
         <div {...stylex.props(styles.line)}>
           <Button slot="trigger" {...stylex.props(styles.trigger)}>
             <span aria-hidden="true">{isExpanded ? '▾' : '▸'} →</span>
-            <span>{delivery._tag === 'Broadcast' ? delivery.recipientCount !== undefined ? `${delivery.recipientCount} seats` : 'Broadcast' : recipients[0] !== undefined ? <AgentIdHierarchy id={recipients[0].id} /> : 'Message sent'}</span>
+            <span>{delivery._tag === 'Broadcast' ? recipientCount !== undefined ? `${recipientCount} seats` : 'Broadcast' : recipients[0] !== undefined ? <AgentIdHierarchy id={recipients[0].id} /> : 'Message sent'}</span>
             <span {...stylex.props(styles.excerpt)} title={firstLine}>{firstLine}</span>
           </Button>
           {recipients.map(recipient => <span key={recipient.id} role={recipient.receipt?._tag === 'Failed' ? 'note' : undefined} tabIndex={recipient.receipt?._tag === 'Failed' ? 0 : undefined} aria-label={recipient.receipt?._tag === 'Failed' ? `${recipient.id} · failed · ${recipient.receipt.reason}` : undefined} {...stylex.props(styles.receipt, recipient.receipt?._tag === 'Failed' && styles.danger)} title={recipient.receipt?._tag === 'Failed' ? recipient.receipt.reason : undefined}>
@@ -123,28 +124,28 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, defaultE
           </span>)}
           {at !== undefined ? <time {...stylex.props(styles.meta)}>{at}</time> : null}
         </div>
-        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.body)}><MessageBody text={message} />{recipients.flatMap(recipient => recipient.receipt?._tag === 'Failed' ? [<p key={recipient.id} {...stylex.props(styles.danger)}>{recipient.id}: {recipient.receipt.reason}</p>] : [])}</div> : null}</DisclosurePanel>
+        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.body)} tabIndex={0} role="region" aria-label="Outgoing message body"><MessageBody text={message} />{recipients.flatMap(recipient => recipient.receipt?._tag === 'Failed' ? [<p key={recipient.id} {...stylex.props(styles.danger)}>{recipient.id}: {recipient.receipt.reason}</p>] : [])}</div> : null}</DisclosurePanel>
       </>}
     </Disclosure>
   </div>
 }
 
 const styles = stylex.create({
-  card: { padding: 12, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 8, backgroundColor: tokens.panel, color: tokens.ink, minWidth: 0, overflowWrap: 'anywhere' },
+  card: { padding: 12, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 8, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere' },
   header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, minWidth: 0 },
-  line: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: 6, minWidth: 0, overflowX: 'auto', whiteSpace: 'nowrap' },
-  messageBody: { maxHeight: 340, overflowY: 'auto', minWidth: 0, overflowWrap: 'anywhere', outlineColor: accentTokens.accent, outlineOffset: 2 },
-  avatar: { width: 22, height: 22, display: 'grid', alignItems: 'center', justifyItems: 'center', backgroundColor: tokens.recess, borderRadius: 5, fontSize: 12 },
-  chip: { paddingInline: 6, paddingBlock: 2, borderRadius: 4, backgroundColor: tokens.recess, color: tokens.muted, fontSize: 11 },
-  meta: { color: tokens.muted, fontSize: 11 },
+  line: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, minWidth: 0 },
+  messageBody: { maxHeight: 340, overflowY: 'auto', minWidth: 0, overflowWrap: 'anywhere', outlineColor: accentVars.primary, outlineOffset: 2 },
+  avatar: { width: 22, height: 22, display: 'grid', alignItems: 'center', justifyItems: 'center', backgroundColor: surfaceVars.rowActive, borderRadius: 5, fontSize: 12 },
+  chip: { paddingInline: 6, paddingBlock: 2, borderRadius: 4, backgroundColor: surfaceVars.rowActive, color: textVars.fgMuted, fontSize: 11 },
+  meta: { color: textVars.fgMuted, fontSize: 11 },
   subject: { marginBlock: 8, fontSize: 13 },
-  button: { padding: 5, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 4, backgroundColor: tokens.recess, color: tokens.ink, cursor: 'pointer', outlineColor: accentTokens.accent, outlineOffset: 2 },
-  outgoing: { paddingBlock: density.toolY, color: tokens.ink, minWidth: 0, fontSize: density.senderSize },
-  trigger: { flex: '1 0 140px', minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, borderWidth: 0, padding: 0, backgroundColor: 'transparent', color: tokens.ink, textAlign: 'left', cursor: 'pointer', outlineColor: accentTokens.accent, outlineOffset: 3 },
-  excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: tokens.muted },
-  receipt: { flexShrink: 0, fontSize: 10, color: tokens.muted, paddingInline: 4, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 4, outlineColor: accentTokens.accent, outlineOffset: 2 },
+  button: { padding: 5, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 4, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 2 },
+  outgoing: { fontSize: 12 },
+  trigger: { flex: '1 1 100%', minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, borderWidth: 0, padding: 0, backgroundColor: 'transparent', color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 3 },
+  excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: textVars.fgMuted },
+  receipt: { maxWidth: '100%', overflowWrap: 'anywhere', fontSize: 10, color: textVars.fgMuted, paddingInline: 4, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 4, outlineColor: accentVars.primary, outlineOffset: 2 },
   body: { padding: 8, overflowWrap: 'anywhere', maxHeight: 340, overflowY: 'auto' },
-  danger: { color: tokens.danger },
+  danger: { color: statusVars.dangerFg },
   plainText: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 },
   visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
 })

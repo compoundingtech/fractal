@@ -58,9 +58,11 @@ The ACH model is retained with small display extensions: `autoSelected` records 
 
 Large plain-text bodies mount one 16,000-character page at a time. Previous/Next controls remain focusable at boundaries with an accessible unavailable reason, so paging never transfers keyboard focus or mounts the full multi-megabyte body.
 
-`OutgoingMessageRow` is one work-log line per send, including broadcasts. Recipient count is a reported fact, not a guess from partial receipts; without a count the row says only “Broadcast”. Each reported recipient gets its own injected/queued/revived/failed receipt; missing status is omitted. Failed receipts expose their reason through keyboard focus and the expanded body. The host counts `data-work-kind="messages-sent"` rows in its turn fold.
+`OutgoingMessageRow` is one folded card per send, including broadcasts. Broadcast count uses the reported total when available, otherwise the listed recipient facts; with neither it says only “Broadcast”. Each reported recipient gets its own injected/queued/revived/failed receipt; missing status is omitted. Receipts and time wrap at narrow widths. Failed receipts expose their reason through keyboard focus and the expanded body. The host counts `data-work-kind="messages-sent"` cards in its turn fold.
 
 These components replace the incoming `HarnessNotice` Irc/Delivery presentations and outgoing peer-message/file-change presentations in application adapters. The kit does not parse message envelopes or resolve recipient receipts.
+
+`TranscriptTurn.outgoingMessages` maps host-normalized sends to their underlying work-call ids. The production work log replaces each mapped shell row with its outgoing card and counts it as a message, not a command. Parsing transport envelopes stays outside the kit. The transcript story exercises the folded shell-send replacement; display-hidden reminder routing through “Show system events” belongs to HarnessMarker, not these message surfaces. Both message components inherit the nearest Fractal composition theme, and all independently scrollable body regions have keyboard-focusable labelled landmarks.
 
 ## Families
 
