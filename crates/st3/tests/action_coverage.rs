@@ -2041,6 +2041,8 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
                     "agent/example/watcher",
                     "--stalled-after",
                     "1h",
+                    "--report-stalls",
+                    "false",
                     "--as",
                     PERSON,
                 ],
@@ -2056,6 +2058,7 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
     assert_eq!(report.actor.as_deref(), Some(PERSON));
     assert_eq!(report.body["fields"]["report_to"], "agent/example/watcher");
     assert_eq!(report.body["fields"]["stalled_after_ms"], 3_600_000);
+    assert_eq!(report.body["fields"]["report_stalls"], false);
     let step = &run.steps[0].subject;
     daemon.store().set_step_state(step, "ready", None).unwrap();
     // An unclaimed step must still reject an obsolete caller incarnation without writes.

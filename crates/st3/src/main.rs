@@ -1957,6 +1957,9 @@ struct MissionReportToArgs {
     #[arg(long, value_name = "DURATION", requires = "agent", conflicts_with = "clear")]
     #[arg(value_parser = parse_stalled_after)]
     stalled_after: Option<u64>,
+    /// Report stalls (true or false). Defaults to the mission's policy, else true.
+    #[arg(long, requires = "agent", conflicts_with = "clear", action = clap::ArgAction::Set)]
+    report_stalls: Option<bool>,
     /// Also tell the agent when the run completes.
     #[arg(long, requires = "agent", conflicts_with = "clear")]
     report_completed: bool,
@@ -7290,6 +7293,7 @@ async fn set_mission_run_report(
                 actor: args.actor,
                 report_to: args.agent,
                 stalled_after_ms: args.stalled_after,
+                report_stalls: args.report_stalls,
                 report_completed: args.report_completed,
                 idempotency_key: format!("mission-report-to:{subject}:{nonce}"),
             },
@@ -7301,9 +7305,16 @@ async fn set_mission_run_report(
     let unchanged = if report.changed { "" } else { " (unchanged)" };
     match &report.report_to {
         Some(agent) => println!(
-            "{} reports to {agent}: failed, cancelled, stalled after {}{}{unchanged}",
+            "{} reports to {agent}: failed, cancelled{}{}{unchanged}",
             report.run,
-            whole_duration(report.stalled_after_ms.unwrap_or_default()),
+            if report.report_stalls {
+                format!(
+                    ", stalled after {}",
+                    whole_duration(report.stalled_after_ms.unwrap_or_default())
+                )
+            } else {
+                String::new()
+            },
             if report.report_completed {
                 ", completed"
             } else {
@@ -28686,6 +28697,8 @@ mod tests {
             "--stalled-after",
             "1h",
             "--report-completed",
+            "--report-stalls",
+            "false",
         ])
         .unwrap()
         .command
@@ -28695,12 +28708,21 @@ mod tests {
         assert_eq!(args.agent.as_deref(), Some("agent/ops/watcher"));
         assert_eq!(args.stalled_after, Some(3_600_000));
         assert!(args.report_completed);
+        assert_eq!(args.report_stalls, Some(false));
         assert!(!args.clear);
         assert_eq!(whole_duration(3_600_000), "1h");
         assert_eq!(whole_duration(45 * 60_000), "45m");
         assert!(parse(&["--clear"]).is_ok());
         for (extra, why) in [
             (&[][..], "it names an agent or clears"),
+            (
+                &["--clear", "--report-stalls", "false"][..],
+                "stall policy needs an agent",
+            ),
+            (
+                &["--agent", "agent/ops/watcher", "--report-stalls", "no"][..],
+                "stall policy is boolean",
+            ),
             (&["--agent", "agent/ops/watcher", "--clear"][..], "not both"),
             (
                 &["--clear", "--stalled-after", "1h"][..],

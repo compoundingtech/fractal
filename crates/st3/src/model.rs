@@ -42,6 +42,14 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -599,6 +607,9 @@ pub struct MissionSpec {
     /// How long a run may go without progress before it is reported as stalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     /// Whether a completed run is reported too.
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
@@ -2804,6 +2815,9 @@ pub struct MissionRunReportRequest {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Override the mission's stall reporting policy; omission inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_stalls: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     pub idempotency_key: String,
@@ -2817,6 +2831,9 @@ pub struct MissionRunReportView {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     /// Whether this request changed it.
