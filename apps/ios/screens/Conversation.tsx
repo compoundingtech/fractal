@@ -13,7 +13,7 @@ import { agentGlyph, agentModel, agentName, agentState, agentWord, harnessColor,
 import { Banners } from '../chrome';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
-import { conversationEntries, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
+import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
 import { addImages, fromDataUri, MAX_IMAGES, megabytes, picked, type Picked } from '../images';
 import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport, VisibleConversationImage, type VisibleImageState } from '../visibleConversationImages';
@@ -72,6 +72,10 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   // When st last sent this conversation, so a view that may be stale says how old it is.
   const [lastFrame, setLastFrame] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // Asking st again: true from the moment the phone starts following this conversation until st sends it.
+  const [refreshing, setRefreshing] = useState(true);
+  // The entry whose text is open for selecting in place: a long press selects it, any part of it can be copied.
+  const [selecting, setSelecting] = useState<string | null>(null);
   useEffect(() => {
     if (!issue) return;
     const timer = setInterval(() => setNow(Date.now()), 5_000);
@@ -151,9 +155,11 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   useFocusEffect(useCallback(() => {
     if (!feed || unresolved) return;
     setIssue('');
+    setRefreshing(true);
     const follow = feed.followConversation(target, {
       onEntries: frame => setTimeline(previous => {
         setLastFrame(Date.now());
+        setRefreshing(false);
         setLoaded(true);
         const next = applyConversation(previous, frame);
         rememberBounded(conversationCache.current, target, next, 24);
@@ -320,6 +326,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     {header ? <View style={styles.strip}><T dim>{header}</T></View> : null}
     {agent ? <AlertsStrip agentId={agent.id} entries={timeline.entries} /> : null}
     {issue ? <View style={styles.strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now)}</T></View> : null}
+    {!unresolved && !issue ? <Freshness refreshing={refreshing} loaded={loaded} lastFrame={lastFrame} /> : null}
     {findOpen ? <View style={[styles.strip, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
       <Field value={find} onChangeText={setFind} placeholder="Find in this conversation" autoFocus autoCapitalize="none" autoCorrect={false} spellCheck={false} returnKeyType="search" style={{ flex: 1 }} />
       <Pressable accessibilityRole="button" onPress={() => { setFinding(false); setFind(''); }}><T color={theme.accent}>Done</T></Pressable>
@@ -330,14 +337,18 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
       ref={list}
       inverted
       data={rows}
+      extraData={selecting}
       keyExtractor={row => row.kind === 'entry' ? row.entry.id : row.kind === 'call' ? `call:${row.entry.id}` : row.kind === 'bundle' ? row.id : row.kind === 'pending' ? row.pending.id : 'older'}
       renderItem={({ item: row }) => row.kind === 'older'
         ? <Pressable accessibilityRole="button" onPress={() => { dragged.current = true; loadOlder(); }} style={styles.entry}><T dim>{olderNote(timeline)}</T></Pressable>
         : row.kind === 'pending' ? <PendingView pending={row.pending} />
         : row.kind === 'bundle' ? <BundleView row={row} onToggle={toggle} />
         : row.kind === 'call' && !open.has(row.entry.id) ? <CallView entry={row.entry} tool={row.tool} onToggle={toggle} />
-        // A long press opens the entry's text to select any part of it; iOS text selects only whole.
-        : <Pressable accessible={false} onLongPress={() => navigation.navigate('SelectText', { text: entryText(row.entry), title })} delayLongPress={350}><EntryView entry={row.entry} conversationId={timeline.sessionId ?? sessionId ?? target} revisionKey={row.entry.contentSources?.map(source => `${source.id}:${sourceRevisions[source.id] ?? 0}`).join('|') ?? String(sourceRevisions[row.entry.id] ?? 0)} imageViewport={imageViewport} open={open.has(row.entry.id)} onToggle={toggle} brief={simpleOn && !finding} onOpenSession={openSession} /></Pressable>}
+        // A long press turns the entry into selectable text where it is, with the handles and menu of
+        // iOS; iOS paragraphs select only whole, a text view selects any part. Tapping away puts it back.
+        : row.entry.id === selecting
+          ? <TextInput accessibilityLabel="Entry text, selected for copying" style={styles.selecting} value={entryText(row.entry)} multiline autoFocus selectTextOnFocus showSoftInputOnFocus={false} scrollEnabled={false} autoCorrect={false} spellCheck={false} onChangeText={() => undefined} onBlur={() => setSelecting(null)} />
+          : <Pressable accessible={false} onLongPress={() => setSelecting(row.entry.id)} delayLongPress={350}><EntryView entry={row.entry} conversationId={timeline.sessionId ?? sessionId ?? target} revisionKey={row.entry.contentSources?.map(source => `${source.id}:${sourceRevisions[source.id] ?? 0}`).join('|') ?? String(sourceRevisions[row.entry.id] ?? 0)} imageViewport={imageViewport} open={open.has(row.entry.id)} onToggle={toggle} brief={simpleOn && !finding} onOpenSession={openSession} /></Pressable>}
       ListEmptyComponent={<View style={[styles.entry, { transform: [{ scaleY: -1 }] }]}>{unreadable ? <T color={theme.waiting} selectable>{unreadable}</T> : <T dim>{unresolved ? 'This process has no exact native session history.' : !loaded ? (issue ? `Not loaded yet: ${issue}. Trying again.` : status === 'online' ? 'Loading the conversation…' : 'Offline; this conversation has not been loaded yet.') : 'No conversation in the recent timeline.'}</T>}</View>}
       // Scrolled up, a new entry must not move what is being read, so the position is kept. At
       // the newest it must not be: the position-keeping scrolls to a new entry with an animation,
@@ -426,6 +437,18 @@ const PendingView = memo(function PendingView({ pending }: { pending: Pending })
     <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
   </View>;
 });
+
+/** How fresh the conversation is, as stui says it on the rule above its box: live, how long since st
+ * last sent it, and that the phone is asking again. It keeps its own clock so a tick redraws only this line. */
+function Freshness({ refreshing, loaded, lastFrame }: { refreshing: boolean; loaded: boolean; lastFrame: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, []);
+  const line = freshnessLine({ issue: '', loaded, refreshing, lastFrame, now });
+  return <View style={styles.freshness} accessible accessibilityLabel={line.text}><T dim={line.tone === 'live'} color={line.tone === 'refreshing' ? theme.accent : undefined} numberOfLines={1}>{line.text}</T></View>;
+}
 
 const EntryView = memo(function EntryView(props: { entry: ConversationEntry; conversationId: string; revisionKey: string; imageViewport: ConversationImageViewport; open: boolean; onToggle: (id: string) => void; brief?: boolean; onOpenSession?: (sessionId: string, title: string) => void }) {
   return <View>
@@ -649,8 +672,10 @@ const styles = StyleSheet.create({
   unthumb: { position: 'absolute', top: -6, right: -6, width: 20, height: 20, borderRadius: 10, backgroundColor: theme.surface1, alignItems: 'center', justifyContent: 'center' },
   mailImage: { width: 200, height: 150, borderRadius: 6, overflow: 'hidden', backgroundColor: theme.surface0 },
   screen: { flex: 1, backgroundColor: theme.base },
+  freshness: { paddingHorizontal: 12, paddingVertical: 3, backgroundColor: theme.base },
   strip: { paddingHorizontal: 12, paddingVertical: 6, borderBottomColor: theme.surface0, borderBottomWidth: StyleSheet.hairlineWidth * 2, backgroundColor: theme.base },
   entry: { paddingHorizontal: 12, paddingVertical: 6 },
+  selecting: { paddingHorizontal: 12, paddingVertical: 6, color: theme.text, backgroundColor: theme.surface0, fontFamily: fonts.regular, fontSize: 14, lineHeight: LINE },
   user: { backgroundColor: theme.userBg, paddingHorizontal: 12, paddingVertical: 8, marginVertical: 6 },
   barred: { borderLeftWidth: 2, marginLeft: 10, paddingLeft: 8 },
   tool: { marginHorizontal: 8, marginVertical: 4, paddingHorizontal: 8, paddingVertical: 4, borderLeftWidth: 2 },

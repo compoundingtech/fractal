@@ -21,7 +21,6 @@ import { FleetScreen, PairScreen } from './screens/Fleet';
 import { UsageDetailScreen, UsageScreen } from './screens/Usage';
 import { AttentionScreen, HomeScreen } from './screens/Home';
 import { LaunchScreen, MissionScreen, MissionsScreen, NewMissionScreen } from './screens/Missions';
-import { SelectTextScreen } from './screens/SelectText';
 import { TerminalScreen } from './screens/Terminal';
 import { GlassesScreen, SpaceScreen } from './screens/Glasses';
 import { SidebarScreen } from './screens/Sidebar';
@@ -62,7 +61,6 @@ function TabStack({ tab }: { tab: Tab | 'Glasses' }) {
     <Stack.Screen name="Sidebar" component={SidebarScreen} options={{ title: 'Resources' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />
-    <Stack.Screen name="SelectText" component={SelectTextScreen} options={{ title: 'Select text', presentation: 'formSheet', sheetAllowedDetents: [0.6, 1], sheetGrabberVisible: true }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
     <Stack.Screen name="Mission" component={MissionScreen} options={{ title: 'Mission' }} />
     <Stack.Screen name="Attention" component={AttentionScreen} options={{ title: 'Alert' }} />
