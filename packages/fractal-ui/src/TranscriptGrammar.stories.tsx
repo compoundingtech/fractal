@@ -59,6 +59,7 @@ function GrammarPreview({ scheme = 'dark', width = 'compact', injectFailure = fa
           </Tier>
           <Tier label="Truncation priority" caption="The excerpt gives way first. A short subject stays whole; a long subject truncates only when space runs out.">
             <div data-testid="short-subject"><TranscriptRow glyph="fileChange" verb="Updated" subject="nav.ts" excerpt={'The navigation keeps every visible action in keyboard order. '.repeat(8)} /></div>
+            <div data-testid="natural-subject"><TranscriptRow glyph="fileChange" verb="Read" subject="navigation-destination-permissions.ts" excerpt={'The subject takes its natural width before the excerpt. '.repeat(8)} /></div>
             <div data-testid="long-subject"><TranscriptRow glyph="fileChange" verb="Checking destination permissions" subject={'navigation-destination-permissions-'.repeat(8)} excerpt={'The destination retains the current keyboard order. '.repeat(8)} meta={eventMeta} /></div>
           </Tier>
           <Tier label="Negative control" caption="Failure words in successful output must not promote a routine row.">
@@ -172,6 +173,13 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
     const shortExcerpt = shortRow.querySelector<HTMLElement>('[data-transcript-slot="excerpt"]')!
     const longSubject = longRow.querySelector<HTMLElement>('[data-transcript-slot="subject"]')!
     const longExcerpt = longRow.querySelector<HTMLElement>('[data-transcript-slot="excerpt"]')!
+    const naturalRow = canvas.getByTestId('natural-subject')
+    const naturalSubject = naturalRow.querySelector<HTMLElement>('[data-transcript-slot="subject"]')!
+    const naturalExcerpt = naturalRow.querySelector<HTMLElement>('[data-transcript-slot="excerpt"]')!
+    await expect(naturalSubject.getBoundingClientRect().width, 'The subject can use more than 55 percent when the excerpt yields').toBeGreaterThan(naturalRow.clientWidth * 0.55)
+    await expect(naturalSubject.scrollWidth, 'The natural-width subject stays whole').toBeLessThanOrEqual(naturalSubject.clientWidth)
+    await expect(naturalExcerpt.scrollWidth).toBeGreaterThan(naturalExcerpt.clientWidth)
+    await expect(getComputedStyle(naturalExcerpt).textOverflow).toBe('ellipsis')
     await expect(frame.getBoundingClientRect().width).toBeLessThanOrEqual(440)
     await expect(shortSubject.scrollWidth, 'The short subject stays whole').toBeLessThanOrEqual(shortSubject.clientWidth)
     await expect(shortExcerpt.scrollWidth, 'The long excerpt overflows its allotted space').toBeGreaterThan(shortExcerpt.clientWidth)
