@@ -889,6 +889,13 @@ export default function (pi: ExtensionAPI) {
       }
       if (!idleProof(ctx)) return;
       clearInterval(poller);
+      // Restored asks need this idle observation to drive their existing retry handshake,
+      // but retain their own delivery fence until reopening or timeout resolves it.
+      if (!state.restoringAsk) {
+        state.running = false;
+        toolCallsInFlight().clear();
+        if (heldMessages().length > 0) void release();
+      }
       sendFrame({ type: "state", state: "idle" });
     }, IDLE_POLL_MS);
     poller.unref?.();
@@ -927,10 +934,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
     try {
-      // `deliverAs` is required only while a turn is streaming, and an idle send that carries
-      // one is rejected, so the idle proof selects the call shape. It never selects the
-      // policy. Not optional-chained: reading a missing idle proof as "idle" would silently
-      // turn every mid-turn delivery into a plain send.
+      // Positive idle selects a plain send; streaming delivery retains the requested mode.
+      // Not optional-chained: reading a missing idle proof as "idle" would silently turn
+      // every mid-turn delivery into a plain send. This selects timing, not message policy.
       if (first.ctx.isIdle()) {
         await pi.sendUserMessage(content);
       } else {
@@ -985,6 +991,12 @@ export default function (pi: ExtensionAPI) {
   /** Deliver a message from the channel now, or hold it while omp is running a turn. */
   const receive = (message: HeldMessage): Promise<void> => {
     heldMessages().push(message);
+    if (!state.pendingAskToolCallId && !state.pendingApproval && !state.restoringAsk &&
+      idleProof(message.ctx)) {
+      state.running = false;
+      toolCallsInFlight().clear();
+      return release();
+    }
     if (state.running || toolCallsInFlight().size > 0) {
       armHoldCap();
       return Promise.resolve();
@@ -1270,6 +1282,10 @@ export default function (pi: ExtensionAPI) {
     // one print-mode run). Nothing is claimed from those — least of all about a credential.
     if (end.willContinue === true) {
       cancelSettle();
+      // Background work can continue after foreground streaming stops. A positive idle proof
+      // releases held mail without declaring the background job terminal; transient retries
+      // remain active until that same proof, and newer activity fences this poll.
+      watchSettle(ctx);
       return;
     }
     // The typed turn result, on every turn that ACTUALLY ended and in both directions. It is one
