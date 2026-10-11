@@ -309,7 +309,11 @@ fn independent_person_updates_of_two_revisions_select_the_canonical_definition_h
     super::tests::receive(&dove, &elm);
     members.push(elm);
     members.push(dove);
-    // Each writer projected its own claim when it wrote it, then receives the other's.
+    // Each writer projected its own claim when it wrote it, then receives the other's. A writer
+    // has no healthy graph frontier until it first projects, so that initial replay is
+    // intentional and happens before it receives, as for every other target.
+    alder.project_replication_backlog().unwrap();
+    birch.project_replication_backlog().unwrap();
     super::tests::receive(&birch, &alder);
     super::tests::receive(&alder, &birch);
 
@@ -390,6 +394,10 @@ fn a_published_definition_of_a_runtime_missions_id_stays_whichever_claim_arrives
         super::tests::receive(second, &target);
         members.push(target);
     }
+    // A writer has no healthy graph frontier until it first projects, so that initial replay is
+    // intentional and happens before it receives, as for every other target.
+    alder.project_replication_backlog().unwrap();
+    birch.project_replication_backlog().unwrap();
     super::tests::receive(&birch, &alder);
     super::tests::receive(&alder, &birch);
     {
