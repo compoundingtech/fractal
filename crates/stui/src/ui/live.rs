@@ -2611,6 +2611,7 @@ mod tests {
         let socket = root.path().join("daemon.sock");
         let store = Arc::new(st3::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
         let state = st3::api::AppState {
+            owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -2668,6 +2669,7 @@ mod tests {
             let store =
                 Arc::new(st3::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
             let state = st3::api::AppState {
+                owning_person: None,
                 store: store.clone(),
                 notify: Arc::new(tokio::sync::Notify::new()),
                 event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -3091,6 +3093,7 @@ mod tests {
                 .unwrap();
         }
         let state = st3::api::AppState {
+            owning_person: None,
             store: store.clone(),
             notify: Arc::new(tokio::sync::Notify::new()),
             event_notify: tokio::sync::watch::channel(0_u64).0,

@@ -96,6 +96,7 @@ mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
 mod summary;
+pub(super) mod assistant;
 
 #[cfg(test)]
 mod stream_start_tests;
@@ -2439,7 +2440,7 @@ fn session_claim_actor(session: &ClientSession) -> String {
     }
 }
 
-pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
+pub(super) fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     let mut capabilities = ALL_SCOPES
         .iter()
         .map(|scope| {
@@ -2477,6 +2478,8 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"assistant.grants.v1", "version":1,
+        "state":if assistant::trusted_issuer(state, session).is_ok() {"granted"} else {"ungranted"}}));
     capabilities
 }
 
@@ -2562,6 +2565,10 @@ pub(super) fn authenticate(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| forbidden("the client authorization scheme must be Bearer"))?;
     let digest = credential_digest(credential);
+    if let Some(session) = assistant::authenticate(state, &digest, transport)? {
+        assistant::authorize_route(&session, request)?;
+        return Ok(session);
+    }
     let pairings = state
         .store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
@@ -4934,6 +4941,9 @@ pub(super) async fn devices(
         return client_page(&state, &snapshot, "devices", Vec::new(), &effective_query).map(Json);
     }
     let mut items = device_resources(&state, &snapshot, &person)?;
+    if assistant::trusted_issuer(&state, &session).is_ok() {
+        items.extend(assistant::device_resources(&state, &snapshot)?);
+    }
     if !query.history {
         items.retain(|item| item["state"] == "active");
     }
@@ -7753,11 +7763,22 @@ pub(super) struct PairingBegin {
     scopes: Option<Vec<String>>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(super) enum PairingBeginRequest {
+    Person(PairingBegin),
+    Assistant(assistant::AssistantPairingBegin),
+}
+
 pub(super) async fn pairing_begin(
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
-    Json(request): Json<PairingBegin>,
+    Json(request): Json<PairingBeginRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let request = match request {
+        PairingBeginRequest::Person(request) => request,
+        PairingBeginRequest::Assistant(request) => return assistant::begin(state, session, request).await,
+    };
     if session.transport != "unix" {
         return Err(forbidden("pairing can only begin on the local Unix API"));
     }
@@ -7950,7 +7971,7 @@ static PAIRING_COMPLETIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_n
 
 pub(super) async fn pairing_complete(
     State(state): State<AppState>,
-    Extension(_session): Extension<ClientSession>,
+    Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<PairingComplete>,
 ) -> Result<Json<Value>, ApiError> {
@@ -7958,6 +7979,9 @@ pub(super) async fn pairing_complete(
         return Err(validation(
             "the pairing completion has an invalid version or public key",
         ));
+    }
+    if let Some(completed) = assistant::complete(&state, &id, &request, session.transport).await? {
+        return Ok(completed);
     }
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
@@ -14365,6 +14389,7 @@ mission "queue-parity" state="ready" {
 
     pub(super) fn test_state_named(root: &Path, node: &str) -> AppState {
         AppState {
+            owning_person: Some("person/operator".into()),
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,

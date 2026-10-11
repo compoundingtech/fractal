@@ -1401,6 +1401,7 @@ mod tests {
 
     fn test_state(root: &Path) -> st3::api::AppState {
         st3::api::AppState {
+            owning_person: None,
             store: Arc::new(st3::store::Store::open_memory("stui-feed").unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,

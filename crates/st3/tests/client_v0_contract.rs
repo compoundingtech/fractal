@@ -1079,6 +1079,7 @@ fn event_feeds_are_contiguous_and_terminal_streams_replace_whole_screens() {
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        owning_person: None,
         // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
         store: Arc::new(
             Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),

@@ -33,7 +33,7 @@ pub async fn pair(
 mod tests {
     use super::*;
     use st3_client::{
-        PairedSession,
+        PersonPairedSession,
         device::{Device, validate_endpoint},
     };
     use std::{
@@ -48,7 +48,7 @@ mod tests {
                 allow_public_http: false,
                 person_root_fingerprint: None,
                 signing_key: None,
-                session: PairedSession {
+                session: PersonPairedSession {
                     kind: "paired-session".into(),
                     device_id: "device/demo".into(),
                     person_id: "person/avery".into(),

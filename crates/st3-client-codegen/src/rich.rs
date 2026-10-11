@@ -11,6 +11,7 @@ const KEYWORDS: &[&str] = &[
     "$comment",
     "description",
     "title",
+    "default",
     "examples",
     "type",
     "properties",
@@ -508,6 +509,7 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
     let Some(object) = value.as_object() else {
         return match value {
             Value::Bool(true) => Ok("Schema.Unknown".into()),
+            Value::Bool(false) => Ok("Schema.Never".into()),
             other => bail!("unsupported schema {other}"),
         };
     };
@@ -891,6 +893,9 @@ fn is_object(value: &Value) -> bool {
 fn recursive_type(value: &Value, encoded: bool) -> Result<String> {
     if value == &Value::Bool(true) {
         return Ok("unknown".into());
+    }
+    if value == &Value::Bool(false) {
+        return Ok("never".into());
     }
     let object = value.as_object().context("recursive schema")?;
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
@@ -1323,6 +1328,29 @@ pub fn models(schema: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disjoint_object_unions_support_forbidden_fields_and_documented_defaults() {
+        let schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": {
+                "Duration": { "type": "integer", "minimum": 1, "maximum": 86400, "default": 3600 },
+                "Challenge": {
+                    "type": "object", "additionalProperties": false,
+                    "properties": { "grant_kind": { "enum": ["person", "assistant"] }, "person_id": { "type": "string" } },
+                    "allOf": [],
+                    "oneOf": [
+                        { "required": ["person_id"], "properties": { "grant_kind": { "const": "person" } } },
+                        { "required": ["grant_kind"], "properties": { "grant_kind": { "const": "assistant" }, "person_id": false } }
+                    ]
+                }
+            }
+        });
+        let rendered = models(&schema).unwrap();
+        assert!(rendered.contains("Schema.Never"));
+        assert!(rendered.contains("Schema.Union"));
+        assert_eq!(recursive_type(&Value::Bool(false), false).unwrap(), "never");
+    }
 
     fn conditional_schema() -> Value {
         json!({

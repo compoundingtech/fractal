@@ -606,6 +606,13 @@ impl Registry {
         fields: &BTreeMap<String, Value>,
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
+        if kind.starts_with("custom.client.assistant.")
+            || subject.starts_with("custom/client/assistant-v1-") {
+            return Err(error(
+                "claim-write-forbidden",
+                "assistant authority claims require a dedicated trusted-local operation",
+            ));
+        }
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient

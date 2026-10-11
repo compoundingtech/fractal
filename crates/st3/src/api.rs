@@ -98,6 +98,8 @@ pub(crate) fn claude_channel_attached(store: &Store, subject: &str, incarnation:
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Configured owning person for trusted-local assistant grant administration.
+    pub owning_person: Option<String>,
     pub store: Arc<Store>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
@@ -636,6 +638,9 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/adapter/import", post(client_adapters::import_message))
         .route("/v1/client/adapter/deliveries", get(client_adapters::deliveries))
         .route("/v1/client/pairings", post(client_v0::pairing_begin))
+        .route("/v1/client/assistant/grants/{id}", get(client_v0::assistant::inspect))
+        .route("/v1/client/assistant/grants/{id}/revoke", post(client_v0::assistant::revoke))
+        .route("/v1/client/assistant/grants/{id}/policy", post(client_v0::assistant::update_policy))
         .route(
             "/v1/client/pairings/{id}/complete",
             post(client_v0::pairing_complete),
@@ -1048,7 +1053,9 @@ async fn response_envelope_unbounded(
     });
     // Authentication can scan pairing claims, and creating a snapshot reads the store. Both
     // must leave the async acceptor free to admit independent requests when SQLite is busy.
-    let (client_authentication, client_snapshot) = if client_request {
+    // Bearers on native Unix routes must not evade the assistant route boundary.
+    let (client_authentication, client_snapshot) = if client_request
+        || request.headers().contains_key(axum::http::header::AUTHORIZATION) {
         let mut auth_request = Request::builder()
             .method(request.method().clone())
             .uri(request.uri().clone())
@@ -2146,7 +2153,7 @@ async fn client_capabilities(
         blocking_store(move || store.read_snapshot(|_| store.event_bounds())).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
-    let capabilities = client_v0::capabilities(&session);
+    let capabilities = client_v0::capabilities(&state, &session);
     Ok(Json(json!({
         "kind": "capabilities",
         "machine_version": st_drivers::version::machine_version(),
@@ -17731,6 +17738,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
 
     pub(super) fn state(root: &Path) -> AppState {
         AppState {
+            owning_person: None,
             store: Arc::new(Store::open_memory("node").unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
