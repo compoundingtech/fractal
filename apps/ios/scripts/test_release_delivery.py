@@ -190,7 +190,9 @@ class ReleaseDeliveryTests(unittest.TestCase):
                 "name": "@smalltalk/" + Path(relative).name, "version": "1.0.0", "dependencies": dependencies,
             }))
             self.write_source(f"{relative}/index.ts", "export const fixture = 1;\n")
-        self.write_source("package.json", '{"private": true, "packageManager": "pnpm@12.7.0"}')
+        self.write_source("package.json", json.dumps({
+            "private": True, "packageManager": "pnpm@12.7.0", "workspaces": list(packages),
+        }))
         self.write_source("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n")
         self.write_source("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
         self.write_source("apps/ios/app.json", json.dumps({"expo": {
@@ -491,13 +493,12 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def test_recursive_dependency_scope_recomputes_when_graph_changes(self):
         self.reconcile()
         package = {
-            "name": "st3-views", "version": "1.0.0",
+            "name": "@smalltalk/st3-views", "version": "1.0.0",
             "dependencies": {"new-local-package": "file:../new-local-package"},
         }
         self.write_source("clients/typescript/st3-views/package.json", json.dumps(package))
         self.write_source("clients/typescript/new-local-package/package.json",
                           json.dumps({"name": "new-local-package", "version": "1.0.0"}))
-        self.write_source("clients/typescript/new-local-package/package-lock.json", "{}")
         self.write_source("clients/typescript/new-local-package/index.ts", "export const fixture = 1;\n")
         graph_commit = self.commit("Retarget transitive local dependency")
         self.reconcile()
@@ -942,7 +943,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
              json.dumps({"name": "@smalltalk/st3-client", "version": "2.0.0", "dependencies": {}})),
             ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
-            ("package.json", '{"private": true, "packageManager": "pnpm@12.7.0", "version": "2.0.0"}'),
+            ("package.json", (self.source / "package.json").read_text().replace("12.7.0", "12.7.1")),
         )
         for count, (relative, contents) in enumerate(changes, start=1):
             with self.subTest(path=relative):
@@ -988,7 +989,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def test_missing_node_modules_workspace_and_pod_lock_regenerate_required_inputs(self):
         self.reconcile("--build-only")
         checkout = self.state / "checkout"
-        shutil.rmtree(checkout / "clients/typescript/st3-client/node_modules")
+        shutil.rmtree(checkout / "node_modules")
         self.change_js("missing-node-modules")
         self.reconcile("--build-only")
         self.assertEqual(len(self.install_commands()), 2)

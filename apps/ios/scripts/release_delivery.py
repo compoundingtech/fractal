@@ -30,11 +30,10 @@ def local_packages(repo, commit):
     found = []
     visiting = set()
     manifests = {}
-    for path in git(repo, "ls-tree", "-r", "--name-only", commit).splitlines():
-        if path.endswith("/package.json"):
-            manifest = json.loads(git(repo, "show", f"{commit}:{path}"))
-            if "name" in manifest:
-                manifests[manifest["name"]] = str(Path(path).parent)
+    root = json.loads(git(repo, "show", f"{commit}:package.json"))
+    for package in root["workspaces"]:
+        manifest = json.loads(git(repo, "show", f"{commit}:{package}/package.json"))
+        manifests[manifest["name"]] = package
 
     def visit(package):
         if package in found or package in visiting:
@@ -119,19 +118,17 @@ def build_release(args):
     env["TMPDIR"] = str(tmp)
     js_env = {key: value for key, value in env.items() if key.startswith("EXPO_PUBLIC_")}
     started = time.monotonic()
-    packages = local_packages(repo, args.commit)
     # One frozen workspace installation retains native-header mtimes when its
     # dependency inputs are unchanged.
-    manifest_paths = [path for path in git(repo, "ls-tree", "-r", "--name-only",
-                                           args.commit).splitlines()
-                      if path == "package.json" or path.endswith("/package.json")]
+    root = json.loads(git(repo, "show", f"{args.commit}:package.json"))
+    manifest_paths = ["package.json", *[f"{package}/package.json"
+        for package in sorted(set(root["workspaces"]) | set(local_packages(repo, args.commit)))]]
     identity = hashlib.sha256((git(repo, "ls-tree", args.commit, "--",
         *manifest_paths, "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
         + str(shutil.which("node")) + str(shutil.which("pnpm"))).encode()).hexdigest()
     identities = {"workspace": identity}
     if (inputs.get("packages") != identities
-            or any(not (repo / package / "node_modules").is_dir()
-                   for package in ["", *packages])):
+            or not (repo / "node_modules").is_dir()):
         run(["pnpm", "install", "--frozen-lockfile"], cwd=repo, env=env)
         inputs["packages"] = identities
         save(inputs_file, inputs)
