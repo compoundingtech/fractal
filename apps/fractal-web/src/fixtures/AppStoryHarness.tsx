@@ -8,9 +8,9 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
-import { appStoryStates, createAppStoryFixture, type AppStoryFixture } from './storybookScenarios.ts'
+import { createAppStoryFixture, type AppStoryFixture, type AppStoryState as StoryState } from './storybookScenarios.ts'
 
-export interface AppStoryArgs { readonly scheme: 'light' | 'dark'; readonly width: 600 | 1440 }
+export interface AppStoryArgs { readonly scheme: 'light' | 'dark'; readonly width: 600 | 1440; readonly state: StoryState }
 
 /** Reset the production persistence boundary without importing App/liveRuntime.
  * Each specimen has its own source and registry; no session adoption leaks. */
@@ -29,7 +29,6 @@ export const prepareAppStory = (scheme: AppStoryArgs['scheme']): void => {
 }
 
 const Specimen = ({ state, scheme, width, children }: AppStoryArgs & {
-  readonly state: typeof appStoryStates[number]
   readonly children: (fixture: AppStoryFixture) => React.ReactNode
 }) => {
   const [fixture] = React.useState(() => createAppStoryFixture(state))
@@ -44,10 +43,11 @@ const Specimen = ({ state, scheme, width, children }: AppStoryArgs & {
   </section>
 }
 
-export const AppStoryStates = ({ renderSurface, ...args }: AppStoryArgs & {
+/** One production boundary per document keeps its landmarks unambiguous. */
+export const AppStoryState = ({ renderSurface, ...args }: AppStoryArgs & {
   readonly renderSurface: (fixture: AppStoryFixture) => React.ReactNode
-}) => <main aria-label="Production app states" style={{ display: 'flex', flexDirection: 'column', gap: 32, padding: 16 }}>
-  {appStoryStates.map(state => <Specimen key={`${state}.${args.scheme}.${args.width}`} state={state} {...args}>{renderSurface}</Specimen>)}
+}) => <main aria-label="Production app state" style={{ padding: 16 }}>
+  <Specimen key={`${args.state}.${args.scheme}.${args.width}`} {...args}>{renderSurface}</Specimen>
 </main>
 
 const styles = stylex.create({

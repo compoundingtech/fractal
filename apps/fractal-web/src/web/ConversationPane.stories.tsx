@@ -2,25 +2,49 @@ import type { ComponentProps } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { waitFor } from 'storybook/test'
 import { ConversationPane } from './ConversationPane.tsx'
-import { AppStoryStates, prepareAppStory, type AppStoryArgs } from '../fixtures/AppStoryHarness.tsx'
-import { assertProductionAppStates } from '../fixtures/appStoryAssertions.ts'
+import { AppStoryState, prepareAppStory, type AppStoryArgs } from '../fixtures/AppStoryHarness.tsx'
+import { assertProductionAppState } from '../fixtures/appStoryAssertions.ts'
 
 const meta = {
   title: 'Fractal/App/ConversationPane',
   component: ConversationPane,
   parameters: { layout: 'fullscreen' },
-  args: { scheme: 'dark', width: 1440, agentRef: '', agentName: '', onOpenTool: () => {} },
+  args: { state: 'populated', scheme: 'dark', width: 1440, agentRef: '', agentName: '', onOpenTool: () => {} },
   beforeEach: ({ args }) => prepareAppStory(args.scheme),
-  render: args => <AppStoryStates {...args} renderSurface={fixture => <ConversationPane agentRef={fixture.agentRef} agentName={fixture.agentName} onOpenTool={() => {}} />} />,
-  play: async ({ canvasElement }) => {
-    await waitFor(() => assertProductionAppStates(canvasElement, false), { timeout: 15000 })
+  render: args => <AppStoryState {...args} renderSurface={fixture => <ConversationPane agentRef={fixture.agentRef} agentName={fixture.agentName} onOpenTool={() => {}} />} />,
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, false), { timeout: 15000 })
     canvasElement.dataset.appPlay = 'passed'
   },
 } satisfies Meta<ComponentProps<typeof ConversationPane> & AppStoryArgs>
 export default meta
 type Story = StoryObj<typeof meta>
 
-export const AllStates: Story = {}
-export const AllStatesLight: Story = { args: { scheme: 'light' } }
-export const AllStates600: Story = { args: { width: 600 } }
-export const AllStatesLight600: Story = { args: { scheme: 'light', width: 600 } }
+export const Loading: Story = { args: { state: 'loading', scheme: 'dark', width: 1440 } }
+export const LoadingLight: Story = { args: { state: 'loading', scheme: 'light', width: 1440 } }
+export const Loading600: Story = { args: { state: 'loading', scheme: 'dark', width: 600 } }
+export const LoadingLight600: Story = { args: { state: 'loading', scheme: 'light', width: 600 } }
+export const Empty: Story = { args: { state: 'empty', scheme: 'dark', width: 1440 } }
+export const EmptyLight: Story = { args: { state: 'empty', scheme: 'light', width: 1440 } }
+export const Empty600: Story = { args: { state: 'empty', scheme: 'dark', width: 600 } }
+export const EmptyLight600: Story = { args: { state: 'empty', scheme: 'light', width: 600 } }
+export const Populated: Story = { args: { state: 'populated', scheme: 'dark', width: 1440 } }
+export const PopulatedLight: Story = { args: { state: 'populated', scheme: 'light', width: 1440 } }
+export const Populated600: Story = { args: { state: 'populated', scheme: 'dark', width: 600 } }
+export const PopulatedLight600: Story = { args: { state: 'populated', scheme: 'light', width: 600 } }
+export const FailedTool: Story = { args: { state: 'failed-tool', scheme: 'dark', width: 1440 } }
+export const FailedToolLight: Story = { args: { state: 'failed-tool', scheme: 'light', width: 1440 } }
+export const FailedTool600: Story = { args: { state: 'failed-tool', scheme: 'dark', width: 600 } }
+export const FailedToolLight600: Story = { args: { state: 'failed-tool', scheme: 'light', width: 600 } }
+export const Offline: Story = { args: { state: 'offline', scheme: 'dark', width: 1440 } }
+export const OfflineLight: Story = { args: { state: 'offline', scheme: 'light', width: 1440 } }
+export const Offline600: Story = { args: { state: 'offline', scheme: 'dark', width: 600 } }
+export const OfflineLight600: Story = { args: { state: 'offline', scheme: 'light', width: 600 } }
+export const Unavailable: Story = { args: { state: 'unavailable', scheme: 'dark', width: 1440 } }
+export const UnavailableLight: Story = { args: { state: 'unavailable', scheme: 'light', width: 1440 } }
+export const Unavailable600: Story = { args: { state: 'unavailable', scheme: 'dark', width: 600 } }
+export const UnavailableLight600: Story = { args: { state: 'unavailable', scheme: 'light', width: 600 } }
+export const ScriptedRepair: Story = { args: { state: 'scripted-repair', scheme: 'dark', width: 1440 } }
+export const ScriptedRepairLight: Story = { args: { state: 'scripted-repair', scheme: 'light', width: 1440 } }
+export const ScriptedRepair600: Story = { args: { state: 'scripted-repair', scheme: 'dark', width: 600 } }
+export const ScriptedRepairLight600: Story = { args: { state: 'scripted-repair', scheme: 'light', width: 600 } }

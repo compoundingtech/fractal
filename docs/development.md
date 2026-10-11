@@ -119,9 +119,12 @@ Development listens on `127.0.0.1:53706`; the static build is
 `apps/fractal-web/storybook-static` (ignored by Git). Build the app first, then the
 kit, never concurrently. The companion kit landing is responsible for composing
 ref `fractal-app`, title **Fractal App**. Canonical suites are `Fractal/App/LiveAgentWorkspace` and
-`Fractal/App/ConversationPane`. Each has four AllStates variants: dark/light ×
-600/1440px, showing loading, empty, populated, a failed tool, offline/stale,
-unavailable and the existing scripted repair session. Fixture time is frozen.
+`Fractal/App/ConversationPane`. Each has seven separate state stories in four
+theme/width variants: dark/light × 600/1440px (56 stories across both suites).
+States cover loading, empty, populated, a failed tool, offline/stale,
+unavailable and the existing scripted repair session. Each document mounts one
+production workspace or pane, never a gallery of repeated full landmarks.
+Fixture time is frozen.
 The adapter decodes production DTOs and reuses the existing timeline projector;
 its unit tests run the scenario corpus decode/privacy gates and an intentional
 stub control that must reject the missing production transcript.
@@ -145,6 +148,13 @@ serve the static directory with a loopback static server, open each story's
 `[data-app-play="passed"]`. That marker is written only after the production
 transcript/composer assertions succeed. Do not infer play success from a story
 label or a loaded iframe.
+
+The synthetic-fixture privacy scanner selects repository inputs using
+`git ls-files --cached --others --exclude-standard`: committed files and
+untracked non-ignored files remain in scope, including tracked files under
+an ignored directory. Gitignored build outputs (such as `storybook-static`)
+are not publication inputs. Fixture roots outside Git are still scanned in
+full; this rule adds no filename, vendor or content-hash exemptions.
 
 ## fractal-web Content Security Policy
 
