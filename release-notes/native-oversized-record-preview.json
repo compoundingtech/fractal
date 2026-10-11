@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Paint oversized native transcript records from a bounded preview",
+  "replay": {
+    "status": "none",
+    "detail": "No replay cursor or spool format changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database tables, indexes, migrations or schema versions change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digests change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "A native transcript record larger than 256 KiB, such as a large tool output, enters the conversation timeline as a preview whose long strings keep only their first 8 KiB. The timeline no longer holds or copies the full body. Every block of such an entry carries a continuation, and opening it reads the complete record from the owner. The continuation omits its size because the preview never measured the complete value; the content chunks report the exact size."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No coordinated restart or startup work is added."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No graph recovery or repair is required."
+  }
+}

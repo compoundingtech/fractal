@@ -951,6 +951,7 @@ pub(crate) fn normalized_record(
                 *sequence,
                 timestamp,
                 *line_index,
+                false,
                 &mut items,
             );
         }
@@ -1548,6 +1549,7 @@ impl FoldedLine {
             sequence,
             timestamp,
             line_number,
+            true,
             &mut self.items,
         );
         let locator = NativeLocator::Jsonl {
@@ -2026,7 +2028,7 @@ fn normalize_native_line(
 /// object only opens after `:`, `,`, `[`, or at the start, so an object opening after anything
 /// else is where the torn record ends. The first such position whose remainder parses as one
 /// whole object is the recovered record. The search is bounded.
-fn recover_trailing_record(line: &str) -> Option<Value> {
+fn recover_trailing_record(line: &str, preview: bool) -> Option<Value> {
     let bytes = line.as_bytes();
     let mut attempts = 0;
     for (index, _) in line.match_indices('{') {
@@ -2044,28 +2046,123 @@ fn recover_trailing_record(line: &str) -> Option<Value> {
         if attempts > 16 {
             return None;
         }
-        if let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(&line[index..]) {
+        if let Ok(value @ Value::Object(_)) = parse_native_record(&bytes[index..], preview) {
             return Some(value);
         }
     }
     None
 }
 
+/// Native records above this size paint from a bounded preview. The complete record is read
+/// only when a continuation asks the owner for it (`normalized_record`).
+const PREVIEW_RECORD_BYTES: usize = 256 * 1024;
+/// The longest head a preview keeps of a string. With its marker it stays within the client
+/// display window (8 KiB), so the marker reports the size of the complete native string.
+const PREVIEW_STRING_BYTES: usize = 8 * 1024 - 128;
+
+/// Parse one native record. A preview of an oversized record keeps every key, element and
+/// scalar, so it normalizes to the same entries and blocks as the complete record, but each
+/// long string keeps only its head: the timeline never holds or copies the full body.
+fn parse_native_record(bytes: &[u8], preview: bool) -> serde_json::Result<Value> {
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        serde_json::from_slice::<PreviewValue>(bytes).map(|PreviewValue(value)| value)
+    } else {
+        serde_json::from_slice(bytes)
+    }
+}
+
+fn preview_text(text: &str) -> String {
+    if text.len() <= PREVIEW_STRING_BYTES {
+        return text.to_owned();
+    }
+    let mut end = PREVIEW_STRING_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[st truncated this native timeline value: size limit; {} bytes]",
+        &text[..end],
+        text.len()
+    )
+}
+
+struct PreviewValue(Value);
+
+impl<'de> Deserialize<'de> for PreviewValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(PreviewVisitor).map(Self)
+    }
+}
+
+struct PreviewVisitor;
+
+impl<'de> serde::de::Visitor<'de> for PreviewVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Value, E> {
+        Ok(Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Value, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Value, E> {
+        Ok(Value::String(preview_text(value)))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(PreviewValue(value)) = seq.next_element()? {
+            values.push(value);
+        }
+        Ok(Value::Array(values))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut values = serde_json::Map::new();
+        while let Some((key, PreviewValue(value))) = map.next_entry::<String, PreviewValue>()? {
+            values.insert(key, value);
+        }
+        Ok(Value::Object(values))
+    }
+}
+
 /// Unparseable records preserve exact bytes, including newline, controls and invalid UTF-8.
+/// A `preview` of an oversized record bounds every retained string (see `parse_native_record`)
+/// and marks its entries with `_preview_of_bytes`; the owner serves the rest on request.
 fn normalize_native_bytes(
     driver: ExternalDriver,
     bytes: &[u8],
     sequence: u64,
     timestamp: &str,
     line_index: usize,
+    preview: bool,
     items: &mut Vec<Value>,
 ) {
-    match serde_json::from_slice::<Value>(bytes) {
+    let first = items.len();
+    match parse_native_record(bytes, preview) {
         Ok(value) => normalize_native_line(driver, &value, sequence, timestamp, items),
         Err(error) => {
             let recovered = std::str::from_utf8(bytes)
                 .ok()
-                .and_then(recover_trailing_record);
+                .and_then(|line| recover_trailing_record(line, preview));
             let mut item = timeline_item(
                 sequence,
                 timestamp,
@@ -2077,14 +2174,24 @@ fn normalize_native_bytes(
                     "retryable":false, "details":{"line_in_window":line_index.saturating_add(1),"parse_error":error.to_string()}
                 }),
             );
+            let kept = if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+                &bytes[..PREVIEW_STRING_BYTES]
+            } else {
+                bytes
+            };
             item["body"]["blocks"]
                 .as_array_mut()
                 .unwrap()
-                .insert(0, raw_bytes_block(sequence, driver.as_str(), bytes));
+                .insert(0, raw_bytes_block(sequence, driver.as_str(), kept));
             items.push(item);
             if let Some(value) = recovered {
                 normalize_native_line(driver, &value, sequence.saturating_add(1), timestamp, items);
             }
+        }
+    }
+    if preview && bytes.len() > PREVIEW_RECORD_BYTES {
+        for item in &mut items[first..] {
+            item["_preview_of_bytes"] = json!(bytes.len());
         }
     }
 }
@@ -7469,6 +7576,7 @@ mod tests {
                 sequence,
                 &last_timestamp,
                 line_index,
+                true,
                 &mut items,
             );
             let source = serde_json::to_value(NativeLocator::Jsonl {

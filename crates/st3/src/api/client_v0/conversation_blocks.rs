@@ -182,6 +182,25 @@ struct ContentLocator {
     pointer: String,
     image: bool,
     native: Value,
+    shape: String,
+}
+
+/// A digest of an entry's structure: its kind and its blocks. A timeline entry may be a bounded
+/// preview of an oversized native record; a ref minted against the preview applies to the
+/// owner's complete record only while both agree on it, so a pointer never lands elsewhere.
+fn shape(item: &Value) -> String {
+    let shape = json!({
+        "type": item["type"],
+        "role": item["role"],
+        "blocks": item["body"]["blocks"].as_array().map(|blocks| {
+            blocks
+                .iter()
+                .map(|block| json!([block["id"], block["kind"], block["source_type"]]))
+                .collect::<Vec<_>>()
+        }),
+    });
+    let encoded = serde_json::to_vec(&shape).expect("JSON value encodes");
+    URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &encoded))
 }
 
 fn reference(
@@ -202,6 +221,7 @@ fn reference(
             .pointer(pointer)
             .is_some_and(|value| image(value) && !external_image(value)),
         native: item["_source"].clone(),
+        shape: shape(item),
     };
     let key = aead::LessSafeKey::new(
         aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &*REF_KEY).expect("owner reference key"),
@@ -260,7 +280,11 @@ fn located_value(source: &ExternalSession, locator: &ContentLocator) -> Result<V
     crate::external_sessions::normalized_record(source, &native)
         .map_err(|_| invalidated())?
         .into_iter()
-        .find(|item| item["id"] == locator.entry && item["revision"] == locator.revision)
+        .find(|item| {
+            item["id"] == locator.entry
+                && item["revision"] == locator.revision
+                && shape(item) == locator.shape
+        })
         .and_then(|item| item.pointer(&locator.pointer).cloned())
         .ok_or_else(invalidated)
 }
@@ -502,6 +526,9 @@ pub(super) fn prepare_one(
     item: &mut Value,
 ) -> Result<(), ApiError> {
     let original = item.clone();
+    // The fold holds oversized native records as bounded previews; their long values reach
+    // the client only through continuations, read from the owner's complete record.
+    let preview = original["_preview_of_bytes"].is_number();
     let body = item["body"]
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("native body is not an object"))?;
@@ -546,27 +573,33 @@ pub(super) fn prepare_one(
                     &original,
                 );
                 let encoded = serde_json::to_vec(&block["payload"]).map_err(ApiError::internal)?;
-                if encoded.len() > VALUE_BYTES || original["_oversized_bytes"].is_number() {
+                // A preview may have clipped a value to within the display window, so every
+                // block of one keeps a way back to the complete native value.
+                if encoded.len() > VALUE_BYTES || original["_oversized_bytes"].is_number() || preview
+                {
                     block["continuation"] = continuation(
                         reference(source, basis, session_id, &original, &pointer),
                         "application/json",
-                        Some(
-                            if let Some(size) = original["_oversized_payload_bytes"][index].as_u64()
-                            {
-                                size as usize
-                            } else if body_ref || images_replaced {
-                                // body_ref previews omit the blocks array, and image refs
-                                // replace native bytes. Size describes the owner value,
-                                // not either of those display-only transformations.
+                        if let Some(size) = original["_oversized_payload_bytes"][index].as_u64()
+                        {
+                            Some(size as usize)
+                        } else if preview {
+                            // A preview never held the complete value, so it cannot size it.
+                            None
+                        } else if body_ref || images_replaced {
+                            // body_ref previews omit the blocks array, and image refs
+                            // replace native bytes. Size describes the owner value,
+                            // not either of those display-only transformations.
+                            Some(
                                 serde_json::to_vec(
                                     original.pointer(&pointer).expect("native block payload"),
                                 )
                                 .map_err(ApiError::internal)?
-                                .len()
-                            } else {
-                                encoded.len()
-                            },
-                        ),
+                                .len(),
+                            )
+                        } else {
+                            Some(encoded.len())
+                        },
                         "size-limit",
                     );
                     bound(&mut block["payload"]);
@@ -622,7 +655,7 @@ pub(super) fn prepare_one(
         for (index, block) in blocks.iter_mut().enumerate() {
             for key in ["metadata", "view"] {
                 if let Some(value) = block.get_mut(key)
-                    && bound_open_value(value)
+                    && (bound_open_value(value) || preview)
                 {
                     let pointer = if block.get("continuation").is_some() {
                         "/body".to_owned()
@@ -632,13 +665,17 @@ pub(super) fn prepare_one(
                     block["continuation"] = continuation(
                         reference(source, basis, session_id, &original, &pointer),
                         "application/json",
-                        Some(
-                            serde_json::to_vec(
-                                original.pointer(&pointer).expect("native open value"),
+                        if preview {
+                            None
+                        } else {
+                            Some(
+                                serde_json::to_vec(
+                                    original.pointer(&pointer).expect("native open value"),
+                                )
+                                .map_err(ApiError::internal)?
+                                .len(),
                             )
-                            .map_err(ApiError::internal)?
-                            .len(),
-                        ),
+                        },
                         "size-limit",
                     );
                 }
@@ -716,6 +753,9 @@ pub(super) fn prepare_one(
     item.as_object_mut()
         .expect("native item")
         .remove("_oversized_payload_bytes");
+    item.as_object_mut()
+        .expect("native item")
+        .remove("_preview_of_bytes");
     if serde_json::to_vec(item).map_err(ApiError::internal)?.len()
         > CLIENT_MAX_RESPONSE_BYTES - 128_000
     {
@@ -1208,7 +1248,9 @@ mod tests {
         let original = located_value(&native, &location).unwrap();
         let encoded = serde_json::to_vec(&original).unwrap();
         assert!(encoded.len() > CHUNK_BYTES * 2);
-        assert_eq!(block["continuation"]["size"], encoded.len());
+        // The timeline only ever held a bounded preview of this record, so it does not
+        // claim a size it never measured; the chunk stream reports the exact one.
+        assert!(block["continuation"].get("size").is_none());
         let fetched = fetch_json_chunks(&state, &native, token).await;
         assert_eq!(fetched, original);
         // tool_output's body_ref covers the complete native tool body, not the
@@ -1224,6 +1266,60 @@ mod tests {
                 .local,
             local
         );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_tool_output_paints_its_first_window_from_a_bounded_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let output = format!(
+            "first synthetic output line\n{}\nlast synthetic output line",
+            "x".repeat(1024 * 1024)
+        );
+        let native = fixture(
+            root.path(),
+            json!([{
+                "type":"toolResult", "call_id":"huge-output", "toolName":"shell",
+                "content":output, "details":{"exitCode":0}
+            }]),
+        );
+        // The fold keeps a bounded preview: neither the complete body nor a raw copy of it.
+        let folded = crate::external_sessions::normalized_timeline(&native).unwrap();
+        let entry = folded
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
+        assert!(entry["_preview_of_bytes"].as_u64().unwrap() > 1024 * 1024);
+        assert!(serde_json::to_vec(entry).unwrap().len() < 128 * 1024);
+        let mut state = super::super::tests::test_state_named(root.path(), "preview-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let page = read_slice(
+            &native,
+            &session,
+            &native.id,
+            crate::external_sessions::TimelineOrder::Sequence,
+            None,
+            10,
+        )
+        .unwrap();
+        let item = page
+            .items
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
+        assert!(item.get("_preview_of_bytes").is_none());
+        assert!(serde_json::to_vec(item).unwrap().len() < 64 * 1024);
+        let shown = item["body"]["content"].as_str().unwrap();
+        assert!(shown.starts_with("first synthetic output line\nxxx"));
+        assert!(shown.contains("[st truncated this native timeline value:"));
+        let block = &item["body"]["blocks"][0];
+        assert_eq!(block["kind"], "tool_output");
+        assert_eq!(block["continuation"]["reason"], "size-limit");
+        // Expanding reads the complete record from the owner, not from the preview.
+        let token = block["continuation"]["ref"].as_str().unwrap();
+        let fetched = fetch_json_chunks(&state, &native, token).await;
+        assert_eq!(fetched["content"], output);
     }
 
     fn assert_native_keyset_pages_match_full_read(
@@ -1305,7 +1401,6 @@ mod tests {
             "{assistant}"
         )
         .unwrap();
-        let originals = crate::external_sessions::normalized_timeline(&native).unwrap();
         let mut state = super::super::tests::test_state_named(root.path(), "view-owner");
         state.native_session_home = Some(root.path().to_path_buf());
         for negotiated in [true, false] {
@@ -1338,13 +1433,12 @@ mod tests {
                     assert_eq!(block[key]["provider"], "example");
                 }
                 let token = block["continuation"]["ref"].as_str().unwrap();
-                let pointer = locator(token, &native.id).unwrap().pointer;
-                let original = originals
-                    .iter()
-                    .find(|entry| entry["id"] == item["id"])
-                    .unwrap();
+                let location = locator(token, &native.id).unwrap();
+                let pointer = location.pointer.clone();
+                // Both records exceed the preview bound: the timeline holds previews, and
+                // the owner's complete record is the reference for a fetched value.
                 let fetched = fetch_json_chunks(&state, &native, token).await;
-                assert_eq!(fetched, *original.pointer(&pointer).unwrap());
+                assert_eq!(fetched, located_value(&native, &location).unwrap());
                 let fetched_value = if pointer == "/body" {
                     &fetched["blocks"][0][key]
                 } else {
