@@ -50,7 +50,7 @@ const meta = {
   title: 'Fractal UI/Questions',
   component: QuestionForm,
   parameters: { layout: 'fullscreen' },
-  args: { request: questionRequest, onOpenTerminal: fn(), onDecline: fn(), onSubmit: fn(), onDraftChange: fn(), composerTyping: true },
+  args: { request: questionRequest, onOpenTerminal: fn(), onDecline: fn(), onSubmit: fn(), onDraftChange: fn(), composerTyping: true, locale: 'en-US', timeZone: 'America/New_York' },
   render: function ControlledQuestion(args) {
     const [draft, setDraft] = React.useState(args.draft)
     return <QuestionForm {...args} draft={draft} onDraftChange={next => { setDraft(next); args.onDraftChange?.(next) }} />
@@ -135,7 +135,8 @@ export const Answered: Story = { args: { request: { ...questionRequest, state: {
   await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
   await expect(trigger).toHaveAttribute('aria-expanded', 'false')
   await expect(canvas.queryByText(questionRequest.questions[0]!.prompt)).toBeNull()
-  await expect(canvas.getByText('2 minutes ago')).toHaveAttribute('title', '2026-10-11T15:41:00Z')
+  await expect(canvas.getByText('2 minutes ago')).toHaveAttribute('title', new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'long', timeZone: 'America/New_York' }).format(new Date('2026-10-11T15:41:00Z')))
+  await expect(canvas.getByText('2 minutes ago')).not.toHaveAttribute('title', '2026-10-11T15:41:00Z')
   await expect(canvas.queryByText('2026-10-11T15:41:00Z')).toBeNull()
   await userEvent.click(trigger)
   await expect(trigger).toHaveAttribute('aria-expanded', 'true')
@@ -296,4 +297,39 @@ export const RelativeAge: Story = { args: { ageLabel: '2 minutes ago' }, play: a
 export const RelativeAgeLight440: Story = { ...RelativeAge, parameters: { scheme: 'light', width: 440 } }
 export const RelativeAgeDark1440: Story = { ...RelativeAge, parameters: { scheme: 'dark', width: 1440 } }
 export const RelativeAgeLight1440: Story = { ...RelativeAge, parameters: { scheme: 'light', width: 1440 } }
+const longAnsweredChoice = 'Keep the release review in this thread and preserve its full explanation. '.repeat(80)
+export const AnsweredLongChoice: Story = { ...Answered, args: { ...Answered.args, request: { ...questionRequest, questions: [{ ...questionKinds[0]!, options: [{ ...questionKinds[0]!.options[0]!, label: longAnsweredChoice }] }], state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*Keep the release review/ })
+  const label = trigger.querySelector('span')!
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
+  await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
+  await expect(row.getBoundingClientRect().width).toBeLessThanOrEqual(canvasElement.getBoundingClientRect().width)
+  await userEvent.click(trigger)
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+} }
+export const AnsweredLongChoiceLight440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredLongChoiceDark1440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredLongChoiceLight1440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'light', width: 1440 } }
+export const AnsweredOriginalKeyboard: Story = { ...Answered, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const trigger = canvas.getByRole('button', { name: /Answered.*This thread/ })
+  await userEvent.click(trigger)
+  const original = canvas.getByText('Original questions', { selector: 'summary' })
+  await expect(canvas.getByText('Team inbox')).not.toBeVisible()
+  await userEvent.keyboard('{Tab}')
+  await expect(original).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect(original.parentElement).toHaveAttribute('open')
+  await expect(canvas.getByText('Team inbox')).toBeVisible()
+  await userEvent.keyboard('{Enter}{Shift>}{Tab}{/Shift}')
+  await expect(trigger).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+} }
+export const AnsweredOriginalKeyboardLight440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredOriginalKeyboardDark1440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredOriginalKeyboardLight1440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, display: 'flex', flexDirection: 'column', gap: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading }, narrow: { width: g.specimenNarrow, maxWidth: '100%' }, wide: { width: g.specimenWide, maxWidth: '100%' }, scroll: { maxHeight: g.transcriptFrameHeight, overflowY: 'auto', maxWidth: g.lane }, scrollSpace: { height: '200vh' } })

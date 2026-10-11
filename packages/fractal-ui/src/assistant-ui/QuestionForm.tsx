@@ -28,6 +28,8 @@ export interface QuestionFormProps {
   readonly composerTyping?: boolean
   readonly composerRouting?: { readonly _tag: 'HeldUntilAnswered' } | { readonly _tag: 'ChatAboutQuestion' }
   readonly ageLabel?: string
+  readonly locale?: string
+  readonly timeZone?: string
   readonly onAttach?: (questionId: string, files: readonly File[]) => void
   readonly autoFocus?: boolean
 }
@@ -99,7 +101,7 @@ export const QuestionForm = (props: QuestionFormProps) => {
     else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); if (question.kind === 'multi') advance(); else choose(question, choiceId, true) }
     else if (event.key === 'n' && question.allowNote) { event.preventDefault(); setNotesOpen({ ...notesOpen, [question.id]: true }); requestAnimationFrame(() => noteRef.current?.focus()) }
   }
-  if (!pending(request)) return <QuestionSummary request={request} ageLabel={props.ageLabel} />
+  if (!pending(request)) return <QuestionSummary request={request} ageLabel={props.ageLabel} locale={props.locale} timeZone={props.timeZone} />
   const initialChoice = question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.id ?? question?.options.find(option => option.recommended)?.id ?? question?.options[0]?.id
   const choices = question === undefined ? [] : [...question.options, ...(question.allowOther ? [{ id: OTHER, label: 'Other…' }] : [])]
   return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
@@ -155,7 +157,8 @@ const AnswerList = ({ request, answers }: { readonly request: QuestionRequestVie
 
 const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}{q.options.map(option => <div key={option.id}><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div>)}</div>)}</>
 
-export const QuestionSummary = ({ request, ageLabel }: { readonly request: QuestionRequestView; readonly ageLabel?: string }) => {
+export const QuestionSummary = ({ request, ageLabel, locale, timeZone }: { readonly request: QuestionRequestView; readonly ageLabel?: string; readonly locale?: string; readonly timeZone?: string }) => {
+  const absoluteFormat = React.useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: 'full', timeStyle: 'long', timeZone }), [locale, timeZone])
   const state = request.state
   if (state._tag === 'unrecorded') return <section {...stylex.props(styles.summary)} aria-label="Original question"><OriginalQuestions request={request} />{state.reason !== '' ? <p {...stylex.props(styles.meta)}>{state.reason}</p> : null}</section>
   if (state._tag === 'answered') {
@@ -165,9 +168,11 @@ export const QuestionSummary = ({ request, ageLabel }: { readonly request: Quest
     if (answer?.other) choices.push(`“${answer.other}”`)
     const choice = request.questions.length > 1 ? `${request.questions.length} questions` : choices.join(', ') || (question?.kind === 'multi' && answer !== undefined ? 'none' : '')
     const answeredBy = [state.by !== '' ? `Answered by ${state.by}` : '', state.where !== undefined ? `in ${state.where}` : ''].filter(Boolean).join(' · ')
+    const answeredAt = Date.parse(state.at)
+    const absolute = Number.isFinite(answeredAt) ? absoluteFormat.format(answeredAt) : undefined
     return <section {...stylex.props(styles.summary)} aria-label="Question outcome">
       <Disclosure>{({ isExpanded }) => <>
-        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{ageLabel !== undefined ? <time title={state.at} {...stylex.props(styles.meta)}>{ageLabel}</time> : null}<span aria-hidden="true">{isExpanded ? '⌄' : '›'}</span></Button>
+        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{ageLabel !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta)}>{ageLabel}</time> : null}<span aria-hidden="true">{isExpanded ? '⌄' : '›'}</span></Button>
         <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<details><summary>Original questions</summary><OriginalQuestions request={request} /></details></> : null}</DisclosurePanel>
       </>}</Disclosure>
     </section>
