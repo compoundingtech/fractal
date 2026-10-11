@@ -31,7 +31,11 @@ use smallclaims::store::checkpoint::*;
 /// than an hour older than their account group's newest, other than each seat's newest. The
 /// proof compares the account fold across every seat. It also keeps only the newest
 /// `runtime.reconcile-decision` of each decision key.
-pub const RULES_VERSION: u32 = 15;
+/// Version 16 drops exactly what version 15 drops. It names a change of agreement: a participant
+/// still sealing with one of the `LAGGING_RULES` no longer holds the others back while they are
+/// more than half the participants. Members on version 15 cannot tell that apart from their own
+/// rules, so the new digest is what keeps them from verifying with members that already do.
+pub const RULES_VERSION: u32 = 16;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -70,7 +74,8 @@ graph=shared-projection-tables-including-arrangements-and-arrangement_registers-
 replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
-carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
+carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field
+agreement=every-participant-verifies-but-those-sealing-lagging-rules-while-the-rest-are-more-than-half";
 
 /// A canonical description of every rule: one line per rule of the retention policy
 /// (`crates/st3-schema/retention.toml`), then the engine's terms. The rules digest hashes it with
@@ -91,19 +96,24 @@ pub fn rules_digest() -> String {
     hex::encode(digest.finalize())
 }
 
-/// The digests of earlier rules versions that this build's rules replace. A member still
-/// sealing with one of them lags a deploy, so the members on these rules verify without it
-/// (see `checkpoint_rules_supersede`). Add the outgoing digest when `RULES_VERSION` changes.
-const SUPERSEDED_RULES: &[(u32, &str)] = &[(
-    14,
-    "6a1426cc23bc9cb8aadc647983d20d79db2b7832b7d846d03e16a80be8412385",
-)];
+/// The rules a member may still run while this build's members verify without it: each entry is
+/// a released rules version and the exact digest of its description, which `checkpoint_tests`
+/// recomputes from that description. Only these digests count, and nothing is inferred from a
+/// version number: a member on any other rules, older, newer or unknown, disagrees and holds every
+/// checkpoint as before.
+///
+/// Rules 16 names 14, what every member ran until 2026-10-10, and 15, which some members run
+/// from that deploy without this agreement. A later version names the versions a member may
+/// still run when it ships: rules 17 would name 16, and 15 or 14 only while a member could
+/// still run them, each with its description kept in the tests.
+pub(crate) const LAGGING_RULES: &[(u32, &str)] = &[
+    (14, "6a1426cc23bc9cb8aadc647983d20d79db2b7832b7d846d03e16a80be8412385"),
+    (15, "319a5838f0c82b8c52f52ce93ace9a31840f8df17cfd3ffc14917a92c8b7d910"),
+];
 
-/// Whether this build's rules replace the rules with `rules_digest`.
+/// Whether a member sealing with `rules_digest` lags this build's rules.
 pub(crate) fn supersedes(rules_digest: &str) -> bool {
-    SUPERSEDED_RULES
-        .iter()
-        .any(|(version, digest)| *version < RULES_VERSION && *digest == rules_digest)
+    LAGGING_RULES.iter().any(|(_, digest)| *digest == rules_digest)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

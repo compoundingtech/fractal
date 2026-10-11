@@ -335,9 +335,11 @@ impl Store {
         })
     }
 
-    /// Whether `certificate` names this node as lagging a rules version and this node still
-    /// runs other rules than the certified ones. Applying it would drop rows these rules may read.
-    fn lags_certificate(&self, certificate: &Certificate) -> bool {
+    /// Whether `certificate` names this node as lagging a rules version and this node still runs
+    /// other rules than the certified ones. Applying it would drop rows these rules may read, so
+    /// it waits until it runs exactly the certified rules. Nothing shows that a build with any
+    /// other rules, newer ones included, can discard the certified manifest's rows.
+    pub(crate) fn lags_certificate(&self, certificate: &Certificate) -> bool {
         certificate.terms.lagging.contains(&self.origin)
             && certificate.terms.rules_digest != self.runtime.checkpoint_rules_digest()
     }

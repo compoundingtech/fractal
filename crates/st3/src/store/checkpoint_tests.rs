@@ -2787,11 +2787,45 @@ guards=person-actor,once-cardinality,record-not-valid,repair-replacement,project
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
+/// The rules description of rules version 15: rules 14 with the account limits rule and the
+/// reconcile decision rule. Members deployed from 2026-10-10 seal with its digest.
+const RULES_V15_DESCRIPTION: &str = "\
+harness.observed slot=subject,incarnation_id keep=first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start
+seat.status-history slot=subject sources=exclude-status_transition-false-or-numeric-zero-heartbeats keep=last-200-transition-including-native-auth-and-runtime-reset-sources-within-7d-before-cut,previous-transition-per-visible-incarnation-even-before-window,current-state-run-start
+harness.timeline slot=subject,incarnation_id keep=newest min-age-before-cut=5d
+loop.state slot=subject keep=first-and-last-of-each-run-of-status-and-round,first-with-items
+subscription.mission-deferred slot=subject,request keep=all-while-open,newest
+observer.observed slot=subject keep=newest,newest-carrier-of-each-field
+daemon.diagnostic slot=subject,code keep=newest,newest-carrier-of-each-field
+transport.observed slot=subject,origin keep=newest,newest-carrier-of-each-field
+runtime.action.requested actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+runtime.action.succeeded actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+runtime.action.failed actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+runtime.action.deadline-reached actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+harness.usage semantics=response_rollup slot=subject,incarnation_id,model,account,owner_run,owner_step,host keep=newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that
+harness.usage semantics=session_cumulative slot=subject,incarnation_id keep=newest,largest-total_tokens
+harness.usage semantics=context_occupancy slot=subject,incarnation_id keep=newest
+harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at
+runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field
+resource.observed actor=null observer=set slot=subject keep=newest
+render.applied slot=subject keep=newest min-age-before-cut=5d
+runtime.readiness-deadline-reached slot=subject keep=newest min-age-before-cut=5d
+sekret.called slot=subject keep=newest min-age-before-cut=5d
+sekret.exited slot=subject keep=newest min-age-before-cut=5d
+sekret.refused slot=subject keep=newest min-age-before-cut=5d
+sekret.changed slot=subject keep=newest min-age-before-cut=5d
+sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
+proof=the-sealed-claims-and-the-blobs-they-reference
+graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
+replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
+guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
+witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
+carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
+
 #[test]
-fn the_policy_renders_the_rules_description_with_only_the_limits_rule_changed_since_14() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 15);
+fn rules_15_changed_only_the_limits_rule_and_added_the_reconcile_rule_since_14() {
     assert_eq!(
-        super::checkpoint_rules::rules_description(),
+        RULES_V15_DESCRIPTION,
         RULES_V14_DESCRIPTION.replace(
             "harness.limits keep=all-source-observations",
             "harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at\n\
@@ -2800,13 +2834,42 @@ fn the_policy_renders_the_rules_description_with_only_the_limits_rule_changed_si
     );
 }
 
+/// Rules 16 drops what rules 15 drops: its description is rules 15's with one engine line that
+/// names the lagging agreement.
 #[test]
-fn this_build_replaces_the_rules_14_digest_members_still_seal_with() {
-    let mut digest = Sha256::new();
-    digest.update(b"st3-checkpoint-rules-v1\0");
-    digest.update(14_u32.to_be_bytes());
-    digest.update(RULES_V14_DESCRIPTION.as_bytes());
-    assert!(super::checkpoint_rules::supersedes(&hex::encode(digest.finalize())));
+fn rules_16_is_rules_15_and_the_lagging_agreement() {
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 16);
+    assert_eq!(
+        super::checkpoint_rules::rules_description(),
+        format!(
+            "{RULES_V15_DESCRIPTION}\n\
+             agreement=every-participant-verifies-but-those-sealing-lagging-rules-while-the-rest-are-more-than-half"
+        )
+    );
+}
+
+#[test]
+fn each_lagging_rules_digest_is_the_digest_of_its_description() {
+    let digest = |version: u32, description: &str| {
+        let mut digest = Sha256::new();
+        digest.update(b"st3-checkpoint-rules-v1\0");
+        digest.update(version.to_be_bytes());
+        digest.update(description.as_bytes());
+        hex::encode(digest.finalize())
+    };
+    let expected = [
+        (14, digest(14, RULES_V14_DESCRIPTION)),
+        (15, digest(15, RULES_V15_DESCRIPTION)),
+    ];
+    let listed = super::checkpoint_rules::LAGGING_RULES
+        .iter()
+        .map(|(version, digest)| (*version, (*digest).to_owned()))
+        .collect::<Vec<_>>();
+    assert_eq!(listed, expected);
+    for (_, digest) in &expected {
+        assert!(super::checkpoint_rules::supersedes(digest));
+    }
+    assert!(!super::checkpoint_rules::supersedes(&super::checkpoint_rules::rules_digest()));
 }
 
 /// `slot_of` as it was before the policy file, to show the policy groups claims into the same

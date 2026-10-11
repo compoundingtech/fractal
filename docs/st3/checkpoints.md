@@ -73,10 +73,10 @@ Version 12 ages out the sekrets claims written before they became local observat
 Version 13 makes status-history retention use the reader's source selection, excluding stamped
 heartbeats before finding transitions. Legacy transitions that the reader exposes remain retained.
 Different builds' rules digests must match, with one exception for a deploy in progress (see
-[Lagging a rules version](#lagging-a-rules-version)): a participant whose seal names rules that
-this build lists as an older version of its own lags, and the rest verify without it while they
-are more than half the participants. Any other difference, unknown or newer rules included, waits
-at sealing, including during rollback. Verification also refuses seal terms whose rules digest
+[Lagging a rules version](#lagging-a-rules-version)): a participant whose seal names one of the
+rules digests this build lists as lagging (`LAGGING_RULES`) lags, and the rest verify without it
+while they are more than half the participants. Any other difference, unknown or newer rules
+included, waits at sealing, including during rollback. Verification also refuses seal terms whose rules digest
 differs from the running build, without consuming the node's first verification. The normal step replaces terms only for the newest due
 cut; quiet retries there do not establish verification of an older cut.
 
@@ -92,8 +92,9 @@ allowed failure, with no scheduled flush or retry. Canonical source keys are clo
 reader's bounded history items during the proof and discarded afterward.
 
 **Stable.** A checkpoint is stable when every participant has published a verification that names
-the same participants and carries identical digests. Participants the verifications name as
-`lagging` are not waited for. Stability is a pure function of claims, like
+the same participants and carries identical digests. From rules 16, participants the
+verifications name as `lagging` are not waited for: the certificate needs every other
+participant, and they must be more than half. Stability is a pure function of claims, like
 the membership fold: no clock, no order, so every node that holds the same claims reaches the same
 answer. If two nodes planned different drops, their digests differ and the checkpoint never becomes
 stable; the next day's checkpoint tries again. `st replication checkpoint status` names the digest
@@ -461,36 +462,90 @@ identical inventories with different rules digests. They cannot verify that cut 
 so checkpoint verification and trimming stall fleet-wide until all participants use v10.
 Replication and ordinary work continue; the mismatch does not authorize dropping data.
 Coordinate the participant upgrades before resuming checkpoint verification. Previously
-verified certificate terms stay unchanged. From rules 15 on, a member left behind on the version
-before lags instead of stalling the rest; see below.
-
-### Lagging a rules version
-
-A member that a deploy has not reached yet still seals each checkpoint, with its older rules. Its
-seal says it holds the same envelopes before the cut and promises to write nothing dated before it;
-only its rules differ. Each build lists the digests of the rules versions its own replace
-(`SUPERSEDED_RULES` in `checkpoint_rules.rs`; rules 15 lists rules 14). When every participant's
-newest seal matches a node's terms, or differs only in rules that list names, the node verifies
-without those participants, provided the ones left are more than half of all participants. Its
-`checkpoint.verified` claim names them in `lagging`, and the certificate needs a verification from
-every other participant. So:
-
-- The upgraded members seal, verify and trim each day while one member lags.
-- A member that upgraded first, alone or with half the members, does not certify its new rules: it
-  waits for the deploy like before, and to the others its newer rules are a disagreement.
-- Unknown or equal-version rules with different digests are never lagging.
-- A lagging member keeps every row: it never trims or adopts a certificate made under rules it does
-  not run (`checkpoint-rules-lagging`). It goes on sealing newer checkpoints, whose sealed digests
-  match the trimmed members' because tombstones count as sealed envelopes, and its writes replicate
-  as usual. A build before this one keeps such verifications as claims of a newer schema, so it sees
-  no certificate at all.
-- Once it runs the certified rules it adopts the newest stable checkpoint's manifest from a peer,
-  like a member that was excused, and takes part in the next checkpoint.
-
-`st replication checkpoint status` lists lagging members on their own line rather than under
-`differs`. When a rules version changes, add the outgoing digest to `SUPERSEDED_RULES`.
+verified certificate terms stay unchanged. From rules 16 on, a member left behind on rules 14
+or 15 lags instead of stalling the rest; see [Lagging a rules version](#lagging-a-rules-version).
 
 The first observation on upgrade can reset `since` once when the legacy snapshot has no
 `provider_auth` field and its successor explicitly records null. That is an evidence-shape
 change, not proof that a login succeeded or that a runtime restarted. Later unchanged
 observations preserve `since`; a held credential refusal persists until positive recovery.
+
+### Lagging a rules version
+
+Rules 16 drops exactly what rules 15 drops. What it changes is agreement, and the change is
+real: a checkpoint can now be certified, and trimmed, by more than half of the participants
+rather than by all of them.
+
+**Who lags.** A member that a deploy has not reached still seals each checkpoint, with its older
+rules. Its seal says it holds the same envelopes before the cut and promises to write nothing
+dated before it; only its rules differ. A rules-16 node treats a participant as lagging when its
+newest seal of the checkpoint equals the node's own terms in cut, participants and sealed digest,
+and its rules digest is one of `LAGGING_RULES` in `checkpoint_rules.rs`. That is an explicit list
+of released rules versions and the exact digest of each one's description, which
+`checkpoint_tests.rs` recomputes from the descriptions it keeps. Rules 16 lists 14, which every
+member ran until 2026-10-10, and 15, which members deployed from then without this agreement
+run. No version number is compared. A member on any other rules, older, newer, unknown or
+equal-version with another digest, disagrees and holds the checkpoint as before. Rules 17 would
+list 16, and 15 or 14 only while a member could still run them.
+
+**What a certificate needs.** When every participant's newest seal equals the node's terms or
+lags, and the members that do not lag are more than half of the participants, the node proves
+the plan on a copy as always and publishes a `checkpoint.verified` claim that names the laggards
+in `lagging`. The certificate is a group of identical verifications from every participant not
+named in `lagging`, which must be a subset of the participants and leave more than half
+verifying. Verifications that name nobody carry no `lagging` field. The laggards' proofs, under
+their own rules, are not part of the certificate: their seals stand in for their agreement on
+the envelopes before the cut, and the majority's proofs for the drop. A member that upgraded
+first, alone or with half the members, does not certify its new rules: to the others its rules
+are a disagreement, and to it they are too many laggards.
+
+**The fence.** Rules 15 members without this agreement seal with rules 15's digest, so to a
+rules-16 member they are laggards, never verifiers that would wait for the others' seals to
+match. A build without the `checkpoint.verified` field `lagging` keeps such verifications as
+claims of a newer schema (counted as waiting claims, never invalid), so it never sees a lagging
+certificate, never trims from one and never adopts one; it admits them once it is upgraded. The
+claim schema is the second fence, not the first: the rules digest is what keeps members with and
+without this agreement from verifying together.
+
+**The lagging member.** It keeps every row. It neither applies nor adopts a certificate whose
+rules are not exactly its own (`checkpoint-rules-lagging`), and while it lags the newest stable
+checkpoint it verifies nothing newer, because every node applies the same checkpoints in order.
+It goes on sealing newer checkpoints. Their sealed digests match the trimmed members', because a
+checkpoint's tombstones count as sealed envelopes. Its writes replicate as usual, dated after the
+cut it sealed. Rows it holds that the others dropped never come back to them:
+
+- A trimmed member lists each dropped envelope in its inventory like one it holds
+  (`load_compact_replication_inventory` reads `checkpoint_envelopes` beside
+  `replica_envelopes`), so a peer never offers it again.
+- If one arrives anyway, `receive_replication_exchange_asking` counts it as a duplicate and stores
+  nothing when `checkpoint::envelope_tombstoned` finds its tombstone, and stores none of its
+  signatures.
+- A dropped claim carried by another envelope is not admitted again
+  (`checkpoint::claim_tombstoned` in `validate_and_admit_envelope_tx`), and a writer's high water counts its
+  dropped envelopes (`writer_high_water`).
+
+Once it runs exactly the certified rules, it adopts the newest stable checkpoint's manifest from a
+peer, checked against the certified drop digest, like a member that was excused. Adoption takes
+only the newest manifest, which holds every earlier tombstone.
+
+**Timing.** Who lags depends on which seals a verifier holds when it verifies, and each member
+verifies a checkpoint once.
+
+- A laggard that upgrades and seals again after one member verified without it, but before the
+  others did: each later verifier takes the lagging set of the first verification of this
+  checkpoint, in canonical order, that a non-lagging participant published with its own seal
+  terms. It does so while each member that set names still lags or now seals those terms
+  exactly, every other participant seals them, and more than half still verify. The upgraded
+  member, named lagging, does not verify; it adopts the certificate. This is the same whether it
+  upgraded between two verifications or after some and before the certificate completed.
+- Open: two members that each publish their verification before holding the other's, one before
+  and one after a laggard upgraded, name different lagging sets. Neither group can complete, so
+  that checkpoint is never stable. Nothing is trimmed, and the next day's checkpoint tries again.
+
+**Where it still stalls.** Rules not in `LAGGING_RULES` (13 and older, unknown, newer, or the
+same version with another digest); half or fewer of the participants not lagging, so a
+two-member fleet with one laggard; a participant with no seal, or a seal of other envelopes or
+participants, which still needs a person's excusal; and the open timing case above.
+
+`st replication checkpoint status` lists lagging members, including one named lagging that has
+since upgraded, on their own line rather than under `differs`.

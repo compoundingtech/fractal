@@ -167,16 +167,69 @@ pub fn lagging_participants(
         if theirs == ours {
             continue;
         }
-        let only_rules = SealTerms {
-            rules_digest: ours.rules_digest.clone(),
-            ..theirs.clone()
-        } == *ours;
-        if !only_rules || !supersede(&theirs.rules_digest) {
+        if !lags(ours, theirs, &supersede) {
             return None;
         }
         lagging.insert(writer.clone());
     }
     lagging_allowed(&ours.participants, &lagging).then_some(lagging)
+}
+
+/// Whether `theirs` matches `ours` in everything but rules that `supersede` says ours replace.
+fn lags(ours: &SealTerms, theirs: &SealTerms, supersede: impl Fn(&str) -> bool) -> bool {
+    theirs.rules_digest != ours.rules_digest
+        && SealTerms {
+            rules_digest: ours.rules_digest.clone(),
+            ..theirs.clone()
+        } == *ours
+        && supersede(&theirs.rules_digest)
+}
+
+/// The participants a node verifies `checkpoint` without. Lagging is a matter of when seals
+/// arrive, so a participant that upgrades and seals again between two verifications would
+/// otherwise be lagging to the first verifier and not to the second, and their two groups of
+/// verifications would never complete. So the first verification of this checkpoint, in
+/// canonical order, that carries these seal terms and names a lagging set decides the set,
+/// while each participant it names still lags or now seals these terms exactly, every other
+/// participant seals these terms, and more than half still verify. Otherwise the set comes
+/// from the seals as they are (`lagging_participants`). A participant named lagging that has
+/// since upgraded does not verify; it adopts the certificate like any other laggard.
+pub fn lagging_for_verification(
+    ours: &SealTerms,
+    seals: &BTreeMap<String, SealTerms>,
+    claims: &[CheckpointClaim],
+    checkpoint: &str,
+    supersede: impl Fn(&str) -> bool,
+) -> Option<BTreeSet<String>> {
+    let mut seen = BTreeSet::new();
+    let earlier = claims
+        .iter()
+        .filter(|claim| claim.subject == checkpoint)
+        .filter_map(|claim| Some((claim.writer.as_str(), claim.verified_terms()?)))
+        // Each writer's first verification only, as in `first_verifications`, and only from a
+        // participant that verifies, not from one its own terms name as lagging.
+        .filter(|(writer, _)| seen.insert(*writer))
+        .find(|(writer, terms)| {
+            ours.participants.contains(*writer)
+                && !terms.lagging.contains(*writer)
+                && !terms.lagging.is_empty()
+                && terms.cut_unix_ms == ours.cut_unix_ms
+                && terms.participants == ours.participants
+                && terms.sealed_digest == ours.sealed_digest
+                && terms.rules_digest == ours.rules_digest
+        })
+        .map(|(_, terms)| terms);
+    if let Some(earlier) = earlier {
+        let holds = ours.participants.iter().all(|writer| {
+            seals.get(writer).is_some_and(|theirs| {
+                theirs == ours || (earlier.lagging.contains(writer) && lags(ours, theirs, &supersede))
+            })
+        }) && lagging_allowed(&ours.participants, &earlier.lagging);
+        if holds {
+            return Some(earlier.lagging);
+        }
+    }
+    lagging_participants(ours, seals, supersede)
 }
 
 /// A stable checkpoint: one verification from each participant, all naming exactly those
@@ -899,6 +952,13 @@ impl Store {
         if cut == 0 || newest_stable.is_some_and(|stable| stable >= cut) {
             return Ok(actions);
         }
+        // A node that lags the newest stable checkpoint has not applied it, and every node
+        // applies the same checkpoints in order, so it seals newer ones but verifies none.
+        let lags_newest_stable = stable
+            .values()
+            .next_back()
+            .and_then(|certificates| chosen_certificate(certificates))
+            .is_some_and(|certificate| self.lags_certificate(certificate));
         let checkpoint = checkpoint_name(cut);
         let (participants, left) =
             self.checkpoint_participants(&claims, &context.configured_peers)?;
@@ -936,9 +996,12 @@ impl Store {
                     sealed_digest: terms.sealed_digest.clone(),
                     participants: terms.participants.clone(),
                 });
-            } else if let Some(lagging) = lagging_participants(&terms, &seals, |rules| {
-                self.runtime.checkpoint_rules_supersede(rules)
-            }) {
+            } else if !lags_newest_stable
+                && let Some(lagging) =
+                    lagging_for_verification(&terms, &seals, &claims, &checkpoint, |rules| {
+                        self.runtime.checkpoint_rules_supersede(rules)
+                    })
+            {
                 self.verify_checkpoint(
                     &checkpoint,
                     &terms,
@@ -1127,13 +1190,18 @@ impl Store {
                 },
             };
             let seals = newest_seals(&claims, &checkpoint);
+            // Participants sealing lagging rules, and those a verification of this checkpoint
+            // names as lagging that have since upgraded to these terms: they do not verify it.
+            let named = verified
+                .values()
+                .flat_map(|(_, verification)| verification.lagging.iter().cloned())
+                .collect::<BTreeSet<_>>();
             let lagging = participants
                 .iter()
                 .filter(|writer| {
                     seals.get(*writer).is_some_and(|theirs| {
-                        theirs != &terms
-                            && seal_difference(&terms, theirs) == "rules"
-                            && self.runtime.checkpoint_rules_supersede(&theirs.rules_digest)
+                        lags(&terms, theirs, |rules| self.runtime.checkpoint_rules_supersede(rules))
+                            || (theirs == &terms && named.contains(*writer))
                     })
                 })
                 .cloned()

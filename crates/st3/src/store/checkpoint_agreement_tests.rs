@@ -1294,6 +1294,8 @@ fn the_agent_card_fold_matches_per_subject_reductions_after_a_trim() {
 
 /// The rules digest of rules version 14, which this build's rules replace.
 const RULES_V14_DIGEST: &str = "6a1426cc23bc9cb8aadc647983d20d79db2b7832b7d846d03e16a80be8412385";
+/// The rules digest of rules version 15, which members deployed without the lagging agreement run.
+const RULES_V15_DIGEST: &str = "319a5838f0c82b8c52f52ce93ace9a31840f8df17cfd3ffc14917a92c8b7d910";
 
 fn seal_terms(participants: &[&str], sealed: &str, rules: &str) -> SealTerms {
     SealTerms {
@@ -1402,19 +1404,32 @@ fn trimmed_drop(store: &Store) -> Option<String> {
     store.trimmed_checkpoint().unwrap().map(|trimmed| trimmed.drop_digest)
 }
 
+// Every member here runs current code. A member on an older build is simulated: its rules
+// digest is overridden (`set_checkpoint_rules`) and, for a build without the `lagging` field, its
+// claim registry loses that field (`set_claim_registry`). Its decoder, sealing and replication
+// are this build's, not the old binary's.
+
 #[test]
 fn members_on_new_rules_seal_and_trim_while_one_lags_and_it_catches_up_after_upgrading() {
-    a_member_lags_a_rules_version(false);
+    a_member_lags_a_rules_version(RULES_V14_DIGEST, false);
 }
 
-/// The build deployed before this one has no `lagging` field: it keeps such verifications as
-/// claims of a newer schema, so it sees no certificate, trims nothing and adopts nothing.
+/// Simulates the rules-14 build every member ran before 2026-10-10. It has no `lagging` field, so
+/// it keeps such verifications as claims of a newer schema: it sees no certificate, trims nothing
+/// and adopts nothing.
 #[test]
-fn a_member_on_the_build_before_this_one_lags_without_seeing_the_certificate() {
-    a_member_lags_a_rules_version(true);
+fn a_member_on_rules_14_lags_without_seeing_the_certificate() {
+    a_member_lags_a_rules_version(RULES_V14_DIGEST, true);
 }
 
-fn a_member_lags_a_rules_version(before_this_build: bool) {
+/// Simulates a rules-15 build without the lagging agreement. Its rules digest differs from this
+/// build's, so it is a laggard here, not a peer that would wait for others' seals to match.
+#[test]
+fn a_member_on_rules_15_without_the_lagging_agreement_lags_the_same_way() {
+    a_member_lags_a_rules_version(RULES_V15_DIGEST, true);
+}
+
+fn a_member_lags_a_rules_version(rules: &str, before_this_build: bool) {
     let directory = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let first = context(scratch.path(), 0);
@@ -1422,9 +1437,9 @@ fn a_member_lags_a_rules_version(before_this_build: bool) {
     let third = context(scratch.path(), 2);
     let path = |name: &str| directory.path().join(format!("{name}.sqlite3"));
     let [alder, birch] = ["alder", "birch"].map(|name| Store::open(&path(name), name).unwrap());
-    // Cedar runs the build before this one: rules 14, which knows no newer rules.
+    // Cedar runs an earlier build, which knows no newer rules.
     let cedar = Store::open(&path("cedar"), "cedar").unwrap();
-    cedar.set_checkpoint_rules(RULES_V14_DIGEST, &[]);
+    cedar.set_checkpoint_rules(rules, &[]);
     if before_this_build {
         let mut registry = st3_schema::registry().clone();
         let verified = registry.claims.get_mut(CHECKPOINT_VERIFIED).unwrap();
@@ -1583,11 +1598,238 @@ fn a_member_that_upgraded_first_does_not_certify_its_new_rules_alone() {
 }
 
 #[test]
-fn this_build_replaces_rules_14_and_only_rules_14() {
+fn only_rules_14_and_15_lag_this_build() {
     let checkpoint_rules = super::checkpoint_rules::supersedes;
     assert!(checkpoint_rules(RULES_V14_DIGEST));
+    assert!(checkpoint_rules(RULES_V15_DIGEST));
     assert!(!checkpoint_rules(&rules_digest()));
     // Rules 9, from the test above, and anything unknown are not known as older.
     assert!(!checkpoint_rules("ba69471dde5e5a9d835a2576a55a9fe9b1c387095ee1dcabdd6abc8e03400780"));
     assert!(!checkpoint_rules("rules13"));
+}
+
+#[test]
+fn an_earlier_verification_decides_who_lags_while_its_laggards_still_lag_or_have_upgraded() {
+    let all = ["alder", "birch", "cedar"];
+    let checkpoint = checkpoint_name(CUT);
+    let ours = SealTerms {
+        sealed_digest: "sealed".into(),
+        rules_digest: "rules".into(),
+        ..seal_terms(&all, "sealed", "rules")
+    };
+    let older = |rules: &str| rules == "v14";
+    let seals = |cedar: SealTerms| {
+        let mut seals = all
+            .iter()
+            .map(|writer| ((*writer).to_owned(), ours.clone()))
+            .collect::<BTreeMap<_, _>>();
+        seals.insert("cedar".into(), cedar);
+        seals
+    };
+    let anchor = lagging_verified("alder", &all, json!(["cedar"]));
+    // Cedar upgraded and seals our terms since alder verified without it: the set stands.
+    assert_eq!(
+        lagging_for_verification(&ours, &seals(ours.clone()), &[anchor.clone()], &checkpoint, older),
+        Some(names(&["cedar"]))
+    );
+    // Cedar still lags: the set stands too.
+    let v14 = seal_terms(&all, "sealed", "v14");
+    assert_eq!(
+        lagging_for_verification(&ours, &seals(v14.clone()), &[anchor.clone()], &checkpoint, older),
+        Some(names(&["cedar"]))
+    );
+    // Without an earlier verification, an upgraded cedar is no laggard.
+    assert_eq!(
+        lagging_for_verification(&ours, &seals(ours.clone()), &[], &checkpoint, older),
+        Some(BTreeSet::new())
+    );
+    // Cedar now differs in its envelopes: the earlier set no longer holds, and neither does any.
+    let moved = seal_terms(&all, "other sealed", "v14");
+    assert_eq!(
+        lagging_for_verification(&ours, &seals(moved), &[anchor.clone()], &checkpoint, older),
+        None
+    );
+    // A verification by a writer its own terms name as lagging decides nothing.
+    let own = lagging_verified("cedar", &all, json!(["cedar"]));
+    assert_eq!(
+        lagging_for_verification(&ours, &seals(ours.clone()), &[own], &checkpoint, older),
+        Some(BTreeSet::new())
+    );
+    // Nor does a second verification by a writer, or one of other seal terms.
+    let first = verified("alder", &all, "drop");
+    assert_eq!(
+        lagging_for_verification(&ours, &seals(ours.clone()), &[first, anchor], &checkpoint, older),
+        Some(BTreeSet::new())
+    );
+    let other_terms = lagging_verified("birch", &["alder", "birch", "cedar", "dogwood"], json!(["cedar"]));
+    assert_eq!(
+        lagging_for_verification(&ours, &seals(v14), &[other_terms], &checkpoint, older),
+        Some(names(&["cedar"]))
+    );
+}
+
+/// Opens `names` on files in `directory`; the last one runs rules 14 until it is reopened.
+fn lagging_fleet(directory: &Path, names: &[&str]) -> Vec<Store> {
+    let stores = names
+        .iter()
+        .map(|name| Store::open(&directory.join(format!("{name}.sqlite3")), *name).unwrap())
+        .collect::<Vec<_>>();
+    stores.last().unwrap().set_checkpoint_rules(RULES_V14_DIGEST, &[]);
+    for store in &stores {
+        observe(store, 2);
+    }
+    stores
+}
+
+fn everyone(fleet: &[Store]) -> Vec<&Store> {
+    fleet.iter().collect()
+}
+
+fn upgrade(directory: &Path, store: Store) -> Store {
+    let name = store.origin.clone();
+    drop(store);
+    Store::open(&directory.join(format!("{name}.sqlite3")), name).unwrap()
+}
+
+fn verified_lagging(store: &Store, writer: &str, checkpoint: &str) -> BTreeSet<String> {
+    first_verifications(&store.checkpoint_claims().unwrap(), checkpoint)[writer].1.lagging.clone()
+}
+
+#[test]
+fn a_member_that_upgrades_between_two_verifications_is_still_verified_without() {
+    let directory = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let checkpoint = checkpoint_name(newest_due_cut(context.now_unix_ms));
+    let mut fleet = lagging_fleet(directory.path(), &["alder", "birch", "cedar"]);
+    sync(&everyone(&fleet));
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &context)), ["sealed"]);
+    }
+    sync(&everyone(&fleet));
+    assert_eq!(kinds(&step(&fleet[0], &context)), ["verified"]);
+    // Cedar upgrades and seals again, now matching, before birch verifies.
+    let cedar = upgrade(directory.path(), fleet.pop().unwrap());
+    fleet.push(cedar);
+    sync(&everyone(&fleet));
+    assert_eq!(kinds(&step(&fleet[2], &context)), ["sealed"]);
+    sync(&everyone(&fleet));
+    // Birch verifies without cedar, as alder did, so their verifications form one group.
+    assert_eq!(kinds(&step(&fleet[1], &context)), ["verified"]);
+    assert_eq!(verified_lagging(&fleet[1], "birch", &checkpoint), names(&["cedar"]));
+    // Cedar, named lagging, does not verify.
+    assert!(step(&fleet[2], &context).is_empty());
+    sync(&everyone(&fleet));
+    for store in &fleet[..2] {
+        assert_eq!(kinds(&step(store, &context)), ["trimmed"]);
+    }
+    // Cedar runs the certified rules now, so it adopts the manifest.
+    assert_eq!(kinds(&step(&fleet[2], &context)), ["manifest-needed"]);
+    let need = fleet[2].checkpoint_manifest_need().unwrap().unwrap();
+    let manifest = fleet[0].checkpoint_manifest(&need.checkpoint, need.cut_unix_ms).unwrap();
+    assert_eq!(kinds(&fleet[2].adopt_checkpoint(&manifest).unwrap()), ["trimmed"]);
+    sync(&everyone(&fleet));
+    assert_eq!(trimmed_drop(&fleet[2]), trimmed_drop(&fleet[0]));
+    assert_eq!(graph(&fleet[2]), graph(&fleet[0]));
+    assert_eq!(graph(&fleet[1]), graph(&fleet[0]));
+}
+
+#[test]
+fn a_member_that_upgrades_after_one_verification_waits_for_the_certificate_and_adopts() {
+    let directory = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let cut = newest_due_cut(context.now_unix_ms);
+    let checkpoint = checkpoint_name(cut);
+    let mut fleet = lagging_fleet(directory.path(), &["alder", "birch", "cedar", "dogwood"]);
+    sync(&everyone(&fleet));
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &context)), ["sealed"]);
+    }
+    sync(&everyone(&fleet));
+    assert_eq!(kinds(&step(&fleet[0], &context)), ["verified"]);
+    sync(&everyone(&fleet));
+    // Dogwood upgrades after alder verified without it, before the certificate is complete.
+    let dogwood = upgrade(directory.path(), fleet.pop().unwrap());
+    fleet.push(dogwood);
+    assert_eq!(kinds(&step(&fleet[3], &context)), ["sealed"]);
+    sync(&everyone(&fleet));
+    // Its status says it lags this checkpoint, and it does not verify.
+    let pending = fleet[3].checkpoint_status(context.now_unix_ms, &[]).unwrap().pending.unwrap();
+    assert_eq!(pending.lagging, names(&["dogwood"]));
+    assert!(pending.disagreeing.is_empty(), "{pending:?}");
+    assert!(step(&fleet[3], &context).is_empty());
+    for store in &fleet[1..3] {
+        assert_eq!(kinds(&step(store, &context)), ["verified"]);
+    }
+    sync(&everyone(&fleet));
+    for writer in ["alder", "birch", "cedar"] {
+        assert_eq!(verified_lagging(&fleet[0], writer, &checkpoint), names(&["dogwood"]));
+    }
+    assert_eq!(stable_cuts(&fleet[3]), [cut]);
+    for store in &fleet[..3] {
+        assert_eq!(kinds(&step(store, &context)), ["trimmed"]);
+    }
+    assert_eq!(kinds(&step(&fleet[3], &context)), ["manifest-needed"]);
+    let manifest = fleet[0].checkpoint_manifest(&checkpoint, cut).unwrap();
+    assert_eq!(kinds(&fleet[3].adopt_checkpoint(&manifest).unwrap()), ["trimmed"]);
+    sync(&everyone(&fleet));
+    for store in &fleet[1..] {
+        assert_eq!(trimmed_drop(store), trimmed_drop(&fleet[0]));
+        assert_eq!(graph(store), graph(&fleet[0]));
+    }
+}
+
+/// The boundary that stays open: two verifiers that each publish their one verification before
+/// they hold the other's, one before and one after a laggard upgraded, name different laggards.
+/// Each verifies once, so neither group completes, and the checkpoint is never stable. Nothing is
+/// trimmed, and the next checkpoint goes on.
+#[test]
+fn two_verifiers_that_disagree_on_who_lags_leave_the_checkpoint_uncertified() {
+    let directory = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let first = context(scratch.path(), 0);
+    let second = context(scratch.path(), 1);
+    let checkpoint = checkpoint_name(newest_due_cut(first.now_unix_ms));
+    let mut fleet = lagging_fleet(directory.path(), &["alder", "birch", "cedar", "dogwood"]);
+    sync(&everyone(&fleet));
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &first)), ["sealed"]);
+    }
+    sync(&everyone(&fleet));
+    let dogwood = upgrade(directory.path(), fleet.pop().unwrap());
+    fleet.push(dogwood);
+    assert_eq!(kinds(&step(&fleet[3], &first)), ["sealed"]);
+    // Only birch holds dogwood's new seal when both verify.
+    sync(&[&fleet[1], &fleet[3]]);
+    assert_eq!(kinds(&step(&fleet[0], &first)), ["verified"]);
+    assert_eq!(kinds(&step(&fleet[1], &first)), ["verified"]);
+    sync(&everyone(&fleet));
+    assert_eq!(verified_lagging(&fleet[0], "alder", &checkpoint), names(&["dogwood"]));
+    assert_eq!(verified_lagging(&fleet[0], "birch", &checkpoint), BTreeSet::new());
+    // Cedar joins alder's group; dogwood, named lagging there, does not verify.
+    assert_eq!(kinds(&step(&fleet[2], &first)), ["verified"]);
+    assert!(step(&fleet[3], &first).is_empty());
+    sync(&everyone(&fleet));
+    for store in &fleet {
+        assert!(stable_cuts(store).is_empty());
+        assert!(step(store, &first).is_empty());
+        assert_eq!(trimmed_drop(store), None);
+    }
+    // The next checkpoint has no laggard: all four verify it and trim.
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &second)), ["sealed"]);
+    }
+    sync(&everyone(&fleet));
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &second)), ["verified"]);
+    }
+    sync(&everyone(&fleet));
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &second)), ["trimmed"]);
+    }
+    for store in &fleet[1..] {
+        assert_eq!(trimmed_drop(store), trimmed_drop(&fleet[0]));
+        assert_eq!(graph(store), graph(&fleet[0]));
+    }
 }
