@@ -62,6 +62,22 @@ const forbiddenText = (text, { rules, allows }) => {
   return rules.some((rule) => rule(identity))
 }
 export const forbiddenLine = (line, policy) => forbiddenText(normalize(line), compileRules(policy))
+/** Published books require location/identity privacy, not fixture credential-shape heuristics. */
+export const publicationLineMatcher = (policy) => {
+  const compiled = compileRules(policy)
+  const locations = [
+    // Require a complete machine label; bare three-byte "mbp" in compressed
+    // font data is not a private hostname. Explicit identities still use policy.
+    new RegExp(String.raw`\b(?:dev[35]|` + 'mb' + String.raw`p[0-9]{4})\b`, 'i'),
+    patterns[1],
+    patterns[2],
+    /~\/[.]megarepo\b|\/(?:[^\s"'<>]*\/)?(?:[.]megarepo|checkouts?|worktrees)\//i,
+  ]
+  return (line) => {
+    const text = normalize(line)
+    return locations.some(pattern => pattern.test(text)) || compiled.rules.some(rule => rule(identityText(text, compiled.allows)))
+  }
+}
 export const scanFiles = async (roots, policy, manifest = binaryManifest) => {
   const compiled = compileRules(policy)
   const findings = []
