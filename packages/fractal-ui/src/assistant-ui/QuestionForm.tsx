@@ -183,7 +183,7 @@ const styles = stylex.create({
   body: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 },
   header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
   meta: { color: textVars.fgMuted, fontSize: 12 },
-  chip: { color: textVars.fgMuted, fontSize: 11, paddingInline: 5, paddingBlock: 2, backgroundColor: surfaceVars.rowActive, borderRadius: 4 },
+  chip: { color: textVars.fgSoft, fontSize: 11, paddingInline: 5, paddingBlock: 2, backgroundColor: surfaceVars.rowActive, borderRadius: 4 },
   button: { paddingBlock: 6, paddingInline: 9, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 5, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 2 },
   danger: { color: statusVars.dangerFg },
   option: { padding: 5, borderRadius: 4, outlineColor: accentVars.primary, outlineOffset: 2, cursor: 'pointer' },
