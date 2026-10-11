@@ -89,7 +89,45 @@ pub fn save(
     std::fs::rename(partial, path)
 }
 
-/// The file holds the person's unsent words: only they read it.
+/// What typing has changed since the last write: the file, what it holds as this stui last wrote
+/// it, and the boxes now. Kept so a panic can write it on the way out (`flush_unsaved`).
+type Unsaved = (PathBuf, HashMap<String, String>, HashMap<String, String>);
+static UNSAVED: std::sync::Mutex<Option<Unsaved>> = std::sync::Mutex::new(None);
+
+/// Tests that note or flush the unsaved boxes take this first: the box is process-wide.
+#[cfg(test)]
+pub(crate) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Remember the boxes that are not written yet, for a panic to write.
+pub fn note_unsaved(
+    path: &Path,
+    before: &HashMap<String, String>,
+    current: &HashMap<String, String>,
+) {
+    if let Ok(mut unsaved) = UNSAVED.lock() {
+        *unsaved = Some((path.to_owned(), before.clone(), current.clone()));
+    }
+}
+
+/// Nothing is waiting any more: the boxes were written.
+pub fn clear_unsaved() {
+    if let Ok(mut unsaved) = UNSAVED.lock() {
+        *unsaved = None;
+    }
+}
+
+/// Write what typing changed and no write has taken yet. Called by the panic hook, so it never
+/// waits for a lock a panicking thread might hold.
+pub fn flush_unsaved() {
+    if let Ok(mut unsaved) = UNSAVED.try_lock()
+        && let Some((path, before, current)) = unsaved.take()
+    {
+        let _ = save(&path, &before, &current);
+    }
+}
+
+/// The file holds the person's unsent words: only they read it. Not flushed to disk: a crash of
+/// stui leaves the write with the operating system, and only a power cut could lose it.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
@@ -100,8 +138,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_data()
+    file.write_all(bytes)
 }
 
 #[cfg(test)]
@@ -168,6 +205,21 @@ mod tests {
         assert_eq!(load(&path), map(&[("new", "kept")]));
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(load(&path).is_empty());
+    }
+
+    #[test]
+    fn a_panic_writes_what_typing_has_not_yet() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let typed = map(&[("a", "the last words")]);
+        note_unsaved(&path, &HashMap::new(), &typed);
+        flush_unsaved();
+        assert_eq!(load(&path), typed);
+        // Written once: a second flush has nothing to do.
+        std::fs::remove_file(&path).unwrap();
+        flush_unsaved();
+        assert!(!path.exists());
     }
 
     #[cfg(unix)]

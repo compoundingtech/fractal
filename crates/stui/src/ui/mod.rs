@@ -336,6 +336,10 @@ const ATTACH_DWELL: Duration = Duration::from_millis(300);
 const RECENTLY_CLOSED: usize = 5;
 const LEAVE_TAP: Duration = Duration::from_millis(400);
 
+/// How often typing is written to the drafts file at most, and how long a failing write waits.
+const DRAFTS_EVERY: std::time::Duration = std::time::Duration::from_millis(400);
+const DRAFTS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub struct Ui {
     world: World,
     tab: usize,
@@ -433,6 +437,9 @@ pub struct Ui {
     pub(crate) drafts_path: Option<std::path::PathBuf>,
     /// The drafts as last read from or written to that file.
     drafts_saved: HashMap<String, String>,
+    /// When they were last written, and until when to leave a failing write alone.
+    drafts_wrote: Instant,
+    drafts_backoff: Option<Instant>,
     /// The conversations whose alert band the person expanded; every other one is a single line.
     alerts_open: HashSet<String>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
@@ -694,6 +701,8 @@ impl Ui {
             snoozed: HashSet::new(),
             drafts_path: None,
             drafts_saved: HashMap::new(),
+            drafts_wrote: Instant::now(),
+            drafts_backoff: None,
             alerts_open: HashSet::new(),
             glasses: None,
             session_focus: None,
@@ -861,15 +870,53 @@ impl Ui {
         }
     }
 
-    /// Write the boxes to this device when they changed since the last write, so a crash or a
-    /// restart loses nothing typed. Cheap when nothing changed: one comparison.
+    /// Write the boxes to this device when they changed, at most every few hundred milliseconds
+    /// of typing, at once when a box was emptied (a sent message must not come back) or the box
+    /// lost the keyboard, and on the way out (`flush_drafts`, and a panic). A failing write waits
+    /// a while before the next try. Cheap when nothing changed: one comparison.
     pub(crate) fn step_drafts(&mut self) {
-        if self.conversation_state.drafts != self.drafts_saved
-            && let Some(path) = &self.drafts_path
-            && drafts_store::save(path, &self.drafts_saved, &self.conversation_state.drafts)
-                .is_ok()
+        if self.conversation_state.drafts == self.drafts_saved {
+            return;
+        }
+        let Some(path) = self.drafts_path.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        if self.drafts_backoff.is_some_and(|until| now < until) {
+            return;
+        }
+        let live = |text: &String| !text.trim().is_empty();
+        let emptied = self.drafts_saved.iter().any(|(key, text)| {
+            live(text) && !self.conversation_state.drafts.get(key).is_some_and(live)
+        });
+        if emptied
+            || !self.editing
+            || now.duration_since(self.drafts_wrote) >= DRAFTS_EVERY
         {
-            self.drafts_saved = self.conversation_state.drafts.clone();
+            self.write_drafts(&path);
+        } else {
+            drafts_store::note_unsaved(&path, &self.drafts_saved, &self.conversation_state.drafts);
+        }
+    }
+
+    /// Write the boxes now: quitting.
+    pub(crate) fn flush_drafts(&mut self) {
+        if let Some(path) = self.drafts_path.clone()
+            && self.conversation_state.drafts != self.drafts_saved
+        {
+            self.write_drafts(&path);
+        }
+    }
+
+    fn write_drafts(&mut self, path: &std::path::Path) {
+        self.drafts_wrote = Instant::now();
+        match drafts_store::save(path, &self.drafts_saved, &self.conversation_state.drafts) {
+            Ok(()) => {
+                self.drafts_saved = self.conversation_state.drafts.clone();
+                self.drafts_backoff = None;
+                drafts_store::clear_unsaved();
+            }
+            Err(_) => self.drafts_backoff = Some(Instant::now() + DRAFTS_RETRY),
         }
     }
 
@@ -7222,6 +7269,91 @@ mod tests {
         );
         ui.key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
         assert!(!ui.simple);
+    }
+
+    #[test]
+    fn typing_is_written_at_most_every_few_hundred_milliseconds_and_sending_clears_it() {
+        let _serial = drafts_store::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let mut ui = Ui::new(demo::world());
+        ui.drafts_path = Some(path.clone());
+        ui.editing = true;
+        let agent = "agent/example/atlas/builder".to_owned();
+        // Typing within the interval writes nothing yet; the panic hook's copy has it.
+        ui.conversation_state.drafts.insert(agent.clone(), "a long mes".into());
+        ui.step_drafts();
+        assert!(!path.exists(), "debounced while the box has the keyboard");
+        drafts_store::flush_unsaved();
+        assert_eq!(drafts_store::load(&path)[&agent], "a long mes");
+        std::fs::remove_file(&path).unwrap();
+        // After the interval the next step writes it.
+        ui.drafts_wrote = Instant::now() - DRAFTS_EVERY;
+        ui.conversation_state.drafts.insert(agent.clone(), "a long message".into());
+        ui.step_drafts();
+        assert_eq!(drafts_store::load(&path)[&agent], "a long message");
+        // The box losing the keyboard writes at once.
+        ui.conversation_state.drafts.insert(agent.clone(), "a long message, more".into());
+        ui.editing = false;
+        ui.step_drafts();
+        assert_eq!(drafts_store::load(&path)[&agent], "a long message, more");
+        // Sending empties the box: written at once, never restored.
+        ui.editing = true;
+        ui.conversation_state.drafts.remove(&agent);
+        ui.step_drafts();
+        assert!(drafts_store::load(&path).is_empty());
+    }
+
+    #[test]
+    fn a_draft_comes_back_into_an_empty_box_and_never_over_typed_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drafts.json");
+        let agent = "agent/example/atlas/builder".to_owned();
+        drafts_store::save(
+            &path,
+            &HashMap::new(),
+            &HashMap::from([(agent.clone(), "what I was typing".to_owned())]),
+        )
+        .unwrap();
+        let mut ui = Ui::new(demo::world());
+        ui.drafts_path = Some(path.clone());
+        ui.load_drafts();
+        assert_eq!(ui.conversation_state.drafts[&agent], "what I was typing");
+        // Nothing is rewritten for what was only read.
+        std::fs::remove_file(&path).unwrap();
+        ui.step_drafts();
+        assert!(!path.exists());
+        let mut busy = Ui::new(demo::world());
+        busy.drafts_path = Some(dir.path().join("other.json"));
+        busy.conversation_state.drafts.insert(agent.clone(), "already here".into());
+        drafts_store::save(
+            busy.drafts_path.as_ref().unwrap(),
+            &HashMap::new(),
+            &HashMap::from([(agent.clone(), "older".to_owned())]),
+        )
+        .unwrap();
+        busy.load_drafts();
+        assert_eq!(busy.conversation_state.drafts[&agent], "already here");
+    }
+
+    #[test]
+    fn a_failing_write_waits_before_it_tries_again() {
+        let _serial = drafts_store::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // The drafts file's parent is a file, so no write can succeed.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let mut ui = Ui::new(demo::world());
+        ui.drafts_path = Some(blocker.join("drafts.json"));
+        ui.editing = false;
+        ui.conversation_state.drafts.insert("a".into(), "text".into());
+        ui.step_drafts();
+        let until = ui.drafts_backoff.expect("a failed write backs off");
+        let wrote = ui.drafts_wrote;
+        ui.step_drafts();
+        assert_eq!(ui.drafts_wrote, wrote, "no second try during the wait");
+        assert_eq!(ui.drafts_backoff, Some(until));
+        assert_ne!(ui.drafts_saved, ui.conversation_state.drafts);
     }
 
     #[test]

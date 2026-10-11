@@ -55,6 +55,8 @@ pub fn log_panics(build: &str) {
         for file in [cache, state].into_iter().flatten() {
             write_panic(&file, &build, &what);
         }
+        // What was typed and not yet written is not lost with the panic.
+        super::drafts_store::flush_unsaved();
         previous(info);
     }));
 }
