@@ -96,7 +96,7 @@ impl Fixture {
         answer
     }
 }
-fn update_exit(tx: &Transaction<'_>, code: i64) {
+fn update_exit(tx: &rusqlite::Connection, code: i64) {
     tx.execute("UPDATE claims SET body=json_set(body,'$.fields.exit_code',?1) WHERE subject='exec/one/probe' AND kind='runtime.observed'", [code]).unwrap();
 }
 fn answer(rx: Receiver<Result<(), String>>) -> Result<(), String> {
