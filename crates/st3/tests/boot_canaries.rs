@@ -156,6 +156,8 @@ fn canary(harness: &str, scenario: &str) {
     if !passed {
         eprintln!("boot canary evidence: {}", evidence.display());
         let _ = evidence_root.keep();
+    } else if keep && scenario.starts_with("access-") {
+        let _ = evidence_root.keep();
     } else if keep {
         // Passing runs are not worth uploading.
         let _ = std::fs::remove_dir_all(&evidence);
@@ -305,4 +307,24 @@ fn opencode_idle_minute_makes_no_hold_calls_then_delivers_with_hold_release_and_
         return;
     }
     canary("opencode", "idle-hold");
+}
+
+#[test]
+fn plain_codex_legacy_config_boots_and_resumes_with_driver_bypass_defaults() {
+    canary("codex", "access-bypass");
+}
+
+#[test]
+fn plain_codex_auto_config_boots_and_resumes_with_a_workspace_socket_profile() {
+    canary("codex", "access-auto");
+}
+
+#[test]
+fn plain_claude_legacy_config_boots_and_resumes_with_driver_bypass_defaults() {
+    canary("claude", "access-bypass");
+}
+
+#[test]
+fn plain_claude_auto_config_boots_and_resumes_with_auto_permissions() {
+    canary("claude", "access-auto");
 }

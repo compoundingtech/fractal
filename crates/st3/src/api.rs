@@ -7493,6 +7493,15 @@ fn doctor_report_with_operation_drift(
     drift: &anyhow::Result<Vec<String>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
     let mut checks = Vec::new();
+    let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
+        .map_err(ApiError::internal)?
+        .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
+    let access_mode = if auto { "auto" } else { "bypass" };
+    checks.push(DoctorCheck {
+        name: "harness-access-mode".into(), status: "pass".into(),
+        message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+    });
+
     match state.store.index() {
         Ok(index) => checks.push(DoctorCheck {
             name: "claim-store".into(),
@@ -9248,14 +9257,6 @@ async fn start_planning_session(
         "You are the durable {} planner for launch {id}. Use `st documents get` for each immutable document reference below. Write one Markdown mission and one complete version 2 KDL mission. The KDL mission ID must be `{mission_id}` and its state must be ready. You can submit named variants with `st launch submit {id} --variant NAME --markdown FILE --kdl KDL_FILE`. Use temporary files outside the workspace, and remove them after submission. Do not change the workspace. Do not publish or run the mission. Stay available for revision messages until approval or cancellation.\n\n{references}",
         planner_config.provider
     );
-    let arguments = match planner_config.provider.as_str() {
-        "codex" => vec![
-            "--dangerously-bypass-approvals-and-sandbox".into(),
-            "--dangerously-bypass-hook-trust".into(),
-        ],
-        "claude" => vec!["--permission-mode".into(), "bypassPermissions".into()],
-        _ => Vec::new(),
-    };
     let planner = quick_agent(
         &state,
         QuickAgentRequest {
@@ -9263,7 +9264,7 @@ async fn start_planning_session(
             worktree: request.workspace.clone(),
             model: planner_config.model.clone(),
             effort: planner_config.effort.clone(),
-            arguments,
+            arguments: Vec::new(),
             expected_subject,
             idempotency_key: format!("{}:planner", request.idempotency_key),
         },
@@ -21368,8 +21369,8 @@ mission "unrequested/work" state="ready" { goal "Do unrelated work." }
         assert!(matches!(
             &planner_launch,
             crate::model::LaunchSpec::Argv(arguments)
-                if arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
-                    && arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
+                if !arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
+                    && !arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
         ));
         assert!(store.mission_spec("planned/work", None).unwrap().is_none());
         assert!(store.active_mission_runs().unwrap().is_empty());

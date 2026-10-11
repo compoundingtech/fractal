@@ -51,7 +51,7 @@ if argv[:1] in (["plugin"], ["mcp"]) or "--version" in argv:
     sys.exit(1)
 settings = json.loads(option(argv, "--settings") or "{}")
 mcp = json.loads(option(argv, "--mcp-config") or "{}")
-receipt("started", argv=argv)
+receipt("started", argv=argv, disable_autoupdater=os.environ.get("DISABLE_AUTOUPDATER"))
 
 # `--resume ID` continues that session in this project, as Claude does; Claude refuses an ID with
 # no transcript here.

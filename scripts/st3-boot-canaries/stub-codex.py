@@ -197,6 +197,10 @@ class AppServer:
             self.send(client, {"id": ident, "result": {
                 "config": {"approval_policy": None},
                 "origins": {"approval_policy": None}}})
+        elif method == "hooks/list":
+            self.send(client, {"id": ident, "result": {"data": [
+                {"cwd": cwd, "hooks": []} for cwd in params.get("cwds", [])
+            ]}})
         elif method == "thread/start":
             if not self.thread_id:
                 self.thread_id = str(uuid.uuid4())
@@ -226,6 +230,8 @@ class AppServer:
                         "workspace-write": "workspaceWrite",
                         "danger-full-access": "dangerFullAccess",
                     }[params["sandbox"]]}
+                if "permissions" in params:
+                    result["activePermissionProfile"] = {"id": params["permissions"]}
                 effort = params.get("config", {}).get("model_reasoning_effort")
                 if effort is not None:
                     result["reasoningEffort"] = effort

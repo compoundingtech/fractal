@@ -46,7 +46,7 @@ sys.dont_write_bytecode = True
 from st_boundary import fresh_seat_findings, output_findings
 
 HARNESSES = ("claude", "codex", "pi", "omp", "opencode")
-SCENARIOS = ("fresh", "restart", "daemon-restart", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
+SCENARIOS = ("access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
 MISSION = "canary/boot"
 RUN_ID = f"{MISSION}/c1"
 LETTERS = "abcde"
@@ -883,7 +883,7 @@ def scenario(node, seats, name, scratch, replacement_binary=None):
         node.cli("agents", "restart", seat_subject("a"), "--as", "person/eval")
         seats.prove("import-restart")
         prove_codex_import(node, seats, native, origin)
-    elif name == "restart":
+    elif name in ("restart", "access-auto", "access-bypass"):
         node.cli("agents", "restart", seat_subject("a"), "--as", "person/eval", check=False)
         seats.prove("restart")
         continued_session(node, "restart")
@@ -937,6 +937,9 @@ def scenario(node, seats, name, scratch, replacement_binary=None):
 
 def run(args, root, evidence):
     node = Node(root, args.binary, args.harness)
+    if args.scenario == "access-auto":
+        with (root / "config.toml").open("a") as config:
+            config.write('access_mode = "auto"\n')
     count = 5 if args.scenario == "concurrent" else 1
     letters = LETTERS[:count]
     seats = Seats(node, letters, args.bound)
@@ -956,6 +959,35 @@ def run(args, root, evidence):
         catalogs_before = {str(path): path.read_bytes() for pattern in ("catalog.kdl", "agent.kdl")
                            for path in (root / "state/drivers").rglob(pattern)}
         scenario(node, seats, args.scenario, args.scratch, args.replacement_binary)
+        if args.scenario.startswith("access-"):
+            mode = args.scenario.removeprefix("access-")
+            starts = [row for row in receipts(node, "a") if row.get("event") == "started"]
+            launches = [row for row in starts if row.get("argv", [])[:1] != ["app-server"]]
+            if len(launches) < 2:
+                fail("access policy did not reach fresh and restarted providers")
+            for row in launches:
+                argv = row["argv"]
+                if node.harness == "codex":
+                    if "check_for_update_on_startup=false" not in argv:
+                        fail("managed Codex did not disable update checks")
+                    if mode == "bypass" and "resume" not in argv:
+                        if "--dangerously-bypass-approvals-and-sandbox" not in argv or "--dangerously-bypass-hook-trust" not in argv:
+                            fail("plain Codex did not receive bypass defaults")
+                    if mode == "auto":
+                        if 'default_permissions="st-managed"' not in argv or "--dangerously-bypass-approvals-and-sandbox" in argv:
+                            fail("auto Codex did not receive the named workspace profile")
+                        profile = next((value for value in argv if value.startswith("permissions.st-managed=")), "")
+                        if str(node.endpoint) not in profile or str(root / "ws") not in profile:
+                            fail("the profile omitted the workspace or st socket")
+                else:
+                    expected = "--dangerously-skip-permissions" if mode == "bypass" else "auto"
+                    if expected not in argv or row.get("disable_autoupdater") != "1":
+                        fail("plain Claude did not receive permission/update defaults")
+            report = node.json("doctor")
+            checks = report.get("value", report).get("checks", [])
+            if not any(check.get("name") == "harness-access-mode" and check.get("message", "").startswith(mode + ":") for check in checks):
+                fail("doctor did not report the mode active in this daemon")
+            (evidence / "access-policy.json").write_text(json.dumps({"mode": mode, "provider_launches": starts, "doctor_checks": checks}, indent=2) + "\n")
         catalogs_after = {str(path): path.read_bytes() for pattern in ("catalog.kdl", "agent.kdl")
                           for path in (root / "state/drivers").rglob(pattern)}
         if catalogs_after != catalogs_before:
