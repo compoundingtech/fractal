@@ -265,6 +265,9 @@ async fn submitted_incarnation_binds_the_receipt_and_survives_replay() {
         (None, "missing-work-incarnation"),
         (Some("chooser:two"), "wrong-work-incarnation"),
     ] {
+        if let Some(incarnation) = incarnation {
+            fixture.runtime(incarnation);
+        }
         let body = json!({"actor":SEAT, "incarnation":incarnation, "evidence":evidence,
             "idempotency_key":format!("refused-{code}")});
         let error = fixture
@@ -282,6 +285,7 @@ async fn submitted_incarnation_binds_the_receipt_and_survives_replay() {
                 .is_none()
         );
     }
+    fixture.runtime("chooser:one");
     // A submission with no summary still carries its immutable author identity.
     let submitted: StepRunView = fixture.client.post(
         &format!("/v1/work/complete/{}", fixture.step),
