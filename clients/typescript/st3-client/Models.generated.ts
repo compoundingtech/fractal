@@ -31,6 +31,7 @@ export type Agent = ResourceHeader & {
   active_work_count?: number;
   activity?: string | null;
   ask?: string | null;
+  background_jobs?: number | null;
   blocked_on?: string | null;
   checkout?: (AgentCheckout | null);
   current_session_id?: string | null;

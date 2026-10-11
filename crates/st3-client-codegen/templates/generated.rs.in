@@ -1092,6 +1092,9 @@ pub struct Agent {
     pub harness_state: Option<String>,
     #[serde(default)]
     pub harness_error_state: Option<String>,
+    /// Background jobs the current harness incarnation reports; `None` when unknown.
+    #[serde(default)]
+    pub background_jobs: Option<u64>,
     #[serde(default)]
     pub since: Option<String>,
     #[serde(default)]

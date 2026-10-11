@@ -3241,6 +3241,7 @@ fn client_agent_cards_presented(
                 "driver": driver,
                 "harness_state": harness_state.as_deref().map(|state| if state == "needs-login" { "unauthenticated" } else { state }),
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
+                "background_jobs": subject.harness.as_ref().and_then(|harness| harness.background_jobs),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
                 "_status_source": subject.harness,
                 "blocked_on": subject.harness.as_ref().and_then(|harness| harness.blocked_on.as_deref()),
@@ -25541,6 +25542,85 @@ mission "agent-auth" state="ready" {
         assert_eq!(resources[0]["observation"], "current");
         assert!(resources[0]["since"].is_string());
         assert!(resources[0].get("_status_source").is_none());
+    }
+
+    #[test]
+    fn agent_card_shows_current_incarnation_background_jobs() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = state.store.clone();
+        let source = r#"
+version 2
+mission "agent-jobs" state="ready" {
+  goal "Exercise harness background jobs."
+  agent "worker" { workspace "/tmp"; harness "omp" {} }
+  agent "helper" { workspace "/tmp"; harness "codex" {} }
+  step "queued" { assigned-to "agent/${ST_MISSION_RUN}/worker" }
+  step "aside" { assigned-to "agent/${ST_MISSION_RUN}/helper" }
+}
+"#;
+        let intent = parse_intent(source, "node").unwrap();
+        let planned = store
+            .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+            .unwrap();
+        store.apply(&intent, &planned.subject_tokens, "agent-jobs-source").unwrap();
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "agent-jobs".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "agent-jobs-run".into(),
+            })
+            .unwrap();
+        materialize_run_agents(&state, &run);
+        let worker = format!("agent/{}/worker", run.id);
+        let helper = format!("agent/{}/helper", run.id);
+        let append = |subject: &str, kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: kind.into(),
+                    actor: (kind == "harness.observed").then(|| subject.to_owned()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        };
+        let card = |subject: &str| {
+            client_agent_resources(&store, false, "snapshot", store.index().unwrap())
+                .unwrap()
+                .into_iter()
+                .find(|card| card["id"] == subject)
+                .unwrap()
+        };
+        let runtime = json!({"status":"running","runtime_id":"node.worker","incarnation_id":"worker-1"});
+        append(&worker, "runtime.observed", runtime);
+        append(&helper, "runtime.observed", json!({"status":"running","runtime_id":"node.helper","incarnation_id":"helper-1"}));
+        append(&helper, "harness.observed", json!({"state":"idle","driver":"codex","incarnation_id":"helper-1"}));
+        assert_eq!(card(&helper)["state"], "running");
+        assert!(card(&helper)["background_jobs"].is_null(), "a harness that does not report jobs is unknown");
+        assert!(card(&worker)["background_jobs"].is_null(), "no report yet is unknown");
+
+        append(&worker, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"worker-1","background_jobs":2}));
+        assert_eq!(card(&worker)["state"], "running");
+        assert_eq!(card(&worker)["background_jobs"], 2);
+        append(&worker, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"worker-1","background_jobs":0}));
+        assert_eq!(card(&worker)["background_jobs"], 0, "a known zero is not unknown");
+
+        append(&worker, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"worker-1","background_jobs":3}));
+        append(&worker, "runtime.observed", json!({"status":"running","runtime_id":"node.worker","incarnation_id":"worker-2"}));
+        let restarted = card(&worker);
+        assert_eq!(restarted["incarnation_id"], "worker-2");
+        assert!(restarted["background_jobs"].is_null(), "a new incarnation does not inherit the old count");
+        append(&worker, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"worker-2","background_jobs":1}));
+        assert_eq!(card(&worker)["background_jobs"], 1);
+        append(&worker, "harness.observed", json!({"state":"ended","driver":"omp","incarnation_id":"worker-2","background_jobs":1}));
+        assert!(card(&worker)["background_jobs"].is_null(), "an ended harness reports no current jobs");
     }
 
     #[tokio::test]
