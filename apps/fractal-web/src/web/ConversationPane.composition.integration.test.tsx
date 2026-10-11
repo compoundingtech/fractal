@@ -238,7 +238,7 @@ describe('ConversationPane composition activation', () => {
     let summaryTop = 925
     const height = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(3000)
     const client = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
-    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
       const lane = this.closest<HTMLElement>('[data-testid="transcript-scroll"]')
       const top = this.hasAttribute('data-scroll-anchor-id') ? summaryTop - (lane?.scrollTop ?? 0) : 0
       return { top, bottom: top + 200, left: 0, right: 800, width: 800, height: 200, x: 0, y: top, toJSON: () => ({}) }
