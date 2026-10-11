@@ -5563,6 +5563,11 @@ fn guard_mutating_cli_actor(
             GhCommand::Own(args) => Some(args.actor.as_str()),
             GhCommand::Ls(_) => None,
         },
+        Command::Devices(args) => match args.command.as_ref() {
+            Some(DevicesCommand::Pair { assistant: Some(_), .. })
+            | Some(DevicesCommand::Grant { .. }) => Some(args.person.as_deref().unwrap_or("requester")),
+            _ => None,
+        },
         _ => None,
     };
     if let Some(actor) = actor {
@@ -30430,6 +30435,18 @@ mod tests {
             .is_err(),
             "read-only and full-control pairing must be mutually exclusive"
         );
+    }
+
+    #[test]
+    fn assistant_grant_cli_rejects_harness_person_impersonation() {
+        for argv in [
+            vec!["st3", "devices", "--as", "person/operator", "pair", "--assistant", "assistant/chatgpt"],
+            vec!["st3", "devices", "--as", "person/operator", "grant", "inspect", "assistant-grant/demo"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
+            assert!(guard_mutating_cli_actor(&cli.command, None, None).is_ok());
+        }
     }
 
     #[test]

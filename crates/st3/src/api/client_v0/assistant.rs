@@ -17,7 +17,7 @@ static TRANSITIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct AssistantPairingBegin {
+pub(in crate::api) struct AssistantPairingBegin {
     api_version: String,
     device_name: String,
     assistant_id: String,
@@ -31,7 +31,7 @@ fn default_expiry() -> u64 { 3600 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct AssistantGrantPolicy {
+pub(in crate::api) struct AssistantGrantPolicy {
     api_version: String,
     scopes: Vec<String>,
     #[serde(default = "default_expiry")]
@@ -136,13 +136,13 @@ pub(super) async fn complete(state: &AppState, id: &str, request: &PairingComple
     }
     result
 }
-pub(super) async fn revoke(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub(in crate::api) async fn revoke(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                           AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     let result = revoke_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone())).await;
     audit(&state, "revoke", &session.actor, session.transport, Some(&id), &result)?;
     result
 }
-pub(super) async fn update_policy(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub(in crate::api) async fn update_policy(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                                  AxumPath(id): AxumPath<String>, Json(request): Json<AssistantGrantPolicy>)
     -> Result<Json<Value>, ApiError> {
     let result = update_policy_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone()), Json(request)).await;
@@ -288,7 +288,7 @@ pub(super) fn authorize_route(_session: &ClientSession, _request: &Request<Body>
     -> Result<(), ApiError> {
     Err(forbidden("assistant grants authorize no generic read, stream, or mutation route"))
 }
-pub(super) async fn inspect(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
+pub(in crate::api) async fn inspect(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                            AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     trusted_issuer(&state, &session)?;
     let granted = latest(&state, &subject(&id)?, GRANTED)?
