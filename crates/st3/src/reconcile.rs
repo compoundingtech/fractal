@@ -353,6 +353,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn remove(&self, runtime_id: &str, terminal: bool) -> Result<()>;
     fn screen(&self, runtime_id: &str) -> Result<String>;
     fn send_key(&self, runtime_id: &str, key: &str) -> Result<()>;
+    /// A backend must opt in to incarnation-bound automatic terminal responses.
+    fn send_key_if(&self, _runtime_id: &str, _key: &str, _incarnation: &str) -> Result<()> {
+        anyhow::bail!("incarnation-bound terminal input is unsupported")
+    }
     fn read_exec_log(&self, runtime_id: &str) -> Result<Option<String>>;
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
@@ -604,6 +608,9 @@ impl RuntimeControl for NativeRuntime {
 
     fn send_key(&self, runtime_id: &str, key: &str) -> Result<()> {
         self.pty()?.send_key(runtime_id, key)
+    }
+    fn send_key_if(&self, runtime_id: &str, key: &str, incarnation: &str) -> Result<()> {
+        self.pty()?.send_key_if(runtime_id, key, Some(incarnation))
     }
 
     fn read_exec_log(&self, runtime_id: &str) -> Result<Option<String>> {
@@ -3612,6 +3619,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         screen: Option<&str>,
     ) -> Result<()> {
+        self.reconcile_blocking_screen_at(subject, member, observation, screen, now_ms())
+    }
+
+    fn reconcile_blocking_screen_at(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+        now: u128,
+    ) -> Result<()> {
         if subject.kind != "agent" || !member.terminal {
             return Ok(());
         }
@@ -3681,7 +3699,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             {
                 continue;
             }
-            self.store.append_claim(&ClaimInput {
+            if let Some(fence) = &fence
+                && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
+            {
+                // Escape is asynchronous. Keep the readiness fence while giving
+                // Codex one existing screen-poll interval to process it. Register
+                // the due input even when the unchanged menu would be skipped by
+                // incremental reconciliation; an ineffective Skip still faults.
+                let due = fence
+                    .accepted_at_unix_ms
+                    .saturating_add(SCREEN_POLL_EVERY_MS);
+                if now < due {
+                    smallclaims::touched::note_due(due);
+                    continue;
+                }
+            }
+            let prompt = self.store.append_claim(&ClaimInput {
                 subject: subject.subject.clone(),
                 kind: "harness.diagnostic".into(),
                 actor: Some(subject.subject.clone()),
@@ -3698,6 +3731,37 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(key.clone()),
             })?;
+            // The retained prompt claim is the once-per-episode action fence.
+            // Re-read the terminal rather than acting on the cached member screen.
+            if fence.is_none()
+                && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
+            {
+                let result = self.runtime.screen(&member.runtime_id).and_then(|fresh| {
+                    let key = st_drivers::blocking_screen::codex_update_skip_key(driver, &fresh)
+                        .ok_or_else(|| anyhow::anyhow!("update menu changed before Skip"))?;
+                    self.runtime
+                        .send_key_if(&member.runtime_id, key, incarnation)
+                });
+                match result {
+                    Ok(()) => {
+                        smallclaims::touched::note_due(
+                            prompt
+                                .accepted_at_unix_ms
+                                .saturating_add(SCREEN_POLL_EVERY_MS),
+                        );
+                        self.signal_changed();
+                        // Only later screen proof clears the readiness fence. A
+                        // persistent menu faults after settlement, without a retry.
+                        continue;
+                    }
+                    Err(error) => tracing::debug!(
+                        subject = %subject.subject,
+                        incarnation,
+                        error = %error,
+                        "Codex update-menu Skip failed; retaining attention path"
+                    ),
+                }
+            }
             let reviewer = match crate::accounts::harness_binding(&subject.desired)
                 .map(|binding| binding.binding)
             {
@@ -16563,6 +16627,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         screen_error: Mutex<bool>,
         screens: Mutex<HashMap<String, String>>,
         keys: Mutex<Vec<String>>,
+        key_error: Mutex<bool>,
         leftovers: Mutex<Vec<(String, bool)>>,
     }
 
@@ -16686,6 +16751,17 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         fn send_key(&self, _runtime_id: &str, key: &str) -> Result<()> {
             self.keys.lock().unwrap().push(key.into());
             Ok(())
+        }
+        fn send_key_if(&self, runtime_id: &str, key: &str, incarnation: &str) -> Result<()> {
+            anyhow::ensure!(!*self.key_error.lock().unwrap(), "terminal input failed");
+            anyhow::ensure!(
+                self.ptys.lock().unwrap().iter().any(|pty| {
+                    pty.runtime_id == runtime_id
+                        && pty.incarnation_id.as_deref() == Some(incarnation)
+                }),
+                "terminal incarnation changed"
+            );
+            self.send_key(runtime_id, key)
         }
         fn read_exec_log(&self, runtime_id: &str) -> Result<Option<String>> {
             Ok(self.logs.lock().unwrap().get(runtime_id).cloned())
@@ -34629,6 +34705,162 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     }
 
     #[test]
+    fn codex_update_skip_is_once_per_episode_and_requires_current_screen_and_incarnation() {
+        let menu =
+            include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt");
+        for case in [
+            "skip",
+            "send-failed",
+            "screen-changed",
+            "incarnation-changed",
+            "screen-unreadable",
+        ] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let workspace = tempfile::tempdir().unwrap();
+            apply_source(
+                &store,
+                &format!(
+                    "version 2\nagent \"seat\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+                    workspace.path().display().to_string()
+                ),
+                "codex-update-skip",
+            );
+            let runtime = Arc::new(FakeRuntime::default());
+            let reconciler = Reconciler::new(
+                store.clone(),
+                runtime.clone(),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            reconciler.reconcile_once().unwrap();
+            let subject = store
+                .desired_subjects()
+                .unwrap()
+                .into_iter()
+                .find(|subject| subject.kind == "agent")
+                .unwrap();
+            let member = runtime.started_members.lock().unwrap()[0].clone();
+            let observation = claude_seat_pty("seat", "running", "one");
+            *runtime.ptys.lock().unwrap() = vec![if case == "incarnation-changed" {
+                claude_seat_pty("seat", "running", "two")
+            } else {
+                observation.clone()
+            }];
+            runtime.screens.lock().unwrap().insert(
+                member.runtime_id.clone(),
+                if case == "screen-changed" {
+                    "› unsent draft"
+                } else {
+                    menu
+                }
+                .into(),
+            );
+            *runtime.key_error.lock().unwrap() = case == "send-failed";
+            *runtime.screen_error.lock().unwrap() = case == "screen-unreadable";
+            reconciler
+                .reconcile_blocking_screen(&subject, &member, &observation, Some(menu))
+                .unwrap();
+            let sent = usize::from(case == "skip");
+            let expected: &[&str] = if sent == 1 { &["escape"] } else { &[] };
+            assert_eq!(runtime.keys.lock().unwrap().as_slice(), expected, "{case}");
+            let claims = store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].body["fields"]["code"], "provider-update-prompt");
+            assert_eq!(claims[0].body["fields"]["status"], "blocked");
+            assert_eq!(
+                store.fault_items(None).unwrap().len(),
+                usize::from(case != "skip")
+            );
+
+            // A daemon restart must neither repeat a key nor fault during the
+            // asynchronous processing interval, even if the menu is unchanged.
+            let due = claims[0]
+                .accepted_at_unix_ms
+                .saturating_add(SCREEN_POLL_EVERY_MS);
+            let restarted = Reconciler::new(
+                store.clone(),
+                runtime.clone(),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            restarted
+                .reconcile_blocking_screen_at(&subject, &member, &observation, Some(menu), due - 1)
+                .unwrap();
+            assert_eq!(runtime.keys.lock().unwrap().len(), sent);
+            assert_eq!(
+                store.fault_items(None).unwrap().len(),
+                usize::from(case != "skip")
+            );
+            restarted
+                .reconcile_blocking_screen(&subject, &member, &observation, None)
+                .unwrap();
+            assert_eq!(
+                store
+                    .claims_for(&subject.subject, Some("harness.diagnostic"))
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            // A cleared screen settles immediately; a menu surviving the due
+            // interval raises attention, with no second key or extra prompt claim.
+            if case == "skip" {
+                restarted
+                    .reconcile_blocking_screen_at(&subject, &member, &observation, Some(menu), due)
+                    .unwrap();
+                assert_eq!(store.fault_items(None).unwrap().len(), 1);
+                assert_eq!(runtime.keys.lock().unwrap().len(), sent);
+            }
+            restarted
+                .reconcile_blocking_screen_at(
+                    &subject,
+                    &member,
+                    &observation,
+                    Some("Ready for work"),
+                    due - 1,
+                )
+                .unwrap();
+            assert!(store.fault_items(None).unwrap().is_empty());
+            let claims = store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .unwrap();
+            assert_eq!(claims[1].body["fields"]["code"], "provider-update-restored");
+            assert_eq!(claims[1].body["evidence"][0], claims[0].id);
+            *runtime.ptys.lock().unwrap() = vec![observation.clone()];
+            runtime
+                .screens
+                .lock()
+                .unwrap()
+                .insert(member.runtime_id.clone(), menu.into());
+            *runtime.key_error.lock().unwrap() = false;
+            *runtime.screen_error.lock().unwrap() = false;
+            restarted
+                .reconcile_blocking_screen(&subject, &member, &observation, Some(menu))
+                .unwrap();
+            assert_eq!(runtime.keys.lock().unwrap().len(), sent + 1);
+            assert!(store.fault_items(None).unwrap().is_empty());
+            let new_prompt = store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .unwrap()
+                .pop()
+                .unwrap();
+            restarted
+                .reconcile_blocking_screen_at(
+                    &subject,
+                    &member,
+                    &observation,
+                    Some("Ready for work"),
+                    new_prompt.accepted_at_unix_ms + 1,
+                )
+                .unwrap();
+            assert!(store.fault_items(None).unwrap().is_empty());
+            assert_eq!(runtime.keys.lock().unwrap().len(), sent + 1);
+        }
+    }
+
+    #[test]
     fn blocking_screens_override_idle_clear_and_fence_again() {
         for (driver, screen, code) in [
             (
@@ -34645,7 +34877,10 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ),
             (
                 "codex",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt"),
+                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt")
+                    .split("enter continue")
+                    .next()
+                    .unwrap(),
                 "provider-update-prompt",
             ),
             (
@@ -34857,7 +35092,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 let next = if code == "provider-auth-expired" {
                     include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt"
-                    )
+                    ).split("enter continue").next().unwrap()
                 } else {
                     include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt")
                 };

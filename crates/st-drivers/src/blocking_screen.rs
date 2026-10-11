@@ -160,6 +160,35 @@ pub fn detect(driver: &str, screen: &str) -> Option<BlockingScreen> {
     None
 }
 
+/// The controlled Codex update menu explicitly offers Escape as Skip. Refuse
+/// partial menus and transcript content: Escape must never reach an input box,
+/// authentication dialog, or a menu whose key semantics have changed.
+pub fn codex_update_skip_key(driver: &str, screen: &str) -> Option<&'static str> {
+    if detect(driver, screen)?.code != "provider-update-prompt" {
+        return None;
+    }
+    let lines: Vec<_> = screen
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if !lines.contains(&"enter continue · esc skip") {
+        return None;
+    }
+    lines
+        .iter()
+        .all(|line| {
+            let line = line.trim_start_matches(['›', '❯', ' ']);
+            line.starts_with("Update available · ")
+                || line == "Release notes: https://github.com/openai/codex/releases/latest"
+                || line.starts_with("1. Update now (runs `") && line.ends_with("`)")
+                || line == "2. Skip"
+                || line == "3. Skip until next version"
+                || line == "enter continue · esc skip"
+        })
+        .then_some("escape")
+}
+
 /// Whether Claude's own input box is on screen: a full-width rule, the `❯` prompt line and
 /// another rule. Claude replaces the box with its dialog while a permission, question or plan
 /// prompt is up, and shows it again once the prompt is answered or dismissed (measured on Claude
@@ -302,6 +331,23 @@ mod tests {
         ] {
             assert_eq!(detect(driver, screen).unwrap().code, code, "{driver}");
         }
+    }
+
+    #[test]
+    fn codex_update_skip_requires_the_complete_active_menu() {
+        let menu = include_str!("../tests/fixtures/blocking-screens/codex-update.txt");
+        assert_eq!(codex_update_skip_key("codex", menu), Some("escape"));
+        for screen in [
+            menu.replace("enter continue · esc skip", "enter continue"),
+            menu.replace("2. Skip", "2. Cancel"),
+            format!("Tool output:\n{menu}"),
+            format!("{menu}\n› unsent draft"),
+            menu.lines().map(|line| format!("> {line}\n")).collect(),
+            include_str!("../tests/fixtures/blocking-screens/codex-login.txt").into(),
+        ] {
+            assert_eq!(codex_update_skip_key("codex", &screen), None, "{screen}");
+        }
+        assert_eq!(codex_update_skip_key("claude", menu), None);
     }
 
     #[test]
