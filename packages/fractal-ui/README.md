@@ -160,6 +160,50 @@ The exported legacy Folio, Relay and Orbit palettes also avoid green: `good` is 
 
 The shared diff tint assertion identifies a token through its causal effect on both the row wash and gutter, letting the browser resolve CSS layers, specificity and conditional rules. It restores exact inline styles and verifies computed paint restoration after each probe. Every dark/light tint story also rejects the original neutral pre-tint paint and an equal-blue wash backed by an unrelated variable, then verifies the restored positive result.
 
+## Quota redesign exploration
+
+`@smalltalk/fractal-ui/quota-design` exports the controlled `QuotaDrawer` and
+`QuotaUsagePage` presentation components and their neutral contracts. They do not
+import a producer, transport, account configuration, or live runtime. This is a
+new exploration surface; the existing usage-meter table and live monitor tab
+remain unchanged.
+
+The `Fractal/App/Quota` stories cover 240/320/420px drawers, column-per-window,
+stacked-mini-meter and governing-plus-chip alternatives, and 1440/900px Usage
+workspaces with overview/brush, small multiples and calendar heatmap alternatives.
+Both themes and retained loading/stale/failed/incompatible states are included,
+along with first-load empty and not-yet-published states. A row opens Usage for
+that identity; Limits, Account and History retain the complete supplied evidence.
+
+The caller owns sorting, unit preference, filters, provider grouping, collapse,
+selection, brush range and detail tab. The drawer's focused shortcuts are `s`
+(next sort), `S` (reverse), `u` (unit), `m` (collapse) and Escape (host callback).
+Missing measurements sort last in either direction; equal numeric ranks use
+canonical identity. Exhaustion never manufactures a percentage. Thresholds are
+60/80. Dollar readings require admitted coverage; token fallback does not change
+the caller's preferred unit. Mixed-unit subtotals remain separate.
+
+History uses the supplied calendar buckets, exposes exact measured values and
+unknown token classes, and marks the unfinished bucket. Cost compares rate-card
+usage value with invoiced/list subscription price for **last 30 days, normalized**;
+it is neither calendar-month spend nor a billing claim. No forecast or hidden
+forecast slot exists. Fictional fixtures and the sole pending cost-serialization
+boundary are recorded in `src/quota-design-fixtures.ts`.
+
+Focused checks:
+
+- `node --test --test-force-exit src/quota-design.unit.test.mjs`
+- `../../node_modules/.bin/tsc --noEmit`
+- `scripts/quota-redesign.e2e.mjs`, with `QUOTA_STORYBOOK_URL`,
+  `QUOTA_EVIDENCE_DIR`, a pinned `PLAYWRIGHT_MODULE` and managed `CHROMIUM_PATH`.
+  This runs the real story plays and rejects deliberate disabled-sort,
+  disabled-keyboard, disabled-brush and refresh-layout-shift controls.
+
+The story harness has explicit refresh/failure controls. Geometry assertions
+measure rows, status, charts and breakdowns; the browser gate also records
+layout-shift entries on refresh. Components never erase supplied last-good data
+when a status changes. Network retention and fencing remain the host's job.
+
 ## Clean-room note
 
 The original kit's behavior references are listed below. The gated workbench/composer additions reuse our independently authored internal review route at `98a270d4e58a44e4c4625cf1956ad09dbabfc1a7`, with the reviewed tint cutover from `35b6922a1559b4b3bcd78b672cb6b707c5d1e108`; their host/runtime boundaries are adapted to this kit as described above. This provenance is not a claim that the later additions were authored without consulting our own source.
