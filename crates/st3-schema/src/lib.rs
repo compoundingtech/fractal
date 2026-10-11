@@ -4521,15 +4521,36 @@ mod tests {
     #[test]
     fn submitted_incarnation_is_optional_and_only_registered_on_submissions() {
         let fields = BTreeMap::from([("attempt".into(), Value::from(1))]);
-        registry().validate_claim("step-run/garden/build", "work.submitted", &fields).unwrap();
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
         let mut fields = fields;
         fields.insert("submitted_incarnation".into(), Value::from("garden:one"));
-        registry().validate_claim("step-run/garden/build", "work.submitted", &fields).unwrap();
-        for kind in ["work.claimed", "work.progress", "work.released", "work.failed"] {
-            assert_eq!(registry().validate_claim("step-run/garden/build", kind, &fields).unwrap_err().code, "unknown-claim-field");
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
+        for kind in [
+            "work.claimed",
+            "work.progress",
+            "work.released",
+            "work.failed",
+        ] {
+            assert_eq!(
+                registry()
+                    .validate_claim("step-run/garden/build", kind, &fields)
+                    .unwrap_err()
+                    .code,
+                "unknown-claim-field"
+            );
         }
         fields.insert("submitted_incarnation".into(), Value::from(1));
-        assert_eq!(registry().validate_claim("step-run/garden/build", "work.submitted", &fields).unwrap_err().code, "invalid-claim-field");
+        assert_eq!(
+            registry()
+                .validate_claim("step-run/garden/build", "work.submitted", &fields)
+                .unwrap_err()
+                .code,
+            "invalid-claim-field"
+        );
     }
 
     #[test]
