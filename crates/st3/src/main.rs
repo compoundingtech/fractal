@@ -6283,6 +6283,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             otlp.endpoint
         );
         tokio::spawn(st3::otlp::run(store.clone(), exporter));
+        // The live SLO windows go out as gauges, once a minute, on a timer of their own.
+        tokio::spawn(st3::otlp::run_slo(st3::otlp::OtlpExporter::new(otlp, &config.node)?));
     }
     #[cfg(target_os = "macos")]
     tokio::spawn(async {

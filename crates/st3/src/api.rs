@@ -1450,7 +1450,7 @@ fn request_latency_snapshot() -> Vec<Value> {
 }
 
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
-fn request_latency_windows() -> Value {
+pub(crate) fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 

@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
+mod slo;
+pub use slo::run as run_slo;
+
 use crate::model::ClaimRecord;
 use crate::store::{Store, local_observation_position};
 
