@@ -347,7 +347,12 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         await self.monitor.route(self.target)
         alert = self.alert_posts("delivery-probe-alert")[0]
         self.assertEqual(alert["to"], self.config["alert_agent"])
-        for hint in (self.monitor.actor, self.target, original["nonce"], original["message"], "st doctor --json"):
+        for hint in (self.monitor.actor, self.target, original["nonce"], original["message"],
+                     "Report this route, nonce, message, missed deadline",
+                     "Reporting does not require st doctor --json to return",
+                     "report that timeout; do not repeat the call",
+                     "A Doctor timeout does not establish that the daemon stopped",
+                     "Fresh probes continue; a real recipient read sends a recovery note"):
             self.assertIn(hint, alert["content"])
         self.assertFalse(any(path == "/v1/work/ask" for path, _ in self.monitor.api.posts))
         original["started_at_unix_ms"] -= self.monitor.interval
