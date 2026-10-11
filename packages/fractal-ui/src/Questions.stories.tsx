@@ -100,6 +100,8 @@ export const NegativeControls: Story = { render: () => <>
   const canvas = within(canvasElement)
   await expect(canvas.queryByRole('button', { name: 'Open terminal' })).toBeNull()
   await expect(canvas.queryByRole('complementary', { name: 'Needs you' })).toBeNull()
+  await expect(canvas.queryByText('none')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: /Answered.*2 questions/ }))
   await expect(canvas.getByText('none')).toBeVisible()
   await expect(canvas.getByText('Left open')).toBeVisible()
   await expect(canvas.getByRole('region', { name: 'Needs you inbox' }).childElementCount).toBe(0)
@@ -126,7 +128,40 @@ export const Failed: Story = { args: { request: { ...questionRequest, answerable
   await expect(args.onRetry).toHaveBeenCalledTimes(1)
   await expect(args.onDecline).not.toHaveBeenCalled()
 } }
-export const Answered: Story = { args: { request: { ...questionRequest, state: questionStates[4]! } } }
+export const Answered: Story = { args: { request: { ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', where: 'web', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2 minutes ago' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*This thread/ })
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  await expect(canvas.queryByText(questionRequest.questions[0]!.prompt)).toBeNull()
+  await expect(canvas.getByText('2 minutes ago')).toHaveAttribute('title', '2026-10-11T15:41:00Z')
+  await expect(canvas.queryByText('2026-10-11T15:41:00Z')).toBeNull()
+  await userEvent.click(trigger)
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+  await expect(canvas.getByText('This thread', { selector: 'dd' })).toBeVisible()
+  await expect(trigger).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+} }
+export const AnsweredLight440: Story = { ...Answered, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredDark1440: Story = { ...Answered, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredLight1440: Story = { ...Answered, parameters: { scheme: 'light', width: 1440 } }
+export const AnsweredMultiple: Story = { args: { request: { ...questionRequest, questions: questionKinds.slice(0, 3), state: { _tag: 'answered', answers: { single: { selected: ['thread'] }, multi: { selected: [] }, text: { selected: [], other: 'Accessibility review' } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2 minutes ago' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*3 questions/ })
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(canvas.queryByText('none')).toBeNull()
+  await userEvent.click(trigger)
+  await expect(canvas.getByText('none')).toBeVisible()
+  await expect(canvas.getByText(/Accessibility review/)).toBeVisible()
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+} }
+export const AnsweredMultipleLight440: Story = { ...AnsweredMultiple, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredMultipleDark1440: Story = { ...AnsweredMultiple, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredMultipleLight1440: Story = { ...AnsweredMultiple, parameters: { scheme: 'light', width: 1440 } }
 export const AnsweredElsewhere: Story = { args: { request: { ...questionRequest, state: questionStates[5]! }, draft: { single: { selected: ['thread'], other: 'Unsent draft must not survive' } } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByText(/your unsent web draft was discarded/)).toBeVisible()
@@ -178,6 +213,7 @@ export const ToolQuestions: Story = {
     await expect(canvas.getByRole('radio', { name: 'Four rows' })).toBeVisible()
     await expect(canvas.getByRole('radio', { name: 'Eight rows' })).toBeVisible()
     await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: /Answered.*2 questions/ }))
     await expect(canvas.getAllByText('SQLite')[0]).toBeVisible()
     await expect(canvas.getByText(/Accessibility/)).toBeVisible()
     await expect(canvas.getByText(/auto-selected/)).toBeVisible()

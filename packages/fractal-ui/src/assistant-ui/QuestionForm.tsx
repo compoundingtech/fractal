@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, RadioGroup, Radio, CheckboxGroup, Checkbox, TextField, TextArea, Input, Label, FileTrigger } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, RadioGroup, Radio, CheckboxGroup, Checkbox, TextField, TextArea, Input, Label, FileTrigger } from 'react-aria-components'
 import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import type { Answers, AnswerDraft, Preview, QuestionRequestView, QuestionVariant, QuestionView } from './question-model'
@@ -99,7 +99,7 @@ export const QuestionForm = (props: QuestionFormProps) => {
     else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); if (question.kind === 'multi') advance(); else choose(question, choiceId, true) }
     else if (event.key === 'n' && question.allowNote) { event.preventDefault(); setNotesOpen({ ...notesOpen, [question.id]: true }); requestAnimationFrame(() => noteRef.current?.focus()) }
   }
-  if (!pending(request)) return <QuestionSummary request={request} />
+  if (!pending(request)) return <QuestionSummary request={request} ageLabel={props.ageLabel} />
   const initialChoice = question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.id ?? question?.options.find(option => option.recommended)?.id ?? question?.options[0]?.id
   const choices = question === undefined ? [] : [...question.options, ...(question.allowOther ? [{ id: OTHER, label: 'Other…' }] : [])]
   return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
@@ -155,11 +155,25 @@ const AnswerList = ({ request, answers }: { readonly request: QuestionRequestVie
 
 const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}{q.options.map(option => <div key={option.id}><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div>)}</div>)}</>
 
-export const QuestionSummary = ({ request }: { readonly request: QuestionRequestView }) => {
+export const QuestionSummary = ({ request, ageLabel }: { readonly request: QuestionRequestView; readonly ageLabel?: string }) => {
   const state = request.state
   if (state._tag === 'unrecorded') return <section {...stylex.props(styles.summary)} aria-label="Original question"><OriginalQuestions request={request} />{state.reason !== '' ? <p {...stylex.props(styles.meta)}>{state.reason}</p> : null}</section>
-  const answers = state._tag === 'answered' ? state.answers : state._tag === 'answered-elsewhere' ? state.answers : state._tag === 'expired' ? state.autoAnswer : undefined
-  const footer = state._tag === 'answered' ? [state.by !== '' ? `Answered by ${state.by}` : '', state.where !== undefined ? `in ${state.where}` : '', state.at].filter(Boolean).join(' · ') : state._tag === 'answered-elsewhere' ? `Answered in ${state.where} · ${state.at}${state.draftDiscarded ? ' · your unsent web draft was discarded' : ''}` : state._tag === 'expired' ? `${state.at} · ${state.autoAnswer !== undefined ? 'auto-selected (timeout)' : 'continued without an answer'}` : state._tag === 'cancelled' ? [state.reason, state.at].filter(Boolean).join(' · ') : state._tag === 'chat-redirected' ? `${state.message} · ${state.at}` : ''
+  if (state._tag === 'answered') {
+    const question = request.questions[0]
+    const answer = question === undefined ? undefined : state.answers[question.id]
+    const choices = question === undefined ? [] : answer?.selected.filter(id => id !== OTHER).map(id => question.options.find(option => option.id === id)?.label ?? id) ?? []
+    if (answer?.other) choices.push(`“${answer.other}”`)
+    const choice = request.questions.length > 1 ? `${request.questions.length} questions` : choices.join(', ') || (question?.kind === 'multi' && answer !== undefined ? 'none' : '')
+    const answeredBy = [state.by !== '' ? `Answered by ${state.by}` : '', state.where !== undefined ? `in ${state.where}` : ''].filter(Boolean).join(' · ')
+    return <section {...stylex.props(styles.summary)} aria-label="Question outcome">
+      <Disclosure>{({ isExpanded }) => <>
+        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{ageLabel !== undefined ? <time title={state.at} {...stylex.props(styles.meta)}>{ageLabel}</time> : null}<span aria-hidden="true">{isExpanded ? '⌄' : '›'}</span></Button>
+        <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<details><summary>Original questions</summary><OriginalQuestions request={request} /></details></> : null}</DisclosurePanel>
+      </>}</Disclosure>
+    </section>
+  }
+  const answers = state._tag === 'answered-elsewhere' ? state.answers : state._tag === 'expired' ? state.autoAnswer : undefined
+  const footer = state._tag === 'answered-elsewhere' ? `Answered in ${state.where} · ${state.at}${state.draftDiscarded ? ' · your unsent web draft was discarded' : ''}` : state._tag === 'expired' ? `${state.at} · ${state.autoAnswer !== undefined ? 'auto-selected (timeout)' : 'continued without an answer'}` : state._tag === 'cancelled' ? [state.reason, state.at].filter(Boolean).join(' · ') : state._tag === 'chat-redirected' ? `${state.message} · ${state.at}` : ''
   return <section {...stylex.props(styles.summary)} aria-label="Question outcome"><strong {...stylex.props(styles.sender)}>{stateLabel(request)}</strong>{answers !== undefined ? <AnswerList request={request} answers={answers} /> : request.questions.map(q => <p key={q.id}>{q.prompt}</p>)}
     {footer !== '' ? <p {...stylex.props(styles.meta)}>{footer}</p> : null}
     <details><summary>Original questions</summary><OriginalQuestions request={request} /></details>
@@ -183,6 +197,8 @@ const styles = stylex.create({
   body: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0 },
   header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md },
   sender: { fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
+  summaryTrigger: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minHeight: g.toolRow, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
+  summaryLabel: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meta: { color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   selectedDescription: { color: textVars.fgSoft },
   chip: { color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, paddingInline: s.xs, paddingBlock: s.xs2, backgroundColor: surfaceVars.rowActive, borderRadius: r.sm },

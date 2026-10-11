@@ -50,7 +50,7 @@ export const Dark: Story = {
       }
       const specimens = canvas.getByTestId(`harness-weight-${weight}`)
       await expect(within(specimens.querySelector('[data-component-name="QuestionForm"]') as HTMLElement).getByRole('button', { name: 'Open terminal' })).toBeVisible()
-      await expect(within(specimens.querySelector('[data-component-name="QuestionSummary"]') as HTMLElement).getByText('Answered')).toBeVisible()
+      await expect(within(specimens.querySelector('[data-component-name="QuestionSummary"]') as HTMLElement).getByRole('button', { name: /Answered.*This thread/ })).toHaveAttribute('aria-expanded', 'false')
       await expect(within(specimens.querySelector('[data-component-name="NeedsYouBar"]') as HTMLElement).getByRole('button', { name: /is waiting on you/ })).toHaveAttribute('aria-expanded', 'false')
       await expect(within(specimens.querySelector('[data-component-name="NeedsYouInbox"]') as HTMLElement).getByRole('region', { name: 'Needs you inbox' }).querySelector('details')).not.toHaveAttribute('open')
     }
