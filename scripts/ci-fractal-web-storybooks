@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-node --test packages/fractal-ui/scripts/check-storybook-index.test.mjs
+node --test packages/fractal-ui/scripts/check-storybook-index.test.mjs packages/fractal-ui/scripts/scan-storybook.integration.test.mjs
 if [ -d apps/fractal-web/.storybook ]; then
   pnpm --filter fractal-web build-storybook
   test -s apps/fractal-web/storybook-static/index.html
@@ -14,3 +14,12 @@ else
 fi
 pnpm --filter @smalltalk/fractal-ui build-storybook
 node packages/fractal-ui/scripts/check-storybook-index.mjs kit packages/fractal-ui/storybook-static/index.json
+privacy_args=()
+if [ -n "${FRACTAL_STORYBOOK_PRIVACY_POLICY:-}" ]; then
+  privacy_args+=(--policy "$FRACTAL_STORYBOOK_PRIVACY_POLICY")
+fi
+outputs=(packages/fractal-ui/storybook-static)
+if [ -d apps/fractal-web/.storybook ]; then
+  outputs+=(apps/fractal-web/storybook-static packages/fractal-ui/storybook-static/apps/fractal-web/storybook-static)
+fi
+node packages/fractal-ui/scripts/scan-storybook.mjs "${privacy_args[@]}" "${outputs[@]}"
