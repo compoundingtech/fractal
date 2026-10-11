@@ -329,6 +329,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
+    ui.drafts_path = super::drafts_store::path();
     ui.load_drafts();
     if glass.is_some() { ui.resource_sidebar.load(&person); }
     ui.resource_sidebar.observe(&ui.world);

@@ -429,7 +429,9 @@ pub struct Ui {
     revoke: Option<String>,
     /// Home items put off until later. Demo only: kept in memory on this machine.
     snoozed: HashSet<String>,
-    /// The drafts as last read from or written to this device's drafts file.
+    /// Where this device keeps unsent drafts: none in tests and the demo, which touch nothing.
+    pub(crate) drafts_path: Option<std::path::PathBuf>,
+    /// The drafts as last read from or written to that file.
     drafts_saved: HashMap<String, String>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
@@ -688,6 +690,7 @@ impl Ui {
             new_mission: None,
             revoke: None,
             snoozed: HashSet::new(),
+            drafts_path: None,
             drafts_saved: HashMap::new(),
             glasses: None,
             session_focus: None,
@@ -843,9 +846,8 @@ impl Ui {
     /// Bring back what was typed and not sent when the last stui ended, read once at start. A box
     /// already holding text keeps it.
     pub(crate) fn load_drafts(&mut self) {
-        #[cfg(not(test))]
-        if let Some(path) = drafts_store::path() {
-            let saved = drafts_store::load(&path);
+        if let Some(path) = &self.drafts_path {
+            let saved = drafts_store::load(path);
             for (key, text) in &saved {
                 self.conversation_state
                     .drafts
@@ -859,10 +861,9 @@ impl Ui {
     /// Write the boxes to this device when they changed since the last write, so a crash or a
     /// restart loses nothing typed. Cheap when nothing changed: one comparison.
     pub(crate) fn step_drafts(&mut self) {
-        #[cfg(not(test))]
         if self.conversation_state.drafts != self.drafts_saved
-            && let Some(path) = drafts_store::path()
-            && drafts_store::save(&path, &self.drafts_saved, &self.conversation_state.drafts)
+            && let Some(path) = &self.drafts_path
+            && drafts_store::save(path, &self.drafts_saved, &self.conversation_state.drafts)
                 .is_ok()
         {
             self.drafts_saved = self.conversation_state.drafts.clone();

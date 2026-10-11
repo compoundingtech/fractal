@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "stui-only change against any member."},
   "downtime": {"status": "none", "detail": "Client-only change; no deployment ordering."},
   "manual": {"status": "none", "detail": "No manual action."},
-  "recovery": {"status": "none", "detail": "stui keeps unsent drafts in drafts.json (owner-only, entries older than 30 days dropped) under its state directory; deleting the file loses only unsent drafts."}
+  "recovery": {"status": "none", "detail": "stui keeps unsent drafts in drafts.json (owner-only, entries older than 30 days dropped) under its cache directory, never its state directory, so a paired device keeps no st state; deleting the file loses only unsent drafts."}
 }

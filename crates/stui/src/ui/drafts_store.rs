@@ -21,13 +21,13 @@ struct Saved {
 
 type File = BTreeMap<String, Saved>;
 
-/// `$XDG_STATE_HOME/st3/stui/drafts.json` (or under `~/.local/state`).
+/// `$XDG_CACHE_HOME/st3/stui/drafts.json` (or under `~/.cache`). The cache, not the state, as
+/// with the run files: a device that only pairs with a member must keep no st state, and typing
+/// a message is not a reason to create it.
 pub fn path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
+    let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("state"))
-        })?;
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
     base.is_absolute()
         .then(|| base.join("st3").join("stui").join("drafts.json"))
 }
