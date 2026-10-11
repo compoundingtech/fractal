@@ -34761,11 +34761,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .reconcile_blocking_screen(&subject, &member, &observation, Some(menu))
                 .unwrap();
             let sent = usize::from(case == "skip");
-            assert_eq!(
-                runtime.keys.lock().unwrap().as_slice(),
-                if sent == 1 { &["escape"] } else { &[] },
-                "{case}"
-            );
+            let expected: &[&str] = if sent == 1 { &["escape"] } else { &[] };
+            assert_eq!(runtime.keys.lock().unwrap().as_slice(), expected, "{case}");
             let claims = store
                 .claims_for(&subject.subject, Some("harness.diagnostic"))
                 .unwrap();
