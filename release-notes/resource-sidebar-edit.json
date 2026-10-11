@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "No daemon recovery change; missing resource rows remain until explicitly cleared."
+    "detail": "No daemon recovery change; missing resource rows remain until explicitly cleared. Fleet integration fixtures reserve listener ports across test processes and restarts, preventing concurrent fixture allocation from reusing a stopped node's port."
   }
 }
