@@ -30,10 +30,10 @@ const meta = {
   render: function Render({ scheme, narrow, failingControl, now }) {
     const fixture = useWorkbenchFixture('idle')
     return <main {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
-      <LiveActivity startedAt={failingControl ? undefined : startedAt} now={now} />
-      <div {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [prompt], onNew: async () => {} }}><Transcript title="Long operator message" turns={[{ id: 'polish', prompt, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }]} sync={{ _tag: 'Live', since: clock }} now={clock} observedAt={clock} /></EmbraceRuntimeProvider></div>
-      <EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><EmbraceComposer variant="C3" history={['Review the selected resource.']} /></EmbraceRuntimeProvider>
-      <div {...stylex.props(styles.workbench)}><Workbench layout={onePaneLayout} resources={fixture.resources} appearance={decidedAppearance} scheme={scheme} workspaceId={`live-polish-${scheme}-${narrow}`} /></div>
+      <section aria-label="Live activity example"><LiveActivity startedAt={failingControl ? undefined : startedAt} now={now} /></section>
+      <section aria-label="Long prompt example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [prompt], onNew: async () => {} }}><Transcript title="Long operator message" turns={[{ id: 'polish', prompt, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }]} sync={{ _tag: 'Live', since: clock }} now={clock} observedAt={clock} /></EmbraceRuntimeProvider></section>
+      <section aria-label="History action example"><EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><EmbraceComposer variant="C3" history={['Review the selected resource.']} /></EmbraceRuntimeProvider></section>
+      <section aria-label="Composer dock example" {...stylex.props(styles.workbench)}><Workbench layout={onePaneLayout} resources={fixture.resources} appearance={decidedAppearance} scheme={scheme} workspaceId={`live-polish-${scheme}-${narrow}`} /></section>
     </main>
   },
 } satisfies Meta<React.ComponentProps<typeof LiveActivity> & { scheme: Scheme; narrow: boolean; failingControl: boolean }>
@@ -41,9 +41,10 @@ export default meta
 type Story = StoryObj<typeof meta>
 export const Dark1440: Story = { play: async ({ mount, args }) => {
   const canvas = await mount()
-  await expect(canvas.getByTestId('live-work')).toHaveTextContent('Working for 12s')
-  const expand = await canvas.findByRole('button', { name: 'Show full message' })
-  const message = canvas.getByTestId('user-message')
+  await expect(within(canvas.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent('Working for 12s')
+  const longPromptCanvas = within(canvas.getByRole('region', { name: 'Long prompt example' }))
+  const expand = await longPromptCanvas.findByRole('button', { name: 'Show full message' })
+  const message = longPromptCanvas.getByTestId('user-message')
   const promptText = message.ownerDocument.getElementById(expand.getAttribute('aria-controls')!)!
   await expect(promptText.textContent!.length).toBeLessThan(longPrompt.length)
   await userEvent.click(expand)
@@ -54,11 +55,11 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   await expect(expand).toHaveFocus()
   await expect(expand).toHaveAttribute('aria-expanded', 'false')
   await expect(promptText.textContent!.length).toBeLessThan(longPrompt.length)
-  const history = canvas.getByRole('button', { name: 'Recall previous message' })
+  const history = within(canvas.getByRole('region', { name: 'History action example' })).getByRole('button', { name: 'Recall previous message' })
   await expect(history).toBeEnabled()
   await expect(getComputedStyle(history).opacity).toBe('1')
   await expect(history.getBoundingClientRect().width).toBe(32)
-  const dock = canvas.getByTestId('workbench-composer-dock')
+  const dock = within(canvas.getByRole('region', { name: 'Composer dock example' })).getByTestId('workbench-composer-dock')
   const composer = within(dock).getByTestId('composer')
   await expect(dock.getBoundingClientRect().height - composer.getBoundingClientRect().height).toBeLessThanOrEqual(12)
   const input = within(dock).getByTestId('composer-input')
@@ -71,7 +72,7 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   await expect(send.getBoundingClientRect().width).toBe(32)
   if (args.scheme === 'light') await expect(getComputedStyle(dock).backgroundColor).toBe('rgb(252, 252, 252)')
   const advanced = await mount(<meta.render {...args} now={clock + 1000} />)
-  await expect(advanced.getByTestId('live-work')).toHaveTextContent('Working for 13s')
+  await expect(within(advanced.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent('Working for 13s')
 } }
 export const Light1440: Story = { ...Dark1440, args: { scheme: 'light' } }
 export const Dark440: Story = { ...Dark1440, args: { narrow: true } }
