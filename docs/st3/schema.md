@@ -3,7 +3,7 @@
 This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
-Digest: `6b99e61e4d95d0d6d966187d9f998f41382b6910050ef90aece441ac978b2c72`
+Digest: `7bf7d0e771379891e31ddd0154416d7943e26dbd3b732b91f77d049c90e7421a`
 Storage version: `18`
 Storage digest: `d11a3e5db57db0a0bd6a9b27474cdd93958a401b3a6482b62aea3595530dbcef`
 
@@ -208,7 +208,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `work.progress` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `worker_reported:boolean` |  |
 | `work.released` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `worker_reported:boolean` |  |
 | `work.renewed` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `worker_reported:boolean` |  |
-| `work.submitted` | `step-run` | `authorized-participant` | `once-per-attempt` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `worker_reported:boolean` |  |
+| `work.submitted` | `step-run` | `authorized-participant` | `once-per-attempt` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `submitted_incarnation:string`, `summary:string`, `worker_reported:boolean` |  |
 | `workspace.observed` | `agent` | `system-only` | `append` | `latest` | `host!:string`, `repository:string`, `workspace!:string` |  |
 
 `resource.observed` validates facts against the resource kind. Custom resource facts remain open.
