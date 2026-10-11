@@ -5,6 +5,28 @@ use proptest::prelude::*;
 
 const CUT: u128 = 20 * DAY_MS;
 
+#[test]
+fn compact_capture_metadata_rejects_malformed_claim_times() {
+    for malformed in ["not-a-time", "-1", "340282366920938463463374607431768211456"] {
+        let store = Store::open_memory("alder").unwrap();
+        store.set_write_clock_at(100).unwrap();
+        let claim = store.append_claim(&input(
+            AGENT, "harness.observed", Some(AGENT),
+            json!({"state":"idle", "incarnation_id":"compact"}), "compact",
+        )).unwrap();
+        store.seal_local_batches().unwrap();
+        store.connection.write().execute(
+            "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+            params![malformed, claim.id],
+        ).unwrap();
+        let error = store.checkpoint_sealed_set_paged(150, None, 1, 1).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("invalid accepted time for checkpoint claim {}", claim.id)),
+            "compact metadata must reject {malformed:?}: {error:#}",
+        );
+    }
+}
+
 /// Builds a sealed set by hand: each claim in its own envelope unless grouped, in canonical
 /// order. Every writer also gets a newest envelope that no rule drops, so the newest-envelope
 /// guard stays out of the way unless a test wants it.
@@ -344,8 +366,8 @@ fn limits_keep_source_observations_even_when_the_same_seat_publishes_again() {
 
 #[test]
 fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
-    // Each page of the read is a read of its own, so the WAL is free between pages. The set must
-    // not depend on how the pages fall: one row to a page, a few, and one page for everything.
+    // Epoch checks keep the capture coherent across bounded page snapshots. The set must not
+    // depend on how the pages fall: one row to a page, a few, or the maximum bounded page.
     let store = Store::open_memory("alder").unwrap();
     store
         .append_claim_outcome(&input(
@@ -402,12 +424,16 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
         .unwrap();
     let paged_order: Vec<String> = whole.claims.iter().map(|sealed| sealed.claim.id.clone()).collect();
     assert_eq!(paged_order, sql_order, "the pages sort as ORDER BY canonical sorts");
+    assert!(
+        !sealed_records_page_sql().contains("body"),
+        "record windows must not decode JSON bodies before the cut and canonical sort"
+    );
     // The record page query is driven from replica_records by its rowid range. A plan that
     // drove from claims would read every claim for every window.
     let plan: Vec<String> = connection
         .prepare(&format!("EXPLAIN QUERY PLAN {}", sealed_records_page_sql()))
         .unwrap()
-        .query_map([0_i64, 1_000_i64], |row| row.get::<_, String>(3))
+        .query_map(params![0_i64, 1_000_i64, i64::try_from(cut).unwrap(), whole.seal_rowid], |row| row.get::<_, String>(3))
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
@@ -429,6 +455,104 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
         store.checkpoint_sealed_identities(cut, None).unwrap(),
         SealedIdentities::of(&whole)
     );
+}
+
+#[test]
+fn sealed_record_windows_leave_later_envelopes_out_before_reading_bodies() {
+    let store = Store::open_memory("alder").unwrap();
+    let append = |at, incarnation: &str| {
+        store.set_write_clock_at(at).unwrap();
+        let claim = store.append_claim(&input(
+            AGENT,
+            "harness.observed",
+            Some(AGENT),
+            json!({"state":"idle", "incarnation_id":incarnation}),
+            incarnation,
+        )).unwrap();
+        store.seal_local_batches().unwrap();
+        claim.id
+    };
+    let older = append(100, "older");
+    let through = store.checkpoint_sealed_set(150).unwrap().seal_rowid;
+    let later = append(200, "later");
+    let sealed = store.checkpoint_sealed_set_paged(150, None, 1, 1).unwrap();
+    assert_eq!(
+        sealed.claims.iter().map(|claim| claim.claim.id.as_str()).collect::<Vec<_>>(),
+        vec![older.as_str()]
+    );
+    let connection = store.readers.get();
+    let record_ids = connection.prepare(&sealed_records_page_sql()).unwrap()
+        .query_map(params![0_i64, i64::MAX, 150_i64, sealed.seal_rowid], |row| row.get::<_, String>(6))
+        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(record_ids, vec![older.clone()], "the later body is not part of the metadata window");
+    drop(connection);
+    let through_set = store.checkpoint_sealed_set_paged(250, Some(through), 1, 1).unwrap();
+    assert!(through_set.claims.iter().all(|claim| claim.claim.id != later));
+    assert_eq!(
+        SealedIdentities::of(&sealed),
+        store.checkpoint_sealed_identities_paged(150, None, 1).unwrap()
+    );
+}
+
+#[test]
+fn sealed_capture_rejects_invalid_times_even_when_another_claim_excludes_the_envelope() {
+    for malformed in ["not-a-time", "-1", "340282366920938463463374607431768211456"] {
+        let store = Store::open_memory("alder").unwrap();
+        store.set_write_clock_at(100).unwrap();
+        let broken = store.append_claim(&input(
+            AGENT, "harness.observed", Some(AGENT),
+            json!({"state":"idle", "incarnation_id":"broken"}), "broken",
+        )).unwrap();
+        let later = store.append_claim(&input(
+            AGENT, "harness.observed", Some(AGENT),
+            json!({"state":"idle", "incarnation_id":"later"}), "later",
+        )).unwrap();
+        store.seal_local_batches().unwrap();
+        {
+            let connection = store.connection.write();
+            connection.execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                params![malformed, broken.id],
+            ).unwrap();
+            connection.execute(
+                "UPDATE claims SET accepted_at_unix_ms='200' WHERE id=?1",
+                [&later.id],
+            ).unwrap();
+            // Put both records in one envelope so a late claim would otherwise hide
+            // the malformed claim when the envelope is excluded from the sealed set.
+            connection.execute(
+                "UPDATE replica_records SET (writer, sequence, envelope_hash, position)=(
+                    SELECT writer, sequence, envelope_hash, position+1 FROM replica_records
+                    WHERE claim_id=?1) WHERE claim_id=?2",
+                params![broken.id, later.id],
+            ).unwrap();
+        }
+        let error = store.checkpoint_sealed_set_paged(150, None, 1, 1).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("invalid accepted time for checkpoint claim {}", broken.id)),
+            "malformed time {malformed:?} must not silently count as early: {error:#}",
+        );
+    }
+}
+
+#[test]
+fn sealed_capture_rejects_invalid_envelope_times_at_first_use() {
+    for malformed in ["not-a-time", "-1", "340282366920938463463374607431768211456"] {
+        let store = Store::open_memory("alder").unwrap();
+        store.set_write_clock_at(100).unwrap();
+        store.append_claim(&input(
+            AGENT, "harness.observed", Some(AGENT),
+            json!({"state":"idle", "incarnation_id":"broken"}), "broken",
+        )).unwrap();
+        store.seal_local_batches().unwrap();
+        store.connection.write().execute(
+            "UPDATE replica_envelopes SET accepted_at_unix_ms=?1", [malformed],
+        ).unwrap();
+        assert!(
+            store.checkpoint_sealed_set(150).is_err(),
+            "malformed envelope time {malformed:?} must fail instead of excluding the envelope",
+        );
+    }
 }
 
 #[test]
@@ -493,6 +617,289 @@ fn a_usage_trim_keeps_lifetime_usage_and_the_proof_guards_it() {
         !proof.passed,
         "dropping a series total changes lifetime usage"
     );
+}
+
+#[test]
+fn first_native_launch_receipt_binding_and_acknowledgement_survive_checkpoint_trim() {
+    use sha2::Digest as _;
+
+    let store = Store::open_memory("alder").unwrap();
+    let marker = format!(
+        "custom/agent/first-native-launch-{}",
+        hex::encode(sha2::Sha256::digest(AGENT.as_bytes()))
+    );
+    let receipt = store
+        .append_claim(&input(
+            &marker,
+            "custom.agent.first-native-launch",
+            Some(AGENT),
+            json!({
+                "agent": AGENT, "incarnation": "inc-1", "invocation_id": "first-invocation",
+                "outcome": "seeded", "session_id": "native-example"
+            }),
+            "first-native-launch",
+        ))
+        .unwrap();
+    let mut acknowledgement_input = input(
+        &marker,
+        "custom.agent.first-native-launch-acknowledged",
+        Some(AGENT),
+        json!({"agent": AGENT, "receipt": receipt.id, "reason": "recover incomplete launch"}),
+        "first-native-launch-acknowledged",
+    );
+    acknowledgement_input.evidence.push(receipt.id.clone());
+    let acknowledgement = store.append_claim(&acknowledgement_input).unwrap();
+    let binding = store
+        .append_claim(&input(
+            AGENT,
+            "harness.session-file",
+            Some(AGENT),
+            json!({"harness": "omp", "incarnation_id": "inc-2", "session_id": "native-example"}),
+            "native-binding",
+        ))
+        .unwrap();
+    let notice = store
+        .append_claim(&input(
+            AGENT,
+            "harness.diagnostic",
+            Some(AGENT),
+            json!({"code": "first-native-launch-incomplete", "reason": "native binding was missing", "severity": "warning", "status": "incomplete"}),
+            "first-native-launch-notice",
+        ))
+        .unwrap();
+    // Later envelopes ensure retention is not an accident of the newest-envelope guard.
+    let observations = [1, 2, 3].map(|count| {
+        store
+            .append_claim(&input(
+                "observer/example",
+                "observer.observed",
+                None,
+                json!({"status": "ok", "revision": count.to_string()}),
+                &format!("checkpoint-observation-{count}"),
+            ))
+            .unwrap()
+    });
+    let cut = now_ms() + 1_000;
+    let scratch = tempfile::tempdir().unwrap();
+    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
+    assert!(proof.passed, "{proof:?}");
+    let gone = dropped(&plan);
+    assert!(gone.contains(&observations[0].id), "{plan:?}");
+    assert!(gone.contains(&observations[1].id), "{plan:?}");
+    for claim in [&receipt, &acknowledgement, &binding, &notice] {
+        assert!(
+            super::checkpoint_rules::slot_of(claim).is_none(),
+            "{} must remain protected by the default no-drop rule",
+            claim.kind
+        );
+        assert!(!gone.contains(&claim.id), "{plan:?}");
+    }
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        record_checkpoint_tombstones_tx(
+            &transaction,
+            &checkpoint_name(cut),
+            &plan.envelopes,
+            &plan.claims,
+        )
+        .unwrap();
+        delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims).unwrap();
+        transaction.commit().unwrap();
+    }
+    for claim in [&receipt, &acknowledgement, &binding, &notice] {
+        let retained = store.claims_for(&claim.subject, Some(&claim.kind)).unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, claim.id);
+        assert_eq!(retained[0].body, claim.body);
+    }
+    let retained = store
+        .claims_for("observer/example", Some("observer.observed"))
+        .unwrap();
+    assert_eq!(retained.len(), 1, "the real trim must remove old observations");
+    assert_eq!(retained[0].id, observations[2].id);
+    assert_eq!(
+        crate::suspension::continue_session(&store, AGENT, "omp", None, None)
+            .unwrap()
+            .unwrap()
+            .0,
+        "native-example"
+    );
+}
+
+#[test]
+fn sealed_capture_restarts_when_trim_commits_between_metadata_and_bodies() {
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+    struct Pause {
+        fired: AtomicBool,
+        reached: mpsc::SyncSender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+    unsafe extern "C" fn pause_before_body(
+        _: std::ffi::c_uint,
+        context: *mut std::ffi::c_void,
+        statement: *mut std::ffi::c_void,
+        _: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        let pause = unsafe { &*context.cast::<Pause>() };
+        let sql = unsafe {
+            std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast()))
+        };
+        if sql.to_bytes().ends_with(b"FROM claims WHERE id=?1")
+            && !pause.fired.swap(true, Ordering::AcqRel)
+        {
+            let _ = pause.reached.send(());
+            if let Ok(resume) = pause.resume.lock() {
+                let _ = resume.recv();
+            }
+        }
+        0
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    // WAL lets the trim commit while one bounded body page holds its read snapshot.
+    let store = Arc::new(Store::open(&scratch.path().join("claims.sqlite3"), "alder").unwrap());
+    store.append_claim(&input(
+        AGENT, "harness.observed", Some(AGENT),
+        json!({"state":"idle","incarnation_id":"one"}), "harness",
+    )).unwrap();
+    let old = now_ms() - 9 * DAY_MS;
+    for n in 0..3 {
+        store.append_claim(&input(
+            AGENT, "harness.usage", Some(AGENT),
+            rollup("claude/aaaa", old + n * DAY_MS / 4, 100 * (n as u64 + 1)),
+            &format!("rollup-{n}"),
+        )).unwrap();
+    }
+    let cut = now_ms() + 1_000;
+    let expected = store.checkpoint_sealed_set(cut).unwrap();
+    let plan = plan_drops(&expected);
+    assert_eq!(plan.claims.len(), 2);
+    let (reached, at_body) = mpsc::sync_channel(1);
+    let (resume, continue_body) = mpsc::sync_channel(1);
+    let pause = Arc::new(Pause {
+        fired: AtomicBool::new(false),
+        reached,
+        resume: Mutex::new(continue_body),
+    });
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        // The Arc outlives the installed callback and the joined capture worker.
+        unsafe {
+            rusqlite::ffi::sqlite3_trace_v2(
+                connection.handle(), rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                Some(pause_before_body), Arc::as_ptr(&pause).cast_mut().cast(),
+            );
+        }
+    }
+    let reader = store.clone();
+    let reader_pause = pause.clone();
+    let capture = std::thread::spawn(move || {
+        let _pause = reader_pause;
+        reader.checkpoint_sealed_set_paged(cut, None, 1, 1)
+    });
+    at_body.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        record_checkpoint_tombstones_tx(
+            &transaction, &checkpoint_name(cut), &plan.envelopes, &plan.claims,
+        ).unwrap();
+        delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims).unwrap();
+        transaction.commit().unwrap();
+    }
+    resume.send(()).unwrap();
+    let captured = capture.join().unwrap();
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        unsafe {
+            rusqlite::ffi::sqlite3_trace_v2(connection.handle(), 0, None, std::ptr::null_mut());
+        }
+    }
+    let captured = captured.expect("capture must restart after a concurrent trim");
+    let current = store.checkpoint_sealed_set(cut).unwrap();
+    assert_eq!(format!("{:?}", captured.claims), format!("{:?}", current.claims));
+    assert_eq!(SealedIdentities::of(&captured), SealedIdentities::of(&current));
+    assert!(captured.claims.len() < expected.claims.len(), "capture must not return the stale bodies");
+    assert_eq!(
+        store.claims_for(AGENT, Some("harness.usage")).unwrap().len(),
+        1,
+        "the trim really committed while capture was paused"
+    );
+}
+
+#[test]
+fn sealed_capture_fails_closed_after_three_consecutive_invalidations() {
+    use std::cell::Cell;
+    struct Mutate {
+        connection: rusqlite::Connection,
+        changes: Cell<usize>,
+    }
+    unsafe extern "C" fn invalidate_page(
+        _: std::ffi::c_uint,
+        context: *mut std::ffi::c_void,
+        statement: *mut std::ffi::c_void,
+        _: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int {
+        let mutation = unsafe { &*context.cast::<Mutate>() };
+        let sql = unsafe {
+            std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sql(statement.cast()))
+        };
+        if sql.to_bytes() == b"SELECT value FROM checkpoint_capture_epoch WHERE id=1" {
+            mutation.connection.execute(
+                "UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1", [],
+            ).unwrap();
+            mutation.changes.set(mutation.changes.get() + 1);
+        }
+        0
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("claims.sqlite3");
+    let store = Store::open(&path, "alder").unwrap();
+    store.append_claim(&input(
+        AGENT, "harness.observed", Some(AGENT),
+        json!({"state":"idle", "incarnation_id":"one"}), "harness",
+    )).unwrap();
+    let cut = now_ms() + 1_000;
+    store.connection.write().execute_batch(
+        "CREATE TABLE capture_registration_count(value INTEGER NOT NULL);
+         INSERT INTO capture_registration_count VALUES (0);
+         CREATE TRIGGER capture_registration_count AFTER UPDATE OF envelope_frontier, cut_unix_ms
+         ON checkpoint_capture_epoch BEGIN
+             UPDATE capture_registration_count SET value=value+1;
+         END;",
+    ).unwrap();
+    store.checkpoint_sealed_set(cut).unwrap();
+    assert_eq!(store.readers.get().query_row(
+        "SELECT value FROM capture_registration_count", [], |row| row.get::<_, i64>(0),
+    ).unwrap(), 1);
+    store.connection.write().execute(
+        "UPDATE capture_registration_count SET value=0", [],
+    ).unwrap();
+    let mutation = Mutate {
+        connection: rusqlite::Connection::open(&path).unwrap(),
+        changes: Cell::new(0),
+    };
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        unsafe {
+            rusqlite::ffi::sqlite3_trace_v2(
+                connection.handle(), rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                Some(invalidate_page), (&raw const mutation).cast_mut().cast(),
+            );
+        }
+    }
+    let captured = store.checkpoint_sealed_set_paged(cut, None, 1, 1);
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        unsafe {
+            rusqlite::ffi::sqlite3_trace_v2(connection.handle(), 0, None, std::ptr::null_mut());
+        }
+    }
+    assert!(captured.unwrap_err().to_string().contains("after 3 attempts"));
+    assert!(mutation.changes.get() >= 3);
+    assert_eq!(store.readers.get().query_row(
+        "SELECT value FROM capture_registration_count", [], |row| row.get::<_, i64>(0),
+    ).unwrap(), 0, "retries must not durably rewrite unchanged capture bounds");
+    store.checkpoint_sealed_set(cut).unwrap();
+    assert_eq!(store.readers.get().query_row(
+        "SELECT value FROM capture_registration_count", [], |row| row.get::<_, i64>(0),
+    ).unwrap(), 0, "a repeated capture with covered bounds needs no frontier write");
 }
 
 #[test]
@@ -1273,7 +1680,10 @@ fn the_proof_passes_for_the_plan_and_fails_for_a_drop_a_reader_needs() {
     write_history(&store);
     let scratch = tempfile::tempdir().unwrap();
     let cut = now_ms() + 1_000;
+    let reclaim_before = allocator_reclaim_stats_for_test();
     let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
+    assert_eq!(allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1,
+        "nested plan/proof entrypoints reclaim once");
     assert!(proof.passed, "{proof:?}");
     assert_eq!(proof.graph_digest_before, proof.graph_digest);
     assert_eq!(proof.reader_digest_before, proof.reader_digest);
@@ -1302,8 +1712,11 @@ fn the_proof_passes_for_the_plan_and_fails_for_a_drop_a_reader_needs() {
     wrong.claims.push(claim_tombstone(newest));
     let copy = scratch.path().join("wrong.sqlite3");
     store.copy_store_to(&copy).unwrap();
+    let reclaim_before = allocator_reclaim_stats_for_test();
     let proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
     assert!(!proof.passed);
+    assert_eq!(allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1,
+        "a reader-mismatch proof also reclaims once");
     assert!(
         proof
             .mismatches
@@ -1314,6 +1727,36 @@ fn the_proof_passes_for_the_plan_and_fails_for_a_drop_a_reader_needs() {
     );
     // The live store is never changed by a proof.
     assert_eq!(store.claims_for(AGENT, None).unwrap().len(), before);
+}
+
+#[test]
+fn allocator_reclamation_follows_checkpoint_plan_view_and_proof_errors_once() {
+    let store = Store::open_memory("alder").unwrap();
+    write_history(&store);
+    let scratch = tempfile::tempdir().unwrap();
+    let cut = now_ms() + 1_000;
+    let before = allocator_reclaim_stats_for_test();
+    let view = store.checkpoint_plan_view(cut, scratch.path()).unwrap();
+    assert!(view.proof.passed);
+    let after = allocator_reclaim_stats_for_test();
+    assert_eq!(after.0 - before.0, 1);
+    assert_eq!(after.1 - before.1, u64::from(cfg!(all(target_os = "linux", target_env = "gnu"))));
+
+    let sealed = store.checkpoint_sealed_set(cut).unwrap();
+    let plan = plan_drops(&sealed);
+    let blocked = scratch.path().join("not-a-directory");
+    std::fs::write(&blocked, b"occupied").unwrap();
+    let before = allocator_reclaim_stats_for_test();
+    assert!(store.prove_checkpoint_plan(&sealed, &plan, &blocked).is_err());
+    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
+        "copy preparation failure finishes its one reclamation attempt");
+
+    let invalid = scratch.path().join("not-a-store.sqlite3");
+    std::fs::write(&invalid, b"not a SQLite store").unwrap();
+    let before = allocator_reclaim_stats_for_test();
+    assert!(prove_on_copy(&invalid, &sealed, &plan).is_err());
+    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
+        "failed direct proof also finishes once");
 }
 
 #[test]
@@ -1607,7 +2050,7 @@ fn an_observed_item_keeps_its_latest_state_and_every_version_still_read_by_id() 
 }
 
 #[test]
-fn checkpoint_reads_of_sealed_batches_do_not_wait_for_the_writer() {
+fn checkpoint_identity_reads_of_sealed_batches_do_not_wait_for_the_writer() {
     let store = Arc::new(Store::open_memory("checkpoint-writer-test").unwrap());
     store
         .append_claim(&input(
@@ -1625,22 +2068,19 @@ fn checkpoint_reads_of_sealed_batches_do_not_wait_for_the_writer() {
     let (sent, received) = std::sync::mpsc::channel();
     let reader = store.clone();
     let task = std::thread::spawn(move || {
-        let result = reader
-            .checkpoint_sealed_identities(cut, None)
-            .and_then(|identities| {
-                reader
-                    .checkpoint_sealed_set_through(cut, None)
-                    .map(|sealed| (identities.digest, sealed_digest(&sealed)))
-            });
+        let result = reader.checkpoint_sealed_identities(cut, None);
         sent.send(result).unwrap();
     });
     let result = received.recv_timeout(std::time::Duration::from_secs(2));
     drop(writer);
     task.join().unwrap();
-    let (identities, sealed) = result
-        .expect("an already sealed checkpoint must not take the writer")
+    let identities = result
+        .expect("an already sealed identity read must not take the writer")
         .unwrap();
-    assert_eq!(identities, sealed);
+    // Full capture takes a brief writer transaction to advance the persisted frontier,
+    // then releases it before reading any pages.
+    let sealed = store.checkpoint_sealed_set_through(cut, None).unwrap();
+    assert_eq!(identities.digest, sealed_digest(&sealed));
 }
 
 #[test]
@@ -1713,6 +2153,7 @@ fn a_write_queued_during_sealing_runs_before_the_backlog_finishes() {
             }),
             profile: None,
             wait: None,
+            enqueued: std::time::Instant::now(),
             done: done.clone(),
         },
     ));
@@ -2265,4 +2706,381 @@ fn native_auth_checkpoint_keeps_current_episode_start_outside_history_window() {
     let gone = dropped(&plan_drops(&sealed.build()));
     assert!(!gone.contains(&start));
     assert!(gone.contains(&repeat));
+}
+
+#[test]
+fn a_kept_usage_fold_answers_as_a_fresh_fold_after_a_usage_trim() {
+    let store = Store::open_memory("alder").unwrap();
+    let old = now_ms() - 9 * DAY_MS;
+    for n in 0..6_u64 {
+        store.set_write_clock_at(old + u128::from(n) * DAY_MS / 8).unwrap();
+        store.append_claim(&input(AGENT, "harness.usage", Some(AGENT),
+            rollup("claude/aaaa", old + u128::from(n) * DAY_MS / 8, 100 * (n + 1)),
+            &format!("kept-rollup-{n}"))).unwrap();
+    }
+    store.set_write_clock_at(now_ms()).unwrap();
+    store.seal_local_batches().unwrap();
+    let subjects = [AGENT.to_owned()];
+    let kept = |store: &Store| store.usage_summaries_at(&subjects, None).unwrap().remove(AGENT);
+    let fresh = |store: &Store| store.usage_summary_at(AGENT, None, None).unwrap();
+    assert_eq!(kept(&store), fresh(&store));
+    // Trim without the hook that forgets kept reductions: the fold itself must stay right.
+    assert!(store.trim_checkpoint_for_test(now_ms() + 1_000) > 0, "the trim drops older rollups");
+    assert_eq!(kept(&store), fresh(&store));
+    store.append_claim(&input(AGENT, "harness.usage", Some(AGENT),
+        rollup("claude/aaaa", now_ms(), 900), "kept-rollup-after-trim")).unwrap();
+    assert_eq!(kept(&store), fresh(&store));
+    assert_eq!(kept(&store).unwrap().total_tokens, 900);
+}
+
+#[test]
+fn a_repaired_usage_claim_is_folded_afresh_once_kept_reductions_are_forgotten() {
+    let store = Store::open_memory("alder").unwrap();
+    let claim = store.append_claim(&input(AGENT, "harness.usage", Some(AGENT),
+        rollup("claude/aaaa", now_ms(), 100), "repaired-rollup")).unwrap();
+    let subjects = [AGENT.to_owned()];
+    assert_eq!(store.usage_summaries_at(&subjects, None).unwrap()[AGENT].total_tokens, 100);
+    // A repair rewrites rows without a new store index, then forgets every kept reduction.
+    store.connection.lock().unwrap().execute(
+        "UPDATE claims SET body=json_set(body, '$.fields.total_tokens', 250) WHERE id=?1",
+        params![claim.id],
+    ).unwrap();
+    store.forget_current_views();
+    assert_eq!(store.usage_summaries_at(&subjects, None).unwrap()[AGENT].total_tokens, 250);
+    assert_eq!(store.usage_summaries_at(&subjects, None).unwrap().remove(AGENT),
+        store.usage_summary_at(AGENT, None, None).unwrap());
+}
+
+
+/// The rules description of rules version 14, before `retention.toml` named the rules. Moving
+/// the rules into the policy file changes no rule, so it renders this text exactly and the rules
+/// digest every member seals with stays the same.
+const RULES_V14_DESCRIPTION: &str = "\
+harness.observed slot=subject,incarnation_id keep=first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start
+seat.status-history slot=subject sources=exclude-status_transition-false-or-numeric-zero-heartbeats keep=last-200-transition-including-native-auth-and-runtime-reset-sources-within-7d-before-cut,previous-transition-per-visible-incarnation-even-before-window,current-state-run-start
+harness.timeline slot=subject,incarnation_id keep=newest min-age-before-cut=5d
+loop.state slot=subject keep=first-and-last-of-each-run-of-status-and-round,first-with-items
+subscription.mission-deferred slot=subject,request keep=all-while-open,newest
+observer.observed slot=subject keep=newest,newest-carrier-of-each-field
+daemon.diagnostic slot=subject,code keep=newest,newest-carrier-of-each-field
+transport.observed slot=subject,origin keep=newest,newest-carrier-of-each-field
+runtime.action.requested actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+runtime.action.succeeded actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+runtime.action.failed actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+runtime.action.deadline-reached actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
+harness.usage semantics=response_rollup slot=subject,incarnation_id,model,account,owner_run,owner_step,host keep=newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that
+harness.usage semantics=session_cumulative slot=subject,incarnation_id keep=newest,largest-total_tokens
+harness.usage semantics=context_occupancy slot=subject,incarnation_id keep=newest
+harness.limits keep=all-source-observations
+resource.observed actor=null observer=set slot=subject keep=newest
+render.applied slot=subject keep=newest min-age-before-cut=5d
+runtime.readiness-deadline-reached slot=subject keep=newest min-age-before-cut=5d
+sekret.called slot=subject keep=newest min-age-before-cut=5d
+sekret.exited slot=subject keep=newest min-age-before-cut=5d
+sekret.refused slot=subject keep=newest min-age-before-cut=5d
+sekret.changed slot=subject keep=newest min-age-before-cut=5d
+sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
+proof=the-sealed-claims-and-the-blobs-they-reference
+graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
+replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
+guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
+witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
+carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
+
+#[test]
+fn the_policy_renders_the_rules_description_with_only_the_limits_rule_changed_since_14() {
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 15);
+    assert_eq!(
+        super::checkpoint_rules::rules_description(),
+        RULES_V14_DESCRIPTION.replace(
+            "harness.limits keep=all-source-observations",
+            "harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at\n\
+             runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field",
+        )
+    );
+}
+
+/// `slot_of` as it was before the policy file, to show the policy groups claims into the same
+/// slots under the same planner functions.
+fn legacy_slot_of(claim: &ClaimRecord) -> Option<(&'static str, Vec<String>)> {
+    use super::checkpoint_rules::{field_str, field_text, fields};
+    let subject = claim.subject.clone();
+    let kind = claim.kind.clone();
+    let slot = |extra: &[&str]| {
+        let mut slot = vec![subject.clone(), kind.clone()];
+        slot.extend(extra.iter().map(|name| field_text(claim, name)));
+        slot
+    };
+    match claim.kind.as_str() {
+        "harness.observed" => field_str(claim, "incarnation_id")
+            .map(|_| ("harness", slot(&["incarnation_id"]))),
+        "harness.timeline" => Some(("aged", slot(&["incarnation_id"]))),
+        "loop.state" => Some(("loop", slot(&[]))),
+        "subscription.mission-deferred" => Some(("deferral", slot(&["request"]))),
+        "observer.observed" => Some(("newest", slot(&[]))),
+        "daemon.diagnostic" => Some(("newest", slot(&["code"]))),
+        "transport.observed" => {
+            let mut slot = slot(&[]);
+            slot.push(claim.origin.clone());
+            Some(("newest", slot))
+        }
+        "runtime.action.requested"
+        | "runtime.action.succeeded"
+        | "runtime.action.failed"
+        | "runtime.action.deadline-reached"
+            if claim.actor.is_none() =>
+        {
+            Some(("aged", slot(&["action", "incarnation_id", "operation_status"])))
+        }
+        "render.applied" | "runtime.readiness-deadline-reached" => Some(("aged", slot(&[]))),
+        "sekret.called" | "sekret.exited" | "sekret.refused" | "sekret.changed" => {
+            Some(("aged", slot(&[])))
+        }
+        "harness.limits" => None,
+        "harness.todo.observed" => Some(("newest", slot(&[]))),
+        "resource.observed"
+            if claim.actor.is_none()
+                && fields(claim).is_some_and(|fields| fields.contains_key("observer")) =>
+        {
+            Some(("newest", slot(&[])))
+        }
+        "harness.usage" => match field_str(claim, "semantics")? {
+            "response_rollup" => Some((
+                "series",
+                slot(&["incarnation_id", "model", "account", "owner_run", "owner_step", "host"]),
+            )),
+            "session_cumulative" => Some(("cumulative", slot(&["semantics", "incarnation_id"]))),
+            "context_occupancy" => Some(("newest", slot(&["semantics", "incarnation_id"]))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[test]
+fn the_policy_groups_claims_into_the_slots_the_rules_did() {
+    use super::checkpoint_rules::{Rule, slot_of};
+    let name = |rule: Rule| match rule {
+        Rule::Newest => "newest",
+        Rule::NewestAged(age) => {
+            assert_eq!(age, 5 * DAY_MS);
+            "aged"
+        }
+        Rule::HarnessObserved => "harness",
+        Rule::LoopState => "loop",
+        Rule::Deferral => "deferral",
+        Rule::UsageSeries => "series",
+        Rule::UsageCumulative => "cumulative",
+        Rule::AccountLimits => "limits",
+    };
+    let field_sets = [
+        json!({}),
+        json!({"incarnation_id": "inc-1", "state": "idle"}),
+        json!({"incarnation_id": "inc-2", "code": "slow", "request": "request-1"}),
+        json!({"incarnation_id": 7, "action": "start", "operation_status": "done"}),
+        json!({"semantics": "response_rollup", "incarnation_id": "inc-1", "model": "m", "account": "a", "owner_run": "r", "owner_step": "s", "host": "h"}),
+        json!({"semantics": "response_rollup", "incarnation_id": "inc-1", "model": "m", "account": "b"}),
+        json!({"semantics": "session_cumulative", "incarnation_id": "inc-1"}),
+        json!({"semantics": "session_cumulative", "incarnation_id": "inc-2"}),
+        json!({"semantics": "context_occupancy", "incarnation_id": "inc-1"}),
+        json!({"semantics": "context_occupancy", "incarnation_id": "inc-2"}),
+        json!({"semantics": "per_response", "incarnation_id": "inc-1"}),
+        json!({"observer": "observer/example", "facts": {}}),
+        json!({"code": "slow", "request": "request-2"}),
+    ];
+    let mut kinds = st3_schema::registry().claims.keys().cloned().collect::<Vec<_>>();
+    kinds.push("custom.example.kind".into());
+    let mut claims = Vec::new();
+    for kind in &kinds {
+        for subject in ["agent/alder.worker", "observer/example"] {
+            for origin in ["alder", "birch"] {
+                for actor in [None, Some("agent/alder.worker"), Some("person/avery")] {
+                    for fields in &field_sets {
+                        claims.push(ClaimRecord {
+                            id: format!("claim-{}", claims.len()),
+                            store_index: claims.len() as u64,
+                            batch_id: "batch".into(),
+                            subject: subject.into(),
+                            kind: kind.clone(),
+                            origin: origin.into(),
+                            actor: actor.map(str::to_owned),
+                            operation_id: None,
+                            request_digest: None,
+                            body: json!({"fields": fields}),
+                            predecessors: Vec::new(),
+                            accepted_at_unix_ms: 1,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    // The same claims share a slot under each, with the same planner function.
+    let mut old_to_new = BTreeMap::new();
+    let mut new_to_old = BTreeMap::new();
+    for claim in &claims {
+        // Rules version 15 added rules for `harness.limits` and `runtime.reconcile-decision`;
+        // every other kind is unchanged.
+        if claim.kind == "harness.limits" {
+            let slot = vec![claim.subject.clone(), claim.kind.clone()];
+            assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("limits", slot)));
+            continue;
+        }
+        if claim.kind == "runtime.reconcile-decision" {
+            let slot = vec![claim.subject.clone(), claim.kind.clone(), super::checkpoint_rules::field_text(claim, "key")];
+            assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("newest", slot)));
+            continue;
+        }
+        let old = legacy_slot_of(claim);
+        let new = slot_of(claim).map(|(rule, slot)| (name(rule), slot));
+        assert_eq!(old.is_some(), new.is_some(), "{} {}", claim.kind, claim.body);
+        if let (Some(old), Some(new)) = (old, new) {
+            assert_eq!(old.0, new.0, "{} {}", claim.kind, claim.body);
+            assert_eq!(*old_to_new.entry(old.clone()).or_insert(new.clone()), new);
+            assert_eq!(*new_to_old.entry(new).or_insert(old.clone()), old);
+        }
+    }
+    assert!(old_to_new.len() > 50, "the corpus covers many slots");
+}
+
+
+const LIMITS_HOUR: u128 = 60 * 60 * 1000;
+
+/// A `harness.limits` reading by `seat` of `account`, accepted at `at`.
+fn limits_reading(store: &Store, seat: &str, account: &str, weekly: Option<f64>, measured: u128, at: u128) -> ClaimRecord {
+    store.set_write_clock_at(at).unwrap();
+    let mut fields = json!({
+        "driver": "claude", "account": account, "incarnation_id": "inc-1",
+        "five_hour_percent": 40.0, "five_hour_resets_at_unix_ms": 1_790_000_000_000_u64,
+        "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": measured as u64,
+    });
+    if let Some(weekly) = weekly {
+        fields["weekly_percent"] = json!(weekly);
+    }
+    let claim = store
+        .append_claim(&input(seat, "harness.limits", Some(seat), fields, &format!("limits-{seat}-{at}")))
+        .unwrap();
+    store.seal_local_batches().unwrap();
+    claim
+}
+
+/// Seat one reads account a every twenty minutes for three hours; its highest weekly reading is
+/// in the last hour but is not its newest. Seat two read account a long ago and then switched to
+/// account b. Seat three's only reading of account a is a five-hour-only one, long ago.
+fn limits_history(store: &Store) -> (Vec<ClaimRecord>, ClaimRecord, ClaimRecord, ClaimRecord) {
+    let base = 10 * DAY_MS;
+    // A writer never dates a claim before its own newest, so they are written in time order.
+    let two_old = limits_reading(store, "agent/alder.two", "claude/a", Some(99.0), base, base);
+    let three = limits_reading(store, "agent/alder.three", "claude/a", None, base, base + 1);
+    let mut one = Vec::new();
+    let mut two_new = None;
+    for step in 0..10_u128 {
+        let weekly = if step == 7 { 95.0 } else { 50.0 + step as f64 };
+        let at = base + 2 + step * 20 * 60_000;
+        one.push(limits_reading(store, "agent/alder.one", "claude/a", Some(weekly), at, at));
+        if step == 3 {
+            let at = base + 3 + LIMITS_HOUR;
+            two_new = Some(limits_reading(store, "agent/alder.two", "claude/b", Some(10.0), at, at));
+        }
+    }
+    let two_new = two_new.unwrap();
+    // Each writer's newest envelope stays; keep it out of the way.
+    store.set_write_clock_at(base + 4 * LIMITS_HOUR).unwrap();
+    store.append_claim(&input("daemon/alder", "daemon.diagnostic", None,
+        json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "limits-last")).unwrap();
+    store.seal_local_batches().unwrap();
+    (one, two_old, two_new, three)
+}
+
+#[test]
+fn account_limits_keep_each_seats_newest_and_the_last_hour_of_each_account() {
+    let store = Store::open_memory("alder").unwrap();
+    let (one, two_old, two_new, three) = limits_history(&store);
+    let before = store.account_limits().unwrap();
+    assert_eq!(before.iter().find(|limit| limit.account == "claude/a").unwrap().weekly_percent, Some(95.0));
+    let cut = 11 * DAY_MS;
+    let scratch = tempfile::tempdir().unwrap();
+    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
+    assert!(proof.passed, "{proof:?}");
+    let gone = dropped(&plan);
+    // Account a's newest reading was measured at 180 minutes, so readings before 120 go.
+    for (step, claim) in one.iter().enumerate() {
+        assert_eq!(gone.contains(&claim.id), step < 6, "seat one, step {step}");
+    }
+    assert!(gone.contains(&two_old.id), "below the floor and not the seat's newest");
+    assert!(!gone.contains(&two_new.id), "the seat's newest");
+    assert!(!gone.contains(&three.id), "the newest of its own group and of its seat");
+
+    // A node that trims and folds its kept claims again answers the same.
+    store.apply_checkpoint_drop("checkpoint/1970-01-11", &plan.envelopes, &plan.claims).unwrap();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        super::limits::refold_limits_tx(&transaction).unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(store.account_limits().unwrap(), before);
+}
+
+#[test]
+fn the_proof_compares_the_account_fold_across_seats() {
+    let store = Store::open_memory("alder").unwrap();
+    let (one, ..) = limits_history(&store);
+    let cut = 11 * DAY_MS;
+    let scratch = tempfile::tempdir().unwrap();
+    let (plan, proof) = store.plan_checkpoint(cut, scratch.path()).unwrap();
+    assert!(proof.passed, "{proof:?}");
+    // Dropping seat one's highest reading in the last hour changes no answer about seat one,
+    // whose newest claim stays, but changes the account's limits.
+    let sealed = store.checkpoint_sealed_set(cut).unwrap();
+    let highest = sealed.claims.iter().find(|claim| claim.claim.id == one[7].id).unwrap();
+    let mut wrong = plan.clone();
+    wrong.claims.push(claim_tombstone(highest));
+    let copy = scratch.path().join("wrong.sqlite3");
+    store.copy_store_to(&copy).unwrap();
+    let proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
+    assert!(!proof.passed);
+    assert_eq!(proof.mismatches, vec!["fleet account_limits".to_owned()], "{proof:?}");
+}
+
+
+#[test]
+fn reconcile_decisions_keep_the_newest_of_each_key() {
+    let store = Store::open_memory("alder").unwrap();
+    let decision = |key: Option<&str>, decision: &str, reason: &str, at: u128| {
+        store.set_write_clock_at(at).unwrap();
+        let mut fields = json!({"decision": decision, "reason": reason});
+        if let Some(key) = key {
+            fields["key"] = json!(key);
+        }
+        let claim = store
+            .append_claim(&input(AGENT, "runtime.reconcile-decision", None, fields, &format!("decision-{at}")))
+            .unwrap();
+        store.seal_local_batches().unwrap();
+        claim
+    };
+    let waits = (0..4).map(|step| decision(None, "wait", &format!("restart in {step}s"), 100 + step)).collect::<Vec<_>>();
+    let fault = decision(Some("member-reconcile"), "member-fault", "unreadable", 200);
+    let recovered = decision(Some("member-reconcile"), "member-recovered", "reconciled", 201);
+    let crash = decision(Some("runtime-crash-loop:token"), "raise", "three exits", 202);
+    let restart = decision(None, "wait", "restart in 9s", 203);
+    store.set_write_clock_at(300).unwrap();
+    store.append_claim(&input("daemon/alder", "daemon.diagnostic", None,
+        json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "decision-last")).unwrap();
+    store.seal_local_batches().unwrap();
+    let fault_before = store.member_reconcile_fault(AGENT, None).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (plan, proof) = store.plan_checkpoint(DAY_MS, scratch.path()).unwrap();
+    assert!(proof.passed, "{proof:?}");
+    let gone = dropped(&plan);
+    for wait in &waits {
+        assert!(gone.contains(&wait.id), "an unkeyed decision replaced by a later one");
+    }
+    assert!(gone.contains(&fault.id), "replaced by the key's newest");
+    for kept in [&recovered, &crash, &restart] {
+        assert!(!gone.contains(&kept.id), "{}", kept.body);
+    }
+    store.apply_checkpoint_drop("checkpoint/1970-01-01", &plan.envelopes, &plan.claims).unwrap();
+    assert_eq!(store.member_reconcile_fault(AGENT, None).unwrap(), fault_before);
+    assert_eq!(store.latest_claim(AGENT, Some("runtime.reconcile-decision")).unwrap().unwrap().id, restart.id);
 }

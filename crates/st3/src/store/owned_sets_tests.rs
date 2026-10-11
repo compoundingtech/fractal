@@ -2,6 +2,8 @@ use super::owned_sets::{Options, Source};
 use super::*;
 use crate::parse_intent;
 
+mod empty_authority_guard;
+
 fn bundle(command: &str, meadow: bool) -> NormalizedIntent {
     parse_intent(
         &format!(
@@ -1604,6 +1606,42 @@ fn manual_rollout_policy_requires_each_active_daemon_and_is_in_the_receipt_diges
 }
 
 #[test]
+fn manual_authored_resume_adoption_metadata_and_launch_publish_before_rollout_refusal() {
+    let store = Store::open_memory("amber").unwrap();
+    let native = |model: &str| crate::graph::parse_owned_set_intent(&format!(
+        "version 2\nagent \"garden/orchard\" {{ rollout \"manual\"; harness \"claude\" {{ model {model:?}; args \"--resume\" \"authored-session\"; }} }}"), "amber").unwrap();
+    let initial = native("one");
+    direct(&store, &initial, "initial").unwrap();
+    let old = initial.subjects["agent/garden/orchard"].member.clone().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "agent/garden/orchard".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status":"running","incarnation_id":"incumbent","runtime_id":old.runtime_id})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let mut opts = options(&store, 1);
+    opts.adopt.insert("agent/garden/orchard".into());
+    let preview = store.owned_set_preview(&initial, &opts).unwrap();
+    assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    assert!(preview.rollouts["agent/garden/orchard"]["blocking"][0].as_str().unwrap().contains("declares its own session selection"));
+    opts.expected_subjects = preview.expected_subjects;
+    store.apply_owned_set(&initial, &opts, "adopt", "person/operator").unwrap();
+    let mut metadata = initial.clone();
+    metadata.subjects.get_mut("agent/garden/orchard").unwrap().desired["description"] = json!("Updated purpose");
+    apply(&store, &metadata, 2);
+    let changed = native("two");
+    apply(&store, &changed, 3);
+    assert_eq!(store.desired_subject_with_writer("agent/garden/orchard").unwrap().unwrap().0.member, changed.subjects["agent/garden/orchard"].member);
+    let token = store.selected_desired_token("agent/garden/orchard").unwrap().unwrap();
+    let index = store.index().unwrap();
+    let error = store.request_rollout("agent/garden/orchard", &token, &old, "incumbent",
+        "person/operator", &crate::rollout::Policy::when_idle(1_800_000, false), "refused").unwrap_err();
+    assert!(error.message.contains("declares its own session selection"), "{error:?}");
+    assert_eq!(store.index().unwrap(), index);
+    assert!(store.rollout("agent/garden/orchard").unwrap().is_none());
+    assert_eq!(store.latest_actual_value("agent/garden/orchard").unwrap().unwrap()["status"], "running");
+}
+
+#[test]
 fn pass_staged_subject_selection_uses_the_partial_index() {
     let store = Store::open_memory("amber").unwrap();
     let connection = store.readers.get();
@@ -1623,4 +1661,56 @@ fn pass_staged_subject_selection_uses_the_partial_index() {
             .any(|plan| plan.contains("claims_owned_set_subject_index")),
         "{plans:?}"
     );
+}
+
+#[test]
+fn the_agent_card_fold_reads_set_owned_declarations_as_the_reduction_does() {
+    let store = Store::open_memory("amber").unwrap();
+    apply(&store, &bundle("true", true), 10);
+    let unmanaged = parse_intent("version 2\nagent \"unmanaged\" { command \"true\" }", "amber")
+        .unwrap();
+    direct(&store, &unmanaged, "unmanaged").unwrap();
+    for subject in ["agent/garden/orchard", "agent/garden/meadow"] {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"status": "running",
+                    "runtime_id": subject, "incarnation_id": "garden-1"}))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    // The set retires meadow, then a staged ownership change of unmanaged rolls back.
+    let retiring = bundle("false", false);
+    let mut opts = options(&store, 11);
+    let preview = store.owned_set_preview(&retiring, &opts).unwrap();
+    opts.expected_subjects = preview.expected_subjects;
+    opts.confirm_retire = Some(preview.digest);
+    store.apply_owned_set(&retiring, &opts, "set-11", "person/operator").unwrap();
+    let desired = store
+        .desired_subjects()
+        .unwrap()
+        .into_iter()
+        .find(|desired| desired.subject.ends_with("unmanaged"))
+        .unwrap();
+    let mut staged = serde_json::to_value(&desired).unwrap();
+    staged["owned_set"] = json!("owned-set/garden");
+    {
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        append_claim_tx(&transaction, "amber", &desired.subject, "intent.desired",
+            Some("person/operator"), &staged, &[], None).unwrap();
+        transaction.rollback().unwrap();
+    }
+    let indexes = (0..=store.index().unwrap()).collect::<Vec<_>>();
+    super::card_fold_tests::assert_card_fold_parity(&store, &indexes);
+    let reads = store
+        .agent_card_reads(&["agent/garden/orchard".to_owned()], store.index().unwrap(), &HashMap::new())
+        .unwrap();
+    assert!(reads.may_have_rollout("agent/garden/orchard"));
 }

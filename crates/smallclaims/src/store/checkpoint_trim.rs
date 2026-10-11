@@ -2,10 +2,12 @@
 //! node did not verify from a peer's manifest. Sections 6 and 8 of
 //! `doc/fleet/smalltalk/checkpoint-design`.
 //!
-//! Tombstones go first, with the checkpoint marked `trimming`, in one transaction. Deletions
-//! follow in chunks, each its own transaction. A crash leaves either nothing recorded, and the
-//! next pass starts again, or every tombstone recorded, and the next pass deletes what is left.
-//! At every point the inventory lists the same identities, so peers cannot tell.
+//! Tombstones go first, in chunks, with the checkpoint marked `recording`; once every one is
+//! recorded it is marked `trimming`. Deletions follow in chunks, each its own transaction. A
+//! sealed set never reads the tombstones of a checkpoint still `recording`, so a crash part way
+//! through recording plans the same drop again and records the rest; a crash after it deletes
+//! what is left. At every point the inventory lists the same identities, since a tombstone and
+//! the envelope it stands for have one identity, so peers cannot tell.
 
 use super::checkpoint::{
     CheckpointManifest, ClaimTombstone, EnvelopeTombstone, checkpoint_name, delete_dropped_rows_tx,
@@ -22,12 +24,16 @@ use crate::replication::InventoryCheckpoint;
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
 /// A trim commits a chunk once it has run this long, so it never holds the writer for long
-/// however slow a row is to delete, and writes queued behind it wait about this long.
-pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+/// however slow a row is to record or delete, and writes queued behind it wait about this long.
+/// The commit then writes and syncs the pages the chunk changed, which on a busy disk costs more
+/// than the chunk itself, so this is well under the writer's 100 ms target.
+pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// A point in a trim where a test makes it stop, as a crash would there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrimFault {
+    /// This many chunks of tombstones are recorded, and the checkpoint is still `recording`.
+    AfterTombstoneChunk(usize),
     /// Tombstones are recorded and nothing is deleted yet.
     AfterTombstones,
     /// This many chunks are deleted.
@@ -265,6 +271,7 @@ impl Store {
                 certificate,
                 seal_rowid,
             }) => {
+                let _completion = super::checkpoint_completion::Completion::outer();
                 let cut = certificate.terms.cut_unix_ms;
                 let verified = |plan: &super::checkpoint::DropPlan| {
                     plan.sealed_digest == certificate.terms.sealed_digest
@@ -389,6 +396,7 @@ impl Store {
         manifest: &CheckpointManifest,
         require_newest: bool,
     ) -> Result<Vec<CheckpointAction>, St3Error> {
+        let _completion = super::checkpoint_completion::Completion::outer();
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let claims = self.checkpoint_claims().map_err(internal)?;
         // Adoption replaces every tombstone this node holds, so only the newest stable
@@ -551,19 +559,14 @@ impl Store {
         exact: bool,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
+        let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
-        {
-            let mut connection = self.connection.write();
-            let transaction = connection.transaction()?;
-            if exact {
-                keep_only_tombstones_tx(&transaction, envelopes, claims)?;
-            }
-            record_checkpoint_tombstones_tx(&transaction, checkpoint, envelopes, claims)?;
+        let mark = |transaction: &Transaction<'_>, state: &str| -> Result<()> {
             transaction.execute(
                 "INSERT INTO checkpoints(
                      id, cut_unix_ms, state, drop_digest, detail, updated_at_unix_ms)
-                 VALUES (?1, ?2, 'trimming', ?3, ?4, ?5)
-                 ON CONFLICT(id) DO UPDATE SET state='trimming',
+                 VALUES (?1, ?2, ?6, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET state=excluded.state,
                      drop_digest=excluded.drop_digest, detail=excluded.detail,
                      updated_at_unix_ms=excluded.updated_at_unix_ms",
                 params![
@@ -571,9 +574,55 @@ impl Store {
                     i64::try_from(cut_unix_ms)?,
                     drop_digest,
                     json!({"envelopes": envelopes.len(), "claims": claims.len()}).to_string(),
-                    i64::try_from(now_ms())?
+                    i64::try_from(now_ms())?,
+                    state
                 ],
             )?;
+            Ok(())
+        };
+        if exact {
+            // Adoption replaces every other tombstone, so it stays one transaction.
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction()?;
+            keep_only_tombstones_tx(&transaction, envelopes, claims)?;
+            record_checkpoint_tombstones_tx(&transaction, checkpoint, envelopes, claims)?;
+            mark(&transaction, "trimming")?;
+            transaction.commit()?;
+        } else {
+            {
+                let mut connection = self.connection.write();
+                let transaction = connection.transaction()?;
+                mark(&transaction, "recording")?;
+                transaction.commit()?;
+            }
+            // Recording again changes nothing, so a restart records what is missing.
+            let (mut envelope, mut claim, mut chunks) = (0, 0, 0);
+            while envelope < envelopes.len() || claim < claims.len() {
+                let mut connection = self.connection.write();
+                let transaction = connection.transaction()?;
+                let started = std::time::Instant::now();
+                while started.elapsed() < TRIM_CHUNK_BUDGET
+                    && (envelope < envelopes.len() || claim < claims.len())
+                {
+                    if envelope < envelopes.len() {
+                        let next = &envelopes[envelope..envelope + 1];
+                        record_checkpoint_tombstones_tx(&transaction, checkpoint, next, &[])?;
+                        envelope += 1;
+                    } else {
+                        let next = &claims[claim..claim + 1];
+                        record_checkpoint_tombstones_tx(&transaction, checkpoint, &[], next)?;
+                        claim += 1;
+                    }
+                    self.pause_for_trim_row_cost();
+                }
+                transaction.commit()?;
+                drop(connection);
+                chunks += 1;
+                self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
+            }
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction()?;
+            mark(&transaction, "trimming")?;
             transaction.commit()?;
         }
         self.replica_rows_changed();
@@ -588,6 +637,7 @@ impl Store {
     /// before the next chunk takes the writer again. Each chunk checks, inside its own
     /// transaction, that the graph did not change; the proof showed it cannot.
     pub fn finish_trim(&self, checkpoint: &str, actions: &mut Vec<CheckpointAction>) -> Result<()> {
+        let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
         let mut chunks = 0;
         let mut deleted_envelopes = 0;

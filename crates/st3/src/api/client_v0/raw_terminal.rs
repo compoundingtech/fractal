@@ -6,6 +6,21 @@ mod lease;
 mod peek_capability;
 pub(crate) use lease::{Binding as LeaseBinding, Lease, ORIGIN_HEADER};
 
+/// Run one lease query (revalidation, proof, or selected-use) as an admitted store read.
+/// A lease is a per-socket authority handle, so each query owns its own clone.
+async fn lease_query<T, F>(lease: Arc<Lease>, work: F) -> anyhow::Result<T>
+where
+    F: FnOnce(&Lease) -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let store = lease
+        .authority()
+        .ok_or_else(|| anyhow::anyhow!("authority stopped"))?;
+    crate::api::read_deadline::store_read(&store, move || work(&lease))
+        .await
+        .unwrap_or_else(|error| Err(anyhow::anyhow!(error.to_string())))
+}
+
 const SUBPROTOCOL: &str = "st3.client.pty.v0";
 const CHUNK: usize = 16 * 1024;
 
@@ -127,11 +142,16 @@ pub(crate) async fn stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
+    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<StreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let upgrade = upgrade.and_then(|Extension(context)| context.0);
     authorize(&session, query.mode)?;
+    // This protocol subscribes in the upgrade request, without a JSON subscribe command.
+    let first_frame = subscription_first_frame("terminal", "raw", upgrade.as_ref())
+        .map(|first| first.span);
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
         .iter()
@@ -236,9 +256,9 @@ pub(crate) async fn stream(
             .map_err(|error| remote_read_error(&live.owner_host_id, error))?;
         (transport, Some(control))
     };
-    if let Some(lease) = &lease {
-        lease
-            .revalidate()
+    if let Some(lease) = lease.clone() {
+        lease_query(lease, |lease| lease.revalidate())
+            .await
             .map_err(|error| stale(error.to_string()))?;
     }
     if query.mode == st3_client::RawTerminalMode::Peek {
@@ -255,7 +275,7 @@ pub(crate) async fn stream(
         .protocols([SUBPROTOCOL])
         .max_message_size(CHUNK * 4)
         .max_frame_size(CHUNK * 4)
-        .on_upgrade(move |socket| splice(socket, transport, Some(query.mode), lease, control)))
+        .on_upgrade(move |socket| splice(socket, transport, Some(query.mode), lease, control, upgrade, first_frame)))
 }
 
 /// One bounded byte splice; closing either direction drops the persistent owner connection.
@@ -266,6 +286,8 @@ pub(crate) async fn splice(
     mode: Option<st3_client::RawTerminalMode>,
     lease: Option<Arc<Lease>>,
     control: Option<tokio::sync::mpsc::Sender<Value>>,
+    _upgrade: Option<opentelemetry::trace::SpanContext>,
+    mut first_frame: Option<tracing::Span>,
 ) {
     let (mut sink, mut source) = socket.split();
     let (mut reader, mut writer) = transport.into_split();
@@ -283,7 +305,10 @@ pub(crate) async fn splice(
                     };
                     let result = match message {
                         lease::Control::SelectedUse { sequence } => {
-                            let result = lease.selected_use(sequence);
+                            let result = lease_query(lease.clone(), move |lease| {
+                                lease.selected_use(sequence)
+                            })
+                            .await;
                             if result.is_ok()
                                 && let Some(control) = &control
                                 && control
@@ -300,7 +325,10 @@ pub(crate) async fn splice(
                             watcher_epoch,
                             sequence,
                         } if lease.owner_side() && lease_id == lease.binding.lease_id => {
-                            let result = lease.proof(&watcher_epoch, sequence);
+                            let result = lease_query(lease.clone(), move |lease| {
+                                lease.proof(&watcher_epoch, sequence)
+                            })
+                            .await;
                             if result.is_ok() {
                                 proof_ready.notify_one();
                             }
@@ -336,13 +364,27 @@ pub(crate) async fn splice(
             tokio::select! {
                 biased;
                 _ = heartbeat.tick(), if lease.is_some() => {
-                    let lease = lease.as_ref().expect("heartbeat requires lease");
-                    if lease.revalidate().is_err() { break; }
+                    let heartbeat_lease = lease.clone().expect("heartbeat requires lease");
+                    if lease_query(heartbeat_lease.clone(), |lease| lease.revalidate())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let lease = heartbeat_lease;
                     sequence += 1;
                     if lease.owner_side() {
                         if sink.send(axum::extract::ws::Message::Text(json!({"type":"owner-proof","lease_id":lease.binding.lease_id,"watcher_epoch":lease.binding.gateway_epoch,"sequence":sequence,"issued_at_unix_ms":client_now_ms()}).to_string().into())).await.is_err() { break; }
-                    } else if lease.binding.gateway == lease.binding.owner && lease.proof(&lease.binding.gateway_epoch, sequence).is_err() {
-                        break;
+                    } else if lease.binding.gateway == lease.binding.owner {
+                        let epoch = lease.binding.gateway_epoch.clone();
+                        let proofed = lease_query(lease.clone(), move |lease| {
+                            lease.proof(&epoch, sequence)
+                        })
+                        .await
+                        .is_ok();
+                        if !proofed {
+                            break;
+                        }
                     }
                 }
                 // An accepted first proof enables reads immediately, not at the next heartbeat.
@@ -350,7 +392,14 @@ pub(crate) async fn splice(
                 read = reader.read(&mut bytes), if lease.as_ref().is_none_or(|lease| !lease.owner_side() || lease.has_proof()) => {
                     let Ok(count) = read else { break; };
                     if count == 0 || lease.as_ref().is_some_and(|lease| lease.check().is_err()) { break; }
-                    if sink.send(axum::extract::ws::Message::Binary(bytes[..count].to_vec().into())).await.is_err() { break; }
+                    if let Some(span) = &first_frame {
+                        span.record("st.page.rows", 0_i64);
+                        span.record("st.page.bytes", count as i64);
+                        span.record("span.label", format!("terminal raw {count}"));
+                    }
+                    let first_span = first_frame.clone();
+                    if first_frame_work(first_span, sink.send(axum::extract::ws::Message::Binary(bytes[..count].to_vec().into()))).await.is_err() { break; }
+                    first_frame = None;
                 }
             }
         }

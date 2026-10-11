@@ -18,7 +18,7 @@ use serde::Deserialize;
 /// The actor st records for what its limits policy does.
 pub const LIMITS_ACTOR: &str = "daemon/limits";
 
-const ACCOUNT_READING_WINDOW_MS: u64 = 3_600_000;
+pub(crate) const ACCOUNT_READING_WINDOW_MS: u64 = 3_600_000;
 
 fn select_account_reading(readings: Vec<AccountLimit>) -> AccountLimit {
     // A partial snapshot after a relaunch can know only the five-hour window. It is not a
@@ -111,8 +111,41 @@ pub struct AccountLimit {
 pub struct LimitsPolicy {
     pub stop_at_weekly_percent: u32,
     pub keep: BTreeSet<String>,
+    /// Accounts never stopped: a declared account name or a provider label.
+    pub exempt_accounts: BTreeSet<String>,
+    /// Harnesses never stopped, whatever their account.
+    pub exempt_harnesses: BTreeSet<String>,
     pub notify: String,
     pub fresh_ms: u64,
+}
+
+impl LimitsPolicy {
+    /// The policy a `[limits]` section describes, or `None` while it is disabled.
+    pub fn from_config(config: &crate::config::LimitsConfig) -> Option<Self> {
+        if !config.enabled {
+            return None;
+        }
+        Some(Self {
+            stop_at_weekly_percent: config.stop_at_weekly_percent,
+            keep: config.keep.iter().cloned().collect(),
+            exempt_accounts: config.exempt_accounts.iter().cloned().collect(),
+            exempt_harnesses: config.exempt_harnesses.iter().cloned().collect(),
+            notify: config.notify.clone()?,
+            fresh_ms: config.fresh_ms().ok()?,
+        })
+    }
+
+    /// Whether this account's seats are never stopped, whenever they started: it is exempt by
+    /// the declared name, the provider's label, or its harness.
+    pub fn exempts(&self, limit: &AccountLimit) -> bool {
+        self.exempt_harnesses.contains(&limit.driver)
+            || self.exempt_accounts.contains(&limit.account)
+            || limit
+                .account_ref
+                .as_ref()
+                .is_some_and(|name| self.exempt_accounts.contains(name))
+            || self.exempt_accounts.contains(&episode_account(limit))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -125,7 +158,7 @@ pub struct LimitsOutcome {
     pub notified: Vec<String>,
 }
 
-fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
+pub(crate) fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
     let fields = body.get("fields")?;
     let driver = fields["driver"].as_str()?.to_owned();
     let identity = fields["account"]
@@ -374,6 +407,16 @@ pub(crate) fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> 
         }
     }
     Ok(claims.len())
+}
+
+/// Empty the projection and fold every `harness.limits` claim into it again, in one
+/// transaction: what a checkpoint proof's copy reads, as a node that never trimmed would.
+pub(crate) fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute("DELETE FROM account_limit_readings", [])?;
+    transaction.execute("DELETE FROM account_limit_seats", [])?;
+    transaction.execute("DELETE FROM meta WHERE key=?1", [LIMITS_CURSOR])?;
+    while flush_limits_page(transaction, LIMITS_CATCH_UP_PAGE)? == LIMITS_CATCH_UP_PAGE {}
+    Ok(())
 }
 
 pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
@@ -633,6 +676,9 @@ impl Store {
             let Some(weekly) = limit.weekly_percent else {
                 continue;
             };
+            if policy.exempts(&limit) {
+                continue;
+            }
             if weekly < f64::from(policy.stop_at_weekly_percent)
                 || limit
                     .weekly_resets_at_unix_ms
@@ -1212,6 +1258,8 @@ mod tests {
         let policy = LimitsPolicy {
             stop_at_weekly_percent: 95,
             keep: BTreeSet::from([coordinator.to_owned()]),
+            exempt_accounts: BTreeSet::new(),
+            exempt_harnesses: BTreeSet::new(),
             notify: "agent/alder.operations".into(),
             fresh_ms: HOUR as u64,
         };
@@ -1362,6 +1410,8 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         LimitsPolicy {
             stop_at_weekly_percent: 95,
             keep: BTreeSet::new(),
+            exempt_accounts: BTreeSet::new(),
+            exempt_harnesses: BTreeSet::new(),
             notify: "agent/alder.operations".into(),
             fresh_ms: HOUR as u64,
         }
@@ -1977,6 +2027,8 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         let policy = LimitsPolicy {
             stop_at_weekly_percent: 95,
             keep: BTreeSet::new(),
+            exempt_accounts: BTreeSet::new(),
+            exempt_harnesses: BTreeSet::new(),
             notify: "agent/alder.operations".into(),
             fresh_ms: HOUR as u64,
         };
@@ -1997,5 +2049,53 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
             LimitsOutcome::default()
         );
         assert!(live(&store, "agent/alder.seat"));
+    }
+    #[test]
+    fn a_seat_started_later_on_an_exempt_account_is_never_stopped() {
+        let store = Store::open_memory("alder").unwrap();
+        let now = now_ms();
+        let first = "agent/alder.first";
+        let later = "agent/alder.later";
+        declare(&store, first, "alder");
+        read(&store, first, Some("claude/aaaa"), 99.0, now);
+        let exempt = LimitsPolicy {
+            exempt_accounts: BTreeSet::from(["claude/aaaa".to_owned()]),
+            ..policy()
+        };
+        assert_eq!(
+            store.enforce_account_limits(&exempt, now).unwrap(),
+            LimitsOutcome::default()
+        );
+        // A seat started after the account passed its threshold, and after the config named it.
+        declare(&store, later, "alder");
+        read(&store, later, Some("claude/aaaa"), 99.0, now + 1);
+        assert_eq!(
+            store.enforce_account_limits(&exempt, now + 1).unwrap(),
+            LimitsOutcome::default()
+        );
+        assert!(live(&store, first) && live(&store, later));
+        // The same readings stop both once the account is no longer exempt, so a reload applies.
+        let outcome = store.enforce_account_limits(&policy(), now + 2).unwrap();
+        assert_eq!(outcome.stopped, [first, later]);
+    }
+
+    #[test]
+    fn exemptions_match_a_label_a_declared_name_or_a_harness_and_nothing_else() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let now = now_ms();
+        read_account(&store, "agent/alder.single", "ada/one", "codex/one", 99.0, now);
+        let limit = store.account_limits().unwrap().remove(0);
+        let with = |accounts: &[&str], harnesses: &[&str]| LimitsPolicy {
+            exempt_accounts: accounts.iter().map(|name| (*name).to_owned()).collect(),
+            exempt_harnesses: harnesses.iter().map(|name| (*name).to_owned()).collect(),
+            ..policy()
+        };
+        assert!(!with(&[], &[]).exempts(&limit));
+        assert!(with(&["ada/one"], &[]).exempts(&limit), "the declared name");
+        assert!(with(&["account/ada/one"], &[]).exempts(&limit));
+        assert!(with(&[limit.account.as_str()], &[]).exempts(&limit), "the label");
+        assert!(with(&[], &["codex"]).exempts(&limit), "the harness");
+        assert!(!with(&["ada/two"], &["claude"]).exempts(&limit));
     }
 }

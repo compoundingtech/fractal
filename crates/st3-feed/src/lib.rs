@@ -48,6 +48,9 @@ const RETRY_DELAYS: [Duration; 5] = [
     Duration::from_secs(30),
 ];
 
+/// How long a fresh request may take to prove st is answering after its stream dropped.
+const PROBE_WAIT: Duration = Duration::from_secs(3);
+
 /// The subscription ID of the open terminal.
 const TERMINAL: &str = "terminal";
 /// The subscription ID of the open conversation.
@@ -63,6 +66,8 @@ pub enum Window {
     /// A handful of counts (needs you, working agents, active missions, machines), followed when
     /// st grants it: what the top bar says without following the whole missions window.
     Summary,
+    /// The selected person’s sidebar organization, when supported.
+    Arrangements,
 }
 
 impl Window {
@@ -75,20 +80,21 @@ impl Window {
             Self::Agents => "agents",
             Self::Glasses => "glasses",
             Self::Summary => "summary",
+            Self::Arrangements => "arrangements",
         }
     }
 
     fn from_id(id: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain([Self::Glasses, Self::Summary])
+            .chain([Self::Glasses, Self::Summary, Self::Arrangements])
             .find(|window| window.id() == id)
     }
 
     /// How many items to follow: every glass a person may keep, a page of anything else.
     fn limit(self) -> usize {
         match self {
-            Self::Glasses => GLASSES,
+            Self::Glasses | Self::Arrangements => GLASSES,
             _ => WINDOW,
         }
     }
@@ -106,6 +112,11 @@ pub enum Update {
     Connected(Client),
     /// st cannot be reached; the feed keeps trying and every window keeps its last items.
     Offline(String),
+    /// st answers a fresh request, but the live stream to it dropped or would not open, with this
+    /// reason. The feed opens another after its usual short wait and every window keeps its last
+    /// items: the link is not offline, and the reason is shown rather than a red word that is not
+    /// true. Only a daemon on this machine is probed.
+    Degraded(String),
     /// The granted glasses shape, delivered before its window. The embedding UI chooses how
     /// to store glasses for this version; the feed owns no application state.
     GlassesVersion(u32),
@@ -132,6 +143,8 @@ pub enum Update {
         /// Availability before the live window; absent on deltas means unchanged.
         has_more: Option<bool>,
         items: Vec<TimelineEntry>,
+        /// The conversation header (contract §3) when this frame carries one.
+        header: Option<serde_json::Value>,
     },
     /// st could not show the open conversation; the feed asks again after a backoff, unless
     /// st said it never can (`permanent`).
@@ -188,8 +201,8 @@ pub enum Command {
     },
 }
 
-/// The most conversations followed at once. A socket holds eight subscriptions: three windows,
-/// glasses and a terminal leave three.
+/// Three conversations remain live alongside collection windows, glasses and a terminal.
+/// Optional arrangements require the advertised sixteen-subscription socket capacity.
 pub const MAX_CONVERSATIONS: usize = 3;
 
 /// A conversation being shown, on its own subscription.
@@ -244,6 +257,19 @@ pub async fn run_members_with(
     glasses: bool,
     missions: bool,
     updates: mpsc::Sender<Update>,
+    commands: channel::UnboundedReceiver<Command>,
+) {
+    run_members_with_sidebar(clients, remote, glasses, missions, None, updates, commands).await;
+}
+
+/// Follow an optional explicit person's sidebar without reducing live conversation capacity.
+pub async fn run_members_with_sidebar(
+    clients: Vec<Client>,
+    remote: bool,
+    glasses: bool,
+    missions: bool,
+    person: Option<String>,
+    updates: mpsc::Sender<Update>,
     mut commands: channel::UnboundedReceiver<Command>,
 ) {
     if clients.is_empty() {
@@ -281,6 +307,7 @@ pub async fn run_members_with(
                 client,
                 remote,
                 glasses,
+                person.as_deref(),
                 &mut stream,
                 &updates,
                 &mut commands,
@@ -293,7 +320,7 @@ pub async fn run_members_with(
             {
                 Ended::Closed => return,
                 Ended::Dropped(reason) => {
-                    if updates.send(Update::Offline(reason.clone())).is_err() {
+                    if updates.send(link_lost(client, remote, &reason).await).is_err() {
                         return;
                     }
                     if let Some(current) = following.as_mut() {
@@ -310,7 +337,10 @@ pub async fn run_members_with(
                     }
                 }
             }
-        } else if updates.send(Update::Offline(reason)).is_err() {
+        } else if updates
+            .send(link_lost(&clients[member % clients.len()], remote, &reason).await)
+            .is_err()
+        {
             return;
         }
         // Wait before trying again, still honouring an unfollow meanwhile.
@@ -351,6 +381,74 @@ pub async fn run_members_with(
     }
 }
 
+/// What a lost stream means. st is offline only when a fresh request to it also fails; when it
+/// answers, only the stream is being replaced (a slow or failed read of another machine shows on
+/// the view that waits for it, not as the whole link going down).
+///
+/// Only a daemon on this machine is probed: each request to its socket connects afresh. A paired
+/// device's gateway is reached over HTTP connections that can be pooled and outlive the route
+/// that carried them, so an answer there proves nothing about the stream; it stays offline.
+async fn link_lost(client: &Client, remote: bool, reason: &str) -> Update {
+    let answered = !remote
+        && tokio::time::timeout(PROBE_WAIT, client.capabilities())
+            .await
+            .is_ok_and(|outcome| outcome.is_ok());
+    // A paired device keeps no daemon or replica state of its own, and writes none for this.
+    if !remote {
+        connection_log(reason, answered);
+    }
+    if answered {
+        Update::Degraded(reason.to_owned())
+    } else {
+        Update::Offline(reason.to_owned())
+    }
+}
+
+/// One line per lost stream of a local daemon in `$XDG_STATE_HOME/st3/stui/connection.log`, so a
+/// link that keeps dropping leaves its reasons behind. The file is cut to its last half when it grows past 256 KB.
+fn connection_log(reason: &str, answered: bool) {
+    use std::io::Write as _;
+    // Tests lose streams on purpose and must not write to the person's state.
+    if cfg!(test) {
+        return;
+    }
+    let Some(base) = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })
+    else {
+        return;
+    };
+    let directory = base.join("st3").join("stui");
+    let path = directory.join("connection.log");
+    let _ = std::fs::create_dir_all(&directory);
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 256 * 1024)
+        && let Ok(bytes) = std::fs::read(&path)
+    {
+        let _ = std::fs::write(&path, &bytes[bytes.len() / 2..]);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(
+            file,
+            "{} {} {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
+            if answered {
+                "stream-lost st-answers"
+            } else {
+                "offline"
+            },
+            reason.replace('\n', " ")
+        );
+    }
+}
+
 enum Ended {
     /// The caller is closing.
     Closed,
@@ -363,6 +461,7 @@ async fn connected(
     client: &Client,
     remote: bool,
     glasses: bool,
+    person: Option<&str>,
     stream: &mut CollectionStream,
     updates: &mpsc::Sender<Update>,
     commands: &mut channel::UnboundedReceiver<Command>,
@@ -400,13 +499,20 @@ async fn connected(
     } else {
         None
     };
-    // The summary exists only where st grants it; an older member has no such collection.
-    let summary = capabilities.as_ref().is_some_and(|capabilities| {
-        capabilities.value.capabilities.iter().any(|capability| {
-            capability.id == "summary"
-                && capability.version >= 1
-                && capability.state == CapabilityState::Granted
+    let supports = |id: &str| {
+        capabilities.as_ref().is_some_and(|capabilities| {
+            capabilities.value.capabilities.iter().any(|capability| {
+                capability.id == id
+                    && capability.version >= 1
+                    && capability.state == CapabilityState::Granted
+            })
         })
+    };
+    // The summary exists only where st grants it; an older member has no such collection.
+    let summary = supports("summary");
+    // Older sockets are already full with glasses, a terminal and three conversations.
+    let sidebar_person = person.filter(|person| {
+        person.starts_with("person/") && supports("arrangements") && supports("collections")
     });
     // From version 2 a glass's splits keep their sizes in st.
     if let Some(version) = version
@@ -427,6 +533,10 @@ async fn connected(
         {
             return Ended::Dropped(error.to_string());
         }
+    }
+    if let Some(person) = sidebar_person
+        && let Err(error) = stream.subscribe_arrangements("arrangements", person, GLASSES, None).await {
+        return Ended::Dropped(error.to_string());
     }
     for current in conversing.iter_mut() {
         if let Err(error) = converse(stream, current).await {
@@ -546,10 +656,10 @@ async fn connected(
                             }
                         }
                     }
-                    CollectionEvent::Conversation { id, session_id, replace, items, has_more } => {
+                    CollectionEvent::Conversation { id, session_id, replace, items, has_more, header } => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         current.failures = 0;
-                        if updates.send(Update::Conversation { target: current.target.clone(), session_id, replace, has_more, items }).is_err() {
+                        if updates.send(Update::Conversation { target: current.target.clone(), session_id, replace, has_more, items, header }).is_err() {
                             return Ended::Closed;
                         }
                     }
@@ -699,7 +809,15 @@ async fn connected(
                     if window == Window::Missions && !*missions {
                         continue;
                     }
-                    if let Err(error) = stream.subscribe(window.id(), window.id(), window.limit(), None, None).await {
+                    let result = if window == Window::Arrangements {
+                        match sidebar_person {
+                            Some(person) => stream.subscribe_arrangements(window.id(), person, window.limit(), None).await,
+                            None => continue,
+                        }
+                    } else {
+                        stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+                    };
+                    if let Err(error) = result {
                         return Ended::Dropped(error.to_string());
                     }
                 }
@@ -1317,6 +1435,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sidebar_arrangements_follow_the_explicit_person_and_remote_register_updates() {
+        use serde_json::json;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("sidebar.sock");
+        let state = test_state(root.path());
+        let app = st3::api::router(state.clone());
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+        let client = Client::unix_as(&socket, "person/avery");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while client.capabilities().await.is_err() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let (commands, command_receiver) = channel::unbounded_channel();
+        let feed = tokio::spawn(run_members_with_sidebar(
+            vec![client],
+            false,
+            true,
+            true,
+            Some("person/avery".into()),
+            tx,
+            command_receiver,
+        ));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut pending = std::collections::BTreeSet::from([
+                Window::Attention,
+                Window::Missions,
+                Window::Agents,
+                Window::Glasses,
+                Window::Arrangements,
+            ]);
+            while !pending.is_empty() {
+                match rx.try_recv() {
+                    Ok(Update::Window { window, items, .. }) if pending.remove(&window) => {
+                        assert!(items.is_empty())
+                    }
+                    Ok(Update::WindowFailed(window, error)) => {
+                        panic!("{window:?} refused: {error}")
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => panic!("feed stopped"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let subject = "arrangement/person/avery/019a0000-0000-7000-8000-000000000001";
+        let append = |operations| {
+            state
+                .store
+                .append_client_claim(&st3::model::ClaimInput {
+                    subject: subject.into(),
+                    kind: "arrangement.edited".into(),
+                    actor: Some("person/avery".into()),
+                    fields: serde_json::from_value(
+                        json!({"owner":"person/avery", "operations":operations}),
+                    )
+                    .unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            state
+                .event_notify
+                .send_replace(state.store.index().unwrap());
+        };
+        append(
+            json!([{"op":"create","name":"Sidebar"}, {"op":"folder.create","id":"019a0000-0000-7000-8000-000000000010","name":"Builds","parent":null,"key":"a0"}]),
+        );
+        let items = next_window(&rx, Window::Arrangements).await;
+        assert!(
+            matches!(&items[0], Resource::Arrangement(a) if a.owner == "person/avery" && a.body.folders.values().next().unwrap().name.value == "Builds")
+        );
+        append(
+            json!([{"op":"folder.rename","id":"019a0000-0000-7000-8000-000000000010","name":"Renamed"}]),
+        );
+        let items = next_window(&rx, Window::Arrangements).await;
+        assert!(
+            matches!(&items[0], Resource::Arrangement(a) if a.body.folders.values().next().unwrap().name.value == "Renamed")
+        );
+        append(json!([{"op":"retire"}]));
+        assert!(next_window(&rx, Window::Arrangements).await.is_empty());
+        drop(commands);
+        tokio::time::timeout(Duration::from_secs(5), feed)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn an_unreachable_member_falls_back_and_announces_glasses_before_their_window() {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("live.sock");
@@ -1360,7 +1577,7 @@ mod tests {
                         window: Window::Glasses,
                         ..
                     }) => {
-                        assert!(version.is_some_and(|value| value >= GLASSES_VERSION));
+                        assert!(version.is_some_and(|value| value >= 1));
                         break;
                     }
                     Ok(Update::Offline(reason)) => panic!("live member was available: {reason}"),
@@ -1503,6 +1720,56 @@ mod tests {
         assert!(model.machines.snapshot.is_some());
         assert_eq!(model.status, "Resynchronized after cursor gap");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_lost_stream_is_offline_only_when_st_does_not_answer_a_fresh_request() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("st3.sock");
+        let app = st3::api::router(test_state(root.path()));
+        let server_socket = socket.clone();
+        let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, app).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !socket.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let answering = link_lost(
+            &Client::unix_as(&socket, "person/avery"),
+            false,
+            "st stopped answering",
+        )
+        .await;
+        assert!(
+            matches!(&answering, Update::Degraded(reason) if reason == "st stopped answering"),
+            "st answered, so only its stream is replaced: {answering:?}"
+        );
+        // A paired device's gateway is never probed: its answer would prove nothing.
+        let remote = link_lost(
+            &Client::unix_as(&socket, "person/avery"),
+            true,
+            "the member stopped answering",
+        )
+        .await;
+        assert!(
+            matches!(&remote, Update::Offline(_)),
+            "a lost remote stream is offline: {remote:?}"
+        );
+        server.abort();
+        let _ = server.await;
+        let gone = link_lost(
+            &Client::unix_as(root.path().join("absent.sock"), "person/avery"),
+            false,
+            "st closed the connection",
+        )
+        .await;
+        assert!(
+            matches!(&gone, Update::Offline(reason) if reason == "st closed the connection"),
+            "no answer at all is offline: {gone:?}"
+        );
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@
     fenix.url = "github:nix-community/fenix";
     fenix.inputs.nixpkgs.follows = "nixpkgs";
     # The runtime, Rust crates and native terminal library share one producer revision.
-    pty.url = "github:compoundingtech/pty/b9d02f3468b718ceff27031e0b9cb38de3bb6b1c";
+    pty.url = "github:compoundingtech/pty/1ae8c187301034d2b343b6ec638f2b74c009f92e";
     pty.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Re-pin to effect-utils main once the Rust helpers and repo-settings PRs merge.
@@ -32,6 +32,15 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        ciRustcWrapper = pkgs.writeShellApplication {
+          name = "ci-rustc-wrapper";
+          runtimeInputs = [ pkgs.coreutils pkgs.gnugrep ];
+          text = ''
+            export SCCACHE_BIN=${pkgs.sccache}/bin/sccache
+            ${builtins.readFile ./scripts/ci-rustc-wrapper}
+          '';
+        };
+
         # Reuse the GitHub-archive flake source instead of importCargoLock's git fetcher.
         # Reject new git sources until they also have an archive-backed input.
         cargoDeps =
@@ -49,7 +58,7 @@
               "pty-core-0.13.0-rust" = pty.narHash;
             };
           };
-        hmModuleEval = nixpkgs.lib.evalModules {
+        mkHmModuleEval = extraConfig: nixpkgs.lib.evalModules {
           specialArgs = {
             inherit pkgs;
             lib = pkgs.lib // {
@@ -77,10 +86,11 @@
                 socket = "/tmp/smalltalk-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/st3/seats/claude.kdl ];
-              };
+              } // extraConfig;
             })
           ];
         };
+        hmModuleEval = mkHmModuleEval { };
         providerRustToolchain = fenix.packages.${system}.combine [
           fenix.packages.${system}.stable.cargo
           fenix.packages.${system}.stable.rustc
@@ -114,6 +124,7 @@
           type = "nix";
           inherit version;
           rev = sourceRev;
+          fullRev = self.rev or self.dirtyRev or sourceRev;
           commitTs = sourceCommitUnix;
           dirty = sourceDirty;
         };
@@ -427,6 +438,8 @@
             runHook postCheck
           '';
           ST3_MESSAGING_COMPAT_BIN = "${messagingBaseline}/bin/st3";
+          ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          ST3_OTEL_REQUIRE = "1";
           # These two tests put an openpty(3) terminal into raw mode. In the macOS Nix build one
           # fails and the other hangs, so they run on Linux only until they pass on macOS.
           checkFlags = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
@@ -467,6 +480,7 @@
             pkgs.curl
             pkgs.nodejs
             ptyPackage
+            effect-utils.packages.${system}.otelite
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.util-linux pkgs.systemd ]
           # Native session discovery lists processes with ps and lsof on macOS (Linux reads /proc).
@@ -837,6 +851,13 @@
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/smalltalk-test.sock" args;
           assert pkgs.lib.hasInfix "--pty-binary" args;
+          # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
+          # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
+          assert (if pkgs.stdenv.hostPlatform.isLinux then
+            pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/st3-client.sock"'' args
+            && !(pkgs.lib.hasInfix "%%t/st3-client.sock" args)
+          else
+            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/st3-client.sock" args);
           assert (if pkgs.stdenv.hostPlatform.isLinux then
             pkgs.lib.hasPrefix ''"${stableExecutable}" '' args
           else
@@ -860,6 +881,54 @@
           assert (!pkgs.stdenv.hostPlatform.isLinux)
             || rendered.systemd.user.services.smalltalk.Service.MemoryMax == "8G";
           pkgs.runCommand "smalltalk-hm-module-eval" { } "touch $out";
+        checks.hm-module-external-binary-eval =
+          let
+            executable = "/opt/smalltalk/bin/st3";
+            externalConfig = { binary.path = executable; };
+            rendered = (mkHmModuleEval externalConfig).config;
+            successor = (mkHmModuleEval (externalConfig // {
+              package = pkgs.emptyDirectory;
+              ptyPackage = null;
+            })).config;
+            units = config: builtins.toJSON {
+              inherit (config.systemd.user) services;
+              inherit (config.launchd) agents;
+            };
+            unitText = units rendered;
+            forbiddenPaths = map (package: builtins.unsafeDiscardStringContext (toString package)) [
+              rendered.services.smalltalk.package
+              rendered.services.smalltalk.ptyPackage
+              (builtins.head hmModuleEval.config.home.packages)
+            ];
+            applyScript = if pkgs.stdenv.hostPlatform.isLinux then
+              rendered.systemd.user.services.smalltalk-apply.Service.ExecStart
+            else
+              builtins.head rendered.launchd.agents.smalltalk-apply.config.ProgramArguments;
+            args = if pkgs.stdenv.hostPlatform.isLinux then
+              rendered.systemd.user.services.smalltalk.Service.ExecStart
+            else
+              builtins.concatStringsSep " " rendered.launchd.agents.smalltalk.config.ProgramArguments;
+          in
+          assert rendered.home.packages == [ ];
+          assert !(rendered.home.activation ? smalltalkBinary);
+          assert builtins.all (path: !(pkgs.lib.hasInfix path unitText)) forbiddenPaths;
+          assert !(pkgs.lib.hasInfix "X-Restart-Triggers" unitText);
+          assert !(pkgs.lib.hasInfix "SMALLTALK_PACKAGE" unitText);
+          assert pkgs.lib.hasInfix executable args;
+          assert pkgs.lib.hasInfix "${builtins.dirOf executable}/pty" args;
+          # Includes the declaration wrapper's store path: neither it nor a unit
+          # may change when the unused st3 or PTY package changes.
+          assert unitText == units successor;
+          pkgs.runCommand "smalltalk-hm-module-external-binary-eval" { } ''
+            ${pkgs.gnugrep}/bin/grep -F -- ${pkgs.lib.escapeShellArg executable} ${applyScript}
+            for package in ${pkgs.lib.escapeShellArgs forbiddenPaths}; do
+              if ${pkgs.gnugrep}/bin/grep -F -- "$package" ${applyScript}; then
+                echo "Declaration wrapper references a Home Manager-owned package" >&2
+                exit 1
+              fi
+            done
+            touch $out
+          '';
         checks.wasm-resolver-feature = st2WasmResolver;
         checks.wasip2-resource-providers = st2ProviderRuntime;
         checks.provider-components = st2ProviderComponents;
@@ -1141,9 +1210,8 @@
             pkgs.lld
             ptyPackage
             libghosttyVT
-            # Local runs of the OTLP export integration gate
-            # (`cargo test --test integration otel_export::`) need the same collector the
-            # Nix check pins; `ST2_OTELITE_BIN` points at it.
+            # Local st2/st3 OTLP export integration tests use the same collector as Nix checks;
+            # ST2_OTELITE_BIN and ST3_OTELITE_BIN point at it.
             effect-utils.packages.${system}.otelite
             # st3's messaging fault matrix runs the omp channel hook (TypeScript) under the
             # provider stand-in with Node's built-in type stripping, which Node 24 enables.
@@ -1155,7 +1223,13 @@
           # Same collector the Nix gate pins, so a bare
           # `cargo test --test integration otel_export::` in this shell runs against it.
           ST2_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
+          shellHook = ''
+            if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+            fi
+          '';
         };
         # The in-process load test uses a stand-in PTY and needs no collector or harness tools.
         devShells.perf = pkgs.mkShell {
@@ -1172,6 +1246,9 @@
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
           shellHook = ''
+            if [ "''${GITHUB_ACTIONS:-}" = true ]; then
+              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+            fi
             export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | sed -n '\|^/nix/store/|p' | paste -sd:):/usr/bin:/bin"
           '';
         };
@@ -1183,6 +1260,55 @@
             ln -sfn ${effect-utils} repos/effect-utils
           '';
         };
+        # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root
+        # Rust nixpkgs: pnpm 12.7.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
+        # The Buck root mirrors `mkConsumerBuckRoot`; its rules and capabilities cells are linked
+        # into `.buck2/` from the store, and `scripts/ci-fractal-web` fails if the checked-in
+        # `.buckconfig`, `BUCK` or `buck2/toolchains/BUCK` drift from it.
+        devShells.web =
+          let
+            webPkgs = import effect-utils.inputs.nixpkgs { inherit system; };
+            effectUtilsPackages = effect-utils.packages.${system};
+            buckRoot = effect-utils.lib.mkConsumerBuckRoot {
+              pkgs = webPkgs;
+              rules = effectUtilsPackages.buck2-rules;
+              capabilities = effectUtilsPackages.buck2-capabilities;
+              cellName = "smalltalk";
+              # The generator input under `repos/` carries effect-utils' own BUCK files.
+              projectIgnore = [
+                "**/__pycache__"
+                "**/dist"
+                "**/node_modules"
+                "**/target"
+                ".devenv"
+                ".git"
+                "buck-out"
+                "node_modules"
+                "repos"
+                "target"
+                "tmp"
+              ];
+            };
+          in
+          webPkgs.mkShell {
+            packages = [
+              (effect-utils.lib.mkPnpm { pkgs = webPkgs; })
+              # Ahead of Node, whose bundled Corepack is older.
+              webPkgs.corepack
+              webPkgs.nodejs_24
+              webPkgs.bun
+              effectUtilsPackages.buck2
+              effectUtilsPackages.genie
+            ];
+            BUCK2_BIN = "${effectUtilsPackages.buck2}/bin/buck2";
+            FRACTAL_WEB_BUCK_ROOT = "${buckRoot}";
+            shellHook = ''
+              mkdir -p repos .buck2
+              ln -sfn ${effect-utils} repos/effect-utils
+              ln -sfn ${buckRoot}/.buck2/rules .buck2/rules
+              ln -sfn ${buckRoot}/.buck2/capabilities .buck2/capabilities
+            '';
+          };
         # The isolation-vm CI job's NixOS VMs; see each file for how it runs.
         legacyPackages = pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           transport-isolation-vm = import ./nix/transport-isolation-vm.nix {

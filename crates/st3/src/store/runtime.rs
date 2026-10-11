@@ -29,25 +29,42 @@ pub struct SmalltalkRuntime {
     pub(crate) message_cache: Mutex<HashMap<String, MessageCacheEntry>>,
     pub(crate) agent_status_cache: Mutex<VecDeque<AgentStatusEntry>>,
     pub(crate) agent_resources_cache: Mutex<VecDeque<AgentResourcesEntry>>,
+    /// Each agent's usage fold at the newest cut a read reached, so a card refold reads only
+    /// the usage claims after it rather than the agent's whole usage history.
+    pub(crate) usage_folds: Mutex<UsageFolds>,
     /// Ordering and queue metadata for lazy HTTP pages, shared at the same graph cuts.
     pub(crate) agent_page_refs_cache: Mutex<VecDeque<AgentResourcesEntry>>,
     /// Acquire before opening a SQLite snapshot, never while pinning a WAL read mark.
     pub(crate) agent_resources_admission: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) agent_resources_admission_state: Mutex<roster_admission::AdmissionState>,
     /// Set once a daemon keeps the complete roster published off the request path; readers
     /// wake it instead of folding cards themselves.
     pub(crate) agent_roster_refresh: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub(crate) agent_roster_requested_at: std::sync::atomic::AtomicU64,
+    /// When an agents list read last asked for the roster, in Unix ms; 0 before the first.
+    pub(crate) agent_roster_read_at: std::sync::atomic::AtomicU64,
+    /// Whether the current overdue refresh request was already reported.
+    pub(crate) agent_roster_overdue_warned: std::sync::atomic::AtomicBool,
     /// Whether a reader asked for the history roster since the refresher last folded it.
     pub(crate) agent_roster_history_wanted: std::sync::atomic::AtomicBool,
+    /// Wakes a pausing refresher for a reader that waits for a fresh roster, so that read
+    /// waits for one fold rather than the rest of the minimum pause.
+    pub(crate) agent_roster_fresh_wanted: tokio::sync::Notify,
+    /// Rosters assembled in chunks because no short fold could complete them, by why.
+    pub(crate) agent_roster_chunked: Mutex<BTreeMap<String, u64>>,
     /// Counts complete current roster publications, same graph index or not, so collection
     /// streams that read an earlier one reread the newer.
     pub(crate) agent_roster_published: tokio::sync::watch::Sender<u64>,
+    /// Every other collection's published view revisions, for the same rereads.
+    pub(crate) published_views: published_views::PublishedViews,
     #[cfg(test)]
     pub(crate) agent_resources_builds: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) agent_resources_refolded_cards: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) agent_resources_largest_fold: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -163,14 +180,17 @@ impl Runtime for SmalltalkRuntime {
 
     fn create_schema(&self, connection: &Connection) -> Result<()> {
         connection.execute_batch(SCHEMA)?;
+        connection.execute_batch(&RUNTIME_ID_INDEX)?;
         connection.execute_batch(arrangements::SCHEMA)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
         backfill_message_index(connection)?;
+        idle_mail::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
         resources::create_schema(connection)?;
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
+        coordination::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
         if let Some(views) = &self.ivm_views {
@@ -349,11 +369,27 @@ impl Runtime for SmalltalkRuntime {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
         self.agent_roster_published.send_modify(|revision| *revision += 1);
+        self.published_views.invalidate();
         self.agent_page_refs_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        // Nothing is published now, and a refold from the log takes seconds on a large store.
+        // Where agents lists are being read, start it here rather than when the next read finds
+        // no roster and waits for it. A node nobody reads keeps folding only on demand, so a
+        // long catch-up or trim that forgets once per chunk does not refold it once per chunk.
+        let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
+        let read_lately = read_at != 0
+            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64;
+        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| read_lately) {
+            let _ = self.agent_roster_requested_at.compare_exchange(
+                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            wake.notify_one();
+        }
     }
 
     fn digest_tables(&self) -> &'static [(&'static str, &'static [&'static str])] {
@@ -389,6 +425,10 @@ impl Runtime for SmalltalkRuntime {
         checkpoint_rules::subject_answers(connection, subject, cut)
     }
 
+    fn checkpoint_global_answers(&self, transaction: &Transaction<'_>) -> Result<Option<Value>> {
+        checkpoint_rules::global_answers(transaction).map(Some)
+    }
+
     fn checkpoint_subject_answers_with_sources(
         &self,
         connection: &Connection,
@@ -401,6 +441,10 @@ impl Runtime for SmalltalkRuntime {
 
 /// The version of smalltalk's shared projection layout, beside the claim vocabulary. Nodes whose
 /// layouts differ keep exchanging claim authority but do not compare projection maps.
+/// How recently an agents list read must have asked for the roster for a forget to refold it
+/// at once rather than on the next read.
+const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
+
 const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.arrangements.v2";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
