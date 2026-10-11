@@ -33,6 +33,8 @@ export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag:
 export interface TranscriptProps {
   readonly turns: readonly TranscriptTurn[]
   readonly title: string
+  /** Omit when the host already owns the conversation's header band. */
+  readonly showHeader?: boolean
   readonly sync: SyncStatus
   readonly now: number
   readonly observedAt: number
@@ -155,7 +157,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, stranded, onOpenTo
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext }: TranscriptProps) {
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
@@ -208,7 +210,7 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   const failure = syncLine({ status: sync, label: 'conversation', now, observedAt })
   const started = Date.parse(running?.work.startedAt ?? '')
-  if (availability._tag === 'Unavailable') return <section aria-label={`Conversation unavailable${landmarkContext ? `, ${landmarkContext}` : ''}`} data-testid="transcript-unavailable" {...stylex.props(styles.frame, styles.empty)}><header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong></header><div {...stylex.props(styles.emptyBody)}>
+  if (availability._tag === 'Unavailable') return <section aria-label={`Conversation unavailable${landmarkContext ? `, ${landmarkContext}` : ''}`} data-testid="transcript-unavailable" {...stylex.props(styles.frame, styles.empty)}>{showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong></header>}<div {...stylex.props(styles.emptyBody)}>
     <TranscriptEmptyContent emptyState={{ title: availability.reason }} />
     {availability.action !== undefined && <Button data-testid="transcript-unavailable-action" onPress={availability.action.onPress} {...stylex.props(styles.unavailableAction)}>{availability.action.label}</Button>}
     {availability.detail !== undefined && <Disclosure {...stylex.props(styles.unavailableDetails)}><Button slot="trigger" {...stylex.props(styles.historyLoad)}>Show details</Button><DisclosurePanel><p data-testid="transcript-unavailable-detail" {...stylex.props(styles.unavailableDetail)}>{availability.detail}</p></DisclosurePanel></Disclosure>}
@@ -217,11 +219,11 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
     ? <div aria-label="Empty conversation" data-testid="transcript-empty" {...stylex.props(styles.emptyBody)}><TranscriptEmptyContent emptyState={emptyState} /></div>
     : <div data-testid="transcript-placeholder" aria-label="Loading conversation" {...stylex.props(styles.placeholder)}><p role="status">Loading conversation…</p><SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} /><div aria-hidden="true" {...stylex.props(styles.turn)}><div {...stylex.props(styles.skeletonPrompt)} /><div {...stylex.props(styles.skeletonWork)} /><div {...stylex.props(styles.skeletonAnswer)} /></div></div>
   return <MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
-    <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>
+    {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>
       {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
-    </header>
+    </header>}
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
       {history._tag === 'HasOlder' && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
       {committed.length === 0 ? empty : <div {...stylex.props(styles.timeline)}>{committed.map(turn => <PreparedTurn key={turn.id} turn={turn} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}</div>}
