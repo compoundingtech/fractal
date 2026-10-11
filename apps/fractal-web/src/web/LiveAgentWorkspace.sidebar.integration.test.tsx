@@ -12,6 +12,9 @@ import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { SidebarAgentRow } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { within } from 'storybook/test'
+import { sidebarRow } from './sidebarRow.ts'
+import { fleetFromAgents } from '../data/projections.ts'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: (...styles: unknown[]) => ({ 'data-style-contract': JSON.stringify(Object.assign({}, ...styles.filter(style => typeof style === 'object' && style !== null))) }) }))
 
@@ -72,6 +75,24 @@ const footerStatus = () => sidebar().querySelector('footer [role="status"]')!
 
 // Both the real data derivation and the kit's SidebarAgentRow DOM participate.
 describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
+  it('keeps the flat production row name equal to its visible identity and status in its description', async () => {
+    const item = sidebarRow({ agent: fleetFromAgents([agent]).agents[0]!, stale: false, now: 5000 })
+    await act(async () => root.render(<SidebarAgentRow item={item} now={5000} layout="SR2-A" extraSignals={[]} onOpen={() => undefined} />))
+    const row = host.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
+    const visibleName = [row.querySelector('[data-row-column="title-text"]')!.textContent, row.querySelector('[data-row-field="host"]')!.textContent].join(' ')
+    const button = within(row).getByRole('button', { name: visibleName })
+    expect(button.hasAttribute('aria-label')).toBe(false)
+    const description = document.getElementById(button.getAttribute('aria-describedby')!)!.textContent
+    expect(description).toContain(item.statusLabel)
+    expect(description).not.toMatch(/unknown|unread/i)
+    // Restore the old naming policy: the same accessible-name criterion must reject it.
+    const labelledBy = button.getAttribute('aria-labelledby')!
+    button.removeAttribute('aria-labelledby')
+    button.setAttribute('aria-label', `${item.title}, ${item.statusLabel}, unread unknown`)
+    expect(within(row).queryByRole('button', { name: visibleName })).toBeNull()
+    button.removeAttribute('aria-label')
+    button.setAttribute('aria-labelledby', labelledBy)
+  })
   it('dismisses the hovered row on navigation while preserving every roster node', async () => {
     const other: Agent = { ...agent, id: 'agent/other', name: 'Other Agent' }
     registry.set(agents, observed({ value: [agent, other] }))
@@ -132,6 +153,17 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
 })
 
 describe('kit sidebar time placement', () => {
+  it.each([undefined, 0, 2])('names the same flat row from name, host and harness with reported unread=%s', async unread => {
+    const item = { ref: 'agent/atlas', id: 'atlas', title: 'Atlas Builder', host: 'host-1', harness: 'seat-1', status: 'unobserved', statusLabel: 'Not observed', freshness: 'live', children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, unread } as const
+    await act(async () => root.render(<SidebarAgentRow item={item} now={5000} layout="SR2-B" extraSignals={['X-model']} onOpen={() => undefined} />))
+    const row = host.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
+    const button = within(row).getByRole('button', { name: 'Atlas Builder host-1 seat-1' })
+    const description = document.getElementById(button.getAttribute('aria-describedby')!)!.textContent
+    expect(description).toContain('Not observed')
+    expect(description).not.toMatch(/unknown/i)
+    if (unread === undefined) expect(description).not.toMatch(/unread/i)
+    else expect(description).toContain(`Unread: ${unread}`)
+  })
   it('reclaims the time track for nested titles while retaining time and the status glyph', async () => {
     const item = { ref: 'agent/example', id: 'agent/example', title: 'Example Agent', host: 'host/example', status: 'idle', statusLabel: 'Idle', freshness: 'live', children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Known', at: 4000, kind: 'turn-completed' } } as const
     const mountRow = async (timePlacement: 'column' | 'subtitle') => {

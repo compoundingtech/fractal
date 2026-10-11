@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Use the accessible folder hierarchy with persisted collapse state and arrangement-backed drag and drop; place nested-row time in the subtitle to preserve title width.",
+  "summary": "Use the accessible folder hierarchy with persisted collapse state and arrangement-backed drag and drop; place nested-row time in the subtitle to preserve title width. Flat row accessible names reference their visible title and subtitle in DOM order, while status and reported unread facts stay in the description; unreported unread is omitted.",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."

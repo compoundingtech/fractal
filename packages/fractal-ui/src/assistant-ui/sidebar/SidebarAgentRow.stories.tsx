@@ -147,6 +147,27 @@ export const AccessibleName: Story = {
     await expect(button.querySelector('[data-row-field="last-turn"]')).not.toBeNull()
   },
 }
+export const VisibleIdentityName: Story = {
+  render: () => <main {...stylex.props(styles.root)}><div data-frame-rows {...stylex.props(styles.list)}><SidebarAgentRow item={{ ...uncountedRow, title: 'Atlas Builder', host: 'host-1', harness: 'seat-1', model: undefined, status: 'unobserved', statusLabel: 'Not observed' }} now={storyNow} layout="SR2-B" extraSignals={['X-model']} onOpen={() => undefined} /></div></main>,
+  play: async ({ canvasElement }) => {
+    const row = within(canvasElement).getByTestId('taste-agent-row')
+    const button = within(row).getByRole('button', { name: 'Atlas Builder host-1 seat-1' })
+    const assertName = async () => { await expect(button).toHaveAccessibleName('Atlas Builder host-1 seat-1') }
+    await assertName()
+    await expect(button).toHaveAccessibleDescription(/Not observed/)
+    await expect(button).not.toHaveAccessibleDescription(/unknown|unread/i)
+    // Negative control: the old status/unread aria-label omits the visible host and harness.
+    const labelledBy = button.getAttribute('aria-labelledby')!
+    try {
+      button.removeAttribute('aria-labelledby')
+      button.setAttribute('aria-label', 'Atlas Builder, Not observed, unread unknown')
+      await expect(assertName()).rejects.toThrow()
+    } finally {
+      button.removeAttribute('aria-label')
+      button.setAttribute('aria-labelledby', labelledBy)
+    }
+  },
+}
 
 const styles = stylex.create({
   root: { height: '100vh', minHeight: 0, overflowY: 'auto', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, display: 'flex', flexDirection: 'column', gap: s.xl },
