@@ -3619,6 +3619,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         screen: Option<&str>,
     ) -> Result<()> {
+        self.reconcile_blocking_screen_at(subject, member, observation, screen, now_ms())
+    }
+
+    fn reconcile_blocking_screen_at(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+        now: u128,
+    ) -> Result<()> {
         if subject.kind != "agent" || !member.terminal {
             return Ok(());
         }
@@ -3688,7 +3699,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             {
                 continue;
             }
-            self.store.append_claim(&ClaimInput {
+            if let Some(fence) = &fence
+                && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
+            {
+                // Escape is asynchronous. Keep the readiness fence while giving
+                // Codex one existing screen-poll interval to process it. Register
+                // the due input even when the unchanged menu would be skipped by
+                // incremental reconciliation; an ineffective Skip still faults.
+                let due = fence
+                    .accepted_at_unix_ms
+                    .saturating_add(SCREEN_POLL_EVERY_MS);
+                if now < due {
+                    smallclaims::touched::note_due(due);
+                    continue;
+                }
+            }
+            let prompt = self.store.append_claim(&ClaimInput {
                 subject: subject.subject.clone(),
                 kind: "harness.diagnostic".into(),
                 actor: Some(subject.subject.clone()),
@@ -3705,24 +3731,36 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(key.clone()),
             })?;
-            // The retained prompt claim is the once-per-episode action fence. Append
-            // it before input so a daemon restart cannot repeat an uncertain send.
+            // The retained prompt claim is the once-per-episode action fence.
             // Re-read the terminal rather than acting on the cached member screen.
             if fence.is_none()
                 && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
-                && let Ok(fresh) = self.runtime.screen(&member.runtime_id)
-                && let Some(key) =
-                    st_drivers::blocking_screen::codex_update_skip_key(driver, &fresh)
-                && self
-                    .runtime
-                    .send_key_if(&member.runtime_id, key, incarnation)
-                    .is_ok()
             {
-                self.signal_changed();
-                // Sending Skip is not readiness proof. Only a later screen capture
-                // can clear the prompt fence. A persistent menu takes the normal
-                // attention path on the next reconciliation, without another key.
-                continue;
+                let result = self.runtime.screen(&member.runtime_id).and_then(|fresh| {
+                    let key = st_drivers::blocking_screen::codex_update_skip_key(driver, &fresh)
+                        .ok_or_else(|| anyhow::anyhow!("update menu changed before Skip"))?;
+                    self.runtime
+                        .send_key_if(&member.runtime_id, key, incarnation)
+                });
+                match result {
+                    Ok(()) => {
+                        smallclaims::touched::note_due(
+                            prompt
+                                .accepted_at_unix_ms
+                                .saturating_add(SCREEN_POLL_EVERY_MS),
+                        );
+                        self.signal_changed();
+                        // Only later screen proof clears the readiness fence. A
+                        // persistent menu faults after settlement, without a retry.
+                        continue;
+                    }
+                    Err(error) => tracing::debug!(
+                        subject = %subject.subject,
+                        incarnation,
+                        error = %error,
+                        "Codex update-menu Skip failed; retaining attention path"
+                    ),
+                }
             }
             let reviewer = match crate::accounts::harness_binding(&subject.desired)
                 .map(|binding| binding.binding)
@@ -34739,7 +34777,11 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 usize::from(case != "skip")
             );
 
-            // A daemon restart must not repeat a key after an uncertain result.
+            // A daemon restart must neither repeat a key nor fault during the
+            // asynchronous processing interval, even if the menu is unchanged.
+            let due = claims[0]
+                .accepted_at_unix_ms
+                .saturating_add(SCREEN_POLL_EVERY_MS);
             let restarted = Reconciler::new(
                 store.clone(),
                 runtime.clone(),
@@ -34747,10 +34789,13 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 Arc::new(Notify::new()),
             );
             restarted
-                .reconcile_blocking_screen(&subject, &member, &observation, Some(menu))
+                .reconcile_blocking_screen_at(&subject, &member, &observation, Some(menu), due - 1)
                 .unwrap();
             assert_eq!(runtime.keys.lock().unwrap().len(), sent);
-            assert_eq!(store.fault_items(None).unwrap().len(), 1);
+            assert_eq!(
+                store.fault_items(None).unwrap().len(),
+                usize::from(case != "skip")
+            );
             restarted
                 .reconcile_blocking_screen(&subject, &member, &observation, None)
                 .unwrap();
@@ -34762,8 +34807,23 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 1
             );
 
+            // A cleared screen settles immediately; a menu surviving the due
+            // interval raises attention, with no second key or extra prompt claim.
+            if case == "skip" {
+                restarted
+                    .reconcile_blocking_screen_at(&subject, &member, &observation, Some(menu), due)
+                    .unwrap();
+                assert_eq!(store.fault_items(None).unwrap().len(), 1);
+                assert_eq!(runtime.keys.lock().unwrap().len(), sent);
+            }
             restarted
-                .reconcile_blocking_screen(&subject, &member, &observation, Some("Ready for work"))
+                .reconcile_blocking_screen_at(
+                    &subject,
+                    &member,
+                    &observation,
+                    Some("Ready for work"),
+                    due - 1,
+                )
                 .unwrap();
             assert!(store.fault_items(None).unwrap().is_empty());
             let claims = store
@@ -34784,6 +34844,22 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .unwrap();
             assert_eq!(runtime.keys.lock().unwrap().len(), sent + 1);
             assert!(store.fault_items(None).unwrap().is_empty());
+            let new_prompt = store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .unwrap()
+                .pop()
+                .unwrap();
+            restarted
+                .reconcile_blocking_screen_at(
+                    &subject,
+                    &member,
+                    &observation,
+                    Some("Ready for work"),
+                    new_prompt.accepted_at_unix_ms + 1,
+                )
+                .unwrap();
+            assert!(store.fault_items(None).unwrap().is_empty());
+            assert_eq!(runtime.keys.lock().unwrap().len(), sent + 1);
         }
     }
 
