@@ -2459,6 +2459,7 @@ fn client_work_values(
                 "readiness_epoch": work.readiness_epoch,
                 "claimant": work.claimant,
                 "claim_incarnation": work.claim_incarnation,
+                "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
@@ -11998,9 +11999,24 @@ async fn get_usage(
         .await
         .ok()
         .flatten();
-    if let Some(Ok(config)) = reloaded
-        && let Some(policy) = crate::store::LimitsPolicy::from_config(&config)
+    let policy = reloaded
+        .as_ref()
+        .and_then(|reloaded| reloaded.as_ref().ok())
+        .and_then(|config| crate::store::LimitsPolicy::from_config(config).map(|policy| (config, policy)));
+    // A reading older than the limits cadence is the last known one, not the current one.
+    let fresh_ms = policy
+        .as_ref()
+        .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |(_, policy)| policy.fresh_ms);
+    let now = client_now_ms() as u64;
+    for (row, limit) in report["limits"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .zip(&limits)
     {
+        row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
+    }
+    if let Some((config, policy)) = policy {
         for (row, limit) in report["limits"]
             .as_array_mut()
             .into_iter()
@@ -17872,6 +17888,41 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    }
+
+    #[tokio::test]
+    async fn the_usage_report_marks_only_old_limits_readings_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let now = client_now_ms() as u64;
+        for (seat, account, measured) in [
+            ("agent/example.old", "ada/claude-1", now - 60 * 3_600_000),
+            ("agent/example.live", "ada/claude-2", now - 10_000),
+        ] {
+            let (status, body) = json_request(
+                app.clone(),
+                "/v1/claims",
+                json!({"subject": seat, "kind": "harness.limits", "actor": seat,
+                    "fields": {"driver": "claude", "account_ref": account, "weekly_percent": 84.0,
+                        "measured_at_unix_ms": measured},
+                    "evidence": [], "idempotency_key": format!("limits-{seat}")}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (_, report) = get_request(app, "/v1/usage").await;
+        let stale = |name: &str| {
+            report["limits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|limit| limit["account_ref"] == name)
+                .unwrap_or_else(|| panic!("{name} missing in {report}"))["stale"]
+                .clone()
+        };
+        assert_eq!(stale("ada/claude-1"), true);
+        assert_eq!(stale("ada/claude-2"), false);
     }
 
     #[tokio::test]

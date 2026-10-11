@@ -1914,3 +1914,15 @@ reads are restricted to content-addressed files in the bound Pi/OMP blob store. 
 signatures, with SVG/HTML/unrecognized bytes returned only as opaque octets.
 
 `message.send` accepts `kind: "silent" | "wake"`; omitted kind means wake. Silent mail stays unread until a real wake offers at most eight held messages, or it is read on demand. Replies default to wake independently of their parent; there is no question tag or per-seat wake policy. Person and system wake events always wake. Signed silent requests carry `st3-silent` in signed tags. Old daemons ignore the kind field and do not hold silent tags; inspect receipt tags in mixed-version fleets. See [silent messages](../silent-messages.md).
+
+### Submission incarnation
+
+Work detail resources expose optional nullable `submitted_incarnation` for the current
+attempt's immutable `work.submitted` claim. The claim's actor records the submitting claimant;
+its subject, attempt and evidence bind the result. `claimant` and `claim_incarnation` remain the
+post-transition lease state and clear on submission. A missing or null submitting incarnation
+(including legacy claims and responses from older members) is unknown and must fail receipt
+matching, even when the expected incarnation is also missing. A summary is not required.
+
+The optional claim field changes the registry digest. Older members keep new-field submissions
+as waiting records until upgrade; see [rolling upgrades](../replication.md#rolling-upgrades-and-waiting-claims).

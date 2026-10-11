@@ -3624,6 +3624,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         .cloned()
         .map(|(name, spec)| (name.into(), spec))
         .collect();
+    if kind == "work.submitted" {
+        fields.insert("submitted_incarnation".into(), string());
+    }
     if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());
@@ -4543,6 +4546,41 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn submitted_incarnation_is_optional_and_only_registered_on_submissions() {
+        let fields = BTreeMap::from([("attempt".into(), Value::from(1))]);
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
+        let mut fields = fields;
+        fields.insert("submitted_incarnation".into(), Value::from("garden:one"));
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
+        for kind in [
+            "work.claimed",
+            "work.progress",
+            "work.released",
+            "work.failed",
+        ] {
+            assert_eq!(
+                registry()
+                    .validate_claim("step-run/garden/build", kind, &fields)
+                    .unwrap_err()
+                    .code,
+                "unknown-claim-field"
+            );
+        }
+        fields.insert("submitted_incarnation".into(), Value::from(1));
+        assert_eq!(
+            registry()
+                .validate_claim("step-run/garden/build", "work.submitted", &fields)
+                .unwrap_err()
+                .code,
+            "invalid-claim-field"
+        );
+    }
 
     #[test]
     fn checked_in_schema_document_matches_the_registry() {

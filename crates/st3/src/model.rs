@@ -2460,6 +2460,9 @@ pub struct StepRunView {
     pub worker_reported: bool,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// The submitting incarnation for this attempt; absent in older submission claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_incarnation: Option<String>,
     pub claim_expires_at_unix_ms: Option<u128>,
     /// The seat whose claim a revision dropped when it carried this ready step
     /// into the current generation, until that seat claims it again.
@@ -2497,6 +2500,28 @@ pub struct StepRunView {
     pub not_before_unix_ms: Option<u128>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+/// Compare an immutable submission receipt with the expected author and result.
+/// Unknown incarnations (including legacy receipts) never establish a match.
+pub fn work_submission_matches(
+    claim: &ClaimRecord,
+    subject: &str,
+    attempt: u32,
+    actor: &str,
+    incarnation: Option<&str>,
+    evidence: &[String],
+) -> bool {
+    let Some(incarnation) = incarnation.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    claim.kind == "work.submitted"
+        && claim.subject == subject
+        && claim.actor.as_deref() == Some(actor)
+        && fields.get("attempt").and_then(Value::as_u64) == Some(u64::from(attempt))
+        && fields.get("submitted_incarnation").and_then(Value::as_str) == Some(incarnation)
+        && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
 }
 
 pub fn fresh_context_operation(step: &StepRunView) -> String {

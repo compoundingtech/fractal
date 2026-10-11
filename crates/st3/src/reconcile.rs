@@ -353,6 +353,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn remove(&self, runtime_id: &str, terminal: bool) -> Result<()>;
     fn screen(&self, runtime_id: &str) -> Result<String>;
     fn send_key(&self, runtime_id: &str, key: &str) -> Result<()>;
+    /// A backend must opt in to incarnation-bound automatic terminal responses.
+    fn send_key_if(&self, _runtime_id: &str, _key: &str, _incarnation: &str) -> Result<()> {
+        anyhow::bail!("incarnation-bound terminal input is unsupported")
+    }
     fn read_exec_log(&self, runtime_id: &str) -> Result<Option<String>>;
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
@@ -604,6 +608,9 @@ impl RuntimeControl for NativeRuntime {
 
     fn send_key(&self, runtime_id: &str, key: &str) -> Result<()> {
         self.pty()?.send_key(runtime_id, key)
+    }
+    fn send_key_if(&self, runtime_id: &str, key: &str, incarnation: &str) -> Result<()> {
+        self.pty()?.send_key_if(runtime_id, key, Some(incarnation))
     }
 
     fn read_exec_log(&self, runtime_id: &str) -> Result<Option<String>> {
@@ -3612,6 +3619,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         observation: &RuntimeObservation,
         screen: Option<&str>,
     ) -> Result<()> {
+        self.reconcile_blocking_screen_at(subject, member, observation, screen, now_ms())
+    }
+
+    fn reconcile_blocking_screen_at(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+        now: u128,
+    ) -> Result<()> {
         if subject.kind != "agent" || !member.terminal {
             return Ok(());
         }
@@ -3681,7 +3699,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             {
                 continue;
             }
-            self.store.append_claim(&ClaimInput {
+            if let Some(fence) = &fence
+                && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
+            {
+                // Escape is asynchronous. Keep the readiness fence while giving
+                // Codex one existing screen-poll interval to process it. Register
+                // the due input even when the unchanged menu would be skipped by
+                // incremental reconciliation; an ineffective Skip still faults.
+                let due = fence
+                    .accepted_at_unix_ms
+                    .saturating_add(SCREEN_POLL_EVERY_MS);
+                if now < due {
+                    smallclaims::touched::note_due(due);
+                    continue;
+                }
+            }
+            let prompt = self.store.append_claim(&ClaimInput {
                 subject: subject.subject.clone(),
                 kind: "harness.diagnostic".into(),
                 actor: Some(subject.subject.clone()),
@@ -3698,6 +3731,37 @@ impl<R: RuntimeControl> Reconciler<R> {
                 expected_subject: None,
                 idempotency_key: Some(key.clone()),
             })?;
+            // The retained prompt claim is the once-per-episode action fence.
+            // Re-read the terminal rather than acting on the cached member screen.
+            if fence.is_none()
+                && st_drivers::blocking_screen::codex_update_skip_key(driver, screen).is_some()
+            {
+                let result = self.runtime.screen(&member.runtime_id).and_then(|fresh| {
+                    let key = st_drivers::blocking_screen::codex_update_skip_key(driver, &fresh)
+                        .ok_or_else(|| anyhow::anyhow!("update menu changed before Skip"))?;
+                    self.runtime
+                        .send_key_if(&member.runtime_id, key, incarnation)
+                });
+                match result {
+                    Ok(()) => {
+                        smallclaims::touched::note_due(
+                            prompt
+                                .accepted_at_unix_ms
+                                .saturating_add(SCREEN_POLL_EVERY_MS),
+                        );
+                        self.signal_changed();
+                        // Only later screen proof clears the readiness fence. A
+                        // persistent menu faults after settlement, without a retry.
+                        continue;
+                    }
+                    Err(error) => tracing::debug!(
+                        subject = %subject.subject,
+                        incarnation,
+                        error = %error,
+                        "Codex update-menu Skip failed; retaining attention path"
+                    ),
+                }
+            }
             let reviewer = match crate::accounts::harness_binding(&subject.desired)
                 .map(|binding| binding.binding)
             {
@@ -5835,6 +5899,29 @@ impl<R: RuntimeControl> Reconciler<R> {
             .map(|(rows, columns)| st_runtime::TerminalSize { rows, columns }))
     }
 
+    /// The declared account whose login directory an unbound seat's harness is launched with, from
+    /// the seat's own environment or else the one it inherits.
+    fn declared_login_account(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        launch: &MemberSpec,
+    ) -> Option<String> {
+        let driver = crate::accounts::harness_driver(&subject.desired)?;
+        let variable = crate::accounts::login_environment_name(driver)?;
+        let directory = launch
+            .environment
+            .get(variable)
+            .cloned()
+            .or_else(|| std::env::var(variable).ok())
+            .filter(|directory| !directory.is_empty())?;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let directory = crate::accounts::expand_login(&directory, home.as_deref())?;
+        let accounts = self.store.declared_accounts().ok()?;
+        crate::accounts::account_by_login(&accounts, driver, &member.host, &directory, home.as_deref())
+            .map(|account| account.name.clone())
+    }
+
     /// Point a seat whose harness block binds an account (or a pool) at that account's login
     /// directory, and name the account so the seat's usage and limits are read against it. A seat
     /// with no binding keeps the harness's default login: nothing here touches its environment.
@@ -5849,6 +5936,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         let Some(binding) = crate::accounts::harness_binding(&subject.desired) else {
+            // No binding: the harness keeps its login, but a login that is a declared account's
+            // directory still belongs to that account.
+            if let Some(name) = self.declared_login_account(subject, member, launch) {
+                launch.environment.insert("ST3_ACCOUNT".into(), name);
+            }
             return Ok(());
         };
         let variable = crate::accounts::login_environment_name(&binding.driver)
@@ -10681,6 +10773,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         worker_reported: false,
                         claimant: None,
                         claim_incarnation: None,
+                        submitted_incarnation: None,
                         claim_expires_at_unix_ms: None,
                         carried_claimant: None,
                         execution_started_at_unix_ms: None,
@@ -16563,6 +16656,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         screen_error: Mutex<bool>,
         screens: Mutex<HashMap<String, String>>,
         keys: Mutex<Vec<String>>,
+        key_error: Mutex<bool>,
         leftovers: Mutex<Vec<(String, bool)>>,
     }
 
@@ -16686,6 +16780,17 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         fn send_key(&self, _runtime_id: &str, key: &str) -> Result<()> {
             self.keys.lock().unwrap().push(key.into());
             Ok(())
+        }
+        fn send_key_if(&self, runtime_id: &str, key: &str, incarnation: &str) -> Result<()> {
+            anyhow::ensure!(!*self.key_error.lock().unwrap(), "terminal input failed");
+            anyhow::ensure!(
+                self.ptys.lock().unwrap().iter().any(|pty| {
+                    pty.runtime_id == runtime_id
+                        && pty.incarnation_id.as_deref() == Some(incarnation)
+                }),
+                "terminal incarnation changed"
+            );
+            self.send_key(runtime_id, key)
         }
         fn read_exec_log(&self, runtime_id: &str) -> Result<Option<String>> {
             Ok(self.logs.lock().unwrap().get(runtime_id).cloned())
@@ -19542,6 +19647,65 @@ mission "feedback-review" state="ready" {
         );
         let plain = environment("agent/node.plain");
         assert!(!plain.contains_key("CODEX_HOME") && !plain.contains_key("ST3_ACCOUNT"));
+    }
+
+    #[test]
+    fn an_unbound_seat_on_a_declared_login_directory_runs_on_that_account() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let logins = tempfile::tempdir().unwrap();
+        fs::create_dir(logins.path().join("one")).unwrap();
+        fs::create_dir(logins.path().join("two")).unwrap();
+        let source = format!(
+            r#"
+            version 2
+
+              account "ada/one" {{
+                provider "openai"
+                owner "person/ada"
+                login {one:?}
+              }}
+              agent "walker" {{
+                workspace {workspace:?}
+                harness "codex" {{}}
+                env {{ CODEX_HOME {one:?}; }}
+              }}
+              agent "stranger" {{
+                workspace {workspace:?}
+                harness "codex" {{}}
+                env {{ CODEX_HOME {two:?}; }}
+              }}
+        "#,
+            one = logins.path().join("one").display().to_string(),
+            two = logins.path().join("two").display().to_string(),
+            workspace = workspace.path().display().to_string(),
+        );
+        apply_source(&store, &source, "unbound-declared-login");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store, runtime.clone(), "node".into(), Arc::new(Notify::new()));
+
+        reconciler.reconcile_once().unwrap();
+
+        let members = runtime.started_members.lock().unwrap();
+        let environment = |seat: &str| {
+            members
+                .iter()
+                .find(|member| member.environment.get("ST_AGENT").map(String::as_str) == Some(seat))
+                .unwrap_or_else(|| panic!("{seat} did not start"))
+                .environment
+                .clone()
+        };
+        let walker = environment("agent/node.walker");
+        assert_eq!(walker.get("ST3_ACCOUNT").map(String::as_str), Some("ada/one"));
+        assert_eq!(
+            walker.get("CODEX_HOME").map(String::as_str),
+            Some(logins.path().join("one").to_str().unwrap()),
+            "the seat keeps the login it set"
+        );
+        assert!(
+            !environment("agent/node.stranger").contains_key("ST3_ACCOUNT"),
+            "a directory no declaration names is no account"
+        );
     }
 
     #[test]
@@ -34629,6 +34793,162 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
     }
 
     #[test]
+    fn codex_update_skip_is_once_per_episode_and_requires_current_screen_and_incarnation() {
+        let menu =
+            include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt");
+        for case in [
+            "skip",
+            "send-failed",
+            "screen-changed",
+            "incarnation-changed",
+            "screen-unreadable",
+        ] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            let workspace = tempfile::tempdir().unwrap();
+            apply_source(
+                &store,
+                &format!(
+                    "version 2\nagent \"seat\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+                    workspace.path().display().to_string()
+                ),
+                "codex-update-skip",
+            );
+            let runtime = Arc::new(FakeRuntime::default());
+            let reconciler = Reconciler::new(
+                store.clone(),
+                runtime.clone(),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            reconciler.reconcile_once().unwrap();
+            let subject = store
+                .desired_subjects()
+                .unwrap()
+                .into_iter()
+                .find(|subject| subject.kind == "agent")
+                .unwrap();
+            let member = runtime.started_members.lock().unwrap()[0].clone();
+            let observation = claude_seat_pty("seat", "running", "one");
+            *runtime.ptys.lock().unwrap() = vec![if case == "incarnation-changed" {
+                claude_seat_pty("seat", "running", "two")
+            } else {
+                observation.clone()
+            }];
+            runtime.screens.lock().unwrap().insert(
+                member.runtime_id.clone(),
+                if case == "screen-changed" {
+                    "› unsent draft"
+                } else {
+                    menu
+                }
+                .into(),
+            );
+            *runtime.key_error.lock().unwrap() = case == "send-failed";
+            *runtime.screen_error.lock().unwrap() = case == "screen-unreadable";
+            reconciler
+                .reconcile_blocking_screen(&subject, &member, &observation, Some(menu))
+                .unwrap();
+            let sent = usize::from(case == "skip");
+            let expected: &[&str] = if sent == 1 { &["escape"] } else { &[] };
+            assert_eq!(runtime.keys.lock().unwrap().as_slice(), expected, "{case}");
+            let claims = store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].body["fields"]["code"], "provider-update-prompt");
+            assert_eq!(claims[0].body["fields"]["status"], "blocked");
+            assert_eq!(
+                store.fault_items(None).unwrap().len(),
+                usize::from(case != "skip")
+            );
+
+            // A daemon restart must neither repeat a key nor fault during the
+            // asynchronous processing interval, even if the menu is unchanged.
+            let due = claims[0]
+                .accepted_at_unix_ms
+                .saturating_add(SCREEN_POLL_EVERY_MS);
+            let restarted = Reconciler::new(
+                store.clone(),
+                runtime.clone(),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            restarted
+                .reconcile_blocking_screen_at(&subject, &member, &observation, Some(menu), due - 1)
+                .unwrap();
+            assert_eq!(runtime.keys.lock().unwrap().len(), sent);
+            assert_eq!(
+                store.fault_items(None).unwrap().len(),
+                usize::from(case != "skip")
+            );
+            restarted
+                .reconcile_blocking_screen(&subject, &member, &observation, None)
+                .unwrap();
+            assert_eq!(
+                store
+                    .claims_for(&subject.subject, Some("harness.diagnostic"))
+                    .unwrap()
+                    .len(),
+                1
+            );
+
+            // A cleared screen settles immediately; a menu surviving the due
+            // interval raises attention, with no second key or extra prompt claim.
+            if case == "skip" {
+                restarted
+                    .reconcile_blocking_screen_at(&subject, &member, &observation, Some(menu), due)
+                    .unwrap();
+                assert_eq!(store.fault_items(None).unwrap().len(), 1);
+                assert_eq!(runtime.keys.lock().unwrap().len(), sent);
+            }
+            restarted
+                .reconcile_blocking_screen_at(
+                    &subject,
+                    &member,
+                    &observation,
+                    Some("Ready for work"),
+                    due - 1,
+                )
+                .unwrap();
+            assert!(store.fault_items(None).unwrap().is_empty());
+            let claims = store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .unwrap();
+            assert_eq!(claims[1].body["fields"]["code"], "provider-update-restored");
+            assert_eq!(claims[1].body["evidence"][0], claims[0].id);
+            *runtime.ptys.lock().unwrap() = vec![observation.clone()];
+            runtime
+                .screens
+                .lock()
+                .unwrap()
+                .insert(member.runtime_id.clone(), menu.into());
+            *runtime.key_error.lock().unwrap() = false;
+            *runtime.screen_error.lock().unwrap() = false;
+            restarted
+                .reconcile_blocking_screen(&subject, &member, &observation, Some(menu))
+                .unwrap();
+            assert_eq!(runtime.keys.lock().unwrap().len(), sent + 1);
+            assert!(store.fault_items(None).unwrap().is_empty());
+            let new_prompt = store
+                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .unwrap()
+                .pop()
+                .unwrap();
+            restarted
+                .reconcile_blocking_screen_at(
+                    &subject,
+                    &member,
+                    &observation,
+                    Some("Ready for work"),
+                    new_prompt.accepted_at_unix_ms + 1,
+                )
+                .unwrap();
+            assert!(store.fault_items(None).unwrap().is_empty());
+            assert_eq!(runtime.keys.lock().unwrap().len(), sent + 1);
+        }
+    }
+
+    #[test]
     fn blocking_screens_override_idle_clear_and_fence_again() {
         for (driver, screen, code) in [
             (
@@ -34645,7 +34965,10 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             ),
             (
                 "codex",
-                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt"),
+                include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt")
+                    .split("enter continue")
+                    .next()
+                    .unwrap(),
                 "provider-update-prompt",
             ),
             (
@@ -34857,7 +35180,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 let next = if code == "provider-auth-expired" {
                     include_str!(
                         "../../st-drivers/tests/fixtures/blocking-screens/codex-update.txt"
-                    )
+                    ).split("enter continue").next().unwrap()
                 } else {
                     include_str!("../../st-drivers/tests/fixtures/blocking-screens/codex-login.txt")
                 };
@@ -36560,6 +36883,7 @@ mission "ios-proof-blocked" state="ready" {
             worker_reported: false,
             claimant: None,
             claim_incarnation: None,
+            submitted_incarnation: None,
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
@@ -36712,6 +37036,7 @@ mission "ios-proof-blocked" state="ready" {
             worker_reported: false,
             claimant: None,
             claim_incarnation: None,
+            submitted_incarnation: None,
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
@@ -37103,6 +37428,7 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
             worker_reported: false,
             claimant: None,
             claim_incarnation: None,
+            submitted_incarnation: None,
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,

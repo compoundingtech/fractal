@@ -3025,6 +3025,28 @@ mission "reported-work" state="ready" {
         "Published the guide"
     );
 
+    let shown = run_cli_human(&socket, &["work", "show", &docs.subject]).await;
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    assert!(
+        String::from_utf8(shown.stdout)
+            .unwrap()
+            .contains("Submitted incarnation: reporter:1")
+    );
+    let shown = value(&run_cli(&socket, &["work", "show", &docs.subject]).await);
+    assert_eq!(shown["value"]["submitted_incarnation"], "reporter:1");
+    assert!(shown["value"]["claimant"].is_null());
+    assert!(shown["value"]["claim_incarnation"].is_null());
+    let client = st3_client::Client::unix_as(&socket, "person/requester");
+    let resource = client.work_get(&docs.subject).await.unwrap().value;
+    let st3_client::Resource::Work(work) = resource else {
+        panic!("expected typed work")
+    };
+    assert_eq!(work.submitted_incarnation.as_deref(), Some("reporter:1"));
+
     server.abort();
 }
 

@@ -1,4 +1,4 @@
-//! Read-only arrangement projection and this device's sidebar choices.
+//! Arrangement projection, explicit edits and this device's sidebar choices.
 use super::{
     Ui,
     doc::Hit,
@@ -11,6 +11,12 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
+pub(super) fn folder_name(name: &str) -> Result<&str, String> {
+    if name.trim().is_empty() || name.trim().len() > 256 || name.chars().any(char::is_control) {
+        return Err("Use a folder name of at most 256 bytes without control characters.".into());
+    }
+    Ok(name.trim())
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ResourceRow {
     pub id: String,
@@ -31,6 +37,43 @@ pub(crate) enum Row {
     Notice(String),
     Welcome,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PaletteMode {
+    New {
+        subject: Option<String>,
+    },
+    Rename {
+        id: String,
+    },
+    Manage {
+        id: String,
+    },
+    Move {
+        subject: String,
+    },
+    Add {
+        folder: String,
+    },
+    ConfirmPlace {
+        subject: String,
+        folder: Option<String>,
+    },
+    ConfirmCreate {
+        subject: String,
+        name: String,
+    },
+    Delete {
+        id: String,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Write {
+    pub subject: String,
+    pub owner: String,
+    pub operations: Vec<st3_client::ArrangementOperation>,
+    pub key: String,
+    pub creating: bool,
+}
 #[derive(Default, Serialize, Deserialize)]
 struct Choices {
     collapsed: BTreeMap<String, bool>,
@@ -42,6 +85,12 @@ pub(crate) struct Sidebar {
     pub arrangements: Vec<st3_client::Arrangement>,
     pub terminals: Vec<ResourceRow>,
     pub terminals_has_more: bool,
+    pub observations: Vec<st3_client::ResourceObservation>,
+    pub observations_has_more: bool,
+    pub observations_issue: Option<String>,
+    pub writable: bool,
+    pub writing: bool,
+    draft: Option<(String, bool)>,
     seen: BTreeMap<String, ResourceRow>,
     choices: Choices,
     path: Option<PathBuf>,
@@ -51,6 +100,177 @@ pub(crate) struct Sidebar {
     pub focused: bool,
 }
 impl Sidebar {
+    pub(super) fn arrangement(&self) -> Option<&st3_client::Arrangement> {
+        self.arrangements
+            .iter()
+            .filter(|a| !a.deleted)
+            .min_by_key(|a| (a.body.name.value != "Sidebar", a.header.id.clone()))
+    }
+    pub(super) fn location(&self, subject: &str) -> Option<&str> {
+        let a = self.arrangement()?;
+        let placement = a.body.placements.get(subject)?;
+        let folder = a
+            .resolved
+            .as_ref()
+            .and_then(|r| r.folders.get(subject))
+            .unwrap_or(&placement.value.folder);
+        folder.as_deref().filter(|id| {
+            a.body
+                .folders
+                .get(*id)
+                .is_some_and(|f| f.tombstone.is_none())
+        })
+    }
+    pub(super) fn resources(&self) -> Vec<ResourceRow> {
+        let mut rows = self.seen.values().cloned().collect::<Vec<_>>();
+        rows.sort_by(|a, b| a.title.cmp(&b.title).then(a.id.cmp(&b.id)));
+        rows
+    }
+    pub(super) fn folders(&self) -> Vec<(String, String)> {
+        let Some(a) = self.arrangement() else {
+            return Vec::new();
+        };
+        let mut folders = a
+            .body
+            .folders
+            .iter()
+            .filter(|(_, f)| f.tombstone.is_none())
+            .collect::<Vec<_>>();
+        folders.sort_by_key(|(id, f)| (&f.position.value.key, *id));
+        folders
+            .into_iter()
+            .map(|(id, f)| (id.clone(), f.name.value.clone()))
+            .collect()
+    }
+    pub(super) fn placement(
+        &self,
+        subject: &str,
+        folder: Option<&str>,
+        before: Option<&str>,
+    ) -> Result<Vec<st3_client::ArrangementOperation>, String> {
+        use st3_client::ArrangementOperation as Op;
+        let mut siblings = self
+            .arrangement()
+            .into_iter()
+            .flat_map(|a| a.body.placements.iter())
+            .filter(|(id, _)| id.as_str() != subject && self.location(id) == folder)
+            .map(|(id, p)| (id.clone(), p.value.key.clone()))
+            .collect::<Vec<_>>();
+        siblings.sort_by(|(ai, ak), (bi, bk)| ak.cmp(bk).then(ai.cmp(bi)));
+        let mut operations = BTreeMap::new();
+        if let Some(before) = before
+            && folder.is_none()
+            && !siblings.iter().any(|(id, _)| id == before)
+        {
+            let key = super::arrangement_keys::between(
+                siblings.last().map(|(_, key)| key.as_str()),
+                None,
+            )?;
+            siblings.push((before.into(), key.clone()));
+            operations.insert(
+                before.to_owned(),
+                Op::SubjectPlace {
+                    subject: before.into(),
+                    folder: None,
+                    key,
+                },
+            );
+        }
+        let index = match before {
+            Some(id) => siblings
+                .iter()
+                .position(|(subject, _)| subject == id)
+                .ok_or("The destination changed; choose it again.")?,
+            None => siblings.len(),
+        };
+        let (key, rekeys) = super::arrangement_keys::insertion(
+            &siblings
+                .iter()
+                .map(|(_, key)| key.as_str())
+                .collect::<Vec<_>>(),
+            index,
+        )?;
+        for (at, key) in rekeys {
+            let id = siblings[at].0.clone();
+            operations.insert(
+                id.clone(),
+                Op::SubjectPlace {
+                    subject: id,
+                    folder: folder.map(str::to_owned),
+                    key,
+                },
+            );
+        }
+        operations.insert(
+            subject.into(),
+            Op::SubjectPlace {
+                subject: subject.into(),
+                folder: folder.map(str::to_owned),
+                key,
+            },
+        );
+        Ok(operations.into_values().collect())
+    }
+    pub(super) fn folder_move(
+        &self,
+        id: &str,
+        before: Option<&str>,
+    ) -> Result<Vec<st3_client::ArrangementOperation>, String> {
+        use st3_client::ArrangementOperation as Op;
+        let a = self
+            .arrangement()
+            .ok_or("The sidebar has not loaded yet.")?;
+        let folder = a
+            .body
+            .folders
+            .get(id)
+            .ok_or("That folder no longer exists.")?;
+        let mut siblings = a
+            .body
+            .folders
+            .iter()
+            .filter(|(other, f)| other.as_str() != id && f.tombstone.is_none())
+            .collect::<Vec<_>>();
+        siblings.sort_by_key(|(id, f)| (&f.position.value.key, *id));
+        let index = match before {
+            Some(id) => siblings
+                .iter()
+                .position(|(other, _)| other.as_str() == id)
+                .ok_or("The destination changed; choose it again.")?,
+            None => siblings.len(),
+        };
+        let (key, rekeys) = super::arrangement_keys::insertion(
+            &siblings
+                .iter()
+                .map(|(_, f)| f.position.value.key.as_str())
+                .collect::<Vec<_>>(),
+            index,
+        )?;
+        let mut operations = rekeys
+            .into_iter()
+            .map(|(at, key)| Op::FolderMove {
+                id: siblings[at].0.clone(),
+                parent: siblings[at].1.position.value.parent.clone(),
+                key,
+            })
+            .collect::<Vec<_>>();
+        operations.push(Op::FolderMove {
+            id: id.into(),
+            parent: folder.position.value.parent.clone(),
+            key,
+        });
+        Ok(operations)
+    }
+    pub(super) fn saved(&mut self, write: &Write, done: bool) {
+        self.writing = false;
+        if write.creating
+            && done
+            && let Some((id, created)) = self.draft.as_mut()
+            && id == &write.subject
+        {
+            *created = true;
+        }
+    }
     pub fn load(&mut self, person: &str) {
         self.path =
             super::glass_store::path(person).map(|path| path.with_extension("sidebar.json"));
@@ -125,6 +345,13 @@ impl Sidebar {
             missing: false,
         }));
         rows.extend(self.terminals.clone());
+        rows.extend(self.observations.iter().map(|row| ResourceRow {
+            id: row.id.clone(),
+            kind: super::observed_resources::kind(row).into(),
+            title: super::observed_resources::title(row),
+            open: row.id.clone(),
+            missing: false,
+        }));
         for row in rows {
             self.seen.insert(row.id.clone(), row);
         }
@@ -179,6 +406,14 @@ impl Sidebar {
             })
         };
         let mut rows = Vec::new();
+        if let Some(issue) = &self.observations_issue {
+            rows.push(Row::Notice(format!("Resources: {issue}")));
+        }
+        if self.observations_has_more {
+            rows.push(Row::Notice(
+                "More graph resources exist beyond this window.".into(),
+            ));
+        }
         if self.terminals_has_more {
             rows.push(Row::Notice(
                 "More terminals exist beyond this 200-item window.".into(),
@@ -232,11 +467,21 @@ impl Sidebar {
                 false,
             );
         }
-        let unfiled = catalog
+        let mut unfiled = catalog
             .values()
             .filter(|row| location(&row.id).is_none())
             .cloned()
             .collect::<Vec<_>>();
+        unfiled.sort_by_key(|row| {
+            (
+                arrangement
+                    .and_then(|a| a.body.placements.get(&row.id))
+                    .map(|p| p.value.key.clone())
+                    .unwrap_or_else(|| "~".into()),
+                row.title.clone(),
+                row.id.clone(),
+            )
+        });
         let count = unfiled.len();
         let closed = self.filter.is_empty()
             && self
@@ -252,7 +497,16 @@ impl Sidebar {
             closed,
         });
         if !closed {
-            for kind in ["Agents", "Missions", "Terminals", "Machines", "Unavailable"] {
+            for kind in [
+                "Agents",
+                "Missions",
+                "Terminals",
+                "Machines",
+                "Pull requests",
+                "Repositories",
+                "Resources",
+                "Unavailable",
+            ] {
                 let resources = unfiled
                     .iter()
                     .filter(|row| {
@@ -302,12 +556,114 @@ impl Sidebar {
     }
 }
 impl Ui {
+    pub(super) fn sidebar_edit(&mut self, operations: Vec<st3_client::ArrangementOperation>) {
+        if self.resource_sidebar.writing {
+            self.flash("Sidebar edit is still being saved.");
+            return;
+        }
+        if self.live && !self.resource_sidebar.writable {
+            self.flash("Sidebar editing is not available on this connection.");
+            return;
+        }
+        let existing = self
+            .resource_sidebar
+            .arrangement()
+            .map(|a| a.header.id.clone());
+        let mut operations = operations;
+        let (subject, creating) = match existing {
+            Some(id) => (id, false),
+            None => {
+                let draft = self.resource_sidebar.draft.get_or_insert_with(|| {
+                    (
+                        format!("arrangement/{}/{}", self.world.person, uuid::Uuid::now_v7()),
+                        false,
+                    )
+                });
+                (draft.0.clone(), !draft.1)
+            }
+        };
+        if creating {
+            operations.insert(
+                0,
+                st3_client::ArrangementOperation::Create {
+                    name: "Sidebar".into(),
+                },
+            );
+        }
+        let write = Write {
+            subject,
+            owner: self.world.person.clone(),
+            operations,
+            key: uuid::Uuid::now_v7().to_string(),
+            creating,
+        };
+        self.resource_sidebar.writing = true;
+        self.effects.push(super::Effect::EditArrangement(write));
+    }
+    pub(super) fn sidebar_place(
+        &mut self,
+        subject: &str,
+        folder: Option<&str>,
+        before: Option<&str>,
+    ) {
+        if subject.starts_with("session/") || subject.starts_with("pty/") {
+            self.flash("Sessions only navigate; file a stable graph subject instead.");
+            return;
+        }
+        match self.resource_sidebar.placement(subject, folder, before) {
+            Ok(operations) => self.sidebar_edit(operations),
+            Err(error) => self.flash(error),
+        }
+    }
+    pub(super) fn sidebar_move_folder(&mut self, id: &str, before: Option<&str>) {
+        match self.resource_sidebar.folder_move(id, before) {
+            Ok(operations) => self.sidebar_edit(operations),
+            Err(error) => self.flash(error),
+        }
+    }
+    pub(super) fn sidebar_create_folder(&mut self, name: &str, subject: Option<&str>) {
+        let id = uuid::Uuid::now_v7().to_string();
+        let last = self
+            .resource_sidebar
+            .arrangement()
+            .into_iter()
+            .flat_map(|a| a.body.folders.values())
+            .filter(|f| f.tombstone.is_none())
+            .map(|f| f.position.value.key.as_str())
+            .max();
+        let key = match super::arrangement_keys::between(last, None) {
+            Ok(key) => key,
+            Err(error) => {
+                self.flash(error);
+                return;
+            }
+        };
+        let mut operations = vec![st3_client::ArrangementOperation::FolderCreate {
+            id: id.clone(),
+            name: name.trim().into(),
+            parent: None,
+            key,
+        }];
+        if let Some(subject) = subject {
+            operations.push(st3_client::ArrangementOperation::SubjectPlace {
+                subject: subject.into(),
+                folder: Some(id),
+                key: "a0".into(),
+            });
+        }
+        self.sidebar_edit(operations);
+    }
     pub(crate) fn draw_resource_sidebar(&self, buf: &mut Buffer, area: Rect) {
         buf.set_style(area, Style::default().bg(theme::MANTLE));
         self.frame.borrow_mut().glass_sidebar = area;
         let filter = format!(" / Filter: {}", self.resource_sidebar.filter);
         buf.set_stringn(area.x, area.y, filter, area.width as usize, theme::dim());
         self.hit(Rect { height: 1, ..area }, Hit::ResourceFilter);
+        if area.width >= 8 {
+            let rect = Rect::new(area.right() - 5, area.y, 5, 1);
+            buf.set_stringn(rect.x, rect.y, " +New", 5, theme::fg(theme::ACCENT));
+            self.hit(rect, Hit::ResourceNewFolder);
+        }
         let rows = self.resource_sidebar.rows();
         let height = area.height.saturating_sub(1) as usize;
         let top = self
@@ -368,6 +724,22 @@ impl Ui {
                 ..area
             };
             self.hit(rect, Hit::ResourceRow(index));
+            if let Row::Group { id, .. } = row
+                && let Some(folder) = id.strip_prefix("folder/")
+                && area.width >= 12
+            {
+                let x = area.right() - 9;
+                buf.set_stringn(x, y, "+  …  ≡", 8, theme::fg(theme::ACCENT));
+                self.hit(Rect::new(x, y, 2, 1), Hit::ResourceAdd(folder.into()));
+                self.hit(
+                    Rect::new(x + 3, y, 2, 1),
+                    Hit::ResourceFolderMenu(folder.into()),
+                );
+                self.hit(
+                    Rect::new(x + 6, y, 3, 1),
+                    Hit::ResourceFolderDrag(folder.into()),
+                );
+            }
             if let Row::Resource(row) = row
                 && !row.missing
             {
@@ -422,6 +794,45 @@ impl Ui {
                 }
                 self.resource_sidebar.filter.clear();
                 self.resource_sidebar.filtering = false;
+            }
+            KeyCode::Char('n') if !self.resource_sidebar.filtering => {
+                self.open_sidebar_palette(PaletteMode::New { subject: None })
+            }
+            KeyCode::Char('m') if !self.resource_sidebar.filtering => {
+                if let Some(Row::Resource(row)) = self
+                    .resource_sidebar
+                    .rows()
+                    .get(self.resource_sidebar.selected)
+                    .cloned()
+                {
+                    self.open_sidebar_palette(PaletteMode::Move { subject: row.id });
+                }
+            }
+            KeyCode::Char('r' | 'd') if !self.resource_sidebar.filtering => {
+                if let Some(Row::Group { id, .. }) = self
+                    .resource_sidebar
+                    .rows()
+                    .get(self.resource_sidebar.selected)
+                    .cloned()
+                    && let Some(id) = id.strip_prefix("folder/")
+                {
+                    self.open_sidebar_palette(if key.code == KeyCode::Char('r') {
+                        PaletteMode::Rename { id: id.into() }
+                    } else {
+                        PaletteMode::Delete { id: id.into() }
+                    });
+                }
+            }
+            KeyCode::Char('+') if !self.resource_sidebar.filtering => {
+                if let Some(Row::Group { id, .. }) = self
+                    .resource_sidebar
+                    .rows()
+                    .get(self.resource_sidebar.selected)
+                    .cloned()
+                    && let Some(id) = id.strip_prefix("folder/")
+                {
+                    self.open_sidebar_palette(PaletteMode::Add { folder: id.into() });
+                }
             }
             KeyCode::Char('/') if !self.resource_sidebar.filtering => {
                 self.resource_sidebar.filtering = true
@@ -601,6 +1012,42 @@ mod tests {
                 .iter()
                 .any(|row| matches!(row, Row::Notice(_)))
         );
+    }
+    #[test]
+    fn placements_rekey_collisions_and_can_anchor_unfiled_rows_without_losing_subjects() {
+        let mut sidebar = Sidebar::default();
+        let mut a = arrangement();
+        a.body.placements.get_mut("agent/atlas").unwrap().value.key = "a0".into();
+        sidebar.arrangements.push(a);
+        let ops = sidebar
+            .placement("agent/new", Some("first"), Some("mission/build"))
+            .unwrap();
+        let keys = ops
+            .iter()
+            .filter_map(|op| {
+                if let st3_client::ArrangementOperation::SubjectPlace { subject, key, .. } = op {
+                    Some((subject.as_str(), key.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(keys.len(), ops.len());
+        assert!(
+            keys["agent/atlas"] < keys["agent/new"] && keys["agent/new"] < keys["mission/build"]
+        );
+        assert!(
+            keys.contains_key("mission/build"),
+            "a dormant placement is kept in an atomic rekey"
+        );
+        assert!(
+            keys.values()
+                .all(|key| st3_schema::arrangements::valid_key(key))
+        );
+        let ops = sidebar
+            .placement("agent/new", None, Some("agent/unplaced"))
+            .unwrap();
+        assert_eq!(ops.len(), 2);
     }
     #[test]
     fn opening_and_collapsing_only_navigate_and_do_not_edit_arrangements() {
