@@ -134,6 +134,7 @@ export const ToolQuestions: Story = {
     <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'singular', callId: 'singular', name: 'ask_user', input: { question: 'Choose a sample size.', options: ['Four rows', 'Eight rows'] }, status: 'running', callSeen: true, at: '2026-10-11T15:40:00Z' }} onOpenTerminal={args.onOpenTerminal} />
     <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'settled-batch', callId: 'settled-batch', name: 'ask', input: { questions: [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] }, { id: 'checks', question: 'Which checks?', options: [{ label: 'Unit' }, { label: 'Browser' }], multi: true }] }, result: { content: { details: { results: [{ id: 'db', selectedOptions: ['SQLite'], note: 'Keep it local' }, { id: 'checks', selectedOptions: ['Browser'], customInput: 'Accessibility', timedOut: true }] } }, isError: false, at: '2026-10-11T15:41:00Z' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
     <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'interrupted-singular', callId: 'interrupted-singular', name: 'ask_user', input: { question: 'Choose a sample size.', options: ['Four rows', 'Eight rows'] }, status: 'interrupted', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'settled-unrecorded', callId: 'settled-unrecorded', name: 'ask_user', input: { question: 'Choose an archived sample size.', options: ['Four rows', 'Eight rows'] }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
   </>,
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement)
@@ -143,7 +144,13 @@ export const ToolQuestions: Story = {
     await expect(canvas.getAllByText('SQLite')[0]).toBeVisible()
     await expect(canvas.getByText(/Accessibility/)).toBeVisible()
     await expect(canvas.getByText(/auto-selected/)).toBeVisible()
-    await expect(canvas.getByText('Interrupted before an answer was recorded.')).toBeVisible()
+    await expect(canvas.getByText('Interrupted')).toBeVisible()
+    await expect(canvas.queryByText('Answer details were not recorded.')).toBeNull()
+    await expect(canvas.queryByText('Question closed')).toBeNull()
+    const original = within(canvas.getAllByRole('region', { name: 'Original question' })[1]!)
+    await expect(original.getByText('Four rows')).toBeVisible()
+    await expect(original.getByText('Eight rows')).toBeVisible()
+    await expect(original.queryByText('Left open')).toBeNull()
     await userEvent.click(canvas.getByRole('button', { name: 'Open terminal' }))
     await expect(args.onOpenTerminal).toHaveBeenCalledTimes(1)
     await expect(args.onSubmit).not.toHaveBeenCalled()
@@ -156,4 +163,18 @@ export const ToolQuestionsLight440: Story = { ...ToolQuestions, parameters: { sc
 export const ToolQuestionsDark1440: Story = { ...ToolQuestions, parameters: { scheme: 'dark', width: 1440 } }
 export const ToolQuestionsLight1440: Story = { ...ToolQuestions, parameters: { scheme: 'light', width: 1440 } }
 export const NegativeControlsLight1440: Story = { ...NegativeControls, parameters: { scheme: 'light', width: 1440 } }
+export const SettledWithoutAnswerFacts: Story = {
+  args: { request: { ...questionRequest, state: { _tag: 'unrecorded', reason: '' } } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('This thread')).toBeVisible()
+    await expect(canvas.getByText('Team inbox')).toBeVisible()
+    await expect(canvas.queryByText('Answer details were not recorded.')).toBeNull()
+    await expect(canvas.queryByText('Question closed')).toBeNull()
+    await expect(canvas.queryByText('Left open')).toBeNull()
+  },
+}
+export const SettledWithoutAnswerFactsLight440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 440 } }
+export const SettledWithoutAnswerFactsDark1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'dark', width: 1440 } }
+export const SettledWithoutAnswerFactsLight1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })
