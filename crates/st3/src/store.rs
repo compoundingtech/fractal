@@ -29911,6 +29911,11 @@ fn project_mission_run_update(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
 ) -> Result<(), St3Error> {
+    // Nudges are retained events, never work-state transitions. This also matches
+    // full replay for historical bodies that bypassed today's field admission.
+    if claim.kind == WORK_NUDGED_KIND {
+        return Ok(());
+    }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     if person_work::project(transaction, claim)? {
         return Ok(());
@@ -41317,6 +41322,68 @@ version 2
             assert_eq!(graph_digest_of(&store), digest);
             assert!(!store.replication_projection_needs_recovery().unwrap());
         }
+    }
+
+    #[test]
+    fn work_nudged_historical_status_is_ignored_by_incremental_tree_and_full_replay() {
+        let (store, _worker, step) = replicated_step_pair();
+        assert!(!store.replication_projection_needs_recovery().unwrap());
+        let rejected = store.append_claim(&ClaimInput {
+            subject: step.clone(), kind: WORK_NUDGED_KIND.into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("attempt".into(), json!(1)), ("agent".into(), json!("agent/worker.one")),
+                ("message".into(), json!("message/historical-nudge")),
+                ("idle_since_unix_ms".into(), json!("1")),
+                ("reason".into(), json!("historical control")), ("waits".into(), json!([])),
+                ("status".into(), json!("failed")),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some("historical-nudge-admission-refusal".into()),
+        }).unwrap_err();
+        assert_eq!(rejected.code, "unknown-claim-field");
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let stored_step = |connection: &rusqlite::Connection| -> String {
+            connection.query_row(
+                "SELECT json_array(status,attempt,worker_reported,lease_owner,
+                 lease_incarnation,lease_expires_at_unix_ms,blocked_reason,updated_at_unix_ms)
+                 FROM step_runs WHERE subject=?1",
+                [&step], |row| row.get(0),
+            ).unwrap()
+        };
+        let before = stored_step(&transaction);
+        // A retained-history fixture deliberately bypasses current admission,
+        // which rejects status and lease fields on work.nudged.
+        let body = json!({"fields": {
+            "attempt": 1, "agent": "agent/worker.one", "message": "message/historical-nudge",
+            "idle_since_unix_ms": "1", "reason": "historical control", "waits": [],
+            "status": "failed", "lease_owner": "agent/historical", "worker_reported": true
+        }, "_operation": {"id": "op/historical-nudge", "request_digest": "historical-digest"}});
+        let claim = append_claim_record_tx(&transaction, "historical", &step,
+            WORK_NUDGED_KIND, Some("daemon/runtime"), &body, &[], None).unwrap();
+        project_mission_run_update(&transaction, &claim).unwrap();
+        assert_eq!(stored_step(&transaction), before, "direct incremental state update ignores nudge");
+        FULL_REPLAYS.with(|count| count.set(0));
+        assert!(matches!(
+            try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index).unwrap(),
+            IncrementalProjection::Projected
+        ));
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        assert_eq!(stored_step(&transaction), before);
+        let incremental_digest = graph_digest(&transaction).unwrap();
+        let operation = operation_tx(&transaction, "op/historical-nudge").unwrap().unwrap();
+        assert_eq!(operation.2, "active");
+        let root = run_tree_of_tx(&transaction, &step).unwrap().unwrap();
+        rebuild_run_tree_tx(&transaction, &root).unwrap();
+        assert_eq!(stored_step(&transaction), before, "affected-tree replay ignores nudge state");
+        assert_eq!(graph_digest(&transaction).unwrap(), incremental_digest);
+        replay_graph_from_nothing_tx(&transaction).unwrap();
+        assert_eq!(stored_step(&transaction), before, "full replay ignores nudge state");
+        assert_eq!(graph_digest(&transaction).unwrap(), incremental_digest);
+        assert_eq!(operation_tx(&transaction, "op/historical-nudge").unwrap().unwrap(), operation);
+        assert_eq!(claim_by_id_tx(&transaction, &claim.id).unwrap().unwrap().body, body);
+        transaction.rollback().unwrap();
     }
 
     #[test]
