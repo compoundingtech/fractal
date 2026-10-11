@@ -26,7 +26,7 @@
     "detail": "Upgrade all members that evaluate work completion before depending on incarnation-bound submissions. During rolling upgrade, inspect replication waiting_claims and do not treat a missing incarnation as a match. Let upgraded members admit and project their waiting claims before requiring projection parity."
   },
   "recovery": {
-    "status": "changed",
-    "detail": "Roll forward an older member to learn retained submissions. Binary swap-back restores older registry behavior: the original envelopes remain available, but submissions carrying the new field wait and are not proof of completion on that member. No database migration needs reversal."
+    "status": "unknown",
+    "detail": "Roll forward an older member to learn retained submissions. No database migration needs reversal. An actual binary downgrade of a store already admitting this field has not been tested; use the reviewed previous-binary/store snapshot recovery procedure rather than assuming older readers prove new submissions. The mixed-registry regression covers waiting claims before upgrade and their canonical admission after upgrade."
   }
 }

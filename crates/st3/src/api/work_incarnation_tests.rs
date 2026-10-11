@@ -255,7 +255,8 @@ async fn an_unbound_caller_can_still_supply_an_explicit_claim_fence() {
 #[tokio::test]
 async fn submitted_incarnation_binds_the_receipt_and_survives_replay() {
     let fixture = Fixture::new(false).await;
-    let evidence = vec!["doc/garden/result@0123456789abcdef".to_owned()];
+    let document = fixture.state.store.put_document("doc/garden/result", b"Garden result", &None, "result").unwrap();
+    let evidence = vec![format!("{}@{}", document.name, document.hash)];
     for (incarnation, code) in [(None, "missing-work-incarnation"), (Some("chooser:two"), "wrong-work-incarnation")] {
         let body = json!({"actor":SEAT, "incarnation":incarnation, "evidence":evidence,
             "idempotency_key":format!("refused-{code}")});
@@ -294,6 +295,10 @@ async fn submitted_incarnation_binds_the_receipt_and_survives_replay() {
     fixture.state.store.replay_replication_graph().unwrap();
     let replayed = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
     assert_eq!(replayed.submitted_incarnation, submitted.submitted_incarnation);
+    let mut other_attempt = replayed.clone();
+    other_attempt.attempt += 1;
+    fixture.state.store.enrich_work_response(&mut other_attempt).unwrap();
+    assert!(other_attempt.submitted_incarnation.is_none());
     let read: StepRunView = fixture.client.get(&format!("/v1/work-items/{}", fixture.step)).await.unwrap();
     assert_eq!(read.submitted_incarnation, submitted.submitted_incarnation);
 }
