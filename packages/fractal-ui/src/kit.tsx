@@ -209,3 +209,12 @@ export function ContextCard({ title, children, preview }: { title: string; child
     <Aria.Tooltip placement="top start" offset={8} className="z-50 max-w-80 rounded-panel border border-line bg-panel p-3 text-[12px] font-sans leading-relaxed text-ink shadow-xl">{preview}</Aria.Tooltip>
   </Aria.TooltipTrigger>
 }
+
+export {
+  TranscriptMarker, TranscriptRow, TranscriptCard, TranscriptTag, TranscriptMeta,
+  TranscriptGlyph, transcriptGlyphNames, formatDuration, formatRelativeAge,
+} from './assistant-ui/transcript-grammar'
+export type {
+  TranscriptMarkerProps, TranscriptRowProps, TranscriptCardProps, TranscriptTagProps,
+  TranscriptMetaProps, TranscriptDisclosure, TranscriptPromotion, TranscriptGlyphName, TranscriptTone,
+} from './assistant-ui/transcript-grammar'
