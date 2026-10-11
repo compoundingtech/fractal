@@ -4132,8 +4132,25 @@ mod tests {
         let mut ui = glass();
         ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", "agent/example/atlas/builder")]);
         ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
+        // Collapsed: one line above the box, the box whole at the bottom, and nothing to answer.
+        let shown = screen(&ui);
+        assert!(shown.contains("1 alert") && shown.contains("▸ show"), "{shown}");
+        assert!(!shown.contains("deny"), "{shown}");
+        let lines: Vec<&str> = shown.lines().collect();
+        let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        let band = line("1 alert");
+        let rule = lines.iter().rposition(|line| line.contains('─') && !line.contains("alert")).unwrap();
+        let input = line("Message Atlas Builder");
+        assert!(band < rule && rule < input, "{shown}");
+        assert!(input + 3 >= lines.len(), "the box sits at the bottom: {shown}");
+        // Expanded on a click: the cards fill the room the conversation gives up.
+        ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Toggle));
         let shown = screen(&ui);
         assert!(shown.contains("1 alert") && shown.contains("deny") && shown.contains("open in Now"), "{shown}");
+        let lines: Vec<&str> = shown.lines().collect();
+        let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        assert!(line("open in Now") < line("Message Atlas Builder"), "{shown}");
+        assert!(line("Message Atlas Builder") + 3 >= lines.len(), "{shown}");
         // Another agent's conversation shows none of it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Tab);
         let other = screen(&ui);
