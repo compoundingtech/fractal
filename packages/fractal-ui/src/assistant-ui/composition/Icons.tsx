@@ -2,8 +2,6 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 
-/** Icon sources: every path in PATHS is original to this kit. The standing-seat anchor below is the only external
- * glyph — Material Design Icons `anchor` (mdi-anchor, U+F0031), © Pictogrammers, Apache-2.0, embedded as a path so no icon font loads. */
 export type IconName =
   | 'search' | 'plus' | 'pencil' | 'gear' | 'swap' | 'clock'
   | 'chevron-right' | 'chevron-down' | 'chevrons-left' | 'panel' | 'drawer'

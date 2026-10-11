@@ -32,6 +32,7 @@ Stories:
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
 - **Fractal UI / Details Tab Strip**: the production Workbench, Details pane and resource tabs. `Wide`, `Threshold`, `ManyTabs`, mounted 159/160px first/last selection cases and `AllStates` cover real resource identities, measured label/icon hysteresis, whole painted representations, keyboard selection, tooltips and focus recovery. `RawStability`, `RawStability159` and `RawStability160` assert raw layout-shift zero across Details loading/failure/recovery; each play includes a failing control.
+- **Fractal UI / Details Recovery** and **Details Resources**: canonical production-mounted plays preserve Details-specific loading footprints, first-load and retained-content failure recovery, keyboard focus, polite announcements, delayed loading glyphs, accessibility of known identity, resource containment/fit, chart scope, section visibility and open intents. Workbench/sidebar host wiring is not reimplemented in these stories.
 
 ## Details and TabStrip
 
@@ -53,7 +54,7 @@ node packages/fractal-ui/scripts/details-run-gates.mjs "$BASE_URL" "$OUTPUT/pain
 node packages/fractal-ui/scripts/details-run-gates.mjs "$BASE_URL" "$OUTPUT/raw0" raw0
 ```
 
-Canonical plays run at 1440×900 and 1280×720 in both schemes and must emit successful `storyFinished`, without exceptions or page/console errors. Only the exact mocker-entry and favicon 404s are allowed. The painted sweep checks complete SVG/text paint inside the effective clip and proves its displacement control rejects. Raw stability records every shift without the recent-input CLS exclusion and proves an intentional displacement produces a positive shift; resource-body initialization is reported separately, not silently included in the zero claim.
+Canonical plays include the fixed Details Tab Strip matrix and the production-mounted Details Recovery/Resources stories discovered from the built Storybook index. They run at 1440×900 and 1280×720 in both schemes; Recovery/Resources also retain the inherited 2980×1744 viewport. Every case must emit successful `storyFinished`, without exceptions or page/console errors. Only the exact mocker-entry and favicon 404s are allowed. The painted sweep checks complete SVG/text paint inside the effective clip and proves its displacement control rejects. Raw stability records every shift without the recent-input CLS exclusion and proves an intentional displacement produces a positive shift; resource-body initialization is reported separately, not silently included in the zero claim.
 
 
 ## Families

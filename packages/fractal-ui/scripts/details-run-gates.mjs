@@ -34,10 +34,18 @@ const paintedIds = [
   'mounted-160-selected-first', 'mounted-160-selected-last', 'many-tabs',
 ].map(storyId)
 const rawIds = ['raw-stability', 'raw-stability-159', 'raw-stability-160'].map(storyId)
-const ids = requestedIds.length ? requestedIds : mode === 'painted' ? paintedIds : mode === 'raw0' ? rawIds : canonicalIds
+const preservedIds = mode === 'canonical' && requestedIds.length === 0
+  ? Object.values((await (await fetch(`${base}/index.json`)).json()).entries)
+    .filter(entry => entry.type === 'story' && /^fractal-ui-details-(recovery|resources)--/.test(entry.id))
+    .map(entry => entry.id)
+  : []
+const ids = requestedIds.length ? requestedIds : mode === 'painted' ? paintedIds : mode === 'raw0' ? rawIds : [...canonicalIds, ...preservedIds]
 const viewports = [{ width: 1440, height: 900 }, { width: 1280, height: 720 }]
+const caseViewports = id => mode === 'canonical' && /^fractal-ui-details-(recovery|resources)--/.test(id)
+  ? [...viewports, { width: 2980, height: 1744 }]
+  : viewports
 const rows = []
-const expectedCases = ids.length * viewports.length * 2
+const expectedCases = ids.reduce((count, id) => count + caseViewports(id).length * 2, 0)
 const writeReceipt = () => {
   const cases = mode === 'painted' ? rows.reduce((count, row) => count + (row.cases ?? 0), 0) : rows.length
   const receipt = { mode, base, pass: cases === expectedCases && rows.every(row => row.pass), expectedCases, cases, rows }
@@ -86,7 +94,7 @@ try {
       console.log(JSON.stringify({ id, pass: rows.at(-1).pass, failures: rows.at(-1).failures ?? rows.at(-1).error }))
     }
   } else {
-    cases: for (const id of ids) for (const scheme of ['dark', 'light']) for (const viewport of viewports) {
+    cases: for (const id of ids) for (const scheme of ['dark', 'light']) for (const viewport of caseViewports(id)) {
       const page = await browser.newPage({ viewport, colorScheme: scheme })
       const guard = await strictStoryGuard(page, base)
       const label = `${id}-${scheme}-${viewport.width}x${viewport.height}`
