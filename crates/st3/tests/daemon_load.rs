@@ -218,6 +218,26 @@ struct Report {
     /// such a window and reads it again, so a subscriber waits through them.
     #[serde(default)]
     collection_resyncs: BTreeMap<String, usize>,
+    /// Measurement overlay: the CPU `daemon_cores` is computed from, read at the same two
+    /// instants, and how far each read lies outside the timed interval.
+    #[serde(default)]
+    cpu: Option<CpuInterval>,
+    /// The CPU each reconcile kind was charged between ledger marks just outside the CPU reads,
+    /// an upper bound on its CPU over the interval `daemon_cores` uses, and between marks just
+    /// inside them, a lower bound (`st3::performance::ledger`).
+    #[serde(default)]
+    reconcile: BTreeMap<String, st3::performance::ledger::Charge>,
+    #[serde(default)]
+    reconcile_inner: BTreeMap<String, st3::performance::ledger::Charge>,
+    /// `low`, `high` or `unknown`, and the gap between the two bounds; see `reconcile_mode`.
+    #[serde(default)]
+    reconcile_mode: String,
+    #[serde(default)]
+    reconcile_uncertainty_ns: u64,
+    /// How each collection's first snapshots were served: from a publication (the snapshot names
+    /// when it was published), natively (it names none), or unknown (no snapshot fence).
+    #[serde(default)]
+    collection_routes: BTreeMap<String, RouteCounts>,
     #[serde(default)]
     regime: String,
     #[serde(default)]
@@ -234,6 +254,112 @@ struct Report {
     store_open_ms: f64,
     paths: BTreeMap<String, PathReport>,
     failed: BTreeMap<String, usize>,
+}
+
+/// Process and load CPU, in seconds, read at the start and end of the timed interval.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct CpuInterval {
+    process_before_s: f64,
+    process_after_s: f64,
+    load_before_s: f64,
+    load_after_s: f64,
+    /// The daemon's share: the process's CPU less the load's, over `interval_s`.
+    daemon_s: f64,
+    interval_s: f64,
+    /// How long before the interval began the first CPU reads were taken, and how long after it
+    /// ended the second, in ms. The reconcile ledger's outer marks lie outside these reads
+    /// (taken before the first, ending after the second) and its inner marks inside them (taken
+    /// after the first, ending before the second), so outer >= read >= inner on each side.
+    read_before_start_ms: f64,
+    read_after_end_ms: f64,
+    #[serde(default)]
+    mark_before_start_ms: f64,
+    #[serde(default)]
+    mark_after_end_ms: f64,
+    #[serde(default)]
+    inner_mark_before_start_ms: f64,
+    #[serde(default)]
+    inner_mark_after_end_ms: f64,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct RouteCounts {
+    published: usize,
+    native: usize,
+    unknown: usize,
+}
+
+/// The kinds a reconcile pass is charged to (`crate::reconcile`).
+const RECONCILE_KINDS: &[&str] = &["task reconcile-pass", "task reconcile-deadline"];
+
+/// A regime's reconcile mode, from bounds on the reconcile CPU over the interval `daemon_cores`
+/// uses: `outer`, charged between marks taken before and after its CPU reads, can only hold more,
+/// and `inner`, charged between marks taken after and before them, only less. Any pass that ran
+/// in the gaps, whether or not it was open at a mark, is in `outer` and not in `inner`. `low`
+/// when even the upper bound is under 30 s, `high` when even the lower bound is 45 s or more,
+/// otherwise `unknown`: between them, when either bound's charge for either reconcile kind is
+/// not complete, when the bounds disagree, or when no reconcile pass ran at all (the ledger saw
+/// nothing to charge). Fixed before any measured run; raw cores compare only between runs of one
+/// known mode, and the bounds never adjust them.
+fn reconcile_mode(
+    outer: &BTreeMap<String, st3::performance::ledger::Charge>,
+    inner: &BTreeMap<String, st3::performance::ledger::Charge>,
+) -> &'static str {
+    use st3::performance::ledger::Status;
+    let complete = |charges: &BTreeMap<String, st3::performance::ledger::Charge>| {
+        RECONCILE_KINDS.iter().all(|kind| {
+            charges.get(*kind).is_some_and(|charge| charge.status == Status::Complete)
+        })
+    };
+    if !complete(outer)
+        || !complete(inner)
+        || outer.get("task reconcile-pass").is_none_or(|charge| charge.spans == 0)
+    {
+        return "unknown";
+    }
+    let upper = outer.values().map(|charge| charge.cpu_ns).sum::<u64>();
+    let lower = inner.values().map(|charge| charge.cpu_ns).sum::<u64>();
+    if lower > upper {
+        "unknown"
+    } else if upper < 30_000_000_000 {
+        "low"
+    } else if lower >= 45_000_000_000 {
+        "high"
+    } else {
+        "unknown"
+    }
+}
+
+/// The CPU the two bounds leave unplaced, in ns.
+fn reconcile_uncertainty_ns(
+    outer: &BTreeMap<String, st3::performance::ledger::Charge>,
+    inner: &BTreeMap<String, st3::performance::ledger::Charge>,
+) -> u64 {
+    let total = |charges: &BTreeMap<String, st3::performance::ledger::Charge>| {
+        charges.values().map(|charge| charge.cpu_ns).sum::<u64>()
+    };
+    total(outer).saturating_sub(total(inner))
+}
+
+/// How a first snapshot frame was served.
+fn snapshot_route(frame: &Value) -> &'static str {
+    match &frame["snapshot"] {
+        Value::Object(snapshot) => match snapshot.get("published_at") {
+            Some(Value::String(_)) => "published",
+            None | Some(Value::Null) => "native",
+            Some(_) => "unknown",
+        },
+        _ => "unknown",
+    }
+}
+
+fn count_route(routes: &mut BTreeMap<String, RouteCounts>, collection: &str, frame: &Value) {
+    let counts = routes.entry(collection.into()).or_default();
+    match snapshot_route(frame) {
+        "published" => counts.published += 1,
+        "native" => counts.native += 1,
+        _ => counts.unknown += 1,
+    }
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -577,6 +703,59 @@ fn compare(report: &Report, baseline: &Baseline) -> Vec<String> {
         ));
     }
     failures
+}
+
+#[test]
+fn first_snapshots_name_their_route_and_reconcile_charges_name_their_mode() {
+    use st3::performance::ledger::{Charge, Status};
+    let mut routes = BTreeMap::new();
+    for frame in [
+        json!({"snapshot":{"store_index":1,"published_at":"2026-10-11T00:00:00Z"}}),
+        json!({"snapshot":{"store_index":1,"published_at":null}}),
+        json!({"snapshot":{"store_index":1}}),
+        json!({"snapshot":{"store_index":1,"published_at":7}}),
+        json!({"kind":"snapshot"}),
+    ] {
+        count_route(&mut routes, "attention", &frame);
+    }
+    let attention = &routes["attention"];
+    assert_eq!((attention.published, attention.native, attention.unknown), (1, 2, 2));
+    let charges = |pass: u64, deadline: u64, status: Status| {
+        BTreeMap::from([
+            ("task reconcile-pass".to_owned(), Charge { cpu_ns: pass, spans: 1, status, ..Charge::default() }),
+            ("task reconcile-deadline".to_owned(), Charge { cpu_ns: deadline, status, ..Charge::default() }),
+        ])
+    };
+    let seconds = 1_000_000_000;
+    let complete = |pass: u64, deadline: u64| charges(pass, deadline, Status::Complete);
+    // Equal bounds: under 30 s low, from 45 s high, between them unknown.
+    for (pass, deadline, mode) in [(10, 1, "low"), (29, 0, "low"), (29, 1, "unknown"), (44, 1, "high"), (100, 0, "high")] {
+        let bound = complete(pass * seconds, deadline * seconds);
+        assert_eq!(reconcile_mode(&bound, &bound), mode, "{pass} + {deadline} s");
+    }
+    // Bounds near a threshold: the upper bound decides low, the lower bound decides high.
+    let near = |upper: u64, lower: u64| reconcile_mode(&complete(upper, 0), &complete(lower, 0));
+    assert_eq!(near(29_900_000_000, 29_000_000_000), "low");
+    assert_eq!(near(31 * seconds, 29 * seconds), "unknown");
+    assert_eq!(near(47 * seconds, 45 * seconds), "high");
+    assert_eq!(near(46 * seconds, 44_900_000_000), "unknown");
+    // Bounds that disagree are no measurement.
+    assert_eq!(near(10 * seconds, 11 * seconds), "unknown");
+    assert_eq!(reconcile_uncertainty_ns(&complete(31 * seconds, 0), &complete(29 * seconds, 0)), 2 * seconds);
+    // Either bound incomplete, lossy or unknown, or missing a kind, is unknown.
+    for status in [Status::Incomplete, Status::Lossy, Status::Unknown] {
+        let bad = charges(10 * seconds, 0, status);
+        assert_eq!(reconcile_mode(&bad, &complete(10 * seconds, 0)), "unknown");
+        assert_eq!(reconcile_mode(&complete(10 * seconds, 0), &bad), "unknown");
+    }
+    let mut missing = complete(10 * seconds, 0);
+    missing.remove("task reconcile-deadline");
+    assert_eq!(reconcile_mode(&missing, &complete(10 * seconds, 0)), "unknown");
+    assert_eq!(reconcile_mode(&complete(10 * seconds, 0), &missing), "unknown");
+    // No reconcile pass in the interval is no evidence of a mode, not a low one.
+    let mut idle = complete(0, 0);
+    idle.get_mut("task reconcile-pass").unwrap().spans = 0;
+    assert_eq!(reconcile_mode(&idle, &idle), "unknown");
 }
 
 #[test]
@@ -1258,6 +1437,8 @@ fn run(
     regime: LoadRegime,
 ) -> Report {
     let profile = LoadProfile::from_env();
+    // Before the daemon can start a reconcile pass, so every pass in the interval is recorded.
+    st3::performance::ledger::start(RECONCILE_KINDS);
     let work = tempfile::tempdir().unwrap();
     let root = work.path();
     let database = root.join("state/claims.sqlite3");
@@ -1393,13 +1574,21 @@ fn run(
     let mut roster_subscribers = 0;
     let roster_change_frames = Arc::new(AtomicUsize::new(0));
     let mut collection_subscribers = BTreeMap::<String, usize>::new();
+    let mut collection_routes = BTreeMap::<String, RouteCounts>::new();
     let collection_change_frames = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let collection_resyncs = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
     let migration_pending_at_load_start = context.store.event_payload_migration_pending().unwrap();
     if matches!(regime, LoadRegime::Steady) {
         assert!(!migration_pending_at_load_start);
     }
+    // Reconcile CPU is bounded by ledger marks around the CPU reads: the outer marks before the
+    // first read and after the second, the inner marks after the first and before the second.
+    let marked_before = Instant::now();
+    let mark_before = st3::performance::ledger::mark();
+    let read_before = Instant::now();
     let cpu_before = (process_cpu(), load_cpu(&peer_threads));
+    let inner_marked_before = Instant::now();
+    let inner_mark_before = st3::performance::ledger::mark();
     let full_folds_before = context.store.agent_roster_chunked_assemblies();
     let cpu_by_kind_before = cpu_by_kind();
     let cursor = context.store.index().unwrap();
@@ -1565,6 +1754,7 @@ fn run(
         drop(snapshots);
         let mut captured = Vec::with_capacity(ROSTER_SUBSCRIBERS);
         while let Some(snapshot) = initial.recv().await {
+            count_route(&mut collection_routes, snapshot.collection, &snapshot.frame);
             if snapshot.collection == "agents" {
                 captured.push(snapshot);
                 continue;
@@ -1647,8 +1837,28 @@ fn run(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     });
-    let elapsed = started.elapsed().as_secs_f64();
+    let ended = Instant::now();
+    let elapsed = (ended - started).as_secs_f64();
+    let inner_mark_after = st3::performance::ledger::mark();
+    let inner_marked_after = Instant::now();
     let cpu_after = (process_cpu(), load_cpu(&peer_threads));
+    let read_after = Instant::now();
+    let mark_after = st3::performance::ledger::mark();
+    let marked_after = Instant::now();
+    let charges = |from, to| {
+        RECONCILE_KINDS
+            .iter()
+            .map(|kind| {
+                let charge = match (from, to) {
+                    (Some(from), Some(to)) => st3::performance::ledger::charge(kind, from, to),
+                    _ => st3::performance::ledger::Charge::unknown(),
+                };
+                ((*kind).to_owned(), charge)
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let reconcile = charges(mark_before, mark_after);
+    let reconcile_inner = charges(inner_mark_before, inner_mark_after);
     let mut cpu_by_kind = cpu_by_kind().into_iter()
         .map(|(kind, ms)| (ms - cpu_by_kind_before.get(&kind).copied().unwrap_or(0.0), kind))
         .filter(|(ms, _)| *ms > 0.0)
@@ -1662,6 +1872,21 @@ fn run(
         .filter(|(_, count)| *count > 0)
         .collect::<BTreeMap<_, _>>();
     let daemon_cpu = (cpu_after.0 - cpu_before.0) - (cpu_after.1 - cpu_before.1);
+    let cpu = CpuInterval {
+        process_before_s: cpu_before.0,
+        process_after_s: cpu_after.0,
+        load_before_s: cpu_before.1,
+        load_after_s: cpu_after.1,
+        daemon_s: daemon_cpu,
+        interval_s: elapsed,
+        read_before_start_ms: (started - read_before).as_secs_f64() * 1e3,
+        read_after_end_ms: (read_after - ended).as_secs_f64() * 1e3,
+        mark_before_start_ms: (started - marked_before).as_secs_f64() * 1e3,
+        mark_after_end_ms: (marked_after - ended).as_secs_f64() * 1e3,
+        inner_mark_before_start_ms: (started - inner_marked_before).as_secs_f64() * 1e3,
+        inner_mark_after_end_ms: (inner_marked_after - ended).as_secs_f64() * 1e3,
+    };
+    let reconcile_uncertainty = reconcile_uncertainty_ns(&reconcile, &reconcile_inner);
 
     let migration_pending_at_load_end = context.store.event_payload_migration_pending().unwrap();
     if let Some(migration) = migration {
@@ -1707,6 +1932,12 @@ fn run(
         claims,
         seconds: elapsed,
         daemon_cores: daemon_cpu / elapsed,
+        reconcile_mode: reconcile_mode(&reconcile, &reconcile_inner).into(),
+        reconcile_uncertainty_ns: reconcile_uncertainty,
+        cpu: Some(cpu),
+        reconcile,
+        reconcile_inner,
+        collection_routes,
         long_poll_seats: long_poll_seats.load(Ordering::Relaxed),
         roster_subscribers,
         roster_change_frames: roster_change_frames.load(Ordering::Relaxed),
