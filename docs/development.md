@@ -119,9 +119,12 @@ Development listens on `127.0.0.1:53706`; the static build is
 `apps/fractal-web/storybook-static` (ignored by Git). Build the app first, then the
 kit, never concurrently. The companion kit landing is responsible for composing
 ref `fractal-app`, title **Fractal App**. Canonical suites are `Fractal/App/LiveAgentWorkspace` and
-`Fractal/App/ConversationPane`. Each has four AllStates variants: dark/light ×
-600/1440px, showing loading, empty, populated, a failed tool, offline/stale,
-unavailable and the existing scripted repair session. Fixture time is frozen.
+`Fractal/App/ConversationPane`. Each has seven separate state stories in four
+theme/width variants: dark/light × 600/1440px (56 stories across both suites).
+States cover loading, empty, populated, a failed tool, offline/stale,
+unavailable and the existing scripted repair session. Each document mounts one
+production workspace or pane, never a gallery of repeated full landmarks.
+Fixture time is frozen.
 The adapter decodes production DTOs and reuses the existing timeline projector;
 its unit tests run the scenario corpus decode/privacy gates and an intentional
 stub control that must reject the missing production transcript.
