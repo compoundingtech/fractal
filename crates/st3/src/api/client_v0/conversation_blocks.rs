@@ -1899,7 +1899,6 @@ mod tests {
                 .contains(&STANDARD.encode(&pixels))
         );
         assert!(serde_json::to_vec(&items).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
-        let original = crate::external_sessions::normalized_timeline(&source).unwrap();
         let location = locator(
             blocks[2]["continuation"]["ref"].as_str().unwrap(),
             &source.id,
@@ -1909,13 +1908,36 @@ mod tests {
             located_value(&source, &location).unwrap(),
             json!({"raw":raw})
         );
-        let (decoded, mime) = image_bytes(
-            &source,
-            &original.last().unwrap()["body"]["blocks"][0]["payload"],
-        )
-        .unwrap();
+        // The timeline holds a bounded preview, not fetchable image bytes. Follow the
+        // image's own locator back to the complete native record before decoding.
+        let token = blocks[3]["continuation"]["ref"].as_str().unwrap();
+        let location = locator(token, &source.id).unwrap();
+        assert!(location.image);
+        assert_eq!(location.pointer, "/body/blocks/0/payload");
+        let value = located_value(&source, &location).unwrap();
+        assert_eq!(value["data"], STANDARD.encode(&pixels));
+        let (decoded, mime) = image_bytes(&source, &value).unwrap();
         assert_eq!(decoded, pixels);
         assert_eq!(mime, "image/png");
+        let first = chunk_local(&state, &session, &source.id, token, 0)
+            .await
+            .unwrap();
+        assert_eq!(first["media_type"], "image/png");
+        assert_eq!(first["size"], pixels.len());
+        let mut fetched = STANDARD.decode(first["data"].as_str().unwrap()).unwrap();
+        assert_eq!(fetched.len(), CHUNK_BYTES);
+        let last = chunk_local(
+            &state,
+            &session,
+            &source.id,
+            token,
+            first["next_offset"].as_u64().unwrap(),
+        )
+        .await
+        .unwrap();
+        fetched.extend(STANDARD.decode(last["data"].as_str().unwrap()).unwrap());
+        assert!(last["next_offset"].is_null());
+        assert_eq!(fetched, pixels);
         assert_eq!(
             state.store.index().unwrap(),
             index,
