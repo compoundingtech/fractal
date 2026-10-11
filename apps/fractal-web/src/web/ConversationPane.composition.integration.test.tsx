@@ -36,6 +36,7 @@ const source = vi.hoisted(() => ({
   feed: { _tag: 'Waiting' } as Feed<ConversationPage>,
   sync: undefined as FeedSyncObservation | undefined,
   now: 1000,
+  sendEnabled: false,
   staticWorkLog: false,
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
   transcriptHistories: [] as React.ComponentProps<typeof Kit.Transcript>['history'][],
@@ -56,10 +57,10 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
-  useDataSource: () => ({ agents, conversationInterest: undefined }),
+  useDataSource: () => ({ agents, conversationInterest: undefined, attachments: source.sendEnabled ? { send: vi.fn() } : undefined }),
   useFeedInterest: () => {},
   useNow: () => source.now,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: source.sendEnabled ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
   })
 })
 
@@ -135,6 +136,7 @@ const container = document.createElement('div')
 
 beforeEach(() => {
   source.now = 1000
+  source.sendEnabled = false
   source.staticWorkLog = false
   source.runtimeItems = []
   source.transcriptTurns = []
@@ -174,6 +176,24 @@ const mount = async (ux?: UxTelemetry) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('initializes the first readable runtime atomically and retains its draft on later observations', async () => {
+    source.sendEnabled = true
+    source.feed = { _tag: 'Waiting' }
+    source.sync = { status: { _tag: 'Requested', since: 990 }, observedAt: 990 }
+    await mount()
+    const loadingInput = container.querySelector('textarea')
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: true, observation: { empty: false } } }
+    source.sync = { status: { _tag: 'Live', since: 1000 }, observedAt: 1000 }
+    await mount()
+    const readyInput = container.querySelector('textarea')
+    expect(readyInput).not.toBe(loadingInput)
+    expect(container.querySelector('[data-testid="transcript-placeholder"]')).toBeNull()
+    expect(container.querySelector('[data-testid="history-boundary"]')).not.toBeNull()
+    source.feed = { ...source.feed, value: { ...source.feed.value, items: [...scenario] } }
+    await mount()
+    expect(container.querySelector('textarea')).toBe(readyInput)
+  })
+
   it('keeps an overflowing visible suffix stable instead of growing it at idle, and finds older rows on demand', async () => {
     const rows: ConversationItem[] = Array.from({ length: 30 }, (_, index) => ({
       _tag: 'Text', id: `long-${index}`, role: 'assistant', text: `History row ${index}`, attachments: [], streaming: false, at: at(index),
