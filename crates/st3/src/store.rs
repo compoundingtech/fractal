@@ -26421,6 +26421,7 @@ mod fleet_admission_tests {
             r#"version 2
 agent "garden/worker" { workspace "/tmp"; command "true" }
 mission "garden" state="ready" {
+  goal "Record and verify garden work submissions."
   step "new" { assigned-to "agent/garden/worker" }
   step "legacy" { assigned-to "agent/garden/worker" }
 }
