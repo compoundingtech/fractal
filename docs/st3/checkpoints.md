@@ -538,9 +538,18 @@ verifies a checkpoint once.
   exactly, every other participant seals them, and more than half still verify. The upgraded
   member, named lagging, does not verify; it adopts the certificate. This is the same whether it
   upgraded between two verifications or after some and before the certificate completed.
+- So the first consistent verification of a participant can name a member that is already up to
+  date as lagging. That member then neither proves nor verifies the checkpoint; it adopts the
+  manifest, checked against the certified drop digest, as an excused member does. The local seal
+  checks and the strict majority bound this, but every up-to-date member verifying independently
+  is no longer guaranteed.
 - Open: two members that each publish their verification before holding the other's, one before
   and one after a laggard upgraded, name different lagging sets. Neither group can complete, so
   that checkpoint is never stable. Nothing is trimmed, and the next day's checkpoint tries again.
+
+A node that lags the newest stable checkpoint verifies no newer one, even when every seal of the
+newer one matches its own: it has not applied that checkpoint, and every node applies the same
+checkpoints in order.
 
 **Where it still stalls.** Rules not in `LAGGING_RULES` (13 and older, unknown, newer, or the
 same version with another digest); half or fewer of the participants not lagging, so a

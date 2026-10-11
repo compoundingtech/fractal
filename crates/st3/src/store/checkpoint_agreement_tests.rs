@@ -1629,13 +1629,25 @@ fn an_earlier_verification_decides_who_lags_while_its_laggards_still_lag_or_have
     let anchor = lagging_verified("alder", &all, json!(["cedar"]));
     // Cedar upgraded and seals our terms since alder verified without it: the set stands.
     assert_eq!(
-        lagging_for_verification(&ours, &seals(ours.clone()), &[anchor.clone()], &checkpoint, older),
+        lagging_for_verification(
+            &ours,
+            &seals(ours.clone()),
+            std::slice::from_ref(&anchor),
+            &checkpoint,
+            older
+        ),
         Some(names(&["cedar"]))
     );
     // Cedar still lags: the set stands too.
     let v14 = seal_terms(&all, "sealed", "v14");
     assert_eq!(
-        lagging_for_verification(&ours, &seals(v14.clone()), &[anchor.clone()], &checkpoint, older),
+        lagging_for_verification(
+            &ours,
+            &seals(v14.clone()),
+            std::slice::from_ref(&anchor),
+            &checkpoint,
+            older
+        ),
         Some(names(&["cedar"]))
     );
     // Without an earlier verification, an upgraded cedar is no laggard.
@@ -1646,7 +1658,13 @@ fn an_earlier_verification_decides_who_lags_while_its_laggards_still_lag_or_have
     // Cedar now differs in its envelopes: the earlier set no longer holds, and neither does any.
     let moved = seal_terms(&all, "other sealed", "v14");
     assert_eq!(
-        lagging_for_verification(&ours, &seals(moved), &[anchor.clone()], &checkpoint, older),
+        lagging_for_verification(
+            &ours,
+            &seals(moved),
+            std::slice::from_ref(&anchor),
+            &checkpoint,
+            older
+        ),
         None
     );
     // A verification by a writer its own terms name as lagging decides nothing.
@@ -1832,4 +1850,54 @@ fn two_verifiers_that_disagree_on_who_lags_leave_the_checkpoint_uncertified() {
         assert_eq!(trimmed_drop(store), trimmed_drop(&fleet[0]));
         assert_eq!(graph(store), graph(&fleet[0]));
     }
+}
+
+/// A node that lags the newest stable checkpoint has not applied it, so it verifies no newer one,
+/// even when every seal of the newer one matches its own. Here cedar lags a rules-16 certificate;
+/// then alder and birch return to cedar's rules, so cedar's seals and theirs match exactly and
+/// only `lags_newest_stable` keeps cedar from verifying a cut it would plan from untrimmed rows.
+#[test]
+fn a_member_that_lags_the_newest_stable_checkpoint_verifies_no_newer_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let first = context(scratch.path(), 0);
+    let second = context(scratch.path(), 1);
+    let mut fleet = lagging_fleet(directory.path(), &["alder", "birch", "cedar"]);
+    sync(&everyone(&fleet));
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &first)), ["sealed"]);
+    }
+    sync(&everyone(&fleet));
+    for store in &fleet[..2] {
+        assert_eq!(kinds(&step(store, &first)), ["verified"]);
+    }
+    sync(&everyone(&fleet));
+    for store in &fleet[..2] {
+        assert_eq!(kinds(&step(store, &first)), ["trimmed"]);
+    }
+    assert!(step(&fleet[2], &first).is_empty());
+
+    // Alder and birch restart on rules 14, cedar's rules.
+    let cedar = fleet.pop().unwrap();
+    let birch = upgrade(directory.path(), fleet.pop().unwrap());
+    let alder = upgrade(directory.path(), fleet.pop().unwrap());
+    for store in [&alder, &birch] {
+        store.set_checkpoint_rules(RULES_V14_DIGEST, &[]);
+    }
+    let fleet = [alder, birch, cedar];
+    for store in &fleet {
+        assert_eq!(kinds(&step(store, &second)), ["sealed"]);
+    }
+    sync(&everyone(&fleet));
+    let next = checkpoint_name(newest_due_cut(second.now_unix_ms));
+    let claims = fleet[2].checkpoint_claims().unwrap();
+    let seals = newest_seals(&claims, &next);
+    // Every seal matches cedar's own, so nothing but the guard stands in its way.
+    assert_eq!(
+        lagging_for_verification(&seals["cedar"], &seals, &claims, &next, |_| false),
+        Some(BTreeSet::new())
+    );
+    assert!(step(&fleet[2], &second).is_empty());
+    let claims = fleet[2].checkpoint_claims().unwrap();
+    assert!(!first_verifications(&claims, &next).contains_key("cedar"));
 }
