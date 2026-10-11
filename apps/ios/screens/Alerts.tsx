@@ -22,13 +22,21 @@ export function AlertsStrip({ agentId, entries }: { agentId: string; entries: Re
   const alerts = useMemo(() => alertsIn(data.attention, agentId, caps?.session_actor), [data.attention, agentId, caps?.session_actor]);
   const [toggled, setToggled] = useState<ReadonlySet<string>>(new Set());
   const calls = useMemo(() => pendingCalls(entries), [entries]);
+  // One line until it is opened, as in stui: the cards take the conversation's room only when asked for.
+  const [expanded, setExpanded] = useState(false);
   if (!alerts.length) return null;
-  // One alert starts open; with several, each opens on a tap.
+  // Opened, one alert starts open; with several, each opens on a tap.
   const isOpen = (id: string) => (alerts.length === 1) !== toggled.has(id);
   const toggle = (id: string) => setToggled(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  return <ScrollView style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0, backgroundColor: theme.mantle }} contentContainerStyle={{ padding: 8, gap: 6 }}>
-    {alerts.map(item => <AlertCard key={item.id} item={item} agentId={agentId} open={isOpen(item.id)} onToggle={() => toggle(item.id)} calls={calls} />)}
-  </ScrollView>;
+  return <View style={{ backgroundColor: theme.mantle }}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${alerts.length} alert${alerts.length === 1 ? '' : 's'}, ${expanded ? 'hide' : 'show'}`} onPress={() => setExpanded(open => !open)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 6 }}>
+      <T numberOfLines={1} style={{ flex: 1 }}><T bold color={theme.person}>◆ {alerts.length} alert{alerts.length === 1 ? '' : 's'}</T><T dim> · </T><T>{alerts[0]!.title}</T></T>
+      <T dim>{expanded ? '▾ hide' : '▸ show'}</T>
+    </Pressable>
+    {expanded ? <ScrollView style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0 }} contentContainerStyle={{ padding: 8, gap: 6 }}>
+      {alerts.map(item => <AlertCard key={item.id} item={item} agentId={agentId} open={isOpen(item.id)} onToggle={() => toggle(item.id)} calls={calls} />)}
+    </ScrollView> : null}
+  </View>;
 }
 
 function AlertCard({ item, agentId, open, onToggle, calls }: { item: KeptAttention; agentId: string; open: boolean; onToggle: () => void; calls: PendingCall[] }) {
