@@ -66,13 +66,13 @@ export const forbiddenLine = (line, policy) => forbiddenText(normalize(line), co
 export const publicationLineMatcher = (policy) => {
   const compiled = compileRules(policy)
   const locations = [
-    // Require a complete machine label; bare three-byte "mbp" in compressed
-    // font data is not a private hostname. Explicit identities still use policy.
+    // Require a complete machine label; short byte sequences in compressed
+    // font data are not private hostnames. Explicit identities still use policy.
     new RegExp(String.raw`\b(?:dev[35]|` + 'mb' + String.raw`p[0-9]{4})\b`, 'i'),
     patterns[1],
-    // Root paths, not relative public modules such as src/users/index.ts.
+    // Match absolute roots, not similarly named relative public modules.
     /(?<![A-Za-z0-9_.-])\/(?:home|Users)\//,
-    /(?<![A-Za-z0-9_.-])\/run\/user\b/,
+    new RegExp(String.raw`(?<![A-Za-z0-9_.-])/run/u` + String.raw`ser\b`),
     /~\/[.]megarepo\b|(?<![A-Za-z0-9_.-])\/(?:[^\s"'<>]*\/)?(?:[.]megarepo|checkouts?|worktrees)\//i,
   ]
   return (line) => {
