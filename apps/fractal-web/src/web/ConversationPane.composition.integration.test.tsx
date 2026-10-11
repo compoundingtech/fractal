@@ -281,8 +281,11 @@ describe('ConversationPane composition activation', () => {
         await show('b', scenario.slice(0, 5), false)
       }
       summaryTop += 300
-      const completed = await show('a', [scenario[0]!, earlier, ...scenario.slice(1, 5)], hasOlder)
+      // A bounded window may omit the captured member even while its summary is mounted.
+      const newerWork = Array.from({ length: 12 }, (_, index): ConversationItem => ({ ...earlier, id: `newer-tool/${index}`, callId: `newer-call/${index}` }))
+      const completed = await show('a', [scenario[0]!, earlier, ...scenario.slice(1, 5), ...newerWork], hasOlder)
       expect(completed.querySelector('[data-scroll-anchor-id]')?.getAttribute('data-scroll-anchor-id')).toBe('["work-summary","p1"]')
+      expect(JSON.parse(completed.querySelector('[data-scroll-anchor-id]')!.getAttribute('data-scroll-anchor-members')!)).toContain('read')
       expect(completed.querySelector('[data-scroll-anchor-id]')?.getBoundingClientRect().top).toBe(24)
       expect(completed.scrollTop).toBe(hasOlder ? 1501 : 1201)
     } finally {
