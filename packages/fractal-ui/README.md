@@ -66,6 +66,8 @@ These components replace the incoming `HarnessNotice` Irc/Delivery presentations
 
 Message cards and story roots use only composition palette, type, spacing, radius and geometry tokens. Headers establish medium-weight shared UI typography; metadata, tags and plain-text output use the shared meta/dense scales rather than inheriting page defaults.
 
+The file-tool negative control is an existing legacy component, so its own subtree receives the existing legacy dark theme without changing the composition-themed message root. Its production Markdown contrast is checked against 4.5:1, with the prior white-on-white pair as a failing control and a scoped axe check.
+
 Command subtraction uses the projected `countedAsCommand` fact, not merely the run kind: orphan results never contributed to the command count and must not remove an unrelated observed command. Custom work-log owners supply that fact only when the call contributed to their count.
 
 ## Families

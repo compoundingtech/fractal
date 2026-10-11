@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
+import axe from 'axe-core'
 import { AgentMessage, OutgoingMessageRow } from './assistant-ui/AgentMessage'
 import { EmbraceToolItem } from './assistant-ui/EmbraceToolCall'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
@@ -10,8 +11,37 @@ import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import type { TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
+import { darkTheme as legacyToolDarkTheme } from './assistant-ui/embrace-theme'
 import { surfaceVars as surface, textVars as ink, typeVars as t, spaceVars as s, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
 import { agentMessage, agentMessageVias, outgoingMessage, broadcastMessage, longAgentMessage, largeAgentMessage } from './agent-message-fixtures'
+
+type ContrastColor = readonly [number, number, number, number]
+const parseContrastColor = (css: string): ContrastColor => {
+  const values = css.match(/[0-9.]+/g)?.map(Number)
+  if (values === undefined || values.length < 3) throw new Error(`Expected a computed RGB color, received ${css}`)
+  return [values[0]!, values[1]!, values[2]!, values[3] ?? 1]
+}
+const blendContrastColor = (front: ContrastColor, back: ContrastColor): ContrastColor => [front[0] * front[3] + back[0] * (1 - front[3]), front[1] * front[3] + back[1] * (1 - front[3]), front[2] * front[3] + back[2] * (1 - front[3]), 1]
+const contrastLuminance = (color: ContrastColor) => {
+  const linear = [color[0], color[1], color[2]].map(value => { const channel = value / 255; return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4 })
+  return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722
+}
+const contrastRatio = (front: ContrastColor, back: ContrastColor) => {
+  const foreground = contrastLuminance(blendContrastColor(front, back)), background = contrastLuminance(back)
+  return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05)
+}
+const computedTextContrast = (element: HTMLElement) => {
+  const layers: ContrastColor[] = []
+  for (let ancestor: HTMLElement | null = element; ancestor !== null; ancestor = ancestor.parentElement) {
+    const color = parseContrastColor(getComputedStyle(ancestor).backgroundColor)
+    layers.push(color)
+    if (color[3] === 1) break
+  }
+  let background = layers.pop()
+  if (background === undefined || background[3] !== 1) throw new Error('The specimen must have an opaque theme background')
+  for (const layer of layers.reverse()) background = blendContrastColor(layer, background)
+  return contrastRatio(parseContrastColor(getComputedStyle(element).color), background)
+}
 
 const meta = { title: 'Fractal UI/Agent Messages', component: AgentMessage, parameters: { layout: 'fullscreen' }, args: { ...agentMessage, onCopyId: fn(), onLoadFull: fn(), onOpenReply: fn() }, decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' && lightTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<typeof AgentMessage>
 export default meta
@@ -132,15 +162,22 @@ export const OutgoingFailed: Story = { render: () => <OutgoingMessageRow {...out
 } }
 const quotedPrompt: TextItem & { role: 'user' } = { _tag: 'Text', role: 'user', id: 'quoted-message', text: 'Explain this example: <smalltalk-message from="Review">Ready for review.</smalltalk-message>', attachments: [], streaming: false, at: '2026-10-11T15:40:00Z' }
 const quotedWork = workLogTurnFromItems([quotedPrompt], { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
-export const NegativeControls: Story = { render: () => <>
+export const NegativeControls: Story = { render: (_args, context) => <>
   <EmbraceRuntimeProvider options={{ messages: [quotedPrompt], isRunning: false, onNew: fn() }}><Transcript title="Quoted example" turns={[{ id: 'quote-turn', prompt: quotedPrompt, items: [], work: quotedWork }]} sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} /></EmbraceRuntimeProvider>
-  <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'file-write', callId: 'file-write', name: 'write', input: { path: 'notes/agent-plan.md', content: 'Keep the release plan beside the report.' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} variant="cards" />
+  <div data-testid="legacy-file-control" {...stylex.props(context.parameters.scheme !== 'light' && legacyToolDarkTheme)}><EmbraceToolItem item={{ _tag: 'ToolCall', id: 'file-write', callId: 'file-write', name: 'write', input: { path: 'notes/agent-plan.md', content: 'Keep the release plan beside the report.' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} variant="cards" /></div>
 </>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('user-message')).toHaveTextContent('<smalltalk-message')
   await expect(canvas.queryByRole('article', { name: /Message from/ })).toBeNull()
   await expect(canvasElement.querySelector('[data-work-kind="messages-sent"]')).toBeNull()
   await expect(canvas.getAllByText(/notes\/agent-plan.md/).find(element => element.getClientRects().length > 0)).toBeVisible()
+  const legacy = canvas.getByTestId('legacy-file-control')
+  const markdown = within(legacy).getByText('Keep the release plan beside the report.', { selector: 'p' })
+  await expect(computedTextContrast(markdown)).toBeGreaterThanOrEqual(4.5)
+  // This is the prior white-on-white failure: the same checker must reject it.
+  await expect(contrastRatio([245, 245, 245, 0.8], [255, 255, 255, 1])).toBeLessThan(4.5)
+  const contrast = await axe.run(legacy, { runOnly: { type: 'rule', values: ['color-contrast'] } })
+  await expect(contrast.violations).toEqual([])
 } }
 export const AllStatesLight440: Story = { ...AllStates, parameters: { scheme: 'light', width: 440 } }
 export const AllStatesDark1440: Story = { ...AllStates, parameters: { scheme: 'dark', width: 1440 } }
