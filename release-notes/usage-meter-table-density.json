@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Usage-meter drawer rows share a native 22px table grid with aligned cells and sticky headers. Account/provider identity stays on one truncated, titled line; window labels, meters and percentages stay inline. Numeric columns use tabular figures and 2px vertical padding. The secondary comparison remains visible at normal sidebar widths and folds into the omitted-window disclosure only below 15rem. Dark/light eleven-row stories use fictional accounts.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted or wire schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Display facts, source adapters, sorting and detail/history contracts are unchanged. Aliases and full provider identity remain in the caption title; complete window evidence stays in row detail. Only the drawer table becomes denser." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

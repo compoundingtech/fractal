@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Cell, Column, Row, Table, TableBody, TableHeader } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { UsageMeterCell, UsageMeterFact, UsageMeterHistory, UsageMeterRow, UsageMeterSortKey, UsageMeterTableProps } from './usage-meter-types'
+import { usageMeterGrid } from './UsageMeterGrid.stylex.ts'
 
 export type { UsageMeterCell, UsageMeterDetail, UsageMeterFact, UsageMeterHistory, UsageMeterHistoryPoint, UsageMeterRow, UsageMeterSort, UsageMeterSortKey, UsageMeterTableProps, UsageMeterTone, UsageMeterWindow } from './usage-meter-types'
 
@@ -15,25 +16,25 @@ export type UsageMeterTableComponentProps = UsageMeterTableProps & {
     flexGrow?: number
     flexShrink?: number
   }>
-  /** Reports whether the comparison column is shown (container inline size at least 36rem), so callers can rank the folded +N. Pass a stable callback. */
+  /** Reports whether the comparison column is shown (container inline size at least 15rem), so callers can rank the folded +N. Pass a stable callback. */
   readonly onComparisonVisibilityChange?: (visible: boolean) => void
 }
 
-/** Container width at which the comparison column is shown; mirrors the `@container (width < 36rem)` styles. */
-const comparisonMinRem = 36
+/** Container width at which the comparison column is shown; mirrors the `@container (width < 15rem)` styles. */
+const comparisonMinRem = 15
 
 const columns: readonly { readonly id: UsageMeterSortKey; readonly label: string; readonly narrowLabel?: string }[] = [
   { id: 'account', label: 'Acct' },
   { id: 'governing', label: 'Window gov', narrowLabel: 'gov' },
-  { id: 'reset', label: 'Reset' },
-  { id: 'comparison', label: 'Comparison' },
+  { id: 'reset', label: 'Reset', narrowLabel: 'rst' },
+  { id: 'comparison', label: 'Comparison', narrowLabel: 'nxt' },
   { id: 'more', label: 'More', narrowLabel: '+N' },
 ]
 const isSortKey = (key: string | number): key is UsageMeterSortKey => columns.some(column => column.id === key)
 
-const Meter = ({ meter, stale }: { readonly meter: UsageMeterCell; readonly stale: boolean }) => <div data-usage-meter-tone={meter.tone} {...stylex.props(styles.meter)}>
-  <span {...stylex.props(styles.windowLabel)}>{meter.label}</span>
-  <div {...stylex.props(styles.meterReading)}>
+const Meter = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCell; readonly stale: boolean; readonly compact?: boolean }) => <div data-usage-meter-tone={meter.tone} {...stylex.props(styles.meter, compact && styles.compactMeter)}>
+  <span title={compact ? meter.label : undefined} {...stylex.props(styles.windowLabel, compact && styles.compactWindow)}>{meter.label}</span>
+  <div {...stylex.props(styles.meterReading, compact && styles.compactReading)}>
     {meter.fraction !== undefined && meter.tone !== 'unknown' && <span aria-hidden="true" data-usage-meter-bar {...stylex.props(styles.track, stale && styles.staleBar)}>
       <span {...stylex.props(styles.fill, meter.tone === 'warning' && styles.warningFill, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerFill, styles.fraction(meter.fraction))} />
     </span>}
@@ -128,19 +129,19 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
       if (typeof id === 'string') onSelect(id)
     }} sortDescriptor={{ column: sort.key, direction: sort.direction }} onSortChange={descriptor => {
       if (isSortKey(descriptor.column) && descriptor.direction !== undefined) onSort({ key: descriptor.column, direction: descriptor.direction })
-    }} {...stylex.props(styles.table)}>
-      <TableHeader>
-        {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting {...stylex.props(styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
-          {({ sortDirection }) => <span {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowCount)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === 'ascending' ? '↑' : sortDirection === 'descending' ? '↓' : ''}</span></span>}
+    }} {...stylex.props(usageMeterGrid.table, styles.table)}>
+      <TableHeader {...stylex.props(usageMeterGrid.header)}>
+        {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting data-usage-meter-column={column.id} {...stylex.props(usageMeterGrid.column, styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
+          {({ sortDirection }) => <span {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === 'ascending' ? '↑' : sortDirection === 'descending' ? '↓' : ''}</span></span>}
         </Column>)}
       </TableHeader>
-      <TableBody renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
-        {rows.map(row => <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(styles.row, selected?.id === row.id && styles.selectedRow)}>
-          <Cell {...stylex.props(styles.cell)}><span title={row.label} {...stylex.props(styles.accountLabel)}>{row.label}</span><span title={row.identity} {...stylex.props(styles.identity)}>{row.identity}</span>{row.stale && <span {...stylex.props(styles.staleText)}>Stale</span>}{row.note !== undefined && <span {...stylex.props(styles.note)}>{row.note}</span>}</Cell>
-          <Cell {...stylex.props(styles.cell)}><Meter meter={row.governing} stale={row.stale} /></Cell>
-          <Cell {...stylex.props(styles.cell)}><span {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span></Cell>
-          <Cell {...stylex.props(styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} />}</Cell>
-          <Cell {...stylex.props(styles.cell)}><Button aria-label={`Show all windows and evidence for ${row.label}`} aria-expanded={selected?.id === row.id} onPress={() => onSelect(row.id)} {...stylex.props(styles.moreButton)}>
+      <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
+        {rows.map(row => <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={`${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note === undefined ? '' : ` · ${row.note}`}`} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}>{row.identity}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span></Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span></Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Button aria-label={`Show all windows and evidence for ${row.label}`} aria-expanded={selected?.id === row.id} onPress={() => onSelect(row.id)} {...stylex.props(styles.moreButton)}>
             <span {...stylex.props(styles.wideCount)}>+{row.omitted}</span><span {...stylex.props(styles.narrowCount)}>+{row.omitted + (row.comparison === undefined ? 0 : 1)}</span>
           </Button></Cell>
         </Row>)}
@@ -156,22 +157,25 @@ const styles = stylex.create({
   statusText: { margin: 0, minWidth: 0, overflowWrap: 'anywhere', color: ink.fgSoft },
   button: { display: 'inline-flex', alignItems: 'center', gap: space.sm, flexShrink: 0, color: ink.fgSoft, backgroundColor: { default: surface.controlFill, ':hover': surface.rowHover, ':active': surface.rowActive }, border: `1px solid ${border.borderStrong}`, borderRadius: radius.keyboard, padding: `${space.xs} ${space.sm}`, font: 'inherit', cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '2px' },
   shortcut: { color: ink.fgMuted, fontFamily: type.fontMono, fontSize: type.denseSize },
-  table: { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', textAlign: 'start' },
-  header: { color: ink.fgMuted, fontSize: type.denseSize, fontWeight: type.weightRegular, padding: `${space.sm} ${space.xs}`, borderBottom: `1px solid ${border.borderStrong}`, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
-  headerContent: { display: 'flex', alignItems: 'center', gap: space.xs, whiteSpace: 'nowrap', overflow: 'hidden' },
-  sortIndicator: { display: 'inline-block', minWidth: '1ch', color: ink.fgSoft },
-  accountColumn: { width: { default: '22%', '@container (width < 36rem)': '32%' } },
-  governingColumn: { width: { default: '29%', '@container (width < 36rem)': '34%' } },
-  resetColumn: { width: { default: '15%', '@container (width < 36rem)': '20%' } },
-  comparisonColumn: { width: '25%', display: { default: 'table-cell', '@container (width < 36rem)': 'none' } },
-  moreColumn: { width: { default: '9%', '@container (width < 36rem)': '14%' } },
+  table: { textAlign: 'start', fontFamily: type.fontMono, fontSize: type.denseSize },
+  header: { zIndex: 1, color: ink.fgMuted, fontSize: type.denseSize, fontWeight: type.weightRegular, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
+  headerContent: { display: 'flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap', overflow: 'hidden' },
+  sortIndicator: { display: { default: 'inline-block', ':empty': 'none' }, flexShrink: 0, color: ink.fgSoft },
+  accountColumn: { width: { default: '22%', '@container (width < 15rem)': '41%' } },
+  governingColumn: { width: { default: '25%', '@container (width < 15rem)': '30%' } },
+  resetColumn: { width: { default: '19%', '@container (width < 15rem)': '20%' } },
+  comparisonColumn: { width: '25%', display: { default: 'table-cell', '@container (width < 15rem)': 'none' } },
+  moreColumn: { width: '9%' },
   row: { backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   selectedRow: { backgroundColor: surface.rowActive },
-  cell: { padding: `${space.md} ${space.xs}`, verticalAlign: 'top', borderBottom: `1px solid ${border.border}`, overflow: 'hidden', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
-  accountLabel: { display: 'block', color: ink.fg, fontWeight: type.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  cell: { outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
+  accountLabel: { color: ink.fg },
   identity: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   note: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   meter: { minWidth: 0 },
+  compactMeter: { display: 'flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap' },
+  compactWindow: { flexShrink: 0, maxWidth: '5ch' },
+  compactReading: { flex: 1, gap: '2px' },
   windowLabel: { display: 'block', color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meterReading: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0 },
   reading: { flexShrink: 0, color: ink.fgSoft, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
@@ -185,9 +189,10 @@ const styles = stylex.create({
   staleText: { color: ink.fgMuted },
   staleBar: { opacity: 0.4 },
   reset: { margin: 0, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
-  moreButton: { display: 'inline-flex', font: 'inherit', fontVariantNumeric: 'tabular-nums', color: ink.fgSoft, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, border: `1px solid ${border.borderStrong}`, borderRadius: radius.keyboard, padding: `${space.xs} ${space.xs}`, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '2px' },
-  wideCount: { display: { default: 'inline', '@container (width < 36rem)': 'none' } },
-  narrowCount: { display: { default: 'none', '@container (width < 36rem)': 'inline' } },
+  moreButton: { display: 'inline-flex', alignItems: 'center', height: '18px', font: 'inherit', fontVariantNumeric: 'tabular-nums', color: ink.fgSoft, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, border: 0, padding: 0, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
+  wideCount: { display: { default: 'inline', '@container (width < 15rem)': 'none' } },
+  narrowCount: { display: { default: 'none', '@container (width < 15rem)': 'inline' } },
+  narrowHeaderLabel: { display: { default: 'none', '@container (width < 36rem)': 'inline' }, minWidth: 0, overflow: 'hidden' },
   /** Stays the accessible column name when the container shows the short label. */
   wideLabel: { position: { default: 'static', '@container (width < 36rem)': 'absolute' }, width: { default: 'auto', '@container (width < 36rem)': '1px' }, height: { default: 'auto', '@container (width < 36rem)': '1px' }, overflow: { default: 'visible', '@container (width < 36rem)': 'hidden' }, clipPath: { default: 'none', '@container (width < 36rem)': 'inset(50%)' } },
   empty: { display: 'block', padding: space.xl, color: ink.fgMuted },

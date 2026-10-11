@@ -137,16 +137,16 @@ test('s cycles sort only inside the focused monitor and never from editable targ
   } finally { outside.remove(); await view.dispose() }
 })
 
-test('comparison visibility reports the 36rem container threshold once per change', async () => {
+test('comparison visibility reports the 15rem container threshold once per change', async () => {
   const visibility = []
   const onComparisonVisibilityChange = visible => visibility.push(visible)
   const view = await mount({ onComparisonVisibilityChange })
   try {
     const monitor = view.container.querySelector('[data-usage-meter-table]')
-    await resize(monitor, 575)
+    await resize(monitor, 239)
+    await resize(monitor, 200)
+    await resize(monitor, 240)
     await resize(monitor, 320)
-    await resize(monitor, 576)
-    await resize(monitor, 900)
     assert.deepEqual(visibility, [false, true])
     await view.render({ onComparisonVisibilityChange, sort: { key: 'more', direction: 'ascending' } })
     await resize(monitor, 900)
@@ -180,5 +180,40 @@ test('detail history draws supplied periods: unmeasured gaps, measured zeroes, o
     assert.equal(failed.querySelectorAll('[data-usage-meter-history-point]').length, 0, 'a failure never draws zero bars')
     await view.render({ selectedId: undefined })
     assert.equal(view.container.querySelector('[data-usage-meter-history]'), null, 'history belongs to the open detail only')
+  } finally { await view.dispose() }
+})
+
+test('hosted toolbar appears once in the shared header and keeps its scoped shortcut', async () => {
+  const header = document.createElement('div')
+  document.body.append(header)
+  const view = await mount({ toolbarTarget: header })
+  try {
+    assert.equal(view.container.querySelector(':scope > section > header'), null)
+    assert.equal(header.querySelectorAll('[data-usage-meter-status]').length, 1)
+    assert.equal(header.querySelector('[role=status]').textContent, 'Updated now')
+    const sortButton = header.querySelector('button')
+    await act(async () => sortButton.focus())
+    await press(sortButton, 's')
+    assert.equal(view.calls.cycle, 1)
+    await view.render({ toolbarTarget: null })
+    assert.equal(header.children.length, 0, 'host mount/collapse does not leave a duplicate toolbar')
+  } finally { await view.dispose(); header.remove() }
+})
+
+test('dense rows keep one titled account/provider caption and preserve meter/reset evidence', async () => {
+  const view = await mount()
+  try {
+    const caption = rowOf(view.container, 'row-a').querySelector('[data-usage-meter-account]')
+    assert.equal(caption.textContent, 'plan one')
+    assert.equal(caption.title, 'Alpha desk · plan one')
+    assert.equal(rowOf(view.container, 'row-a').querySelectorAll('[data-usage-meter-account]').length, 1)
+    assert.deepEqual([...view.container.querySelectorAll('[data-usage-meter-column]')].map(header => header.dataset.usageMeterColumn), ['account', 'governing', 'reset', 'comparison', 'more'])
+    assert.ok(rowOf(view.container, 'row-a').textContent.includes('64%'))
+    assert.ok(rowOf(view.container, 'row-a').textContent.includes('↺0'))
+    assert.ok(rowOf(view.container, 'row-c').querySelector('[data-usage-meter-account]').title.includes('Stale'))
+    await view.render({ rows: [{ ...rows[0], note: 'Conflicting source evidence' }] })
+    const marked = rowOf(view.container, 'row-a').querySelector('[data-usage-meter-account]')
+    assert.ok(marked.title.includes('Conflicting source evidence'))
+    assert.equal(marked.querySelector('[aria-label]').getAttribute('aria-label'), 'Conflicting source evidence')
   } finally { await view.dispose() }
 })
