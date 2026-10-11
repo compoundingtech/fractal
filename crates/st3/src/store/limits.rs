@@ -421,12 +421,11 @@ pub(crate) fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
 
 pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
     type Key = (String, String, Option<String>);
-    let mut weekly = BTreeMap::<Key, Vec<AccountLimit>>::new();
-    let mut partial = BTreeMap::<Key, Vec<AccountLimit>>::new();
     let mut statement = connection.prepare_cached(
         "SELECT driver, account, account_ref, weekly, origin, subject, body
          FROM account_limit_readings",
     )?;
+    let mut rows = Vec::new();
     for row in statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -438,13 +437,61 @@ pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLi
             row.get::<_, String>(6)?,
         ))
     })? {
-        let (driver, account, account_ref, is_weekly, origin, subject, body) = row?;
+        rows.push(row?);
+    }
+    // A seat that reported under a provider identity and later under a declared account is one
+    // login that changed identity (a re-login), not two accounts: the identity's readings are the
+    // declared account's. Only a seat's own reports link them, so nothing else is ever merged.
+    let mut named = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for (driver, _, account_ref, _, _, subject, _) in &rows {
+        if !account_ref.is_empty() {
+            named
+                .entry((driver.clone(), subject.clone()))
+                .or_default()
+                .insert(account_ref.clone());
+        }
+    }
+    let mut alias = BTreeMap::<(String, String), String>::new();
+    for (driver, account, account_ref, _, _, subject, _) in &rows {
+        if account_ref.is_empty()
+            && let Some(declared) = named
+                .get(&(driver.clone(), subject.clone()))
+                .and_then(|names| names.first())
+        {
+            let entry = alias.entry((driver.clone(), account.clone()));
+            entry
+                .and_modify(|current| {
+                    if declared < current {
+                        *current = declared.clone();
+                    }
+                })
+                .or_insert_with(|| declared.clone());
+        }
+    }
+    let resolve = |driver: String, account: String, account_ref: String| -> Key {
+        match alias.get(&(driver.clone(), account.clone())) {
+            Some(declared) if account_ref.is_empty() => (
+                driver.clone(),
+                st_drivers::account::account_label(&driver, &format!("declared:{declared}")),
+                Some(declared.clone()),
+            ),
+            _ => (driver, account, (!account_ref.is_empty()).then_some(account_ref)),
+        }
+    };
+    let mut weekly = BTreeMap::<Key, Vec<AccountLimit>>::new();
+    let mut partial = BTreeMap::<Key, Vec<AccountLimit>>::new();
+    for (driver, account, account_ref, is_weekly, origin, subject, body) in rows {
         let body: Value = serde_json::from_str(&body)?;
         let Some((mut limit, _)) = reading(&origin, &body) else {
             continue;
         };
         limit.measured_by = subject;
-        let key = (driver, account, (!account_ref.is_empty()).then_some(account_ref));
+        let key = resolve(driver, account, account_ref);
+        if let Some(declared) = &key.2 {
+            limit.account = key.1.clone();
+            limit.account_ref = Some(declared.clone());
+            limit.identified = true;
+        }
         if is_weekly {
             weekly.entry(key).or_default().push(limit);
         } else {
@@ -474,7 +521,7 @@ pub(super) fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLi
         ))
     })? {
         let (seat, driver, account, account_ref) = row?;
-        let key = (driver, account, (!account_ref.is_empty()).then_some(account_ref));
+        let key = resolve(driver, account, account_ref);
         accounts
             .get_mut(&key)
             .expect("the seat reported an account")
@@ -2097,5 +2144,85 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         assert!(with(&[limit.account.as_str()], &[]).exempts(&limit), "the label");
         assert!(with(&[], &["codex"]).exempts(&limit), "the harness");
         assert!(!with(&["ada/two"], &["claude"]).exempts(&limit));
+    }
+
+    fn read_unnamed(store: &Store, seat: &str, label: &str, weekly: f64, measured_at: u128) {
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "harness.limits".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("driver".into(), json!("codex")),
+                    ("account".into(), json!(label)),
+                    ("weekly_percent".into(), json!(weekly)),
+                    (
+                        "weekly_resets_at_unix_ms".into(),
+                        json!(1_800_000_000_000_u64),
+                    ),
+                    ("measured_at_unix_ms".into(), json!(measured_at as u64)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("unnamed-{seat}-{label}-{measured_at}")),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_relogin_that_changes_the_provider_identity_leaves_one_declared_account_with_the_live_reading() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let now = now_ms();
+        let sixty_hours = 60 * HOUR;
+        // Sixty hours ago the login was seen twice: by a bound seat, and by a seat that sets the
+        // login directory itself and so reported under the provider's identity.
+        read_account(&store, "agent/alder.pooled", "ada/one", "codex/ignored", 84.0, now - sixty_hours);
+        read_unnamed(&store, "agent/alder.walker", "codex/before-login", 84.0, now - sixty_hours);
+        // The login was renewed. The walker now runs on the declared account and says so,
+        // and the live reading is higher.
+        read_account(&store, "agent/alder.walker", "ada/one", "codex/ignored", 94.0, now - 30_000);
+        read_account(&store, "agent/alder.other", "ada/two", "codex/ignored", 90.0, now - 30_000);
+
+        let limits = store.account_limits().unwrap();
+        let mut rows = limits
+            .iter()
+            .map(|limit| (limit.account_ref.as_deref(), limit.weekly_percent))
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            rows,
+            [(Some("ada/one"), Some(94.0)), (Some("ada/two"), Some(90.0))],
+            "{limits:?}"
+        );
+        assert!(
+            limits.iter().all(|limit| limit.account != "codex/before-login"),
+            "the old identity is the declared account, not a second row"
+        );
+        let one = limits.iter().find(|limit| limit.account_ref.as_deref() == Some("ada/one")).unwrap();
+        assert!(one.identified && one.measured_at_unix_ms > (now - HOUR) as u64);
+        assert!(one.seats.contains(&"agent/alder.walker".to_owned()));
+
+        // The pool picks by the live reading: ada/one at 94 is worse than ada/two at 90, where the
+        // sixty-hour-old 84 would have kept choosing ada/one.
+        let binding = store.seat_binding("agent/alder.other").unwrap().unwrap();
+        let chosen = store
+            .account_for_start("agent/alder.other", &binding, "alder", now)
+            .unwrap();
+        assert_eq!(chosen.account.name, "ada/two");
+    }
+
+    #[test]
+    fn identity_readings_with_no_seat_in_common_are_never_attributed_to_a_declared_account() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let now = now_ms();
+        read_account(&store, "agent/alder.pooled", "ada/one", "codex/ignored", 40.0, now - 30_000);
+        read_unnamed(&store, "agent/alder.stranger", "codex/someone-else", 70.0, now - 30_000);
+
+        let limits = store.account_limits().unwrap();
+
+        assert_eq!(limits.len(), 2, "{limits:?}");
+        assert!(limits.iter().any(|limit| limit.account == "codex/someone-else" && limit.account_ref.is_none()));
     }
 }

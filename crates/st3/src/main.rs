@@ -9944,6 +9944,10 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                     ""
                 },
             );
+            if limit["stale"].as_bool() == Some(true) {
+                output.truncate(output.trim_end().len());
+                output.push_str("  stale\n");
+            }
         }
         let names = |key: &str| {
             report["limits_policy"][key]
@@ -25919,6 +25923,19 @@ mod tests {
         let before = claim.fields.clone();
         bind_observation_account(&mut claim, None);
         assert_eq!(claim.fields, before);
+    }
+
+    #[test]
+    fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
+        let report = json!({"rows": [], "limits": [
+            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 84.0, "stale": true,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+            {"account": "claude/bbbb", "weekly_percent": 50.0, "stale": false,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+        ]});
+        let output = render_usage_report(&report, 24, None);
+        assert!(output.contains("  ada/claude-1 (claude/aaaa)  stale\n"), "{output}");
+        assert!(output.contains("  claude/bbbb\n"), "{output}");
     }
 
     #[test]
