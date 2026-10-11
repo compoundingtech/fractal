@@ -3,6 +3,7 @@ import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
 import { expect, userEvent, within } from 'storybook/test'
+import { Tree, TreeItem, TreeItemContent } from 'react-aria-components'
 import { AgentHoverCard, AgentRowDetails, SidebarAgentRow } from './SidebarAgentRow'
 import type { SidebarAgentRow as Row } from './model'
 import { lightTheme } from '../composition-theme'
@@ -132,7 +133,7 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await userEvent.click(within(target).getByRole('button', { name: /^Open / }))
   await expect(target.querySelector('[aria-current="page"]')).not.toBeNull()
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main> }
+export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList />{treeVisibleIdentity}</main> }
 export const AccessibleName: Story = {
   name: 'Accessible name · subtitle time',
   render: () => <main {...stylex.props(styles.root)}><div data-frame-rows {...stylex.props(styles.list)}><SidebarAgentRow item={knownRow} now={storyNow} variant="SR-2" timePlacement="subtitle" active /></div></main>,
@@ -165,6 +166,28 @@ export const VisibleIdentityName: Story = {
     } finally {
       button.removeAttribute('aria-label')
       button.setAttribute('aria-labelledby', labelledBy)
+    }
+  },
+}
+const treeVisibleIdentity = <Tree aria-label="Agent roster" selectionMode="none">
+  <TreeItem id="agent/atlas" textValue="Atlas Builder">
+    <TreeItemContent><SidebarAgentRow inTree item={{ ...uncountedRow, title: 'Atlas Builder', host: 'host-1', harness: 'seat-1', model: undefined, status: 'unobserved', statusLabel: 'Not observed' }} now={storyNow} layout="SR2-B" extraSignals={['X-model']} /></TreeItemContent>
+  </TreeItem>
+</Tree>
+export const TreeVisibleIdentityName: Story = {
+  render: () => <main {...stylex.props(styles.root)}><div data-frame-rows {...stylex.props(styles.list)}>{treeVisibleIdentity}</div></main>,
+  play: async ({ canvasElement }) => {
+    const row = within(canvasElement).getByRole('row', { name: 'Atlas Builder host-1 seat-1' })
+    const assertName = async () => { await expect(row).toHaveAccessibleName('Atlas Builder host-1 seat-1') }
+    await assertName()
+    await expect(row).toHaveAccessibleDescription(/Not observed/)
+    await expect(row).not.toHaveAccessibleDescription(/unknown|unread/i)
+    const labelledBy = row.getAttribute('aria-labelledby')!
+    try {
+      row.removeAttribute('aria-labelledby')
+      await expect(assertName()).rejects.toThrow()
+    } finally {
+      row.setAttribute('aria-labelledby', labelledBy)
     }
   },
 }

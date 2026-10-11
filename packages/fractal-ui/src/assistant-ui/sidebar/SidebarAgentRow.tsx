@@ -144,6 +144,17 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   }, [])
   // The hover card anchors to the measured row frame so it follows the row, not its hidden trigger.
   const rowAnchor = React.useCallback((node: HTMLDivElement | null) => { attachSidebarLine1Fit(node); tooltipAnchor.current = node }, [])
+  React.useLayoutEffect(() => {
+    // RAC TreeItem overrides label/description props and has no description slot.
+    // Finish after RAC's collection commit, including when its row props refresh.
+    if (!inTree) return
+    queueMicrotask(() => {
+      const treeRow = tooltipAnchor.current?.closest<HTMLElement>('[role="row"]')
+      if (treeRow === undefined || treeRow === null) return
+      treeRow.setAttribute('aria-labelledby', [`${labelId}-title`, ...(variant === 'SR-1' ? [] : [`${labelId}-subtitle`]), ...(variant === 'SR-3' ? [`${labelId}-metadata`] : [])].join(' '))
+      treeRow.setAttribute('aria-describedby', descriptionId)
+    })
+  }, [inTree, labelId, descriptionId, variant, title, metadata])
   const hoverIntent = (open: boolean) => { clearTimeout(hoverTimer.current); hoverTimer.current = window.setTimeout(() => setHoverOpen(open), open ? 150 : 300) }
   const prefetch = () => { if (!inTree) callbacks?.prefetch?.(item.ref) }
   const open = () => { callbacks?.select?.(item.id, item.parentRef?.replace(/^agent\//, '')); onOpen?.(item) }
@@ -174,8 +185,9 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly /></span>
       <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" title="Needs your attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
       {!subtitleTime && <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>}
-      {/* The button's name is its visible content; React Aria drops aria-description, so reported facts describe it by reference. */}
-      {inTree ? <div aria-current={active ? 'page' : undefined} aria-description={metadata} {...rowStyle}>{content}</div> : <><Button aria-labelledby={[`${labelId}-title`, ...(variant === 'SR-1' ? [] : [`${labelId}-subtitle`]), ...(variant === 'SR-3' ? [`${labelId}-metadata`] : [])].join(' ')} aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button><span id={descriptionId} hidden>{metadata}</span></>}
+      {/* Flat buttons and owning tree rows reference the same visible spans and reported description. */}
+      {inTree ? <div aria-current={active ? 'page' : undefined} {...rowStyle}>{content}</div> : <Button aria-labelledby={[`${labelId}-title`, ...(variant === 'SR-1' ? [] : [`${labelId}-subtitle`]), ...(variant === 'SR-3' ? [`${labelId}-metadata`] : [])].join(' ')} aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button>}
+      <span id={descriptionId} hidden>{metadata}</span>
       <div {...stylex.props(styles.actions)}>
         <DialogTrigger><TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}><VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={() => setHoverOpen(false)} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden><Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger><Popover triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={item} {...clock} /></Dialog></Popover></DialogTrigger>
         <MenuTrigger><Button ref={menuTrigger} data-agent-menu="true" aria-label={`Actions for ${title}`} className={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle).className ?? ''}><Icon name="gear" /></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Menu aria-label={`Actions for ${title}`} {...stylex.props(styles.menu)}>
