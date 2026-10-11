@@ -4199,7 +4199,7 @@ mission "observed" state="ready" {
         // Older stored definitions decode and serialize byte-for-byte without a new field.
         let old = serde_json::to_value(default).unwrap();
         assert!(old.get("report_stalls").is_none());
-        let replay: MissionSpec = serde_json::from_value(old.clone()).unwrap();
+        let replay: crate::model::MissionSpec = serde_json::from_value(old.clone()).unwrap();
         assert!(replay.report_stalls);
         assert_eq!(serde_json::to_value(replay).unwrap(), old);
 
