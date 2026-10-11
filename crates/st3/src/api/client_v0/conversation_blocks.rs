@@ -8,7 +8,25 @@ use std::io::Read as _;
 use std::sync::LazyLock;
 
 // Bound expensive reads without a queued backlog or a second content cache.
+#[cfg(not(test))]
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// The read budget serving `transcript`: the process-wide one, or under test the budget of
+/// the test's own scope, so parallel tests never take each other's slots.
+#[cfg(not(test))]
+fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore {
+    &READ_SLOTS
+}
+
+#[cfg(test)]
+fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<
+        tokio::sync::Semaphore,
+    > = LazyLock::new(Default::default);
+    crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
+        tokio::sync::Semaphore::new(4)
+    })
+}
 static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let mut key = [0; 32];
     getrandom::fill(&mut key).expect("owner reference key entropy");
@@ -406,7 +424,8 @@ pub(super) fn read(
     let mut held = timeline.hold();
     // The fold is held before the slot is taken: waiting viewers of this conversation hold
     // no global read slot, so they never crowd an unrelated conversation out of the budget.
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&source.transcript);
+    let _slot = read_slot(&slots)?;
     let before = basis(source)?;
     let items = held.read(source).map_err(ApiError::internal)?;
     if before != basis(source)? {
@@ -438,7 +457,8 @@ pub(super) fn read_slice(
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
     let mut held = timeline.hold();
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&source.transcript);
+    let _slot = read_slot(&slots)?;
     let basis = basis(source)?;
     let mut slice = held
         .slice(source, order, before, limit)
@@ -818,7 +838,8 @@ pub(super) async fn chunk_local(
 ) -> Result<Value, ApiError> {
     require_scope(session, "read.projections")?;
     let locator = locator(wanted, session_id)?;
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&locator.source.transcript);
+    let _slot = read_slot(&slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
     let (bytes, media) = crate::api::read_deadline::spawn_blocking(move || -> Result<_, ApiError> {
