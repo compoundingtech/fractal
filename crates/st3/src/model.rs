@@ -1610,6 +1610,10 @@ pub struct CurrentHarnessView {
     pub input_buffer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<String>,
+    /// Background jobs the current incarnation last reported with its state; `None` when the
+    /// harness does not report them or the incarnation ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_jobs: Option<u64>,
     pub claim: String,
     pub observed_at_unix_ms: u128,
     #[serde(default)]
@@ -1617,6 +1621,14 @@ pub struct CurrentHarnessView {
 }
 
 impl CurrentHarnessView {
+    /// The background-job count a `harness.observed` state report carries for a live incarnation.
+    pub(crate) fn reported_background_jobs(state: &str, fields: &serde_json::Value) -> Option<u64> {
+        if matches!(state, "ended" | "indeterminate") {
+            return None;
+        }
+        fields.get("background_jobs").and_then(serde_json::Value::as_u64)
+    }
+
     pub fn is_ready(&self) -> bool {
         matches!(self.state.as_str(), "ready" | "working" | "idle")
             && self.reason.as_deref() != Some("providerAuth")
@@ -1638,6 +1650,7 @@ mod current_harness_view_tests {
             ask: None,
             input_buffer: None,
             exit: None,
+            background_jobs: None,
             claim: "claim/one".into(),
             since_unix_ms: 1,
             observed_at_unix_ms: 1,

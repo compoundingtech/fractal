@@ -418,7 +418,7 @@ impl View for AgentView {
     fn definition(&self) -> Definition {
         Definition {
             name: VIEW,
-            fingerprint: "agent-ordered-harness.v1;canonical.v1;sparse-seven;episodes433;retain-repaired;strict-state-reason",
+            fingerprint: "agent-ordered-harness.v1;canonical.v1;sparse-seven;episodes433;retain-repaired;strict-state-reason;background-jobs",
             kinds: KINDS,
             local_kinds: &[],
             max_contributions: 1,
@@ -553,6 +553,7 @@ fn observed(
         ask: None,
         input_buffer: None,
         exit: None,
+        background_jobs: None,
         claim: event.claim.clone(),
         since_unix_ms: event.accepted,
         observed_at_unix_ms: event.accepted,
@@ -640,6 +641,8 @@ fn observed(
         };
         let field = |name: &str| merged.fields.get(name).and_then(|f| f.value.clone());
         let mut state = text(event, "state").context("harness state missing")?;
+        let background_jobs =
+            crate::model::CurrentHarnessView::reported_background_jobs(&state, &event.fields);
         let mut reason = field("reason");
         let terminal = matches!(state.as_str(), "ended" | "indeterminate");
         if seat_status::permission_blocked(
@@ -670,6 +673,7 @@ fn observed(
             ask: if terminal { None } else { field("ask") },
             input_buffer: field("input_buffer"),
             exit: field("exit"),
+            background_jobs,
             claim: event.claim.clone(),
             since_unix_ms: event.accepted,
             observed_at_unix_ms: event.accepted,
@@ -938,6 +942,36 @@ mod tests {
             "runtime.observed",
             json!({"status":"stopped","incarnation_id":"two"}),
         );
+    }
+    #[test]
+    fn ordered_agent_background_jobs_match_canonical_for_current_incarnation_only() {
+        let f = Fixture::new();
+        let jobs = || {
+            let connection = f.store.readers.get();
+            read_harness(&connection, &f.views, SEAT)
+                .unwrap()
+                .and_then(|view| view.background_jobs)
+        };
+        f.append(SEAT, "runtime.observed", json!({"status":"running","incarnation_id":"one"}));
+        f.append(SEAT, "harness.observed", json!({"state":"working","driver":"omp","incarnation_id":"one","background_jobs":2}));
+        assert_eq!(jobs(), Some(2));
+        f.append(SEAT, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":0}));
+        assert_eq!(jobs(), Some(0));
+        f.append(SEAT, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":null}));
+        assert_eq!(jobs(), None, "an explicit null report is unknown");
+        f.append(SEAT, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":3}));
+        f.append(SEAT, "harness.observed", json!({"state":"ended","driver":"omp","incarnation_id":"one","background_jobs":3}));
+        assert_eq!(jobs(), None, "an ended harness reports no current jobs");
+        f.append(SEAT, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":4}));
+        assert_eq!(jobs(), Some(4));
+        f.append(SEAT, "runtime.observed", json!({"status":"running","incarnation_id":"two"}));
+        assert_eq!(jobs(), None, "a new incarnation does not inherit the old count");
+        f.append(SEAT, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":5}));
+        assert_eq!(jobs(), None, "a late report from the old incarnation is ignored");
+        f.append(SEAT, "harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"two"}));
+        assert_eq!(jobs(), None, "a state report without a count is unknown");
+        f.append(SEAT, "harness.observed", json!({"state":"idle","driver":"codex","incarnation_id":"two"}));
+        assert_eq!(jobs(), None);
     }
     #[test]
     fn ordered_agent_native_fences_and_mixed_stamps_match_canonical() {
