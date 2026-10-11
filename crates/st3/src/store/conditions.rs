@@ -817,6 +817,15 @@ impl Store {
     }
 
     pub fn note_condition_evaluator_status(&self, now: u128, error: Option<&str>) -> Result<()> {
+        // An unused, healthy evaluator must not take the writer every thirty seconds.
+        // Keep recording failures and clearing an earlier failure, even without declarations.
+        if error.is_none()
+            && !self.readers.get().prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM desired WHERE kind='condition') OR EXISTS(SELECT 1 FROM meta WHERE key='condition_evaluator_error')",
+            )?.query_row([], |row| row.get::<_, bool>(0))?
+        {
+            return Ok(());
+        }
         let at = i64::try_from(now)?;
         let error = error.map(|error| error.chars().take(1024).collect::<String>());
         self.connection.batched(move |tx| {
@@ -2096,6 +2105,58 @@ condition "fleet/database" {
     }
 
     #[test]
+    fn unused_condition_status_skips_the_writer_and_still_clears_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.sqlite3");
+        let empty = Store::open(&path, "alder").unwrap();
+        empty
+            .connection
+            .batched(|tx| tx.execute_batch("PRAGMA busy_timeout=0"))
+            .unwrap()
+            .unwrap();
+        let outside = Connection::open(&path).unwrap();
+        outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+        for now in [30_000, 60_000, 90_000] {
+            empty.note_condition_evaluator_status(now, None).unwrap();
+        }
+        assert_eq!(empty.condition_evaluator_status().unwrap(), (None, None));
+        outside.execute_batch("ROLLBACK").unwrap();
+
+        empty
+            .note_condition_evaluator_status(120_000, Some("probe failed"))
+            .unwrap();
+        assert_eq!(
+            empty.condition_evaluator_status().unwrap(),
+            (Some(120_000), Some("probe failed".into()))
+        );
+        empty
+            .note_condition_evaluator_status(150_000, None)
+            .unwrap();
+        assert_eq!(
+            empty.condition_evaluator_status().unwrap(),
+            (Some(150_000), None)
+        );
+        outside.execute_batch("BEGIN IMMEDIATE").unwrap();
+        empty
+            .note_condition_evaluator_status(180_000, None)
+            .unwrap();
+        assert_eq!(
+            empty.condition_evaluator_status().unwrap(),
+            (Some(150_000), None)
+        );
+        outside.execute_batch("ROLLBACK").unwrap();
+
+        let (_directory, declared) = store();
+        for now in [30_000, 60_000] {
+            declared.note_condition_evaluator_status(now, None).unwrap();
+            assert_eq!(
+                declared.condition_evaluator_status().unwrap(),
+                (Some(now as i64), None)
+            );
+        }
+    }
+
+    #[test]
     fn condition_status_keeps_capacity_discovery_and_probe_errors_visible() {
         let (_directory, store) = store();
         store
@@ -2122,6 +2183,7 @@ condition "fleet/database" {
         let connection = store.readers.get();
         for sql in [
             NOTIFICATION_ROWS_QUERY,
+            "SELECT EXISTS(SELECT 1 FROM desired WHERE kind='condition') OR EXISTS(SELECT 1 FROM meta WHERE key='condition_evaluator_error')",
             "SELECT subject FROM claims INDEXED BY claims_subject_kind_accepted_index WHERE subject>'condition-instance/a/' AND subject<'condition-instance/a/~' AND kind='condition.state' ORDER BY subject LIMIT 1",
             "SELECT subject FROM claims INDEXED BY claims_subject_kind_accepted_index WHERE subject>'condition-instance/a/b/' AND subject<'condition-instance/a/b/~' AND kind='condition.state' ORDER BY subject LIMIT 1",
             "SELECT store_index FROM claims WHERE kind='condition.state' AND store_index>1 ORDER BY store_index LIMIT 50",
