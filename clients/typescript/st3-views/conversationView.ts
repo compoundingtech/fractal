@@ -952,6 +952,26 @@ export function staleLine(issue: string, loaded: boolean, lastFrame: number | nu
   return `${issue} · shown as of ${age} ago · trying again`;
 }
 
+/** How old a conversation's last news from st is, as stui writes it: "4s", "3m", "2h". */
+export function updatedAge(lastFrame: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - lastFrame) / 1000));
+  return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+}
+
+/**
+ * The line under a conversation's header that says how fresh it is, as stui's does ("live ·
+ * updated 1m ago"), and shows that the phone is asking again: `refreshing` is true from the moment
+ * it starts following the conversation until st sends it. `tone` is how to colour it.
+ */
+export function freshnessLine(o: { issue: string; loaded: boolean; refreshing: boolean; lastFrame: number | null; now: number }): { text: string; tone: 'live' | 'refreshing' | 'warn' } {
+  const updated = o.lastFrame === null ? '' : ` · updated ${updatedAge(o.lastFrame, o.now)} ago`;
+  if (o.issue) return { text: `⚠ retrying${updated}`, tone: 'warn' };
+  if (!o.loaded) return { text: '↻ loading…', tone: 'refreshing' };
+  if (o.refreshing) return { text: `↻ refreshing…${updated}`, tone: 'refreshing' };
+  if (o.lastFrame === null) return { text: '● live · waiting for st', tone: 'live' };
+  return { text: `● live${updated}`, tone: 'live' };
+}
+
 const hasClippedValue = (value: unknown): boolean => typeof value === 'string'
   ? value.includes('[st truncated this native timeline value')
   : Array.isArray(value) ? value.some(hasClippedValue)
