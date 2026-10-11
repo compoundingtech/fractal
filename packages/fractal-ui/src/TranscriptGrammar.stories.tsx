@@ -79,6 +79,11 @@ function GrammarPreview({ scheme = 'dark', width = 'compact', injectFailure = fa
             <p {...stylex.props(styles.meta)}>Ages: 45s · 12m · 3h · 2d. Durations: 45s · 1m 45s · 1h 02m.</p>
             <p {...stylex.props(styles.meta)}>Facts: 3 files · 12 matches · 2 sources. Success needs no tag.</p>
           </Tier>
+          <Tier label="Meaningful faint text" caption="Small excerpts remain readable on the canvas, raised panels, and message surfaces.">
+            <p data-contrast-surface="canvas" {...stylex.props(styles.contrastSample, styles.canvasSample)}>Canvas · A concise excerpt still carries meaning.</p>
+            <p data-contrast-surface="raised" {...stylex.props(styles.contrastSample, styles.raisedSample)}>Raised · Keep supporting text readable.</p>
+            <p data-contrast-surface="message" {...stylex.props(styles.contrastSample, styles.messageSample)}>Message · Context should never disappear into the surface.</p>
+          </Tier>
           <Tier label="Glyph set" caption="One quiet family; meaning comes from the adjacent label.">
             <ul {...stylex.props(styles.glyphs)}>{transcriptGlyphNames.map(name => <li key={name} {...stylex.props(styles.glyph)}><TranscriptGlyph name={name} /><span>{name}</span></li>)}</ul>
           </Tier>
@@ -189,10 +194,43 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
     await expect(longSubject.scrollWidth, 'The long subject is the negative control: it eventually truncates too').toBeGreaterThan(longSubject.clientWidth)
     await expect(getComputedStyle(longSubject).textOverflow).toBe('ellipsis')
   }
+  if (args.scheme === 'light') {
+    const samples = Array.from(frame.querySelectorAll<HTMLElement>('[data-contrast-surface]'))
+    const canvasSample = samples.find(sample => sample.dataset.contrastSurface === 'canvas')!
+    const canvasBackground = rgb(getComputedStyle(canvasSample).backgroundColor)
+    await expect(contrast([135, 135, 137], canvasBackground), 'Failing control: the previous faint ink must fail small-text AA').toBeLessThan(4.5)
+    for (const sample of samples) {
+      const computed = getComputedStyle(sample)
+      await expect(contrast(rgb(computed.color), rgb(computed.backgroundColor)), `${sample.dataset.contrastSurface} faint text meets AA`).toBeGreaterThanOrEqual(4.5)
+    }
+    for (const excerpt of frame.querySelectorAll<HTMLElement>('[data-transcript-slot="excerpt"]')) {
+      await expect(contrast(rgb(getComputedStyle(excerpt).color), canvasBackground), 'Every meaningful light excerpt meets small-text AA').toBeGreaterThanOrEqual(4.5)
+    }
+  }
+  for (const chevron of frame.querySelectorAll<SVGElement>('[data-transcript-glyph="chevron"]')) {
+    await expect(chevron.getBoundingClientRect().width).toBe(12)
+    await expect(chevron.getBoundingClientRect().height).toBe(12)
+  }
   await expect(frame.scrollWidth, 'Long output must not widen the preview').toBeLessThanOrEqual(frame.clientWidth)
   await expect(canvasElement.ownerDocument.documentElement.scrollWidth, 'The preview must fit the actual viewport').toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
   // The configured accessibility addon runs axe color-contrast after this play,
   // including dark-mode glyphs, metadata, tags, and promoted cards.
+}
+
+type Rgb = readonly [number, number, number]
+function rgb(color: string): Rgb {
+  const channels = color.match(/[\d.]+/g)?.map(Number)
+  if (!channels || channels.length < 3) throw new Error(`Expected computed RGB color, received ${color}`)
+  return [channels[0]!, channels[1]!, channels[2]!]
+}
+function contrast(foreground: Rgb, background: Rgb): number {
+  const luminance = (channels: Rgb) => {
+    const linear = channels.map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4)
+    return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722
+  }
+  const a = luminance(foreground)
+  const b = luminance(background)
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
 }
 
 export const Light440: Story = { args: { scheme: 'light', width: 'compact' }, play }
@@ -216,6 +254,10 @@ const styles = stylex.create({
   label: { margin: 0, fontSize: grammar.labelSize, lineHeight: grammar.labelLeading },
   meta: { margin: 0, fontSize: grammar.metaSize, lineHeight: grammar.metaLeading, color: ink.fgMuted },
   tag: { margin: 0, fontSize: grammar.tagSize, lineHeight: grammar.tagLeading },
+  contrastSample: { margin: 0, padding: space.sm, fontSize: grammar.metaSize, lineHeight: grammar.metaLeading, color: ink.fgFaint },
+  canvasSample: { backgroundColor: surface.canvas },
+  raisedSample: { backgroundColor: surface.raised },
+  messageSample: { backgroundColor: surface.message },
   output: { margin: 0, fontFamily: type.fontMono, fontSize: grammar.outputSize, lineHeight: grammar.outputLeading, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   glyphs: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexWrap: 'wrap', gap: grammar.itemGap },
   glyph: { display: 'flex', alignItems: 'center', gap: space.sm, fontSize: grammar.metaSize, lineHeight: grammar.metaLeading },

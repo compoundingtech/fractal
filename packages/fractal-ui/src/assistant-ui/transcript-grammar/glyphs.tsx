@@ -52,13 +52,14 @@ export type TranscriptGlyphName = keyof typeof paths
 export const transcriptGlyphNames = Object.keys(paths) as readonly TranscriptGlyphName[]
 
 export function TranscriptGlyph({ name, tone = 'neutral' }: { name: TranscriptGlyphName; tone?: TranscriptTone }) {
-  return <svg {...stylex.props(styles.glyph, styles[tone])} viewBox="0 0 16 16" aria-hidden="true" focusable="false" data-transcript-glyph={name}>
+  return <svg {...stylex.props(styles.glyph, name === 'chevron' && styles.chevron, styles[tone])} viewBox="0 0 16 16" aria-hidden="true" focusable="false" data-transcript-glyph={name}>
     <path d={paths[name]} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 }
 
 const styles = stylex.create({
   glyph: { width: transcriptVars.glyphSize, height: transcriptVars.glyphSize, flexShrink: 0 },
+  chevron: { width: transcriptVars.chevronSize, height: transcriptVars.chevronSize },
   neutral: { color: textVars.fgMuted },
   running: { color: statusVars.runningFg },
   attention: { color: statusVars.attention },

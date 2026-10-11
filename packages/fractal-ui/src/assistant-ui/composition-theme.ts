@@ -22,7 +22,7 @@ const textVarsTheme = stylex.createTheme(textVars, {
   fg: '#27272a',
   fgMuted: '#66666e',
   fgSoft: 'rgba(39, 39, 42, 0.82)',
-  fgFaint: 'rgba(39, 39, 42, 0.55)',
+  fgFaint: '#6b6b73',
   sidebarFgMuted: '#626b77',
 })
 
@@ -58,7 +58,7 @@ export const lightStatusTheme = stylex.createTheme(statusVars, {
 
 const colorTheme = stylex.createTheme(colorVars, {
   canvas: '#fcfcfc', sidebar: '#ffffff', raised: '#ffffff', message: '#f4f4f5',
-  fg: '#27272a', fgMuted: '#66666e', fgSoft: 'rgba(39, 39, 42, 0.82)', fgFaint: 'rgba(39, 39, 42, 0.55)',
+  fg: '#27272a', fgMuted: '#66666e', fgSoft: 'rgba(39, 39, 42, 0.82)', fgFaint: '#6b6b73',
   sidebarFgMuted: '#626b77', border: '#e4e4e7', borderStrong: '#d4d4d8',
   glassFill: 'rgba(255, 255, 255, 0.85)', glassBorder: 'rgba(0, 0, 0, 0.06)',
   primary: '#1b4ed8', primaryHover: '#1a46c2', onPrimary: '#ffffff',
