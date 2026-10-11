@@ -62,7 +62,7 @@ is not readiness and cannot reinterpret unscoped open-time work as certified.
 Eight managed_gate_* controls are separate from the unchanged original fourteen
 native_gate_* name roster and canonical oracle. Work control sizes are 0 / 1024 /
 100000 unrelated rows. It reports each prepare, finalize marker read, source finish,
-marker clear, whole operation and finalize count. Targets, still UNRUN: clean prepare
+marker clear, whole operation and finalize count. Targets: clean prepare
 <=3 statements/120 VM/zero fullscan; finalize marker read 1/40/0; old idle source finish
 1/40/0; full source maintenance <=96/20000/0; marker clear 1/40/0. The marker read is
 INCLUDED in finalization, separately from source maintenance and clearing. No figure
@@ -97,3 +97,23 @@ A future adapter must short-circuit an already recorded gap, so unrelated writes
 not pay repeated gap writes. A saved-binding mismatch currently makes prepare error
 and fails every write on this private Store; this abort behavior must not carry into a
 production coverage design. Neither limitation is production-approved by this slice.
+
+Hosted run 38129863239 at public c17814ab2 / archive source 5d69e5bf8 /
+tree bd9f10bc executed all fourteen original native controls with initial PASS and
+seven of eight managed controls with initial PASS. The native append control failed
+all three attempts before its first append: it incorrectly cited desired.revision
+(the content digest) instead of desired.claim_id (the stored declaration). The
+successor fixes that fixture link and adds an explicit missing-evidence admission
+refusal with full committed-state equality; its outcomes are not yet executed.
+The old failure and its two retries remain attributed to c17814ab2.
+
+The c178 work control initially passed at all three sizes. Measured clean prepare
+was 2 statements / 57 VM, finalize marker read 1 / 8, idle source finish 1 / 23,
+and marker clear 1 / 33. Whole idle was 7 / 127 at every size; whole unrelated
+update was 8 / 399 at zero and 8 / 1276 at 1024 and 100000; whole semantic no-op
+was 57 / 2288 at zero and 57 / 2289 at both larger sizes. No-op source finish
+was 50 / 1092 at zero and 50 / 1093 at the larger sizes. All measured paths
+had zero fullscan, sorts and autoindex rows. These are private fixture SQL work,
+not production or elapsed-time evidence, and do not transfer execution to the
+corrected successor. Required linux-tests was red only on the append fixture;
+optional perf-cost separately failed messaging_faults::link_minutes recovery.

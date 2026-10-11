@@ -105,7 +105,7 @@ fn answer(rx: Receiver<Result<(), String>>) -> Result<(), String> {
 fn observation(f: &Fixture, code: i64) -> ClaimInput {
     let desired: String = f.read(|tx| {
         tx.query_row(
-            "SELECT revision FROM desired WHERE subject='exec/one/probe'",
+            "SELECT claim_id FROM desired WHERE subject='exec/one/probe'",
             [],
             |r| r.get(0),
         )
@@ -234,6 +234,14 @@ fn managed_gate_native_append_and_local_latest_paths_finalize_before_ack() {
     assert_eq!(f.counts(), (3, 3));
     assert_eq!(f.saved().0, before);
     // Native validation refusal is still an error, never an acknowledged write.
+    let retained = f.saved();
+    let mut missing = observation(&f, 0);
+    missing.evidence = vec!["claim/not-stored".into()];
+    assert_eq!(
+        f.store.append_claim(&missing).unwrap_err().code,
+        "missing-evidence"
+    );
+    assert_eq!(f.saved(), retained);
     let mut invalid = observation(&f, 0);
     invalid.kind = "not-a-native-kind".into();
     assert!(f.store.append_claim(&invalid).is_err());
