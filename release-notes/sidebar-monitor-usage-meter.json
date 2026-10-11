@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The agent sidebar can compose real monitor tabs through its fixed build-time extension entry; a second tab registers the same way. Empty public composition renders no injected monitor controls or source requests. The reusable usage-meter table and complete row evidence view accept display facts and typed callbacks, preserve unknown and stale states, shrink bars before text, fold hidden comparisons into omitted-window counts, and scope sort shortcuts to monitor focus. Row detail can carry a supplied period history; the same chart draws hour or day histograms, keeps unmeasured periods as gaps, marks open periods and states failures instead of drawing zeroes. Fictional stories exercise the production presentation in both color schemes and narrow layouts. Native usage.period observations remain independently available.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Monitor sources supply trusted display snapshots instead of transport envelopes. Native observations retain reported zero, missing capability and original measurement evidence. Build-time compositions may contribute real sidebar monitors; public composition contributes none." },
+  "downtime": { "status": "none", "detail": "None for the public application." },
+  "manual": { "status": "none", "detail": "No public manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/kit.tsx",
+    "./usage-meter": "./src/UsageMeterTable.tsx",
     "./tokens.css": "./src/tokens.css",
     "./assistant-ui": "./src/assistant-ui/index.ts",
     "./assistant-ui/shell": "./src/assistant-ui/shell.ts",
@@ -19,6 +20,7 @@
     "storybook": "storybook dev -p 53705 --host 127.0.0.1 --no-open --disable-telemetry",
     "build-storybook": "storybook build --disable-telemetry",
     "typecheck": "tsc --noEmit",
+    "test:usage-meter": "node --test --test-force-exit src/UsageMeterTable.unit.test.mjs",
     "test:palettes": "node --test src/legacy-palettes.test.mjs",
     "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs",
     "check:shell-imports": "node scripts/check-shell-imports.mjs",
