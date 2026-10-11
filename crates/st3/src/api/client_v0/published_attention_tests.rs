@@ -258,3 +258,61 @@ async fn odd_and_surplus_summary_selections_never_stop_the_others() {
     assert!(snapshot.published_at.is_none(), "read by the window itself");
     assert_eq!(counts(&items[0]), counts(&computed_summary_for(&state, &agent, Some(surplus))));
 }
+
+/// The running refresher after views are forgotten (a checkpoint, a chunk of a long catch-up):
+/// with no window reading, a pass publishes glasses again but does not fold attention, so a
+/// node nobody reads never refolds it once per forget. The next attention window is refused,
+/// retryably, and its read wakes the refresher, which folds it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_a_forget_attention_folds_again_only_once_a_window_reads_it() {
+    use crate::store::owner_lists::OwnerView;
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "forget-gate");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    let glass = |id: usize, name: &str| ClaimInput {
+        subject: format!("glass/person/ada/019a0000-0000-7000-8000-{id:012x}"),
+        kind: "glass.upserted".into(),
+        actor: Some("person/ada".into()),
+        fields: serde_json::from_value(json!({
+            "body":{"name":name,"layout":{"tabs":[{"pane":"opaque:anything"}]}},
+            "base_revision":null,
+        }))
+        .unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    state.store.append_claim(&glass(1, "Desk")).unwrap();
+    let until = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    crate::api::start_attention_list(&state);
+    // As the daemon starts, every view is published with no window reading.
+    until("the first publication", &|| {
+        state.store.newest_attention_list().1.is_some()
+            && state.store.owner_list_cut(OwnerView::Glasses).is_some()
+    });
+    assert!(!state.store.attention_list_read_within(u64::MAX));
+    state.store.forget_current_views();
+    assert!(state.store.newest_attention_list().1.is_none());
+    assert!(state.store.owner_list_cut(OwnerView::Glasses).is_none());
+    // A commit wakes the refresher: glasses are published again, after attention in the same
+    // pass, and attention is not folded.
+    state.store.append_claim(&glass(2, "Window")).unwrap();
+    state.event_notify.send_modify(|generation| *generation += 1);
+    until("glasses again", &|| state.store.owner_list_cut(OwnerView::Glasses).is_some());
+    assert!(state.store.newest_attention_list().1.is_none(), "no window reads attention");
+    // A window's read is refused, retryably, and wakes the refresher, which folds it.
+    let ada = ClientSession::local(Some("person/ada")).unwrap();
+    let refused = window(&state, &ada, None, 50).await.unwrap_err();
+    assert_eq!(refused.code, "attention-not-ready");
+    until("attention again", &|| state.store.newest_attention_list().1.is_some());
+    let (snapshot, items, _) = window(&state, &ada, None, 50).await.unwrap();
+    assert!(snapshot.published_at.is_some());
+    assert_eq!(items.len(), 1);
+    state.store.stop_attention_list_refresher();
+}

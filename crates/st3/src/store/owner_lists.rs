@@ -230,6 +230,13 @@ impl Store {
         })
     }
 
+    /// The cut of `view`'s newest publication, if any, without counting as a window's read.
+    #[cfg(test)]
+    pub(crate) fn owner_list_cut(&self, view: OwnerView) -> Option<u64> {
+        let published = view.list(self).published.lock().unwrap_or_else(PoisonError::into_inner);
+        published.as_ref().map(|publication| publication.cut)
+    }
+
     /// People read again by refreshes of `view`, and full reads of everyone.
     #[cfg(test)]
     pub(crate) fn owner_list_reads(&self, view: OwnerView) -> (u64, u64) {
