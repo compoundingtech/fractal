@@ -249,7 +249,7 @@ pub(crate) fn tool_call_view(tool: &str, args: &Value) -> Value {
     out
 }
 
-fn job(value: &Value, completed: bool) -> Value {
+fn job(value: &Value, require_state: bool) -> Value {
     let mut out = json!({});
     fields(
         &mut out,
@@ -269,8 +269,8 @@ fn job(value: &Value, completed: bool) -> Value {
             ("output_bytes", "outputBytes"),
         ],
     );
-    if completed && out.get("state").is_none() {
-        out["state"] = json!("completed");
+    if require_state && out.get("state").is_none() {
+        out["state"] = json!("unknown");
     }
     out
 }
@@ -764,6 +764,24 @@ mod tests {
     }
 
     #[test]
+    fn completion_job_states_are_unknown_unless_explicit() {
+        for (custom_type, key) in [("async-result", "jobs"), ("launch-completion", "daemons")] {
+            for state in [None, Some("cancelled"), Some("failed"), Some("failed (exit 2)")] {
+                let mut native_job = json!({"jobId":"j","durationMs":123});
+                if let Some(state) = state {
+                    native_job["state"] = json!(state);
+                }
+                let mut record = json!({"type":"custom_message","customType":custom_type,"details":{}});
+                record["details"][key] = json!([native_job]);
+                let (_, view, _) = omp_record_view(&record).unwrap();
+                assert_eq!(view["jobs"][0]["state"], state.unwrap_or("unknown"));
+            }
+        }
+        let hub = tool_output_view("hub", "h", false, Some(&json!({"jobs":[{"jobId":"j"}]})));
+        assert!(hub["jobs"][0].get("state").is_none());
+    }
+
+    #[test]
     fn record_views_parse_extensions_bookkeeping_and_visibility() {
         let cases = [
             (
@@ -822,6 +840,9 @@ mod tests {
             let (actual, view, visibility) = omp_record_view(&record).unwrap();
             assert_eq!(actual, kind);
             assert_eq!(view["type"], view_type);
+            if record["customType"] == "async-result" {
+                assert_eq!(view["jobs"][0]["state"], "unknown");
+            }
             assert_eq!(
                 visibility,
                 if view_type == "tool_start" {
