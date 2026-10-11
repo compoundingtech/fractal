@@ -44,6 +44,8 @@ export const quotaAccounts: readonly QuotaAccount[] = [
   { ...accountOf('elm', 'Elm sandbox', 'Cedar', .14, 6), state: 'stale', facts: [{ label: 'Retained evidence', value: 'Latest collection failed; value observed 2030-04-29T18:00:00Z' }] },
   accountOf('cove', 'Cove', 'Orbit', .08, 7),
   { ...accountOf('unknown', 'Unreported seat', 'Cedar', undefined, 8), state: 'unknown', usd: undefined, tokens: undefined, usdCoverage: false, windows: [windowOf('unknown-week', 'week', undefined, true, false, { reported: false, resetAt: undefined, facts: [{ label: 'Observation', value: 'Declared but unreported' }] })] },
+  accountOf('spruce', 'Spruce', 'Prism', .12, 9),
+  accountOf('willow', 'Willow', 'Prism', .03, 10),
 ]
 export const quotaDays: readonly QuotaHistoryDay[] = Array.from({ length: 30 }, (_, index) => {
   const id = `2030-04-${String(index + 1).padStart(2, '0')}`

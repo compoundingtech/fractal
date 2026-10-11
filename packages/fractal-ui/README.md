@@ -183,6 +183,18 @@ canonical identity. Exhaustion never manufactures a percentage. Thresholds are
 60/80. Dollar readings require admitted coverage; token fallback does not change
 the caller's preferred unit. Mixed-unit subtotals remain separate.
 
+Drawer accounts use one 22px native table row: 18px inline content and 2px
+vertical padding. `src/UsageMeterGrid.stylex.ts` supplies schema-agnostic grid
+geometry shared with other meter tables; inset separators do not add row height.
+Name and provider share a truncated, titled line, percentages keep their micro
+bars inline, and amount/reset cells align to sticky headers. Variant meters stay
+inside the same row rather than growing the account into a card.
+
+Every Drawer S/M/L and drawer-variant story proves that all 11 fictional accounts
+fit the stated height without scrolling and that each cell's x-offset matches its
+header within 1px. The browser runner repeats this proof and injects a 6px cell
+translation in each story; every misalignment control must fail the same proof.
+
 History uses the supplied calendar buckets, exposes exact measured values and
 unknown token classes, and marks the unfinished bucket. Cost compares rate-card
 usage value with invoiced/list subscription price for **last 30 days, normalized**;

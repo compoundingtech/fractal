@@ -6,6 +6,7 @@ import { QuotaDrawer } from './QuotaDrawer.tsx'
 import { QuotaUsagePage } from './QuotaUsagePage.tsx'
 import type { QuotaDrawerProps, QuotaSort, QuotaStatus, QuotaUnit, QuotaUsageProps } from './quota-design-types.ts'
 import { quotaAccounts, quotaClock, quotaColumns, quotaDays, quotaEconomics, quotaRefreshedAccounts, quotaStatuses } from './quota-design-fixtures.ts'
+import { assertQuotaDrawerDensity } from './quota-design-density-proof.ts'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -66,18 +67,25 @@ export const QuotaUsageMatrix = (args: QuotaStoryArgs) => <div {...stylex.props(
 export const QuotaStatesMatrix = (args: QuotaStoryArgs) => <div {...stylex.props(styles.matrix)}>{(['dark', 'light'] as const).flatMap(scheme => (Object.keys(quotaStatuses) as QuotaStatus['kind'][]).map(status => <section key={`${scheme}-${status}`} {...stylex.props(styles.matrixItem)}><h2 {...stylex.props(styles.caption)}>{scheme} · {status} · retained inventory</h2><QuotaStoryHarness {...args} scheme={scheme} status={status} landmarkContext={`${scheme} ${status}`} /></section>))}</div>
 const storyRoot = (canvas: HTMLElement) => canvas.querySelector<HTMLElement>('[data-quota-story]')!
 const ids = (canvas: HTMLElement) => [...canvas.querySelectorAll('[data-quota-row]')].map(row => row.getAttribute('data-quota-row'))
-const defaultOrder = ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'cove', 'unknown']
+const defaultOrder = ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'spruce', 'cove', 'willow', 'unknown']
+export const quotaDensityPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+ for (const drawer of canvasElement.querySelectorAll<HTMLElement>('[data-quota-drawer]')) {
+  if (drawer.querySelector('[data-quota-row]') !== null) await waitFor(() => assertQuotaDrawerDensity(drawer))
+ }
+}
 export const quotaSortPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaDensityPlay({ canvasElement })
   await waitFor(() => expect(ids(canvasElement)).toEqual(defaultOrder))
   const account = canvasElement.querySelector<HTMLElement>('[data-quota-sort="account"]')!
   await userEvent.click(account)
-  await waitFor(() => expect(ids(canvasElement)).toEqual(['birch', 'cove', 'delta', 'elm', 'harbor', 'lake', 'meadow', 'north', 'unknown']))
+  await waitFor(() => expect(ids(canvasElement)).toEqual(['birch', 'cove', 'delta', 'elm', 'harbor', 'lake', 'meadow', 'north', 'spruce', 'unknown', 'willow']))
   await userEvent.click(account)
-  await waitFor(() => expect(ids(canvasElement)).toEqual(['unknown', 'north', 'meadow', 'lake', 'harbor', 'elm', 'delta', 'cove', 'birch']))
+  await waitFor(() => expect(ids(canvasElement)).toEqual(['willow', 'unknown', 'spruce', 'north', 'meadow', 'lake', 'harbor', 'elm', 'delta', 'cove', 'birch']))
   await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-quota-sort="governing"]')!)
   await waitFor(() => expect(ids(canvasElement)).toEqual(defaultOrder))
 }
 export const quotaKeyboardPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaDensityPlay({ canvasElement })
   const drawer = canvasElement.querySelector<HTMLElement>('[data-quota-drawer]')!
   drawer.focus()
   await userEvent.keyboard('s')
@@ -107,6 +115,7 @@ const geometry = (canvas: HTMLElement) => [...canvas.querySelectorAll<HTMLElemen
   const box = node.getBoundingClientRect(); return [box.x, box.y, box.width, box.height]
 })
 export const quotaRefreshPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaDensityPlay({ canvasElement })
   const canvas = within(canvasElement), before = geometry(canvasElement)
   await expect(before.length).toBeGreaterThan(0)
   await userEvent.click(canvas.getByRole('button', { name: 'Refresh snapshot' }))

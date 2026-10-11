@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdir, writeFile } from 'node:fs/promises'
+import { assertQuotaDrawerDensity } from '../src/quota-design-density-proof.ts'
 
 // Existing Storybook only: no server lifecycle or dependency installation.
 // Supply the workspace/Nix-pinned Playwright module and its managed Chromium executable.
@@ -12,7 +13,7 @@ const index = await (await fetch(new URL('index.json', `${base.replace(/\/$/, ''
 const stories = Object.values(index.entries).filter(entry => entry.type === 'story' && entry.title.startsWith('Fractal/App/Quota/'))
 assert(stories.length >= 30, 'Complete redesign story matrix is indexed')
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true })
-const report = { base, stories: stories.map(entry => entry.id), plays: [], checks: [], controls: [], screenshots: [] }
+const report = { base, stories: stories.map(entry => entry.id), plays: [], checks: [], controls: [], screenshots: [], density: [] }
 const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } })
 page.setDefaultTimeout(90000)
 const errors = []
@@ -30,8 +31,14 @@ const load = async id => {
   return result
 }
 const order = () => page.locator('[data-quota-row]').evaluateAll(rows => rows.map(row => row.getAttribute('data-quota-row')))
-const defaultOrder = ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'cove', 'unknown']
-const alphabetical = ['birch', 'cove', 'delta', 'elm', 'harbor', 'lake', 'meadow', 'north', 'unknown']
+const defaultOrder = ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'spruce', 'cove', 'willow', 'unknown']
+const alphabetical = ['birch', 'cove', 'delta', 'elm', 'harbor', 'lake', 'meadow', 'north', 'spruce', 'unknown', 'willow']
+const densityCheck = async () => {
+  const observations = []
+  for (const drawer of await page.locator('[data-quota-drawer]').all()) observations.push(await drawer.evaluate(assertQuotaDrawerDensity))
+  assert(observations.length > 0, 'Drawer density proof must measure a drawer')
+  return observations
+}
 const sortCheck = async () => {
   assert.deepEqual(await order(), defaultOrder)
   await page.locator('[data-quota-sort="account"]').click()
@@ -99,6 +106,12 @@ try {
   for (const story of stories) {
     await load(story.id)
     report.plays.push({ id: story.id, result: 'completed' })
+    if (story.title.startsWith('Fractal/App/Quota/Drawer')) {
+      report.density.push({ id: story.id, drawers: await densityCheck() })
+      await control(`misalignment:${story.id}`, story.id, () => page.locator('[data-quota-cell]').first().evaluate(cell => { cell.style.transform = 'translateX(6px)' }), densityCheck)
+      assert.match(report.controls.at(-1).expectedFailure, /misalignment .* exceeds 1px/)
+      await page.locator('[data-quota-cell]').first().evaluate(cell => { cell.style.removeProperty('transform') })
+    }
     if (['--dark', '--light', '--columns', '--stacked-mini-meters', '--governing-and-chips', '--overview-and-brush', '--small-multiples', '--heatmap-calendar', '--overview-900', '--overview-light', '--multiples-light-900', '--heatmap-light-900', '--failed-retained', '--not-yet-published'].some(suffix => story.id.endsWith(suffix))) {
       const file = `${story.id}.png`
       await page.locator('[data-quota-story]').screenshot({ path: `${out}/${file}` })
@@ -125,7 +138,7 @@ try {
   assert.deepEqual(await order(), ['harbor', 'birch', 'lake', 'cove'], 'Provider filter changes roster')
   await page.getByRole('button', { name: 'Group by provider', exact: true }).click()
   assert.equal(await page.locator('[data-quota-provider="Orbit"]').count(), 1, 'Provider group subtotal appears')
-  await page.getByRole('button', { name: 'Open usage for Harbor', exact: true }).click()
+  await page.getByRole('button', { name: 'Open usage for Harbor · Orbit', exact: true }).click()
   await page.locator('[data-quota-usage]').waitFor()
   assert.equal(await page.locator('[data-quota-story]').getAttribute('data-selected-account'), 'harbor', 'Row opens Usage with stable account identity')
   await page.getByRole('tab', { name: 'Account', exact: true }).click()

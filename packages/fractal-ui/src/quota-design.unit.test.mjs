@@ -6,7 +6,7 @@ const view = { variant: 'columns', columns: quotaColumns }
 const account = id => quotaAccounts.find(account => account.id === id)
 
 test('governing default, exhaustion without fraction, canonical ties, missing last', () => {
-  assert.deepEqual(sortQuotaAccounts(quotaAccounts, { key: 'governing', direction: 'descending' }, view).map(account => account.id), ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'cove', 'unknown'])
+  assert.deepEqual(sortQuotaAccounts(quotaAccounts, { key: 'governing', direction: 'descending' }, view).map(account => account.id), ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'spruce', 'cove', 'willow', 'unknown'])
   const ascending = sortQuotaAccounts(quotaAccounts, { key: 'governing', direction: 'ascending' }, view)
   assert.equal(ascending.at(-1).id, 'unknown')
   assert.equal(ascending.at(-2).id, 'harbor')
