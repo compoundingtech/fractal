@@ -3,12 +3,14 @@
 This is the disk-first consumer of the coordination-free retention design, not a
 second trim protocol. Pinned main: `8f4f47e0bb059ee4d1dab98bc0c5633326fff2c5`.
 The local quorum-free payload/negative-set API is absent at that revision.
-Speed confirmed in message/3100632a375f5830 that there is still no usable
+Speed confirmed in message/739b2d3c9f4e188a that there is still no usable
 local-trim API, certified removal family or PR 3–6 authority. The consolidated
 source-only design is
-`doc/fleet/smalltalk/speed/2026-10-11/coordination-free-retention-design-v4@33ace47253bec788d0c9b73302528887439775c76ec1a532ee934ae8ee8cb811`.
-Intake read v4 without a new source objection; that is not implemented API or
-payload-removal approval. V4 distinguishes advisory signature verdicts from the
+`doc/fleet/smalltalk/speed/2026-10-11/coordination-free-retention-design-v6@2b84ea59d6afd86476aedb27b9e65db4aa68a2443f0ddb1a5ea5a04770092098`.
+Intake read v4 without a new source objection. V6 carries dated retired-set
+scale and a repaired-original reader inconsistency; it supplies no implemented
+API, family certification or payload-removal approval. The design distinguishes
+advisory signature verdicts from the
 actual live fold and requires the union of every reader's winner set, complete
 carrier closure, permanent authenticated nonce/admission evidence, exact-ID/body
 reference closure, immutable positions and real N-1 exchange. No family is
@@ -41,7 +43,11 @@ The direct restart reader uses `condition_tracker` and canonical `latest_claim`;
 condition discovery/fold, cached views, attention and notification delivery have
 separate retained-head/payload requirements. Generic `latest_actual_at` also
 reads these subjects: its `fold_latest_values` clears registered fields for
-`StateTransition`, then merges fields. That supports full-value absence for
+`StateTransition`, then merges fields. V6 records that this actual-state reader
+still includes repaired originals while other readers exclude them. That is a
+source-reported inconsistency at the generic owner's later pin, not an
+independently reproduced condition ordering failure or observed production
+incident. The condition consumer does not repair it or gain trim eligibility. That supports full-value absence for
 registered condition fields, but is not proof of closure for every cross-kind,
 custom or historical-cut reader. The actual reader union and full projection
 must agree with untrimmed replay after shuffled arrivals and different trim cuts.
@@ -130,7 +136,7 @@ Local trim bounds retained state; it does not reduce these daily writes.
 | Nonce and admission fences | Permanent population includes every signed claim, not just trimmed transitions. Exact row/index bytes remain a generic-retention input; no net savings promised. |
 | Notification messages | Up to one ordinary durable agent message per transition, about 105,216 messages/day/writer at that extreme. Additional normal delivery/read claims remain unchanged. Person attention is projected from the current breach. Message retention is unchanged. |
 | Pending delivery outbox | Immutable payload copied once per queued local transition. The queue keeps at most 1,024 copied rows after enqueue; excess oldest rows and retry counters are discarded with a one-hour doctor diagnostic. Loss of queued wakes is explicit. Only the oldest 256 rows are considered per tick; each copied body still has the condition claim field bounds. |
-| OTel/local export log | One local observation per authored transition. Copies are written even without OTLP. Existing hourly trimming defaults to seven days and at most 20,000 rows per subject/kind; the newest row of each subject/kind always remains. There is no global byte cap or lifetime-key cap. Export cursor/backoff and possible outage gaps remain unchanged. It is not replicated condition history. |
+| OTel/local export log | One local observation per authored transition. Copies are written even without OTLP. Existing hourly trimming defaults to seven days and at most 20,000 rows per subject/kind; the newest row of each subject/kind always remains. There is no global byte cap or lifetime-key cap. At 411 transitions/day, seven-day retention is about 2,900 rows (roughly 4.2 MiB of payload at 1.5 KiB/row) per continuously flapping instance, or about 1.05 GiB at 256 instances, before indexes and hourly sweep overshoot. Export cursor/backoff and possible outage gaps remain unchanged. It is not replicated condition history. |
 | Replicated writes and containers | Source transition plus ordinary notifications and transport overhead. No write-volume reduction is claimed. Each replica receives other writers' transitions too. `claims.body`, `replica_records.raw`, signed envelopes and their indexes must be counted separately by the trim dependency. |
 
 The generic design's observed rich retired-claim cost is about **865 bytes per
@@ -156,3 +162,18 @@ write estimate. No deletion has occurred in this draft and no kilobyte physical
 retention result is claimed. Disk-first's planned two declarations have a much
 smaller instance population, but baseline thresholds and actual counts belong to
 Operations and must not be invented here.
+
+The v6 dated single-node snapshot (2026-10-11 17:01Z) reports 615,894
+retired-claim rows and 605,872 dropped-envelope rows, with seven table/index
+objects totaling 527,216,640 bytes (~856 bytes per retired claim including
+envelope negatives). These are retained negative rows, not domain-deleted entity
+counts, a fleet total, payload savings or family-eligibility evidence. Full
+build/tool binding remains PARTIAL: daemon/tool byte identities are missing and
+the elapsed-origin shift is unqualified. Compact nonce-ledger size remains
+UNKNOWN. No extra production read follows from carrying these supplied numbers.
+
+The OTLP doctor warning reflects a daemon runtime flag set during `run_up`.
+A standalone `Store` or a doctor served before configuration initialization
+defaults to not configured and can warn even if another configuration would
+provide a collector. Interpret it with that daemon's configuration; it is not
+collector-health evidence.

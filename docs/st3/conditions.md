@@ -158,5 +158,11 @@ up to an hour before the next reading, plus the configured hold. Native free-spa
 readings continue every 30 seconds. OTLP copies are made even when export is not
 configured. Local log maintenance runs hourly; defaults are seven days and 20,000
 rows per subject/kind, always preserving the newest per key. This is not a global
-byte bound. Doctor warns on declarations without `observations.otlp`. Outbox
+byte bound: at 411 transitions/day, seven days retain about 2,900 rows
+(~4.2 MiB payload at 1.5 KiB/row) per instance, or ~1.05 GiB at 256
+instances, before indexes and hourly sweep overshoot. Doctor warns on declarations without `observations.otlp`. Outbox
 capacity eviction loses a wake explicitly; its diagnostic lasts one hour.
+
+The OTLP warning uses runtime configuration initialized by the daemon; standalone
+stores or a doctor served before that initialization default to not configured.
+The warning does not establish collector health.
