@@ -275,12 +275,12 @@ export const LargeBodies: Story = { render: () => <>
   await expect(canvasElement.querySelector('[data-message-renderer="plain"]')).toBeNull()
   await userEvent.click(canvas.getByRole('button', { name: 'Show full message' }))
   const full = canvas.getByRole('region', { name: 'Full message' })
-  await expect(full.querySelector('[data-message-renderer="plain"] pre')?.textContent).toBe(largeAgentMessage)
+  await expect(full.querySelector('[data-message-window]')?.textContent).toBe(largeAgentMessage.slice(0, 16000))
   await expect(full.querySelector('[data-testid="markdown"]')).toBeNull()
   await expect(full.querySelector('[data-syntax-token]')).toBeNull()
   await userEvent.click(canvas.getByRole('button', { name: /Review.*Large report/ }))
   await expect(canvasElement.querySelectorAll('[data-message-renderer="plain"]')).toHaveLength(2)
-  await expect(canvasElement.querySelectorAll('[data-message-renderer="plain"] pre')[1]?.textContent).toBe(largeAgentMessage)
+  await expect(canvasElement.querySelectorAll('[data-message-renderer="plain"] pre')[1]?.textContent).toBe(largeAgentMessage.slice(0, 16000))
   await expect(canvasElement.querySelector('[data-message-renderer="plain"] code')).toBeNull()
 } }
 export const BroadcastWithoutCountLight440: Story = { ...BroadcastWithoutCount, parameters: { scheme: 'light', width: 440 } }
@@ -292,4 +292,30 @@ export const FetchedLongMessageLight1440: Story = { ...FetchedLongMessage, param
 export const LargeBodiesLight440: Story = { ...LargeBodies, parameters: { scheme: 'light', width: 440 } }
 export const LargeBodiesDark1440: Story = { ...LargeBodies, parameters: { scheme: 'dark', width: 1440 } }
 export const LargeBodiesLight1440: Story = { ...LargeBodies, parameters: { scheme: 'light', width: 1440 } }
+const multiMegabyteMessage = largeAgentMessage.repeat(20)
+export const PagedMultiMegabyteMessage: Story = {
+  render: () => <AgentMessage {...agentMessage} body={{ _tag: 'Full', markdown: multiMegabyteMessage }} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Show full message' }))
+    const next = canvas.getByRole('button', { name: 'Next message page' })
+    const previous = canvas.getByRole('button', { name: 'Previous message page' })
+    await expect(previous).toHaveAttribute('aria-disabled', 'true')
+    await expect(previous).toHaveAccessibleDescription('Previous unavailable: first page.')
+    await expect(canvasElement.querySelectorAll('[data-message-window]')).toHaveLength(1)
+    await expect(canvasElement.querySelector('[data-message-window]')?.textContent).toBe(multiMegabyteMessage.slice(0, 16000))
+    await userEvent.click(next)
+    await expect(next).toHaveFocus()
+    await expect(canvasElement.querySelectorAll('[data-message-window]')).toHaveLength(1)
+    await expect(canvasElement.querySelector('[data-message-window]')?.textContent).toBe(multiMegabyteMessage.slice(16000, 32000))
+    await expect(previous).not.toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(previous)
+    await expect(previous).toHaveFocus()
+    await expect(previous).toHaveAttribute('aria-disabled', 'true')
+    await expect(canvasElement.querySelector('[data-message-window]')?.textContent).not.toBe(multiMegabyteMessage)
+  },
+}
+export const PagedMultiMegabyteMessageLight440: Story = { ...PagedMultiMegabyteMessage, parameters: { scheme: 'light', width: 440 } }
+export const PagedMultiMegabyteMessageDark1440: Story = { ...PagedMultiMegabyteMessage, parameters: { scheme: 'dark', width: 1440 } }
+export const PagedMultiMegabyteMessageLight1440: Story = { ...PagedMultiMegabyteMessage, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })

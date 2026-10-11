@@ -37,10 +37,25 @@ export interface AgentMessageProps {
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels. */
 export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? ' › ' : ''}{part}</React.Fragment>)}</span><span {...stylex.props(styles.visuallyHidden)}>{id}</span></span>
 
-/** Large untrusted bodies bypass synchronous Markdown parsing and code highlighting entirely. */
-const MessageBody = ({ text }: { readonly text: string }) => text.length > 16000
-  ? <div data-message-renderer="plain"><p {...stylex.props(styles.meta)}>Large message · shown as plain text</p><pre {...stylex.props(styles.plainText)}>{text}</pre></div>
-  : <div data-message-renderer="markdown"><EmbraceMarkdownPreview markdown={text} /></div>
+/** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
+const MessageBody = ({ text }: { readonly text: string }) => {
+  const [page, setPage] = React.useState(0)
+  const reasonId = React.useId()
+  if (text.length <= 16000) return <div data-message-renderer="markdown"><EmbraceMarkdownPreview markdown={text} /></div>
+  const pages = Math.ceil(text.length / 16000)
+  const current = Math.min(page, pages - 1)
+  const atStart = current === 0
+  const atEnd = current === pages - 1
+  return <div data-message-renderer="plain">
+    <p {...stylex.props(styles.meta)}>Large message · plain text · page {current + 1} of {pages}</p>
+    <pre data-message-window={current} {...stylex.props(styles.plainText)}>{text.slice(current * 16000, (current + 1) * 16000)}</pre>
+    <div {...stylex.props(styles.header)}>
+      <Button {...stylex.props(styles.button)} aria-disabled={atStart || undefined} aria-describedby={reasonId} onPress={atStart ? undefined : () => setPage(current - 1)}>Previous message page</Button>
+      <Button {...stylex.props(styles.button)} aria-disabled={atEnd || undefined} aria-describedby={reasonId} onPress={atEnd ? undefined : () => setPage(current + 1)}>Next message page</Button>
+      <span id={reasonId} {...stylex.props(styles.meta)}>{atStart ? 'Previous unavailable: first page.' : ''}{atStart && atEnd ? ' ' : ''}{atEnd ? 'Next unavailable: last page.' : ''}</span>
+    </div>
+  </div>
+}
 
 /** A promoted incoming card. Transport and full-body loading belong to its owner. */
 export const AgentMessage = ({ id, from, to, via, body, subject, replyTo, at, arrivedWhileWorking, delivery, onLoadFull, onCopyId, onOpenReply, fullMessageUnavailableReason }: AgentMessageProps) => {
