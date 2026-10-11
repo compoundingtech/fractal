@@ -5,6 +5,10 @@ its own host every 30 seconds, using local measurements. Owners receive one
 notification per instance on entering breach and one on recovery. Samples and intermediate
 hold phases do not wake an owner.
 
+A clean evaluator tick with no declarations skips the evaluator status write.
+Failures are still recorded, and a following clean tick clears the error even
+when no condition is declared.
+
 ```kdl
 version 2
 condition "fleet/disk" {
