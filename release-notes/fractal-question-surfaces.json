@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Harness-neutral question forms, settled summaries and needs-you attention surfaces",
+  "replay": {"status": "none", "detail": "Presentation-only changes do not change replay or recovery triggers."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, migrations or schema versions change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules, digests or fleet coordination change."},
+  "compatibility": {"status": "none", "detail": "New typed UI props and recorded tool-question presentation do not change wire protocols or harness version admission. The generic tool seam remains read-only; applications own terminal navigation and any web-answer capability."},
+  "downtime": {"status": "none", "detail": "No additional service restart or interruption is introduced."},
+  "manual": {"status": "none", "detail": "Existing installations require no migration or state-changing operator action."},
+  "recovery": {"status": "none", "detail": "No stored state is changed and no additional runtime recovery procedure is required."}
+}
