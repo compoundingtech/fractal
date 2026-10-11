@@ -1,7 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
+import { useArgs } from 'storybook/preview-api'
 import { QuestionForm, QuestionSummary, NeedsYouBar, NeedsYouInbox } from './assistant-ui/QuestionForm'
 import { EmbraceToolItem } from './assistant-ui/EmbraceToolCall'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -10,7 +11,17 @@ import { darkTheme } from './assistant-ui/embrace-theme'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
 import { questionKinds, questionRequest, questionStates } from './question-fixtures'
 
-const meta = { title: 'Fractal UI/Questions', component: QuestionForm, parameters: { layout: 'fullscreen' }, args: { request: questionRequest, onOpenTerminal: fn(), onDecline: fn(), onSubmit: fn(), onDraftChange: fn(), composerTyping: true }, decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' ? lightTheme : darkTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<typeof QuestionForm>
+const meta = {
+  title: 'Fractal UI/Questions',
+  component: QuestionForm,
+  parameters: { layout: 'fullscreen' },
+  args: { request: questionRequest, onOpenTerminal: fn(), onDecline: fn(), onSubmit: fn(), onDraftChange: fn(), composerTyping: true },
+  render: function ControlledQuestion(args) {
+    const [, updateArgs] = useArgs()
+    return <QuestionForm {...args} onDraftChange={draft => { args.onDraftChange?.(draft); updateArgs({ draft }) }} />
+  },
+  decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' ? lightTheme : darkTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>],
+} satisfies Meta<typeof QuestionForm>
 export default meta
 type Story = StoryObj<typeof meta>
 export const ReadOnly: Story = { play: async ({ canvasElement, args }) => {
@@ -23,10 +34,10 @@ export const ReadOnly: Story = { play: async ({ canvasElement, args }) => {
 } }
 export const Keyboard: Story = { args: { request: { ...questionRequest, answerable: true }, draft: { single: { selected: ['thread'], note: 'Keep this draft' } } }, play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
-  await userEvent.click(canvas.getByRole('option', { name: /This thread/ }))
+  await userEvent.click(canvas.getByRole('radio', { name: /This thread/ }))
   await userEvent.keyboard('{Escape}')
   await expect(args.onDecline).not.toHaveBeenCalled()
-  await expect(canvas.getByRole('option', { name: /This thread/ })).toHaveAttribute('aria-selected', 'true')
+  await expect(canvas.getByRole('radio', { name: /This thread/ })).toBeChecked()
   await expect(canvas.getByRole('button', { name: 'Submit' })).toBeEnabled()
   await expect(canvas.getByRole('button', { name: 'Skip · ends the turn' })).toBeVisible()
   await userEvent.keyboard('2')
@@ -72,7 +83,7 @@ export const PendingTimeout: Story = { args: { request: { ...questionRequest, an
 export const Submitting: Story = { args: { request: { ...questionRequest, answerable: true, state: { _tag: 'submitting' } }, draft: { single: { selected: ['thread'] } } } }
 export const Failed: Story = { args: { request: { ...questionRequest, answerable: true, state: questionStates[3]! }, draft: { single: { selected: ['thread'], note: 'Retain this note on retry' } }, onRetry: fn() }, play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
-  await expect(canvas.getByRole('option', { name: /This thread/ })).toHaveAttribute('aria-selected', 'true')
+  await expect(canvas.getByRole('radio', { name: /This thread/ })).toBeChecked()
   await expect(canvas.getByRole('textbox', { name: 'Note to the agent' })).toHaveValue('Retain this note on retry')
   await userEvent.click(canvas.getByRole('button', { name: 'Retry' }))
   await expect(args.onRetry).toHaveBeenCalledTimes(1)
@@ -90,5 +101,59 @@ export const TimedOutAuto: Story = { args: { request: { ...questionRequest, stat
 export const TimedOutNone: Story = { args: { request: { ...questionRequest, state: questionStates[7]! } } }
 export const Cancelled: Story = { args: { request: { ...questionRequest, state: questionStates[8]! } } }
 export const ChatRedirected: Story = { args: { request: { ...questionRequest, state: questionStates[9]! } } }
+export const KeyboardWalk: Story = {
+  args: { request: { ...questionRequest, answerable: true, questions: [questionKinds[0]!, questionKinds[1]!, questionKinds[2]!] }, autoFocus: true, draft: { single: { selected: ['thread'] } } },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('radiogroup')).toHaveAttribute('aria-required', 'true')
+    await userEvent.click(canvas.getByRole('radio', { name: /This thread/ }))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(canvas.getByRole('checkbox', { name: 'Unit tests' })).toHaveFocus())
+    await userEvent.keyboard('n')
+    await waitFor(() => expect(canvas.getByRole('textbox', { name: 'Note to the agent' })).toHaveFocus())
+    await userEvent.keyboard('{Escape}')
+    await expect(canvas.getByRole('checkbox', { name: 'Unit tests' })).toHaveFocus()
+    await userEvent.keyboard('3')
+    await waitFor(() => expect(canvas.getByRole('textbox', { name: 'Your answer' })).toHaveFocus())
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Your answer' }), 'Accessibility audit')
+    await userEvent.keyboard('{Escape}1')
+    await expect(canvas.getByRole('textbox', { name: 'Your answer' })).toHaveValue('Accessibility audit')
+    await expect(canvas.getByRole('checkbox', { name: 'Unit tests' })).toBeChecked()
+    await userEvent.click(canvas.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(canvas.getByRole('textbox', { name: 'Your answer' })).toHaveFocus())
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Your answer' }), 'A release ready for review.')
+    await userEvent.click(canvas.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Submit' })).toHaveFocus())
+    await expect(canvas.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-current', 'step')
+    await expect(args.onDecline).not.toHaveBeenCalled()
+    await expect(args.onSubmit).not.toHaveBeenCalled()
+  },
+}
+export const ToolQuestions: Story = {
+  render: args => <>
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'singular', callId: 'singular', name: 'ask_user', input: { question: 'Choose a sample size.', options: ['Four rows', 'Eight rows'] }, status: 'running', callSeen: true, at: '2026-10-11T15:40:00Z' }} onOpenTerminal={args.onOpenTerminal} />
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'settled-batch', callId: 'settled-batch', name: 'ask', input: { questions: [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] }, { id: 'checks', question: 'Which checks?', options: [{ label: 'Unit' }, { label: 'Browser' }], multi: true }] }, result: { content: { details: { results: [{ id: 'db', selectedOptions: ['SQLite'], note: 'Keep it local' }, { id: 'checks', selectedOptions: ['Browser'], customInput: 'Accessibility', timedOut: true }] } }, isError: false, at: '2026-10-11T15:41:00Z' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'interrupted-singular', callId: 'interrupted-singular', name: 'ask_user', input: { question: 'Choose a sample size.', options: ['Four rows', 'Eight rows'] }, status: 'interrupted', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
+  </>,
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('radio', { name: 'Four rows' })).toBeVisible()
+    await expect(canvas.getByRole('radio', { name: 'Eight rows' })).toBeVisible()
+    await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
+    await expect(canvas.getAllByText('SQLite')[0]).toBeVisible()
+    await expect(canvas.getByText(/Accessibility/)).toBeVisible()
+    await expect(canvas.getByText(/auto-selected/)).toBeVisible()
+    await expect(canvas.getByText('Interrupted before an answer was recorded.')).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Open terminal' }))
+    await expect(args.onOpenTerminal).toHaveBeenCalledTimes(1)
+    await expect(args.onSubmit).not.toHaveBeenCalled()
+  },
+}
+export const KeyboardWalkLight440: Story = { ...KeyboardWalk, parameters: { scheme: 'light', width: 440 } }
+export const KeyboardWalkDark1440: Story = { ...KeyboardWalk, parameters: { scheme: 'dark', width: 1440 } }
+export const KeyboardWalkLight1440: Story = { ...KeyboardWalk, parameters: { scheme: 'light', width: 1440 } }
+export const ToolQuestionsLight440: Story = { ...ToolQuestions, parameters: { scheme: 'light', width: 440 } }
+export const ToolQuestionsDark1440: Story = { ...ToolQuestions, parameters: { scheme: 'dark', width: 1440 } }
+export const ToolQuestionsLight1440: Story = { ...ToolQuestions, parameters: { scheme: 'light', width: 1440 } }
 export const NegativeControlsLight1440: Story = { ...NegativeControls, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })

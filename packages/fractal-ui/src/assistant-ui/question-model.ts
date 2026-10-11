@@ -61,6 +61,8 @@ export type QuestionState =
   | { readonly _tag: 'cancelled'; readonly reason: string; readonly at: string }
   | { readonly _tag: 'failed'; readonly error: string }
   | { readonly _tag: 'chat-redirected'; readonly message: string; readonly at: string }
+  /** A settled source call without recorded answer facts must not invent an outcome. */
+  | { readonly _tag: 'unrecorded'; readonly reason: string }
 
 export interface QuestionRequestView {
   readonly id: string
