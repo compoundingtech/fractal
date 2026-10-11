@@ -17988,6 +17988,7 @@ impl Store {
                 | "work.claimed"
                 | "work.renewed"
                 | "work.progress"
+                | "work.nudged"
                 | "work.submitted"
                 | "work.failed"
                 | "work.released"
@@ -36541,6 +36542,7 @@ agent "test/empty" { command "true" }
         assert!(Store::simple_replication_kind("work.renewed"));
         assert!(Store::simple_replication_kind("work.claimed"));
         assert!(Store::simple_replication_kind("work.progress"));
+        assert!(Store::simple_replication_kind(WORK_NUDGED_KIND));
         assert!(!Store::simple_replication_kind("work.unknown"));
         assert!(!Store::simple_replication_kind("mission.published"));
         let store = Store::open_memory("node").unwrap();
@@ -41138,6 +41140,183 @@ version 2
             controller.step_run(&step).unwrap().unwrap().status,
             "verifying"
         );
+    }
+
+    #[test]
+    fn work_nudged_operations_are_incremental_in_opposite_arrival_and_batch_orders() {
+        fn nudge(store: &Store, step: &str, key: &str) -> ClaimRecord {
+            store.append_claim(&ClaimInput {
+                subject: step.into(),
+                kind: WORK_NUDGED_KIND.into(),
+                actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([
+                    ("attempt".into(), Value::from(1)),
+                    ("agent".into(), Value::String("agent/worker.one".into())),
+                    ("message".into(), Value::String("message/invented-nudge".into())),
+                    ("idle_since_unix_ms".into(), Value::String("1".into())),
+                    ("reason".into(), Value::String(key.into())),
+                    ("waits".into(), json!([])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            }).unwrap()
+        }
+        fn stored_step(store: &Store, step: &str) -> String {
+            store.readers.get().query_row(
+                "SELECT json_array(status,attempt,worker_reported,lease_owner,
+                 lease_incarnation,lease_expires_at_unix_ms,blocked_reason,updated_at_unix_ms)
+                 FROM step_runs WHERE subject=?1",
+                [step], |row| row.get(0),
+            ).unwrap()
+        }
+        for split_worker_batches in [false, true] {
+            let (controller, worker, step) = replicated_step_pair();
+            worker_work(&worker, &step, "claim", None, "nudge-claim");
+            assert!(!projection_replayed(&controller, "worker", &worker));
+            assert!(worker.project_replication_backlog().unwrap());
+            // These private nodes sign the new nudge claims through the normal sealer.
+            for source in [&controller, &worker] {
+                source.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+            }
+            let left = Store::open_memory("left").unwrap();
+            let right = Store::open_memory("right").unwrap();
+            for follower in [&left, &right] {
+                receive_and_project(follower, "controller",
+                    &exchange_from(&controller, &ReplicationInventory::default()));
+            }
+            for store in [&controller, &worker, &left, &right] {
+                assert!(!store.replication_projection_needs_recovery().unwrap(),
+                    "initialize healthy projections before the nudge exchange");
+            }
+            let before = stored_step(&controller, &step);
+            let before_index = left.index().unwrap();
+            let local = nudge(&controller, &step, "nudge-controller");
+            let foreign_first = nudge(&worker, &step, "nudge-worker-first");
+            // Seal a first worker batch before admitting a second. One follower may
+            // project the first batch separately; the other receives both together.
+            let first_exchange = exchange_from(&worker, &left.replication_inventory().unwrap());
+            if split_worker_batches {
+                FULL_REPLAYS.with(|count| count.set(0));
+                receive_and_project(&left, "worker", &first_exchange);
+                assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+            }
+            let foreign_second = nudge(&worker, &step, "nudge-worker-second");
+            for source in [&controller, &worker] {
+                FULL_REPLAYS.with(|count| count.set(0));
+                assert!(source.project_replication_backlog().unwrap());
+                assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "local nudge");
+            }
+            // The right follower sees worker batches before the controller's
+            // nudge, the left sees the controller before the remaining worker data.
+            assert!(!projection_replayed(&right, "worker", &worker));
+            assert!(!projection_replayed(&right, "controller", &controller));
+            assert!(!projection_replayed(&left, "controller", &controller));
+            assert!(!projection_replayed(&left, "worker", &worker));
+            assert!(!left.claims_since_only_quiet_notifications(before_index).unwrap(),
+                "a nudge must retain the existing receive wake classification");
+            let nudges = [&local, &foreign_first, &foreign_second];
+            let latest = nudges.iter().map(|claim| claim.accepted_at_unix_ms).max().unwrap();
+            // Both arrival orders must use identical canonical authority.
+            let left_connection = left.readers.get();
+            let right_connection = right.readers.get();
+            for claim in &nudges {
+                assert_eq!(canonical::claim_key(&left_connection, &claim.id).unwrap(),
+                    canonical::claim_key(&right_connection, &claim.id).unwrap());
+            }
+            drop(left_connection);
+            drop(right_connection);
+            let mut digests = Vec::new();
+            for follower in [&left, &right] {
+                assert_eq!(stored_step(follower, &step), before, "nudge is not a state transition");
+                let connection = follower.readers.get();
+                let mut view = follower.step_run(&step).unwrap().unwrap();
+                enrich_step_nudge_at(&connection, &mut view, latest).unwrap();
+                assert_eq!(view.nudged_at_unix_ms, Some(latest));
+                assert_eq!(follower.latest_nudge(&step).unwrap().unwrap().accepted_at_unix_ms, latest);
+                let rows = nudges.iter().map(|claim| {
+                    let (operation, _) = operation_parts(&claim.body).expect("durable operation");
+                    let signed: bool = connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM claim_signatures WHERE claim_id=?1)",
+                        [&claim.id], |row| row.get(0),
+                    ).unwrap();
+                    assert!(signed, "replicated nudge carries its stored signature");
+                    let row = operation_tx(&connection, operation).unwrap().unwrap();
+                    assert_eq!(row.2, "active");
+                    row
+                }).collect::<Vec<_>>();
+                drop(connection);
+                assert!(follower.operation_projection_drift().unwrap().is_empty());
+                let digest = graph_digest_of(follower);
+                follower.replay_replication_graph().unwrap();
+                assert_eq!(graph_digest_of(follower), digest, "full replay oracle");
+                assert_eq!(stored_step(follower, &step), before);
+                let connection = follower.readers.get();
+                let mut replayed_view = follower.step_run(&step).unwrap().unwrap();
+                enrich_step_nudge_at(&connection, &mut replayed_view, latest).unwrap();
+                assert_eq!(replayed_view.nudged_at_unix_ms, Some(latest));
+                for (claim, expected) in nudges.iter().zip(rows) {
+                    let (operation, _) = operation_parts(&claim.body).unwrap();
+                    assert_eq!(operation_tx(&connection, operation).unwrap().unwrap(), expected);
+                }
+                digests.push(digest);
+            }
+            assert_eq!(digests[0], digests[1]);
+        }
+    }
+
+    #[test]
+    fn work_nudged_incremental_guards_and_rollback_preserve_the_committed_frontier() {
+        for refusal in ["none", "malformed-operation", "operation-conflict", "unhealthy-projection"] {
+            let store = Store::open_memory("node").unwrap();
+            assert!(store.project_replication_backlog().unwrap());
+            let before = store.index().unwrap();
+            let digest = graph_digest_of(&store);
+            let mut connection = store.connection.lock().unwrap();
+            let transaction = connection.transaction().unwrap();
+            let frontier: u64 = transaction.query_row(
+                "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                [], |row| row.get(0),
+            ).unwrap();
+            let mut body = json!({"fields": {
+                "attempt": 1, "agent": "agent/worker.one", "message": "message/invented-nudge",
+                "idle_since_unix_ms": "1", "reason": "invented control", "waits": []
+            }, "_operation": {"id": "op/nudge-guard", "request_digest": "digest-a"}});
+            if refusal == "malformed-operation" {
+                body["_operation"] = json!({"id": "op/nudge-guard"});
+            }
+            let claim = append_claim_record_tx(&transaction, "node", "step-run/invented",
+                WORK_NUDGED_KIND, Some("daemon/runtime"), &body, &[], None).unwrap();
+            if refusal == "operation-conflict" {
+                transaction.execute(
+                    "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+                     VALUES ('op/nudge-guard','digest-b',?1,'active')", [&claim.id],
+                ).unwrap();
+            }
+            if refusal == "unhealthy-projection" {
+                transaction.execute("UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
+            }
+            let result = try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index).unwrap();
+            match result {
+                IncrementalProjection::Projected => {
+                    assert_eq!(refusal, "none");
+                    assert_eq!(operation_tx(&transaction, "op/nudge-guard").unwrap().unwrap().2, "active");
+                }
+                IncrementalProjection::Replay(reason)
+                | IncrementalProjection::ReplayWithContext { reason, .. } => assert_eq!(reason, refusal),
+            }
+            // A projection attempt never advertises the uncommitted index as good.
+            assert_eq!(transaction.query_row(
+                "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), frontier);
+            transaction.rollback().unwrap();
+            assert_eq!(operation_tx(&connection, "op/nudge-guard").unwrap(), None);
+            drop(connection);
+            assert_eq!(store.index().unwrap(), before);
+            assert_eq!(graph_digest_of(&store), digest);
+            assert!(!store.replication_projection_needs_recovery().unwrap());
+        }
     }
 
     #[test]
