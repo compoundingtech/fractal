@@ -6,10 +6,12 @@
 //! the same report as `GET /v1/client/request-latency` and sends it to `[observations.otlp]`.
 //!
 //! Every point carries bounded labels, all from `slo/targets.toml` or fixed words: `target`, the
-//! `series` inside it (`owner` or `remote` for a read target, `statement`, `read`, `write` or
-//! `writer_hold` for the store), the `window` (`1m`, `5m`, `1h`) and, for the latency gauge, the
-//! `stat` (`p50`, `p99`, `max`). The target figures go out beside them as `st_slo_target_ms` so one
-//! query can set what a host did against what it should.
+//! `series` inside it (`owner` or `remote` for a read target, `reported` for a latency a paired
+//! phone reported, `statement`, `read`, `write` or `writer_hold` for the store), the `window`
+//! (`1m`, `5m`, `1h`) and, for the latency gauge, the `stat` (`p50`, `p99`, `max`). The target
+//! figures go out beside them as `st_slo_target_ms` so one query can set what a host did against
+//! what it should. A phone's live share is a minimum, not a latency, and has its own gauges
+//! (`st_slo_live_share`, `st_slo_foreground_ms`, `st_slo_min_share_percent`).
 
 use std::time::Duration;
 
@@ -30,6 +32,9 @@ pub(super) fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Va
     let mut targets = Vec::new();
     let mut cpu = Vec::new();
     let mut cpu_max = Vec::new();
+    let mut live_share = Vec::new();
+    let mut foreground = Vec::new();
+    let mut min_share = Vec::new();
     let point = |value: f64, labels: &[(&str, &str)]| {
         json!({
             "timeUnixNano": time, "asDouble": value,
@@ -43,6 +48,23 @@ pub(super) fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Va
         let Some(name) = row["name"].as_str() else { continue };
         // A phone's reported minutes are another population from the daemon's own timings.
         let population = row["population"].as_str();
+        if population == Some("client-observed-foreground-ms") {
+            // Its count is foreground milliseconds and its target a minimum share, not a latency.
+            for window in WINDOWS {
+                let labels = [("target", name), ("window", window)];
+                let row = &row["windows"][window];
+                if let Some(ms) = row["foreground_ms"].as_f64() {
+                    foreground.push(point(ms, &labels));
+                }
+                if let Some(share) = row["live_share"].as_f64() {
+                    live_share.push(point(share, &labels));
+                }
+            }
+            if let Some(percent) = row["min_percent"].as_f64() {
+                min_share.push(point(percent, &[("target", name)]));
+            }
+            continue;
+        }
         let mut series = |series: &str, windows: &Value| {
             for window in WINDOWS {
                 let row = &windows[window];
@@ -94,7 +116,7 @@ pub(super) fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Va
             }
             "database" => {}
             _ => {
-                let owner = population.unwrap_or("owner");
+                let owner = if population.is_some() { "reported" } else { "owner" };
                 series(owner, &row["windows"]);
                 target(owner, "p99", &row["p99_ms"]);
                 if row["remote_windows"].is_object() {
@@ -135,6 +157,24 @@ pub(super) fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Va
             targets,
         ),
         gauge(
+            "st_slo_live_share",
+            "1",
+            "Share of a phone's reported foreground time that was live, over a rolling window of whole reported minutes",
+            live_share,
+        ),
+        gauge(
+            "st_slo_foreground_ms",
+            "ms",
+            "Foreground milliseconds the paired phones reported in a rolling window of whole reported minutes",
+            foreground,
+        ),
+        gauge(
+            "st_slo_min_share_percent",
+            "%",
+            "The minimum live share, in percent, a phone's foreground time should reach",
+            min_share,
+        ),
+        gauge(
             "st_slo_cpu_cores",
             "{core}",
             "Cores the daemon process used over a rolling window",
@@ -170,9 +210,16 @@ pub async fn run(exporter: OtlpExporter) {
     let mut failing = false;
     loop {
         tokio::time::sleep(INTERVAL).await;
-        let report = tokio::task::spawn_blocking(crate::api::request_latency_windows)
-            .await
-            .unwrap_or(Value::Null);
+        let report = match tokio::task::spawn_blocking(crate::api::request_latency_target_windows).await {
+            Ok(report) => report,
+            Err(error) => {
+                if !failing {
+                    failing = true;
+                    eprintln!("st3: reading the SLO windows for OpenTelemetry export failed: {error}");
+                }
+                continue;
+            }
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_millis() as u64);
@@ -238,6 +285,13 @@ mod tests {
                 "1m": {"cores": 0.4, "measured_seconds": 60}, "5m": {"cores": 0.3, "measured_seconds": 300},
                 "1h": {"cores": 0.2, "measured_seconds": 3600}}},
             {"name": "database", "max_live_gb": 5, "size": {"live_gb": 1.0}},
+            {"name": "ios-connect", "p99_ms": 1500, "population": "client-observed-latencies",
+             "windows": windows(20, 900.0, 0)},
+            {"name": "ios-live-share", "min_percent": 99, "population": "client-observed-foreground-ms",
+             "windows": {"1m": {"count": 60000, "over_target": 600, "over_target_share": 0.01,
+                 "foreground_ms": 60000, "live_ms": 59400, "live_share": 0.99},
+              "5m": {"count": 0, "over_target": 0, "over_target_share": 0.0, "foreground_ms": 0, "live_ms": 0, "live_share": null},
+              "1h": {"count": 0, "over_target": 0, "over_target_share": 0.0, "foreground_ms": 0, "live_ms": 0, "live_share": null}}},
         ]})
     }
 
@@ -271,6 +325,35 @@ mod tests {
     }
 
     #[test]
+    fn a_phone_latency_is_a_reported_series_and_its_live_share_has_gauges_of_its_own() {
+        let body = metrics("node-a", &report(), 1).unwrap();
+        let latency = points(&body, "st_slo_latency_ms");
+        assert_eq!(
+            find(latency, &[("target", "ios-connect"), ("series", "reported"), ("window", "1m"), ("stat", "p99")])["asDouble"],
+            900.0
+        );
+        assert_eq!(
+            find(points(&body, "st_slo_target_ms"), &[("target", "ios-connect"), ("series", "reported")])["asDouble"],
+            1500.0
+        );
+        // Foreground milliseconds are not sample counts, and a minimum is not a latency target.
+        for gauge in ["st_slo_samples", "st_slo_over_target_ratio", "st_slo_latency_ms", "st_slo_target_ms"] {
+            assert!(
+                !points(&body, gauge).iter().any(|point| label(point, "target") == Some("ios-live-share")),
+                "{gauge}"
+            );
+        }
+        let share = points(&body, "st_slo_live_share");
+        assert_eq!(share.len(), 1, "an empty window has no share");
+        assert_eq!(find(share, &[("target", "ios-live-share"), ("window", "1m")])["asDouble"], 0.99);
+        assert_eq!(
+            find(points(&body, "st_slo_foreground_ms"), &[("target", "ios-live-share"), ("window", "1m")])["asDouble"],
+            60000.0
+        );
+        assert_eq!(points(&body, "st_slo_min_share_percent")[0]["asDouble"], 99.0);
+    }
+
+    #[test]
     fn an_empty_window_reports_its_count_and_no_latency() {
         let body = metrics("node-a", &report(), 1).unwrap();
         let samples = points(&body, "st_slo_samples");
@@ -289,7 +372,9 @@ mod tests {
 
     #[test]
     fn the_live_report_names_every_target_in_the_targets_file() {
-        let body = metrics("node-a", &crate::api::request_latency_windows(), 1).unwrap();
+        let report = crate::api::request_latency_target_windows();
+        assert!(report.get("paths").is_none(), "the collector's read skips every path");
+        let body = metrics("node-a", &report, 1).unwrap();
         let samples = points(&body, "st_slo_samples");
         for latency in &crate::slo::targets().latency {
             assert!(
@@ -297,6 +382,12 @@ mod tests {
                 "{} is missing",
                 latency.name
             );
+        }
+        // A share target is a minimum on its own gauge, never a sample count.
+        let minimums = points(&body, "st_slo_min_share_percent");
+        for share in &crate::slo::targets().share {
+            assert!(minimums.iter().any(|point| label(point, "target") == Some(share.name.as_str())));
+            assert!(!samples.iter().any(|point| label(point, "target") == Some(share.name.as_str())));
         }
         for store in ["sql-statement", "transaction"] {
             assert!(samples.iter().any(|point| label(point, "target") == Some(store)), "{store}");

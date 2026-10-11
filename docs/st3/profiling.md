@@ -83,11 +83,15 @@ With `[observations.otlp]` set, the daemon also sends the windows to the collect
 as gauges, from a timer task that reads the same report as the request-latency read and does no
 work on a request path. A minute the collector refuses is dropped, not replayed; the collector
 holds the history. Each point carries `target`, `series` (`owner` or `remote` for a read target;
-`statement`, `read`, `write` or `writer_hold` for the store), `window` (`1m`, `5m`, `1h`) and, on
+`reported` for a latency paired phones reported; `statement`, `read`, `write` or `writer_hold` for
+the store), `window` (`1m`, `5m`, `1h`) and, on
 latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
 `st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
 figure from `slo/targets.toml`, so one query sets a host's number against its target),
-`st_slo_cpu_cores` and `st_slo_cpu_max_cores`. A window with no samples sends its count only.
+`st_slo_cpu_cores` and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
+phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
+`st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
+the targets, not every path's snapshot.
 
 `st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
 over their target in the last five minutes. A p99 target is missed in a window when more than 1%
