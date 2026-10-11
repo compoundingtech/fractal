@@ -14676,6 +14676,7 @@ async fn set_mission_run_report(
             &actor,
             request.report_to.as_deref(),
             request.stalled_after_ms,
+            request.report_stalls,
             request.report_completed,
             &request.idempotency_key,
         )

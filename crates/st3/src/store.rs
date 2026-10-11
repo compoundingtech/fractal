@@ -6502,17 +6502,19 @@ impl Store {
     }
 
     /// Change who a running run reports to, or clear it, as `missions start --report-to` would
-    /// have set it: the mission's own `stalled-after` and `report-completed` apply unless the
-    /// request names a limit. Only a person or the agent that requested the run may. It is a
-    /// claim of its own on the run, so the creation claim keeps what the run started with and a
+    /// have set it: the mission's own `stalled-after`, `report-stalls` and `report-completed`
+    /// apply unless the request names a limit or stall policy. Only a person or the agent that
+    /// requested the run may. It is a claim of its own on the run, so the creation claim keeps what the run started with and a
     /// repeated declaration of the run still compares with it. A request that changes nothing
     /// writes nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_mission_run_report(
         &self,
         run: &str,
         actor: &str,
         report_to: Option<&str>,
         stalled_after_ms: Option<u64>,
+        report_stalls: Option<bool>,
         report_completed: bool,
         idempotency_key: &str,
     ) -> Result<MissionRunReportView, St3Error> {
@@ -6523,10 +6525,10 @@ impl Store {
             return Ok(response);
         }
         match report_to {
-            None if stalled_after_ms.is_some() || report_completed => {
+            None if stalled_after_ms.is_some() || report_stalls.is_some() || report_completed => {
                 return Err(St3Error::new(
                     "report-without-recipient",
-                    "a stall limit or completion report needs a `report-to` agent",
+                    "a stall policy, limit or completion report needs a `report-to` agent",
                 ));
             }
             None => {}
@@ -6592,15 +6594,21 @@ impl Store {
                         .unwrap_or(crate::mission::DEFAULT_STALLED_AFTER_MS),
                     report_completed
                         || mission.as_ref().is_some_and(|mission| mission.report_completed),
+                    report_stalls.unwrap_or_else(|| {
+                        mission.as_ref().is_none_or(|mission| mission.report_stalls)
+                    }),
                 ))
             }
         };
         let changed = desired != current_run_report_tx(&transaction, &current.subject)?;
         if changed {
             let mut fields = serde_json::Map::new();
-            if let Some((report_to, stalled_after_ms, completed)) = &desired {
+            if let Some((report_to, stalled_after_ms, completed, stalls)) = &desired {
                 fields.insert("report_to".into(), json!(report_to));
                 fields.insert("stalled_after_ms".into(), json!(stalled_after_ms));
+                if !*stalls {
+                    fields.insert("report_stalls".into(), json!(false));
+                }
                 if *completed {
                     fields.insert("report_completed".into(), json!(true));
                 }
@@ -6618,16 +6626,17 @@ impl Store {
             )
             .map_err(internal)?;
         }
-        let (report_to, stalled_after_ms, report_completed) = match desired {
-            Some((report_to, stalled_after_ms, completed)) => {
-                (Some(report_to), Some(stalled_after_ms), completed)
+        let (report_to, stalled_after_ms, report_completed, report_stalls) = match desired {
+            Some((report_to, stalled_after_ms, completed, stalls)) => {
+                (Some(report_to), Some(stalled_after_ms), completed, stalls)
             }
-            None => (None, None, false),
+            None => (None, None, false, true),
         };
         let view = MissionRunReportView {
             run: current.subject,
             report_to,
             stalled_after_ms,
+            report_stalls,
             report_completed,
             changed,
         };
@@ -18689,7 +18698,7 @@ fn awaited_mission_run_tx(connection: &Connection, run: &str) -> Result<Option<S
 fn requested_run_report(
     connection: &Connection,
     creation: &crate::model::MissionRunCreation,
-) -> Result<Option<(String, bool)>, St3Error> {
+) -> Result<Option<(String, bool, bool)>, St3Error> {
     let mission = mission_revision_spec_tx(connection, &creation.mission, &creation.revision)?;
     Ok(mission.and_then(|mission| {
         resolved_run_report(
@@ -18705,17 +18714,24 @@ fn requested_run_report(
 fn mission_run_report_tx(
     connection: &Connection,
     run_id: &str,
-) -> Result<Option<(String, bool)>, St3Error> {
+) -> Result<Option<(String, bool, bool)>, St3Error> {
     connection
         .query_row(
             "SELECT json_extract(body, '$.fields.report_to'),
-                    COALESCE(json_extract(body, '$.fields.report_completed'), 0)
+                    COALESCE(json_extract(body, '$.fields.report_completed'), 0),
+                    COALESCE(json_extract(body, '$.fields.report_stalls'), 1)
              FROM claims WHERE subject=?1 AND kind='mission-run.created' LIMIT 1",
             [format!("mission-run/{run_id}")],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
         )
         .optional()
-        .map(|row| row.and_then(|(report_to, completed)| Some((report_to?, completed))))
+        .map(|row| row.and_then(|(report_to, completed, stalls)| Some((report_to?, completed, stalls))))
         .map_err(internal)
 }
 
@@ -18725,7 +18741,7 @@ pub(crate) const RUN_REPORT_KIND: &str = "mission-run.report-to";
 
 /// The agent, stall limit and completion report that a report claim or a creation claim
 /// records, or `None` when it names no agent.
-pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool)> {
+pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool, bool)> {
     let fields = body.get("fields").unwrap_or(body);
     Some((
         fields.get("report_to")?.as_str()?.to_owned(),
@@ -18737,6 +18753,10 @@ pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool)> {
             .get("report_completed")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        fields
+            .get("report_stalls")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     ))
 }
 
@@ -18744,7 +18764,7 @@ pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool)> {
 fn current_run_report_tx(
     transaction: &Transaction<'_>,
     run: &str,
-) -> Result<Option<(String, u64, bool)>, St3Error> {
+) -> Result<Option<(String, u64, bool, bool)>, St3Error> {
     let claim = match latest_claim_of_kind_tx(transaction, run, RUN_REPORT_KIND)? {
         Some(claim) => Some(claim),
         None => latest_claim_of_kind_tx(transaction, run, "mission-run.created")?,
@@ -25717,11 +25737,12 @@ fn resolved_run_report(
     mission: &MissionSpec,
     report_to: Option<&str>,
     report_completed: bool,
-) -> Option<(String, bool)> {
+) -> Option<(String, bool, bool)> {
     let report_to = report_to.or(mission.report_to.as_deref())?;
     Some((
         report_to.to_owned(),
         report_completed || mission.report_completed,
+        mission.report_stalls,
     ))
 }
 
@@ -25733,7 +25754,8 @@ fn add_run_report_fields(
     report_to: Option<&str>,
     report_completed: bool,
 ) {
-    let Some((report_to, completed)) = resolved_run_report(mission, report_to, report_completed)
+    let Some((report_to, completed, stalls)) =
+        resolved_run_report(mission, report_to, report_completed)
     else {
         return;
     };
@@ -25744,6 +25766,9 @@ fn add_run_report_fields(
             .stalled_after_ms
             .unwrap_or(crate::mission::DEFAULT_STALLED_AFTER_MS)
     );
+    if !stalls {
+        fields["report_stalls"] = json!(false);
+    }
     if completed {
         fields["report_completed"] = json!(true);
     }
@@ -42407,6 +42432,7 @@ version 2
                 "agent/ops/stranger",
                 Some("agent/ops/watcher"),
                 None,
+                None,
                 false,
                 "stranger",
             )),
@@ -42417,6 +42443,7 @@ version 2
                 run,
                 "person/operator",
                 Some("person/operator"),
+                None,
                 None,
                 false,
                 "person-reporter",
@@ -42429,6 +42456,7 @@ version 2
                 "person/operator",
                 None,
                 Some(60_000),
+                None,
                 false,
                 "limit-alone",
             )),
@@ -42442,6 +42470,7 @@ version 2
                 run,
                 "agent/ops/owner",
                 Some("agent/ops/watcher"),
+                None,
                 None,
                 false,
                 "owner-sets",
@@ -42458,6 +42487,7 @@ version 2
                 "person/operator",
                 Some("agent/ops/watcher"),
                 None,
+                None,
                 false,
                 "person-repeats",
             )
@@ -42470,6 +42500,7 @@ version 2
                 "person/operator",
                 Some("agent/ops/watcher"),
                 Some(60 * 60_000),
+                None,
                 true,
                 "person-limits",
             )
@@ -42483,12 +42514,12 @@ version 2
         assert_eq!(latest.actor.as_deref(), Some("person/operator"));
         assert_eq!(
             run_report_fields(&latest.body),
-            Some(("agent/ops/watcher".into(), 60 * 60_000, true))
+            Some(("agent/ops/watcher".into(), 60 * 60_000, true, true))
         );
 
         // Clearing reports to nobody, even though the mission names a reporter.
         let cleared = store
-            .set_mission_run_report(run, "agent/ops/owner", None, None, false, "owner-clears")
+            .set_mission_run_report(run, "agent/ops/owner", None, None, None, false, "owner-clears")
             .unwrap();
         assert!(cleared.changed);
         assert_eq!(cleared.report_to, None);
@@ -42508,6 +42539,136 @@ version 2
         assert_eq!((still.id, still.body), (created.id, created.body));
         let (_, redeclared) = declare();
         assert!(redeclared.blockers.is_empty(), "{:?}", redeclared.blockers);
+    }
+
+    #[test]
+    fn report_stalls_policy_survives_replication_replay_and_legacy_records() {
+        let store = Store::open_memory("source").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mission = publish_mission(
+            &store,
+            r#"version 2
+mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#false {
+  concurrent-runs
+  goal "Wait until retirement."
+  step "retire" { agentless; gate "retired" { field "state" "mission/parent" is "retired" } }
+}"#,
+            "muted-mission",
+        );
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: mission.id.clone(),
+                revision: Some(mission.revision.clone()),
+                workspace: workspace.path().to_string_lossy().into_owned(),
+                requester: Some("person/operator".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "muted-parent".into(),
+            })
+            .unwrap();
+        let created = store
+            .latest_claim(&run.subject, Some("mission-run.created"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.body["fields"]["report_stalls"], false);
+        assert_eq!(
+            run_report_fields(&created.body),
+            Some(("agent/ops/watcher".into(), 1_800_000, false, false))
+        );
+        // Omission inherits the pinned mission revision; it is not an implicit re-enable.
+        let inherited = store
+            .set_mission_run_report(
+                &run.subject,
+                "person/operator",
+                Some("agent/ops/watcher"),
+                None,
+                None,
+                false,
+                "inherits-muted",
+            )
+            .unwrap();
+        assert!(!inherited.changed);
+        assert!(!inherited.report_stalls);
+        for policy in [Some(false), Some(true)] {
+            assert_eq!(
+                store
+                    .set_mission_run_report(
+                        &run.subject,
+                        "person/operator",
+                        None,
+                        None,
+                        policy,
+                        false,
+                        &format!("no-recipient-{policy:?}")
+                    )
+                    .unwrap_err()
+                    .code,
+                "report-without-recipient"
+            );
+        }
+        let replica = Store::open_memory("replica").unwrap();
+        replica
+            .import_replication("source", &store.export_replication(0).unwrap())
+            .unwrap();
+        replica.rebuild_claim_projections().unwrap();
+        assert!(
+            !replica
+                .mission_spec("parent", Some(&mission.revision))
+                .unwrap()
+                .unwrap()
+                .report_stalls
+        );
+        let replayed = replica
+            .latest_claim(&run.subject, Some("mission-run.created"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run_report_fields(&replayed.body),
+            run_report_fields(&created.body)
+        );
+        let enabled = store
+            .set_mission_run_report(
+                &run.subject,
+                "person/operator",
+                Some("agent/ops/watcher"),
+                None,
+                Some(true),
+                false,
+                "explicit-enable",
+            )
+            .unwrap();
+        assert!(enabled.report_stalls);
+        replica
+            .import_replication("source", &store.export_replication(0).unwrap())
+            .unwrap();
+        replica.rebuild_claim_projections().unwrap();
+        let latest = replica
+            .latest_claim(&run.subject, Some(RUN_REPORT_KIND))
+            .unwrap()
+            .unwrap();
+        assert!(latest.body["fields"].get("report_stalls").is_none());
+        assert_eq!(
+            run_report_fields(&latest.body),
+            Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+        );
+        // Old client responses, requests and creation/change claims still mean stalls=true.
+        let old_view = serde_json::json!({"run": run.subject, "report_to": "agent/ops/watcher",
+            "stalled_after_ms": 1_800_000, "changed": false});
+        let view: MissionRunReportView = serde_json::from_value(old_view).unwrap();
+        assert!(view.report_stalls);
+        let old_request = serde_json::json!({"actor": "person/operator",
+            "report_to": "agent/ops/watcher", "idempotency_key": "old-client"});
+        let request: crate::model::MissionRunReportRequest =
+            serde_json::from_value(old_request.clone()).unwrap();
+        assert_eq!(request.report_stalls, None);
+        let mut invalid = old_request;
+        invalid["report_stalls"] = json!("false");
+        assert!(serde_json::from_value::<crate::model::MissionRunReportRequest>(invalid).is_err());
+        let old_claim = json!({"fields": {"report_to": "agent/ops/watcher"}});
+        assert_eq!(
+            run_report_fields(&old_claim),
+            Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+        );
     }
 
     #[test]
