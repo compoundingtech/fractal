@@ -26455,7 +26455,7 @@ mission "garden" state="ready" {
             .find(|step| step.step == "legacy")
             .unwrap()
             .subject;
-        for subject in [step, legacy_step] {
+        let claim_step = |subject: &str| {
             current.set_step_state(subject, "ready", None).unwrap();
             current
                 .work_action(
@@ -26471,7 +26471,8 @@ mission "garden" state="ready" {
                     },
                 )
                 .unwrap();
-        }
+        };
+        claim_step(step);
         current
             .work_action(
                 step,
@@ -26490,6 +26491,7 @@ mission "garden" state="ready" {
             .latest_claim(step, Some("work.submitted"))
             .unwrap()
             .unwrap();
+        claim_step(legacy_step);
         let legacy = current
             .append_claim(&ClaimInput {
                 subject: legacy_step.clone(),
