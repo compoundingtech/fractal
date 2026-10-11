@@ -1536,8 +1536,15 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             assert!(published >= requested, "fresh read served an older cut: {span}");
         }
     }
+    // The seeded undeclared seat appears only in history. Await that one-card cold
+    // publication, not the startup diagnostic reader's unadmitted empty current roster.
+    let cold_publication = daemon.await_span(root.path(), |span| {
+        span["name"] == "st.roster.rebuild"
+            && string_attribute(span, "st.roster.invalidation") == Some("cold")
+            && int_attribute(span, "st.roster.covered") == Some(1)
+    });
     let spans = daemon.captured_spans(root.path());
-    // The refresher's first publication is a detached cold rebuild; it carries the closed
+    // The refresher's history publication is a detached cold rebuild; it carries the closed
     // invalidation reason, bounded counts and synchronous phase wall/CPU time on the root.
     let rebuilds: Vec<_> = spans.iter().filter(|span| span["name"] == "st.roster.rebuild").collect();
     assert!(!rebuilds.is_empty(), "published roster requires a rebuild root: {spans:?}");
@@ -1552,8 +1559,7 @@ async fn daemon_request_id_and_roster_stages_match_response() {
             assert!(int_attribute(rebuild, count).is_some_and(|value| value >= 0), "{count}: {rebuild}");
         }
     }
-    let cold = rebuilds.iter().find(|span| string_attribute(span, "st.roster.invalidation") == Some("cold"))
-        .unwrap_or_else(|| panic!("first publication must be a cold rebuild: {rebuilds:?}"));
+    let cold = &cold_publication;
     // The refresher builds publications under admission; the root names that holder.
     assert_eq!(string_attribute(cold, "st.roster.admission.holder_class"), Some("refresher"), "{cold}");
     assert!(int_attribute(cold, "st.roster.admission.id").is_some(), "{cold}");

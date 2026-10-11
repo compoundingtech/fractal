@@ -3275,11 +3275,16 @@ impl Store {
                 | "work.claimed" | "work.renewed" | "work.progress" | "work.submitted"
                 | "work.failed" | "work.released" | "work.extended"
                 | "work.person-asked" | "work.person-done" | "work.person-cancelled");
-            if owner || step {
+            // Any other kind on a run, generation or step (a fault, a nudge): a card sees these
+            // subjects only through its owner and its queue, so refold the agents they own or
+            // queue, and every card's queue and membership, never the whole fleet.
+            let other = !owner && !step && ["mission-run/", "run-generation/", "step-run/"]
+                .iter().any(|prefix| subject.starts_with(prefix));
+            if owner || step || other {
                 delta.queues = true;
-                delta.membership |= owner;
+                delta.membership |= owner || other;
                 owners.insert(subject.clone());
-                if step {
+                if step || (other && subject.starts_with("step-run/")) {
                     let mut agents = connection.prepare_cached(
                         "SELECT assignee,lease_owner FROM step_runs WHERE subject=?1",
                     )?;
