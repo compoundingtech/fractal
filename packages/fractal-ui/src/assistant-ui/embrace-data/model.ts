@@ -24,6 +24,13 @@ export type ToolResult = {
 export type RunStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled'
 export type NoticeKind = 'error' | 'redaction' | 'truncation' | 'event' | 'unknown'
 
+/** Typed harness facts; app-owned recognition never runs in the kit. */
+export type HarnessNotice =
+  | { readonly _tag: 'SubagentResult'; readonly taskId: string; readonly agent: string; readonly status: string; readonly duration: string; readonly payload: string; readonly raw: string; readonly lines?: number; readonly size?: string; readonly fullOutput?: string; readonly abortReason?: string; readonly error?: string; readonly mergeSummary?: string }
+  | { readonly _tag: 'Irc'; readonly from: string; readonly to?: string; readonly replyTo?: string; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'BackgroundJob'; readonly jobId: string; readonly label?: string; readonly state: 'completed'; readonly duration?: string; readonly payload: string; readonly raw: string }
+  | { readonly _tag: 'Compaction'; readonly payload: string; readonly raw: string }
+
 export type ConversationItem =
   | {
       readonly _tag: 'Text'
@@ -104,11 +111,12 @@ export type ConversationItem =
   | {
       readonly _tag: 'Event'
       readonly id: string
-      readonly kind: 'resource-observed' | 'harness-message' | 'subagent-result'
+      readonly kind: 'resource-observed' | 'harness-message' | 'subagent-result' | 'irc' | 'background-job' | 'compaction'
       readonly title: string
       readonly text: string
       readonly sender: Sender
       readonly data: unknown
+      readonly notice?: HarnessNotice
       readonly at?: string
     }
   | {
