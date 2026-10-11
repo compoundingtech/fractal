@@ -20,4 +20,5 @@ export const deliveryStyles = stylex.create({
   unavailable: { color: ink.fgMuted, fontWeight: t.weightRegular, cursor: 'default' },
   hiddenReason: { position: 'absolute', width: g.hairline, height: g.hairline, padding: 0, margin: '-1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
   tooltip: { maxWidth: g.tooltipMax, padding: s.md, borderRadius: r.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, zIndex: 10 },
+  quiet: { paddingBlock: s.md, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, minWidth: 0 },
 })

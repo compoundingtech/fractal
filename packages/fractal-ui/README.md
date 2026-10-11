@@ -43,7 +43,9 @@ Background exit chips use only the reported exit fact. An absent exit has no chi
 
 Harness updates preserve each job's mounted identity, focus, open JSON nodes and terminal page. Disclosure tracks the last observed state alongside the local open decision, so a newly arriving failure opens without remounting the card. Pagination controls stay mounted and keyboard-reachable at the first and last page, with an accessible boundary reason.
 
-These components replace the old batch notice, `HarnessNotice.SubagentResult`, and background-result notice presentations in the consuming application's dispatcher; the dispatcher is not present on this branch.
+The q106 explore story, **Fractal / Explore / Harness event weight**, includes all four production components and their semantic weight classes in both B1 quiet-row and B2 compact-card treatments, with named 440/1440 light/dark stories. The delivery group and result default to cards, background jobs default to rows, and the terminal tail stays a literal leaf. An explicit `weight` on the card/row components supports the comparison without a story-only replacement.
+
+Application adapters map the old batch notice, `HarnessNotice.SubagentResult`, and background-result notices to these typed contracts. String-payload notices do not provide the schema facts, lifecycle or navigation capability needed by a result card; the adapter owns that normalization.
 
 ## Families
 
