@@ -1340,7 +1340,7 @@ export type ConversationHeaderEncoded = typeof ConversationHeader.Encoded
 export const Device = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": optionalKey(AssistantMinimalReadMode), "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": Id, "policy_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "principal": optionalKey(Schema.Never), "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": optionalKey(Schema.Never), "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp }),
   Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": AssistantMinimalReadMode, "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal, "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": AssistantSenderClass, "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp })
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("grant_kind")).annotate({ identifier: "Device" }))()
+], { mode: "oneOf" }).annotate({ identifier: "Device" }))()
 export type Device = typeof Device.Type
 export type DeviceEncoded = typeof Device.Encoded
 
@@ -2855,7 +2855,7 @@ export type PairedSessionEncoded = typeof PairedSession.Encoded
 export const PairingChallenge = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))), "expires_at": Timestamp, "grant_expires_at": optionalKey(Schema.Never), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "kind": Schema.Literal("pairing-challenge"), "minimal_read_mode": optionalKey(Schema.Never), "pairing_id": Id, "person_root_fingerprint": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^sha256:[A-Za-z0-9_-]{43}$", "u")))), "policy_revision": optionalKey(Schema.Never), "principal": optionalKey(Schema.Never) }),
   Schema.Struct({ "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))), "expires_at": Timestamp, "grant_expires_at": Timestamp, "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "kind": Schema.Literal("pairing-challenge"), "minimal_read_mode": AssistantMinimalReadMode, "pairing_id": Id, "person_root_fingerprint": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal })
-], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("grant_kind")).annotate({ identifier: "PairingChallenge" }))()
+], { mode: "oneOf" }).annotate({ identifier: "PairingChallenge" }))()
 export type PairingChallenge = typeof PairingChallenge.Type
 export type PairingChallengeEncoded = typeof PairingChallenge.Encoded
 

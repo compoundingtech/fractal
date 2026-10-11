@@ -131,7 +131,7 @@ pub(super) async fn complete(state: &AppState, id: &str, request: &PairingComple
     let result = complete_inner(state, id, request, transport).await;
     if !matches!(&result, Ok(None)) {
         let actor = result.as_ref().ok().and_then(Option::as_ref)
-            .and_then(|Json(value)| value["session_actor"].as_str()).unwrap_or("client/pairing/completion");
+            .and_then(|Json(value)| value["session_actor"].as_str()).unwrap_or("custom/client/pairing-completion");
         audit(state, "complete", actor, transport, Some(id), &result)?;
     }
     result
@@ -391,7 +391,7 @@ mod tests {
     async fn paired(state: &AppState) -> Value {
         let Json(challenge) = begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), request()).await.unwrap();
         let request: PairingComplete = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
-            "code":challenge["code"],"device_public_key":hex::encode([7_u8;32])})).unwrap();
+            "code":challenge["code"],"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
         complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
                  &request, "fabric-loopback").await.unwrap().unwrap().0
     }
@@ -429,7 +429,7 @@ mod tests {
         let root=tempfile::tempdir().unwrap(); let state1=state(root.path()); let paired1=paired(&state1).await;
         let digest=credential_digest(paired1["credential"].as_str().unwrap());
         let id=paired1["grant"]["id"].as_str().unwrap().to_owned();
-        revoke(State(state1.clone()),Extension(ClientSession::local(Some(ISSUER)).unwrap()),AxumPath(id)).await.unwrap();
+        let _ = revoke(State(state1.clone()),Extension(ClientSession::local(Some(ISSUER)).unwrap()),AxumPath(id)).await.unwrap();
         assert!(authenticate(&state(root.path()),&digest,"fabric-loopback").is_err());
         let paired2=paired(&state1).await; let granted=latest(&state1,&subject(paired2["grant"]["id"].as_str().unwrap()).unwrap(),GRANTED).unwrap().unwrap();
         let mut expired=fields(&granted).unwrap().clone(); expired["expires_at_unix_ms"]=json!(1);
@@ -441,12 +441,17 @@ mod tests {
         let root=tempfile::tempdir().unwrap(); let state=state(root.path());
         let Json(challenge)=begin(state.clone(),ClientSession::local(Some(ISSUER)).unwrap(),request()).await.unwrap();
         let value=json!({"api_version":CLIENT_API_VERSION,"code":challenge["code"],
-            "device_public_key":hex::encode([8_u8;32])});
+            "device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([8_u8;32])});
         let mut escalated=value.clone(); escalated["scopes"]=json!(["control.messages"]);
         assert!(serde_json::from_value::<PairingComplete>(escalated).is_err());
-        let request=serde_json::from_value(value).unwrap();
+        let request: PairingComplete=serde_json::from_value(value).unwrap();
         let id=challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
-        complete(&state,id,&request,"fabric-loopback").await.unwrap().unwrap();
+        let invalid_key = PairingComplete {
+            api_version: request.api_version.clone(), code: request.code.clone(),
+            device_public_key: hex::encode([8_u8; 32]), key_storage: None,
+        };
+        assert_eq!(complete(&state, id, &invalid_key, "fabric-loopback").await.unwrap_err().code, "validation-failed");
+        let _ = complete(&state,id,&request,"fabric-loopback").await.unwrap().unwrap();
         assert_eq!(complete(&state,id,&request,"fabric-loopback").await.unwrap_err().status,StatusCode::FORBIDDEN);
     }
     #[tokio::test]

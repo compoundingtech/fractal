@@ -382,6 +382,15 @@ impl Registry {
                 "a subject needs a non-empty path after its registered family",
             ));
         }
+        if spec.family == "assistant" && subject != "assistant/chatgpt" {
+            let grant = subject.strip_prefix("assistant/chatgpt/session/assistant-grant/");
+            if !grant.is_some_and(|id| id.len() == 24 && id.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+                return Err(error(
+                    "invalid-claim-subject",
+                    "an assistant subject must be assistant/chatgpt or its exact grant session",
+                ));
+            }
+        }
         if spec.family == "custom" {
             let parts = subject.split('/').collect::<Vec<_>>();
             if parts.len() < 3 || !parts[1..].iter().all(|part| valid_identifier_part(part)) {
@@ -820,6 +829,12 @@ fn build_registry() -> Registry {
             false,
         ),
         ("person", "person/IDENTITY", "A human actor.", false),
+        (
+            "assistant",
+            "assistant/chatgpt[/session/assistant-grant/ID]",
+            "An external assistant principal or its grant-bound audit session, never a person.",
+            false,
+        ),
         (
             "external",
             "external/PROVIDER/KIND/IDENTITY",
@@ -4327,6 +4342,9 @@ mod tests {
     #[test]
     fn subject_paths_and_file_subjects_are_strict() {
         for invalid in [
+            "assistant/other",
+            "assistant/chatgpt/session/person/operator",
+            "assistant/chatgpt/session/assistant-grant/not-a-grant",
             "agent/",
             "agent/run//worker",
             "file/node/tmp/example",
@@ -4339,6 +4357,8 @@ mod tests {
         registry()
             .validate_subject("file/node:/tmp/example")
             .unwrap();
+        registry().validate_subject("assistant/chatgpt").unwrap();
+        registry().validate_subject("assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567").unwrap();
     }
 
     #[test]
