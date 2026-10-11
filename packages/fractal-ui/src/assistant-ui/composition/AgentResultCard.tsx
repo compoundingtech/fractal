@@ -24,13 +24,14 @@ function factLabel(fact: ResultFact): string {
     case 'Count': return `${fact.value} ${fact.label}`
   }
 }
-export function AgentResultCard({ result, expanded = false }: { readonly result: AgentResultData; readonly expanded?: boolean }) {
+export function AgentResultCard({ result, expanded = false, compact = false }: { readonly result: AgentResultData; readonly expanded?: boolean; readonly compact?: boolean }) {
   const [open, setOpen] = React.useState(() => agentResultNeedsExpansion(result))
   const [rawOpen, setRawOpen] = React.useState(false)
   const visible = expanded || open
   const state = result.state
   const excerpt = state._tag === 'Failed' ? state.error : state._tag === 'Cancelled' || state._tag === 'Aborted' ? state.reason : result.excerpt
   const lifecycle = result.lifecycle._tag === 'Stopped' ? `Stopped${result.lifecycle.resumable ? ' · resumable' : ''}` : result.lifecycle._tag === 'Isolated' ? 'Ran isolated' : result.lifecycle._tag === 'Submitted' ? 'Result submitted' : result.lifecycle._tag
+  if (compact && !visible) return <article data-testid="agent-result" data-result-state={state._tag} {...stylex.props(styles.row)}><Button aria-label="Show result" aria-expanded={false} onPress={() => setOpen(true)} {...stylex.props(styles.button, styles.summary)}><span aria-hidden="true">◈</span><strong>{result.name}</strong>{result.agentKind && <span>{result.agentKind}</span>}{state._tag !== 'Completed' && <span>{state._tag}</span>}{result.schema._tag === 'Invalid' && <span {...stylex.props(styles.danger)}>Schema invalid</span>}{result.durationMs !== undefined && <span>{formatWorkDuration(result.durationMs) || '<1s'}</span>}<span aria-hidden="true">›</span></Button></article>
   return <article data-testid="agent-result" data-result-state={state._tag} {...stylex.props(styles.card, styles.stack)}>
     <div {...stylex.props(styles.row)}><span aria-hidden="true">◈</span><strong>{result.name}</strong>{result.agentKind && <span {...stylex.props(styles.muted)}>{result.agentKind}</span>}{state._tag !== 'Completed' && <span {...stylex.props(styles.chip, state._tag === 'Failed' && styles.danger)}>{state._tag}{state._tag === 'Failed' && state.exitCode !== undefined ? ` · exit ${state.exitCode}` : ''}</span>}{result.schema._tag === 'Invalid' && <span title={result.schema.reason} {...stylex.props(styles.chip, styles.danger)}>Schema invalid</span>}{result.durationMs !== undefined && <span {...stylex.props(styles.muted)}>{formatWorkDuration(result.durationMs) || '<1s'}</span>}{result.time && <time {...stylex.props(styles.muted)}>{result.time}</time>}</div>
     {excerpt && <p {...stylex.props(styles.excerpt)}>{excerpt}</p>}

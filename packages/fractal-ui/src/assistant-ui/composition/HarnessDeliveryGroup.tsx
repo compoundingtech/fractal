@@ -5,8 +5,8 @@ import { AgentResultCard } from './AgentResultCard'
 import { BackgroundJobRow } from './BackgroundJobRow'
 import type { DeliveryChild, HarnessDeliveryData } from './delivery-model'
 import { deliveryStyles as styles } from './delivery-styles'
-function DeliveryItem({ child, expanded }: { readonly child: DeliveryChild; readonly expanded: boolean }) {
-  return child._tag === 'Agent' ? <AgentResultCard result={child.result} expanded={expanded} /> : <BackgroundJobRow job={child.job} expanded={expanded} />
+function DeliveryItem({ child, expanded, compact = false }: { readonly child: DeliveryChild; readonly expanded: boolean; readonly compact?: boolean }) {
+  return child._tag === 'Agent' ? <AgentResultCard result={child.result} expanded={expanded} compact={compact} /> : <BackgroundJobRow job={child.job} expanded={expanded} />
 }
 export function HarnessDeliveryGroup({ delivery }: { readonly delivery: HarnessDeliveryData }) {
   const [expanded, setExpanded] = React.useState(false)
@@ -32,6 +32,6 @@ export function HarnessDeliveryGroup({ delivery }: { readonly delivery: HarnessD
     <header {...stylex.props(styles.row)}><strong>{delivery.children.length} background results</strong><span {...stylex.props(styles.muted)}>{agents} agents · {delivery.children.length - agents} commands</span>{delivery.time && <time {...stylex.props(styles.muted)}>{delivery.time}</time>}</header>
     {status && <div {...stylex.props(styles.muted)}>{status}</div>}
     <div {...stylex.props(styles.row)}><Button aria-expanded={expanded} onPress={() => setExpanded(value => !value)} {...stylex.props(styles.button)}>{expanded ? 'Collapse successful results' : 'Expand all'}</Button><Button onPress={() => { void navigator.clipboard.writeText(delivery.id) }} {...stylex.props(styles.button)}>Copy delivery id</Button></div>
-    {delivery.children.map(child => <DeliveryItem key={child._tag === 'Agent' ? child.result.id : child.job.id} child={child} expanded={expanded} />)}
+    {delivery.children.map(child => <DeliveryItem key={child._tag === 'Agent' ? child.result.id : child.job.id} child={child} expanded={expanded} compact />)}
   </section>
 }
