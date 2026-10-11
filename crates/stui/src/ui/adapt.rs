@@ -1201,6 +1201,16 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_longer_than_its_line_budget_names_what_it_hides() {
+        let text = (0..450).map(|index| format!("line {index}")).collect::<Vec<_>>().join("\n");
+        let entries = tool_pair(json!({"cmd":"cat notes.txt"}), Value::String(text));
+        let (_, _, output) = tool(&entries);
+        assert_eq!(output.len(), 401, "{:?}", output.last());
+        assert_eq!(output[399], "line 399");
+        assert_eq!(output[400], "… 50 more lines not shown in the timeline preview");
+    }
+
+    #[test]
     fn redacted_and_image_results_are_words_not_json() {
         let redacted = json!({"redacted":true,"sha256":"00ff","bytes":120});
         let (title, _, output) = tool(&tool_pair(redacted.clone(), redacted));

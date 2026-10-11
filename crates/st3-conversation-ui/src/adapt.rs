@@ -2004,14 +2004,19 @@ fn tool_output(content: &Value, full: bool) -> (Vec<String>, bool) {
     while lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
-    if !full {
-        lines.truncate(400);
+    if !full && lines.len() > PREVIEW_LINES {
+        let hidden = lines.len() - PREVIEW_LINES;
+        lines.truncate(PREVIEW_LINES);
+        lines.push(format!("… {hidden} more lines not shown in the timeline preview"));
     }
     if cut {
         lines.push("… st kept only the start of this output".into());
     }
     (lines, failed)
 }
+
+/// How many output lines a timeline preview keeps; the rest is named, not dropped silently.
+const PREVIEW_LINES: usize = 400;
 
 /// How an image a tool returned is drawn in text.
 const IMAGE: &str = "[image]";
