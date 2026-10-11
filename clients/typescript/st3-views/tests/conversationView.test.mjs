@@ -173,6 +173,16 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.equal(staleLine('st asked to slow down for a moment', true, 10_000, 22_000), 'st asked to slow down for a moment · shown as of 12s ago · trying again');
 }
 
+// A conversation st refused for good never claims to be loading or retrying: it says why and offers a retry.
+{
+  const { staleLine } = await import('@smalltalk/st3-views/conversationView');
+  for (const loaded of [false, true]) {
+    const line = staleLine('session/example-child was not found', loaded, null, 0, true);
+    assert.equal(line, 'Could not load this conversation: session/example-child was not found · tap to try again');
+    assert.doesNotMatch(line, /Loading|Trying again|trying again/);
+  }
+}
+
 // A compacted conversation's summary is one folded tool-like line, never a giant message with tags.
 {
   const [summary] = conversationEntries([

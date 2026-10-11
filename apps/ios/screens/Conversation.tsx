@@ -69,6 +69,10 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   // Whether st has answered at all: until it has, the screen says it is loading, never "nothing".
   const [loaded, setLoaded] = useState(() => conversationCache.current.has(target));
   const [issue, setIssue] = useState('');
+  // st refused for good: nothing asks again until the person taps to retry, which follows again.
+  const [stopped, setStopped] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const retry = () => { if (stopped) { setStopped(false); setIssue(''); setAttempt(count => count + 1); } };
   // When st last sent this conversation, so a view that may be stale says how old it is.
   const [lastFrame, setLastFrame] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -151,6 +155,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   useFocusEffect(useCallback(() => {
     if (!feed || unresolved) return;
     setIssue('');
+    setStopped(false);
     const follow = feed.followConversation(target, {
       onEntries: frame => setTimeline(previous => {
         setLastFrame(Date.now());
@@ -159,10 +164,10 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         rememberBounded(conversationCache.current, target, next, 24);
         return next;
       }),
-      onIssue: setIssue,
+      onIssue: (text, refused = false) => { setIssue(text); setStopped(refused); },
     });
     return () => follow.close();
-  }, [feed, target, unresolved, conversationCache, followed]));
+  }, [feed, target, unresolved, conversationCache, followed, attempt]));
 
   const names = useMemo(() => {
     const map = new Map(data.agents.map(candidate => [candidate.id, agentName(candidate)]));
@@ -319,7 +324,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     {agent ? <AgentStrip agent={agent} onMission={(id, missionTitle) => navigation.navigate('Mission', { id, title: missionTitle })} /> : session ? <View style={styles.strip}><T dim numberOfLines={1}>{session.driver ?? 'harness'} · {session.state} · {session.id}</T></View> : null}
     {header ? <View style={styles.strip}><T dim>{header}</T></View> : null}
     {agent ? <AlertsStrip agentId={agent.id} entries={timeline.entries} /> : null}
-    {issue ? <View style={styles.strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now)}</T></View> : null}
+    {issue ? <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry} style={styles.strip}><T color={theme.waiting}>{staleLine(issue, loaded, lastFrame, now, stopped)}</T></Pressable> : null}
     {findOpen ? <View style={[styles.strip, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
       <Field value={find} onChangeText={setFind} placeholder="Find in this conversation" autoFocus autoCapitalize="none" autoCorrect={false} spellCheck={false} returnKeyType="search" style={{ flex: 1 }} />
       <Pressable accessibilityRole="button" onPress={() => { setFinding(false); setFind(''); }}><T color={theme.accent}>Done</T></Pressable>
@@ -338,7 +343,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         : row.kind === 'call' && !open.has(row.entry.id) ? <CallView entry={row.entry} tool={row.tool} onToggle={toggle} />
         // A long press opens the entry's text to select any part of it; iOS text selects only whole.
         : <Pressable accessible={false} onLongPress={() => navigation.navigate('SelectText', { text: entryText(row.entry), title })} delayLongPress={350}><EntryView entry={row.entry} conversationId={timeline.sessionId ?? sessionId ?? target} revisionKey={row.entry.contentSources?.map(source => `${source.id}:${sourceRevisions[source.id] ?? 0}`).join('|') ?? String(sourceRevisions[row.entry.id] ?? 0)} imageViewport={imageViewport} open={open.has(row.entry.id)} onToggle={toggle} brief={simpleOn && !finding} onOpenSession={openSession} /></Pressable>}
-      ListEmptyComponent={<View style={[styles.entry, { transform: [{ scaleY: -1 }] }]}>{unreadable ? <T color={theme.waiting} selectable>{unreadable}</T> : <T dim>{unresolved ? 'This process has no exact native session history.' : !loaded ? (issue ? `Not loaded yet: ${issue}. Trying again.` : status === 'online' ? 'Loading the conversation…' : 'Offline; this conversation has not been loaded yet.') : 'No conversation in the recent timeline.'}</T>}</View>}
+      ListEmptyComponent={<View style={[styles.entry, { transform: [{ scaleY: -1 }] }]}>{unreadable ? <T color={theme.waiting} selectable>{unreadable}</T> : <Pressable accessibilityRole={stopped ? 'button' : undefined} disabled={!stopped} onPress={retry}><T dim>{unresolved ? 'This process has no exact native session history.' : !loaded ? (issue ? staleLine(issue, false, null, now, stopped) : status === 'online' ? 'Loading the conversation…' : 'Offline; this conversation has not been loaded yet.') : 'No conversation in the recent timeline.'}</T></Pressable>}</View>}
       // Scrolled up, a new entry must not move what is being read, so the position is kept. At
       // the newest it must not be: the position-keeping scrolls to a new entry with an animation,
       // which slid the whole conversation after each send and each reply (Nathan, 2026-10-05).

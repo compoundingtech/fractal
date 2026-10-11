@@ -943,8 +943,10 @@ export function shownToolLines(body: Extract<Body, { kind: 'tool' }>, open: bool
   return { hidden: body.output.length - COLLAPSED_TOOL_LINES, lines: head ? body.output.slice(0, COLLAPSED_TOOL_LINES) : body.output.slice(-COLLAPSED_TOOL_LINES) };
 }
 
-/** What a problem means for what is shown: how old it is and that the phone keeps trying. */
-export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number): string {
+/** What a problem means for what is shown: how old it is and that the phone keeps trying, or,
+ * once st refused for good (`stopped`), that nothing retries until the person asks again. */
+export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number, stopped = false): string {
+  if (stopped) return `Could not load this conversation: ${issue} · tap to try again`;
   if (!loaded) return `Not loaded yet: ${issue}. Trying again.`;
   if (lastFrame === null) return `${issue} · trying again`;
   const seconds = Math.max(0, Math.round((now - lastFrame) / 1000));
