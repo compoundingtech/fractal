@@ -3,7 +3,7 @@
 //!
 //! A condition names a metric, a scope (host, process, member or route), a threshold, how long it
 //! must hold, and an owner. Each daemon evaluates the instances that live on it, at a fixed low
-//! rate and never on the request path: a host's disks and processes, its own database and spend,
+//! rate and never on the request path: a host's disks and processes, its own database,
 //! and its own request-latency windows. Entering breach wakes the owner once and recovery tells it
 //! once. Between the two a hysteresis threshold and a hold time keep a value near the line from
 //! flapping.
@@ -41,7 +41,7 @@ pub enum Scope {
     Host,
     /// The processes of one name on a host.
     Process,
-    /// A fleet member's daemon: its database, its spend, its own CPU.
+    /// A fleet member's daemon: its database and its own CPU.
     Member,
     /// A daemon's request-latency target or route.
     Route,
@@ -84,8 +84,6 @@ pub enum Metric {
     /// Bytes of claims this member wrote in the last 24 hours. Every member stores every claim, so
     /// this is what each member adds to every database in the fleet.
     DbAuthoredBytesPerDay,
-    /// Model spend by seats on this member in the last 24 hours.
-    CostUsdPerDay,
     /// The daemon's own CPU, from its request-latency windows.
     DaemonCpuCores,
     /// The share of a target's samples over target, as a multiple of the 1% a p99 target allows:
@@ -110,7 +108,6 @@ const METRICS: &[(&str, Metric, Scope)] = &[
         Metric::DbAuthoredBytesPerDay,
         Scope::Member,
     ),
-    ("cost.usd-per-day", Metric::CostUsdPerDay, Scope::Member),
     ("daemon.cpu-cores", Metric::DaemonCpuCores, Scope::Member),
     ("slo.burn-rate", Metric::SloBurnRate, Scope::Route),
     ("slo.p99-ms", Metric::SloP99Ms, Scope::Route),
@@ -157,7 +154,6 @@ impl Metric {
             | Self::DbSizeBytes
             | Self::DbAuthoredBytesPerDay => bytes(value),
             Self::ProcessCpuCores | Self::DaemonCpuCores => format!("{} cores", round(value)),
-            Self::CostUsdPerDay => format!("${}", round(value)),
             Self::SloBurnRate => format!("{}x budget", round(value)),
             Self::SloP99Ms => format!("{} ms", round(value)),
         }
@@ -1115,6 +1111,14 @@ mod tests {
         };
         assert!(
             replace(0, json!({"name": "metric", "arguments": ["cpu"]})).contains("unknown metric")
+        );
+        // Spend remains unavailable until the usage reader is bounded and measured.
+        assert!(
+            replace(
+                0,
+                json!({"name": "metric", "arguments": ["cost.usd-per-day"]})
+            )
+            .contains("unknown metric")
         );
         assert!(
             replace(1, json!({"name": "scope", "arguments": ["host"]}))

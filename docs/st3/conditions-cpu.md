@@ -12,7 +12,6 @@ metrics; the disk-only parser refuses them.
 | process | `process.cpu-cores` | CPU seconds per elapsed second, summed by executable name |
 | process | `process.rss-bytes` | resident bytes, summed by executable name |
 | member | `daemon.cpu-cores` | existing daemon CPU SLO windows |
-| member | `cost.usd-per-day` | existing recorded model spend over 24 hours |
 | route | `slo.p99-ms` | existing latency window p99 milliseconds |
 | route | `slo.burn-rate` | fraction over the target divided by its one-percent error budget |
 
@@ -36,9 +35,20 @@ on this attribution metric. Physical net database-plus-WAL growth per replica
 needs the shared hourly sampler and Operations' last-week baseline; it remains a
 follow-up. `db.size-bytes` keeps the disk PR's hourly background cache.
 
-Spend is reused for five minutes. The authored-byte counter catches up in bounded
-indexed pages and prunes hourly buckets after two days; it can be unavailable
-while catching up or with less than an hour of coverage. Precise readings and
+`cost.usd-per-day` is deferred until the usage-period reader is bounded and
+measured; caching does not bound its history-dependent work. This daemon rejects
+spend declarations and the evaluator never calls that reader.
+
+The authored-byte counter catches up in bounded indexed pages and prunes hourly
+buckets after two days. The initial scan visits the whole fleet's last-day claim
+ranges, up to 25 pages of 2,000 indices (50,000 indices) per tick; only this
+member's rows pass the origin filter before byte lengths are computed. Total
+catch-up work depends on the fleet's day-sized claim population. Physical read
+bytes require Operations' workload measurement; no per-index byte width is
+assumed. The reading can be unavailable while catching up or with less than an
+hour of coverage. A covered hour is scaled by 24, so a busy initial hour can
+inflate the daily estimate. The window's first hour counts whole, giving a small
+upward bias. This attribution estimate must not drive first-user disk alerts. Precise readings and
 hold phases remain local. Only entry/recovery transitions replicate, and every
 locally authored transition is copied atomically for the existing OTLP exporter.
 

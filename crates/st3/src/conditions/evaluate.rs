@@ -100,9 +100,6 @@ pub fn spawn(
     });
 }
 
-/// How long a spend reading is reused: it reads a day of usage rollups.
-const COST_EVERY_MS: u128 = 5 * 60_000;
-
 /// Where values come from. The daemon reads the host; tests supply their own.
 pub(crate) trait Probe: Send {
     /// Free space on each local filesystem, by mount point.
@@ -214,7 +211,6 @@ pub(crate) struct Evaluator {
     last_tick: Option<u128>,
     /// Transitions whose state claim is not written yet.
     unrecorded: BTreeMap<(String, String), Transition>,
-    cost: Option<(u128, f64)>,
     write_cursor: usize,
 }
 
@@ -238,7 +234,6 @@ impl Evaluator {
             seed_started: false,
             last_tick: None,
             unrecorded: BTreeMap::new(),
-            cost: None,
             write_cursor: 0,
         }
     }
@@ -340,7 +335,7 @@ impl Evaluator {
         let mut live = BTreeSet::new();
         for decl in &decls {
             let subject = decl.subject();
-            let mut values = self.values(store, decl, &mut readings, now);
+            let mut values = self.values(decl, &mut readings);
             if values.len() > super::MAX_INSTANCES {
                 let omitted = values.len() - super::MAX_INSTANCES;
                 report.errors.push(format!("{subject}: {omitted} instances not evaluated (eight-instance limit); select explicit data filesystem paths"));
@@ -496,13 +491,7 @@ impl Evaluator {
 
     /// Each instance of `decl` on this host and its value now. An instance without a reading
     /// is left out, and keeps its state.
-    fn values(
-        &mut self,
-        store: &Store,
-        decl: &ConditionDecl,
-        readings: &mut Readings,
-        now: u128,
-    ) -> Vec<(String, f64)> {
+    fn values(&mut self, decl: &ConditionDecl, readings: &mut Readings) -> Vec<(String, f64)> {
         let host = self.host.clone();
         let disk = |space: &DiskSpace| match decl.metric {
             Metric::DiskFreeBytes => space.available as f64,
@@ -548,10 +537,6 @@ impl Evaluator {
                 .flatten()
                 .map(|value| vec![(host, value)])
                 .unwrap_or_default(),
-            Metric::CostUsdPerDay => self
-                .cost_per_day(store, now)
-                .map(|value| vec![(host, value)])
-                .unwrap_or_default(),
             Metric::DaemonCpuCores | Metric::SloBurnRate | Metric::SloP99Ms => {
                 let windows = readings.slo.get_or_insert_with(|| self.probe.slo_windows());
                 slo_value(windows, decl)
@@ -559,28 +544,6 @@ impl Evaluator {
                     .unwrap_or_default()
             }
         }
-    }
-
-    /// Spend by seats on this host in the last day, in dollars, read at most every few minutes.
-    fn cost_per_day(&mut self, store: &Store, now: u128) -> Option<f64> {
-        if let Some((at, value)) = self.cost
-            && now.saturating_sub(at) < COST_EVERY_MS
-        {
-            return Some(value);
-        }
-        let until = u64::try_from(now).ok()?;
-        let rows = store
-            .usage_period_rows(until.saturating_sub(24 * 3_600_000), until)
-            .ok()?;
-        let host = format!("host/{}", self.host);
-        let micro = rows
-            .iter()
-            .filter(|row| row["host"].as_str() == Some(host.as_str()))
-            .filter_map(|row| row["cost_microusd"].as_f64())
-            .sum::<f64>();
-        let value = micro / 1_000_000.0;
-        self.cost = Some((now, value));
-        Some(value)
     }
 }
 
