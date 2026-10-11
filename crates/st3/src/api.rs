@@ -2459,6 +2459,7 @@ fn client_work_values(
                 "readiness_epoch": work.readiness_epoch,
                 "claimant": work.claimant,
                 "claim_incarnation": work.claim_incarnation,
+                "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,

@@ -251,3 +251,49 @@ async fn an_unbound_caller_can_still_supply_an_explicit_claim_fence() {
     let ask: StepRunView = fixture.client.post("/v1/work/ask", &body).await.unwrap();
     assert_eq!(ask.assigned_to.as_deref(), Some("person/ada"));
 }
+
+#[tokio::test]
+async fn submitted_incarnation_binds_the_receipt_and_survives_replay() {
+    let fixture = Fixture::new(false).await;
+    let evidence = vec!["doc/garden/result@0123456789abcdef".to_owned()];
+    for (incarnation, code) in [(None, "missing-work-incarnation"), (Some("chooser:two"), "wrong-work-incarnation")] {
+        let body = json!({"actor":SEAT, "incarnation":incarnation, "evidence":evidence,
+            "idempotency_key":format!("refused-{code}")});
+        let error = fixture.client.post::<_, Value>(
+            &format!("/v1/work/complete/{}", fixture.step), &body,
+        ).await.unwrap_err();
+        assert!(format!("{error:#}").contains(code));
+        assert!(fixture.state.store.latest_claim(&fixture.step, Some("work.submitted")).unwrap().is_none());
+    }
+    // A submission with no summary still carries its immutable author identity.
+    let submitted: StepRunView = fixture.client.post(
+        &format!("/v1/work/complete/{}", fixture.step),
+        &json!({"actor":SEAT, "incarnation":"chooser:one", "evidence":evidence, "idempotency_key":"submit"}),
+    ).await.unwrap();
+    assert_eq!(submitted.submitted_incarnation.as_deref(), Some("chooser:one"));
+    assert!(submitted.claimant.is_none());
+    assert!(submitted.claim_incarnation.is_none());
+    let receipt = fixture.state.store.latest_claim(&fixture.step, Some("work.submitted")).unwrap().unwrap();
+    assert_eq!(receipt.subject, fixture.step);
+    assert_eq!(receipt.actor.as_deref(), Some(SEAT));
+    assert_eq!(receipt.body["fields"]["attempt"], submitted.attempt);
+    assert_eq!(receipt.body["fields"]["submitted_incarnation"], "chooser:one");
+    assert!(receipt.body["fields"]["claimant"].is_null());
+    assert!(receipt.body["fields"]["claim_incarnation"].is_null());
+    let matches = |claim: &ClaimRecord, subject: &str, attempt: u32, actor: &str, incarnation, refs: &[String]| {
+        crate::model::work_submission_matches(claim, subject, attempt, actor, incarnation, refs)
+    };
+    assert!(matches(&receipt, &fixture.step, submitted.attempt, SEAT, Some("chooser:one"), &evidence));
+    for incarnation in [None, Some(""), Some("chooser:two")] {
+        assert!(!matches(&receipt, &fixture.step, submitted.attempt, SEAT, incarnation, &evidence));
+    }
+    assert!(!matches(&receipt, "step-run/other/choose", submitted.attempt, SEAT, Some("chooser:one"), &evidence));
+    assert!(!matches(&receipt, &fixture.step, submitted.attempt + 1, SEAT, Some("chooser:one"), &evidence));
+    assert!(!matches(&receipt, &fixture.step, submitted.attempt, "agent/garden/other", Some("chooser:one"), &evidence));
+    assert!(!matches(&receipt, &fixture.step, submitted.attempt, SEAT, Some("chooser:one"), &[]));
+    fixture.state.store.replay_replication_graph().unwrap();
+    let replayed = fixture.state.store.step_run(&fixture.step).unwrap().unwrap();
+    assert_eq!(replayed.submitted_incarnation, submitted.submitted_incarnation);
+    let read: StepRunView = fixture.client.get(&format!("/v1/work-items/{}", fixture.step)).await.unwrap();
+    assert_eq!(read.submitted_incarnation, submitted.submitted_incarnation);
+}

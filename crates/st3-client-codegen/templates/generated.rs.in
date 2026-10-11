@@ -1042,6 +1042,9 @@ pub struct Work {
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// Submitting incarnation for this attempt; missing or null means unknown.
+    #[serde(default)]
+    pub submitted_incarnation: Option<String>,
     #[serde(default)]
     pub agentless: bool,
     #[serde(default)]

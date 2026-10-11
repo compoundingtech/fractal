@@ -9024,6 +9024,9 @@ impl Store {
                     "claim_expires_at_unix_ms": claim_expiry,
                     "readiness_epoch": readiness_epoch
                 }, "evidence": request.evidence});
+                if action == "complete" {
+                    body["fields"]["submitted_incarnation"] = json!(actor_incarnation);
+                }
                 if let Some(extend_ms) = extend_ms {
                     body["fields"]["extend_ms"] = json!(extend_ms);
                 }
@@ -26392,6 +26395,109 @@ mod fleet_admission_tests {
     }
 
     #[test]
+    fn submitted_incarnation_waits_on_older_members_and_legacy_submissions_replay() {
+        let anchor_key = key();
+        let older_key = key();
+        let current = node("current", Some(&anchor_key), Some(&anchor_key));
+        admit(&current, "current", &anchor_key, "anchor", None);
+        admit(&current, "older", &older_key, "invite", None);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("older.sqlite3");
+        let older = Store::open(&path, "older").unwrap();
+        older.bind_fleet(FLEET).unwrap();
+        older.pin_fleet_anchor(anchor_key.public()).unwrap();
+        older.set_member_key(Some(older_key.clone())).unwrap();
+        let mut registry = st3_schema::registry().clone();
+        registry.claims.get_mut("work.submitted").unwrap().fields.remove("submitted_incarnation").unwrap();
+        older.set_claim_registry(registry.clone());
+        sync(&current, &older);
+        let intent = crate::graph::parse_test_intent(r#"version 2
+agent "garden/worker" { workspace "/tmp"; command "true" }
+mission "garden" state="ready" {
+  step "new" { assigned-to "agent/garden/worker" }
+  step "legacy" { assigned-to "agent/garden/worker" }
+}
+"#, "current").unwrap();
+        current.apply_internal(&intent, "garden").unwrap();
+        let run = current.create_mission_run(&MissionRunRequest {
+            mission: "garden".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/ada".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "garden-run".into(),
+        }).unwrap();
+        let actor = "agent/garden/worker";
+        let incarnation = "garden:one";
+        let step = &run.steps.iter().find(|step| step.step == "new").unwrap().subject;
+        let legacy_step = &run.steps.iter().find(|step| step.step == "legacy").unwrap().subject;
+        for subject in [step, legacy_step] {
+            current.set_step_state(subject, "ready", None).unwrap();
+            current.work_action(subject, "claim", &WorkRequest {
+                actor: Some(actor.into()), incarnation: Some(incarnation.into()),
+                summary: None, reason: None, evidence: vec![], idempotency_key: format!("claim-{subject}"),
+            }).unwrap();
+        }
+        current.work_action(step, "complete", &WorkRequest {
+            actor: Some(actor.into()), incarnation: Some(incarnation.into()),
+            summary: None, reason: None, evidence: vec![], idempotency_key: "garden-submit".into(),
+        }).unwrap();
+        let submitted = current.latest_claim(step, Some("work.submitted")).unwrap().unwrap();
+        let legacy = current.append_claim(&ClaimInput {
+            subject: legacy_step.clone(), kind: "work.submitted".into(), actor: Some(actor.into()),
+            fields: BTreeMap::from([
+                ("attempt".into(), json!(1)), ("status".into(), json!("verifying")),
+                ("worker_reported".into(), json!(true)), ("claimant".into(), Value::Null),
+                ("claim_incarnation".into(), Value::Null), ("claim_expires_at_unix_ms".into(), Value::Null),
+            ]), evidence: vec![], expected_subject: None, idempotency_key: Some("legacy-submit".into()),
+        }).unwrap();
+        assert!(!crate::model::work_submission_matches(&legacy, legacy_step, 1, actor, Some(incarnation), &[]));
+        assert!(!crate::model::work_submission_matches(&legacy, legacy_step, 1, actor, None, &[]));
+        current.replay_replication_graph().unwrap();
+        let legacy_view = current.step_run(legacy_step).unwrap().unwrap();
+        assert_eq!(legacy_view.status, "verifying");
+        assert!(legacy_view.submitted_incarnation.is_none());
+        let fields = schema_fields_for_body(&submitted.kind, &submitted.body).unwrap();
+        assert_eq!(registry.validate_claim(step, "work.submitted", &fields).unwrap_err().code, "unknown-claim-field");
+        assert!(matches!(classify_replicated_claim_with_registry(&submitted, &registry).unwrap(), ReplicatedClaimAdmission::UnknownField));
+        let later = note(&current, "A known claim after the submission");
+        let admission = sync(&current, &older);
+        assert_eq!(admission.unknown, 1);
+        assert_eq!(admission.invalid, 0);
+        assert!(!admitted(&older, &submitted));
+        assert!(admitted(&older, &legacy));
+        assert!(admitted(&older, &later));
+        assert!(older.step_run(step).unwrap().unwrap().submitted_incarnation.is_none());
+        assert_eq!(older.step_run(legacy_step).unwrap().unwrap().status, "verifying");
+        let local = note(&older, "The older member can still write known claims");
+        sync(&older, &current);
+        assert!(admitted(&current, &local));
+        let before = older.replication_status(true, Some(FLEET), &[]).unwrap();
+        let source = current.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(before.waiting_claims, 1);
+        assert_eq!(before.invalid_records, 0);
+        assert_eq!(before.unhealthy_projections, 0);
+        assert_eq!(before.authority_digest, source.authority_digest);
+        let waiting = older.replica_records(true).unwrap();
+        assert_eq!(waiting[0].error_code.as_deref(), Some("unknown-claim-field"));
+        drop(older);
+        let upgraded = Store::open(&path, "older").unwrap();
+        upgraded.set_member_key(Some(older_key)).unwrap();
+        upgraded.validate_replication_backlog().unwrap();
+        upgraded.apply_replication_repairs().unwrap();
+        upgraded.project_replication_backlog().unwrap();
+        let after = upgraded.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(after.waiting_claims, 0);
+        assert_eq!(after.authority_digest, before.authority_digest);
+        assert_eq!(after.graph_digest, source.graph_digest);
+        assert_eq!(after.projection_digests, source.projection_digests);
+        let learned = upgraded.claim_by_id(&submitted.id).unwrap().unwrap();
+        assert_eq!(learned.body, submitted.body);
+        let view = upgraded.step_run(step).unwrap().unwrap();
+        assert_eq!(view.submitted_incarnation.as_deref(), Some(incarnation));
+        assert!(view.claimant.is_none());
+        assert!(view.claim_incarnation.is_none());
+        assert!(upgraded.step_run(legacy_step).unwrap().unwrap().submitted_incarnation.is_none());
+    }
+
+    #[test]
     fn a_member_leaves_once_and_a_second_leave_writes_nothing() {
         let anchor_key = key();
         let laptop_key = key();
@@ -31813,6 +31919,7 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
         worker_reported: row.get::<_, bool>(11)?,
         claimant: row.get(12)?,
         claim_incarnation: row.get(13)?,
+        submitted_incarnation: None,
         claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
         carried_claimant: None,
         execution_started_at_unix_ms: None,
@@ -31945,6 +32052,7 @@ fn enrich_step_summaries_at(
     view.progress_summary = None;
     view.progress_at_unix_ms = None;
     view.completion_summary = None;
+    view.submitted_incarnation = None;
     for (kind, body, accepted) in events {
         let accepted = accepted.parse::<u128>().unwrap_or(0);
         if accepted > snapshot_unix_ms {
@@ -31957,6 +32065,14 @@ fn enrich_step_summaries_at(
         }
         if fields.get("handoff_acknowledged").is_some() {
             continue;
+        }
+        if kind == "work.submitted" {
+            // Bind only this attempt's submission, including reports without a summary.
+            // Legacy claims carry no submitting incarnation; the cleared lease is no proof.
+            view.submitted_incarnation = fields
+                .get("submitted_incarnation")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
         }
         let Some(summary) = fields
             .get("summary")

@@ -16063,6 +16063,9 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
     if let Some(incarnation) = &work.claim_incarnation {
         let _ = writeln!(output, "Incarnation: {incarnation}");
     }
+    if let Some(incarnation) = &work.submitted_incarnation {
+        let _ = writeln!(output, "Submitted incarnation: {incarnation}");
+    }
     if let Some(nudged) = work
         .nudged_at_unix_ms
         .and_then(|at| chrono::DateTime::from_timestamp_millis(i64::try_from(at).ok()?))
