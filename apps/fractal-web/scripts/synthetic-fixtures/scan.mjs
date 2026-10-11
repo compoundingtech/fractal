@@ -70,8 +70,10 @@ export const publicationLineMatcher = (policy) => {
     // font data is not a private hostname. Explicit identities still use policy.
     new RegExp(String.raw`\b(?:dev[35]|` + 'mb' + String.raw`p[0-9]{4})\b`, 'i'),
     patterns[1],
-    patterns[2],
-    /~\/[.]megarepo\b|\/(?:[^\s"'<>]*\/)?(?:[.]megarepo|checkouts?|worktrees)\//i,
+    // Root paths, not relative public modules such as src/users/index.ts.
+    /(?<![A-Za-z0-9_.-])\/(?:home|Users)\//,
+    /(?<![A-Za-z0-9_.-])\/run\/user\b/,
+    /~\/[.]megarepo\b|(?<![A-Za-z0-9_.-])\/(?:[^\s"'<>]*\/)?(?:[.]megarepo|checkouts?|worktrees)\//i,
   ]
   return (line) => {
     const text = normalize(line)
