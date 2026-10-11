@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Declare disk free-space and database size thresholds in KDL; daemon evaluation wakes owners on breach and recovery, with OTLP transition history and a pending local graph-retention dependency.",
+  "replay": {
+    "status": "changed",
+    "detail": "No graph replay; one-time re-admission of old unknown-family invalid records per new schema digest. Local condition heads re-seed through bounded indexed seeks whenever declarations change. Membership changes also trigger indexed reconstruction, which resumes over multiple ticks; local tracker restoration reads its own indexed state directly."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds condition and authenticated condition-instance subjects. condition.state is a system-only full replacement state. Storage stays 18; three local tables and desired-condition index are created on open. Pending notification payloads are copied so trimming cannot lose them."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint-only retention fallback. Required condition-state contract is current plus three previous transitions per authenticated instance with local quorum-free trim and permanent compact deleted IDs. The reviewed local trim/transport dependency is absent on pinned main 8f4f47e0b. This draft is not ready for queueing while source transition payloads accumulate. A four-state logical cache is proposed as the smallest bounded stand-in; it cannot establish the physical retained-byte target. Full locally authored history is atomically copied for existing OTLP export. Notifications no longer pin state claims as evidence, but ordinary durable message retention stays unchanged. Count deleted IDs, messages, outbox, signed containers and replicated daily writes separately."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Adds /v1/conditions and st conditions ls/show. Client-v0 adds condition attention kind; generated clients/digest change and stui renders these alerts. Deploy all daemons before facts, daemon before CLI, and clients before person-owned declarations. Old daemons mark condition intent.desired invalid (degraded envelope) and condition.state unknown; these heal once after upgrade without replication repair. Shared TypeScript Home includes condition cards; stui does not offer human resolution controls or manual-clear guidance for these self-clearing alerts."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Ordinary restart; breaches resume silently, holds restart. Evaluation every 30 seconds; physical file+WAL size reads cached hourly; one disk worker with stale diagnostics. CPU/process/memory/cost/SLO adapters are a separate PR."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Operations reviews and deploys; independent approval and measured hetz CPU/SQL gate required. Upgrade every daemon before new declarations and the reviewed local trim/negative-set compatibility gate before payload reclamation. Configure observations.otlp for full external history; collector gaps follow the existing local log retention. Retain existing disk/watchdog missions until a real breach/recovery and Operations approval. Disk metrics only; other metrics are refused until the follow-up lands. Existing 32 declaration/8 local instance/256 remote-head/discovery and notification materialization limits apply. Pending outbox is not yet capped; unexpected storage failures retain deliveries with diagnostics. State-only kilobyte figures exclude messages, tombstones and pending deliveries."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Roll forward after declarations exist. An older daemon cannot evaluate them. Unknown-family records rejected by old registries heal on an upgraded schema; other invalid records require normal replication repair. Notification storage failures retain rows, deterministic validation failures consume three attempts, partial successful deliveries remain visible, and discarded rows leave a diagnostic for one hour."
+  }
+}

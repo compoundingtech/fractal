@@ -830,6 +830,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn condition_history_exports_all_transitions_and_retries_a_collector_outage() {
+        use crate::conditions::{Phase, Tracker, Transition};
+        use crate::model::IntentInput;
+        use crate::store::ConditionRecord;
+        let (collector, endpoint) = start_collector().await;
+        let store = Arc::new(Store::open_memory("node-a").unwrap());
+        let source = "version 2\ncondition \"fleet/disk\" { metric \"disk.free-percent\"; scope \"host\"; below 15; for \"1m\"; owner \"person/ada\" }\n";
+        let intent = crate::graph::parse_test_intent(source, "node-a").unwrap();
+        let publication = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(
+                &intent,
+                &publication.subject_tokens,
+                "otel-condition-fixture",
+                Some("person/ada"),
+            )
+            .unwrap();
+        let decl = store.declared_conditions().unwrap().remove(0).decl.unwrap();
+        for n in 0..6u128 {
+            let mut tracker = Tracker::default();
+            tracker.phase = if n % 2 == 0 {
+                Phase::Breach
+            } else {
+                Phase::Clear
+            };
+            tracker.phase_since = n * 420_000;
+            tracker.breach_since = Some(n.saturating_sub(n % 2) * 420_000);
+            tracker
+                .values
+                .push_back((n * 420_000, if n % 2 == 0 { 10.0 } else { 20.0 }));
+            let record = ConditionRecord {
+                decl: &decl,
+                host: "node-a",
+                instance: "node-a:/",
+                tracker: &tracker,
+                transition: Some(if n % 2 == 0 {
+                    Transition::Enter
+                } else {
+                    Transition::Recover
+                }),
+                now: n * 420_000,
+            };
+            let first = store.record_condition_state(&record).unwrap();
+            assert_eq!(store.record_condition_state(&record).unwrap().id, first.id);
+        }
+        let exporter = OtlpExporter::new(
+            &OtlpConfig {
+                endpoint,
+                headers_file: None,
+            },
+            "node-a",
+        )
+        .unwrap();
+        collector.status.store(503, Ordering::SeqCst);
+        assert!(exporter.export_once(&store).await.is_err());
+        assert_eq!(store.otlp_export_cursor().unwrap(), 0);
+        collector.status.store(200, Ordering::SeqCst);
+        assert_eq!(exporter.export_once(&store).await.unwrap().exported, 6);
+        assert_eq!(store.otlp_export_cursor().unwrap(), 6);
+        let requests = collector.requests.lock().unwrap();
+        let logs = records(&requests.last().unwrap().1);
+        assert_eq!(logs.len(), 6);
+        assert!(logs.iter().all(|log| log["eventName"] == "condition.state"));
+        let fields = store.local_observations_after(0, 10).unwrap();
+        for (log, source) in logs.iter().zip(fields) {
+            assert_eq!(log["body"], any_value(&source.body["fields"]));
+        }
+        drop(requests);
+        assert_eq!(exporter.export_once(&store).await.unwrap().exported, 0);
+    }
+
+    #[tokio::test]
     async fn the_exporter_delivers_each_observation_once_the_collector_accepts_it() {
         let (collector, endpoint) = start_collector().await;
         let directory = tempfile::tempdir().unwrap();
