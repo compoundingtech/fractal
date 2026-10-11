@@ -75,6 +75,8 @@ impl Trace {
             "stage": stage,
             "at_ms": self.started.elapsed().as_secs_f64() * 1000.0,
             "entries": entries,
+            "live_update_seen": self.update,
+            "live_nonempty_update_seen": self.nonempty,
         })
         .to_string()
             + "\n";
@@ -128,7 +130,7 @@ impl Trace {
     }
 
     fn presented(&mut self, useful: bool) {
-        if useful && self.intent && self.update && self.nonempty {
+        if useful && self.intent {
             self.record("first_useful_presented", None);
             // The one measurement is complete. Later updates/reopens cannot append to it.
             self.file = None;
@@ -197,7 +199,7 @@ mod tests {
         selected.enqueue(&targets, true);
         selected.received("agent/test/other", 5);
         selected.received(TARGET, 0);
-        present(&mut trace, || Ok::<_, ()>(()), |_| true).unwrap();
+        present(&mut trace, || Ok::<_, ()>(()), |_| false).unwrap();
         assert!(!stages(&path).contains(&"first_useful_presented".into()));
         trace.as_mut().unwrap().received(TARGET, 2);
         // Placeholder/occluded/offscreen readiness is supplied by the actual viewport.
@@ -271,6 +273,26 @@ mod tests {
             "stopped_before_useful_render"
         );
         assert!(!stages(&path).contains(&"first_useful_presented".into()));
+    }
+
+    #[test]
+    fn cached_useful_presentation_is_not_delayed_until_a_live_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timing");
+        let mut trace = Some(Trace::create(Instant::now(), &path, TARGET.into()).unwrap());
+        let selected = trace.as_mut().unwrap();
+        selected.intend(&[TARGET.into()]);
+        selected.enqueue(&[TARGET.into()], true);
+        present(&mut trace, || Ok::<_, ()>(()), |_| true).unwrap();
+        trace.as_mut().unwrap().received(TARGET, 5);
+        drop(trace);
+        let text = fs::read_to_string(path).unwrap();
+        let final_record: serde_json::Value =
+            serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(final_record["stage"], "first_useful_presented");
+        assert_eq!(final_record["live_update_seen"], false);
+        assert_eq!(final_record["live_nonempty_update_seen"], false);
+        assert!(!text.contains("conversation_update"));
     }
 
     #[test]

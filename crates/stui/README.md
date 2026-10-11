@@ -76,13 +76,17 @@ attachment), `--demo`, or a headless test client as a conversation-render measur
 
 The file has at most seven content-free JSON lines (at most 2 KiB), with monotonic `at_ms`
 from entry to `main`: `process_started`, `conversation_intent`, `converse_enqueued`,
-`conversation_update`, `nonempty_update`, then `first_useful_presented`. Intent means the
+`conversation_update`, `nonempty_update`, then `first_useful_presented`. A useful cached
+presentation may precede the live update and end the trace earlier; each record explicitly
+states `live_update_seen` and `live_nonempty_update_seen`. Intent means the
 UI loop observed the selected conversation among its wanted subscriptions, not the exact
 key-press time. Enqueued means the feed command channel accepted it, not that a WebSocket
 send completed. The first update may be empty. The last marker requires an unobscured
 conversation entry and follows the successful terminal draw/flush and synchronized-update
 end; it excludes loading, starting, empty, header-only and off-screen content. This observes
-terminal presentation, not the display compositor's pixels. It includes no content, actor,
+terminal presentation, not the display compositor's pixels or live-currentness proof.
+Caches are preserved: first useful presentation is never delayed merely to wait for a live
+update. The file includes no content, actor,
 conversation ID, address, credential or error text.
 
 A failed enqueue records `converse_enqueue_failed`. Normal exit before a useful render
