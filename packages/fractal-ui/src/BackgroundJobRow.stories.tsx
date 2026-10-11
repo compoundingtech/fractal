@@ -2,7 +2,7 @@ import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { BackgroundJobRow } from './assistant-ui/composition/BackgroundJobRow'
 import { jobFixture } from './delivery-fixtures'
 import { deliveryStoryMatrix } from './delivery-story-frame'
@@ -66,7 +66,7 @@ export const MountedStateTransition: Story = { args: { job: { ...jobFixture, sta
   await expect(canvasElement.querySelector('[data-testid="terminal-tail"]')).toBeNull()
   for (const label of ['Report nonzero exit', 'Report aborted job']) {
     await userEvent.click(canvas.getAllByRole('button', { name: label })[0]!)
-    await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(4)
+    await waitFor(async () => { await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(4) })
     await userEvent.click(canvas.getAllByRole('button', { name: 'Output for bg_40' })[0]!)
     await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(3)
   }
@@ -106,5 +106,5 @@ export const MountedAbortKeepsOutputContext: Story = { args: { job: { ...jobFixt
   await expect(canvas.getByText('Lines 101–200 of 205')).toBeVisible()
   await expect(canvas.getByText('job-line-100')).toBeVisible()
   await expect(canvas.queryByText('job-line-0')).toBeNull()
-  await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(4)
+  await waitFor(async () => { await expect(canvasElement.querySelectorAll('[data-testid="terminal-tail"]')).toHaveLength(4) })
 } }

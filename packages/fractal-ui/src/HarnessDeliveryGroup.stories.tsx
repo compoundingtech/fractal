@@ -38,6 +38,8 @@ const statePlay: NonNullable<Story['play']> = async ({ canvasElement, args }) =>
 export const FiveJobMixed: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getAllByText('5 background results')).toHaveLength(4)
+  await expect(canvas.getAllByText('4 agents · 1 command')).toHaveLength(4)
+  await expect(canvas.queryByText('4 agents · 1 commands')).toBeNull()
   await expect(canvas.getAllByRole('button', { name: 'Show result' })).toHaveLength(8)
   await expect(canvas.getAllByRole('button', { name: 'Hide result' })).toHaveLength(8)
   await expect(canvasElement.querySelectorAll('[data-result-state="Failed"] [data-testid="markdown"]')).toHaveLength(4)

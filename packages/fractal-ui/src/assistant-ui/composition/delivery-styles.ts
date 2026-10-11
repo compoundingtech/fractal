@@ -4,7 +4,7 @@ export const deliveryStyles = stylex.create({
   card: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, backgroundColor: surface.raised, padding: s.lg, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, minWidth: 0 },
   row: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.sm, minHeight: g.toolRow, minWidth: 0 },
   stack: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
-  button: { borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, padding: s.xs, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary }, ':disabled': { cursor: 'default', color: ink.fgFaint } },
+  button: { borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, padding: s.xs, fontFamily: t.fontSans, fontSize: t.metaSize, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary }, ':disabled': { cursor: 'default', color: ink.fgFaint } },
   summary: { textAlign: 'left', display: 'flex', gap: s.sm, alignItems: 'center', width: '100%', minHeight: g.toolRow },
   label: { minWidth: 0, flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   mono: { fontFamily: t.fontMono, fontSize: t.metaSize },
@@ -17,4 +17,7 @@ export const deliveryStyles = stylex.create({
   tree: { maxHeight: '340px', overflow: 'auto', fontFamily: t.fontMono, fontSize: t.metaSize, backgroundColor: surface.codeBg, padding: s.md, borderRadius: r.sm },
   node: { paddingLeft: s.lg },
   footer: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border, paddingTop: s.md },
+  unavailable: { color: ink.fgMuted, fontWeight: t.weightRegular, cursor: 'default' },
+  hiddenReason: { position: 'absolute', width: g.hairline, height: g.hairline, padding: 0, margin: '-1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
+  tooltip: { maxWidth: g.tooltipMax, padding: s.md, borderRadius: r.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, zIndex: 10 },
 })

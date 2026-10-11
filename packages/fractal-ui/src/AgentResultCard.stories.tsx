@@ -2,7 +2,7 @@ import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { AgentResultCard } from './assistant-ui/composition/AgentResultCard'
 import { resultFixture } from './delivery-fixtures'
 import { deliveryStoryMatrix } from './delivery-story-frame'
@@ -39,7 +39,7 @@ const statePlay: NonNullable<Story['play']> = async ({ canvasElement, args }) =>
   await userEvent.tab()
   const resume = canvas.getByRole('button', { name: 'Resume' })
   await expect(resume).toHaveFocus()
-  await expect(resume).toHaveAccessibleDescription(args.result.resumeReason)
+  await waitFor(async () => { await expect(resume).toHaveAccessibleDescription(args.result.resumeReason) })
   const thread = canvas.getByRole('button', { name: 'Open thread' })
   if (args.result.openThread._tag === 'Unavailable') {
     await expect(thread).toHaveAttribute('aria-disabled', 'true')
@@ -63,6 +63,24 @@ export const RanIsolated: Story = { args: { result: { ...resultFixture, lifecycl
 export const ResultSubmitted: Story = { args: { result: { ...resultFixture, lifecycle: { _tag: 'Submitted' } } }, play: statePlay }
 export const MarkdownOnly: Story = { args: { expanded: true, result: { ...resultFixture, facts: [], schema: { _tag: 'NotProvided' } } }, play: statePlay }
 export const OpenThreadUnavailable: Story = { play: statePlay }
+export const UnavailableReasonsOnFocus: Story = { play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const page = within(canvasElement.ownerDocument.body)
+  for (const reason of [resultFixture.messageReason, resultFixture.resumeReason]) {
+    for (const description of canvas.getAllByText(reason)) await expect(description).not.toBeVisible()
+  }
+  const message = canvas.getAllByRole('button', { name: 'Message' })[0]!
+  message.focus()
+  const tooltip = await page.findByRole('tooltip')
+  await expect(tooltip).toHaveTextContent(resultFixture.messageReason)
+  await expect(tooltip).toBeVisible()
+  await expect(message).toHaveAccessibleDescription(resultFixture.messageReason)
+  await userEvent.tab()
+  await waitFor(async () => { await expect(page.getByRole('tooltip')).toHaveTextContent(resultFixture.resumeReason) })
+  await expect(page.getAllByRole('tooltip')).toHaveLength(1)
+  await expect(canvas.getAllByRole('button', { name: 'Resume' })[0]).toHaveFocus()
+  await expect(canvasElement.querySelector('[data-testid="markdown"]')).toBeNull()
+} }
 export const OpenThread: Story = { args: { result: { ...resultFixture, openThread: { _tag: 'Available', onPress: openThread } } }, play: async context => {
   await statePlay(context)
   const canvas = within(context.canvasElement)
@@ -91,8 +109,10 @@ export const MountedStateTransition: Story = { args: { result: { ...resultFixtur
   await expect(canvasElement.querySelector('[data-testid="markdown"]')).toBeNull()
   for (const label of ['Report failed child', 'Report cancelled child', 'Report aborted child']) {
     await userEvent.click(canvas.getAllByRole('button', { name: label })[0]!)
-    await expect(canvas.getAllByRole('button', { name: 'Hide result' })).toHaveLength(4)
-    await expect(canvasElement.querySelectorAll('[data-testid="markdown"]')).toHaveLength(4)
+    await waitFor(async () => {
+      await expect(canvas.getAllByRole('button', { name: 'Hide result' })).toHaveLength(4)
+      await expect(canvasElement.querySelectorAll('[data-testid="markdown"]')).toHaveLength(4)
+    })
     await userEvent.click(canvas.getAllByRole('button', { name: 'Hide result' })[0]!)
     await expect(canvasElement.querySelectorAll('[data-testid="markdown"]')).toHaveLength(3)
   }
@@ -153,7 +173,7 @@ export const MountedFailureKeepsContext: Story = { args: { result: { ...resultFi
   await expect(thread).toHaveFocus()
   await expect(root).toHaveAttribute('aria-expanded', 'true')
   await expect(canvas.getByText('commit: "a41d90b"')).toBeVisible()
-  await expect(canvasElement.querySelectorAll('[data-result-state="Failed"]')).toHaveLength(4)
+  await waitFor(async () => { await expect(canvasElement.querySelectorAll('[data-result-state="Failed"]')).toHaveLength(4) })
   await userEvent.click(canvas.getAllByRole('button', { name: 'Hide result' })[0]!)
   await expect(canvasElement.querySelectorAll('[data-testid="markdown"]')).toHaveLength(3)
 } }
