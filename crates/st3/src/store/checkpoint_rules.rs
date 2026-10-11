@@ -91,6 +91,21 @@ pub fn rules_digest() -> String {
     hex::encode(digest.finalize())
 }
 
+/// The digests of earlier rules versions that this build's rules replace. A member still
+/// sealing with one of them lags a deploy, so the members on these rules verify without it
+/// (see `checkpoint_rules_supersede`). Add the outgoing digest when `RULES_VERSION` changes.
+const SUPERSEDED_RULES: &[(u32, &str)] = &[(
+    14,
+    "6a1426cc23bc9cb8aadc647983d20d79db2b7832b7d846d03e16a80be8412385",
+)];
+
+/// Whether this build's rules replace the rules with `rules_digest`.
+pub(crate) fn supersedes(rules_digest: &str) -> bool {
+    SUPERSEDED_RULES
+        .iter()
+        .any(|(version, digest)| *version < RULES_VERSION && *digest == rules_digest)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Rule {
     Newest,

@@ -3,7 +3,7 @@
 This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
-Digest: `6b99e61e4d95d0d6d966187d9f998f41382b6910050ef90aece441ac978b2c72`
+Digest: `e17af976e4e8f648fdb47d2d23eeb05ba85a1b4e213a6c3c2bd542e7dfa4f82c`
 Storage version: `18`
 Storage digest: `d11a3e5db57db0a0bd6a9b27474cdd93958a401b3a6482b62aea3595530dbcef`
 
@@ -79,7 +79,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `attention.resolved` | `attention` | `authorized-participant` | `once` | `durable` | `outcome!:string`, `reason:string`, `request!:string` |  |
 | `checkpoint.excused` | `checkpoint-excusal` | `system-only` | `append` | `durable` | `reason!:string`, `writer!:string` |  |
 | `checkpoint.sealed` | `checkpoint` | `system-only` | `append` | `durable` | `build:string`, `checkpoint_protocol!:integer`, `cut_unix_ms!:integer`, `participants:array`, `rules_digest!:string`, `sealed_count!:integer`, `sealed_digest!:string` |  |
-| `checkpoint.verified` | `checkpoint` | `system-only` | `append` | `durable` | `build:string`, `checkpoint_protocol!:integer`, `cut_unix_ms!:integer`, `drop_digest!:string`, `dropped_claims!:integer`, `dropped_envelopes!:integer`, `graph_digest!:string`, `participants:array`, `reader_digest!:string`, `retained_digest!:string`, `rules_digest!:string`, `sealed_digest!:string` |  |
+| `checkpoint.verified` | `checkpoint` | `system-only` | `append` | `durable` | `build:string`, `checkpoint_protocol!:integer`, `cut_unix_ms!:integer`, `drop_digest!:string`, `dropped_claims!:integer`, `dropped_envelopes!:integer`, `graph_digest!:string`, `lagging:array`, `participants:array`, `reader_digest!:string`, `retained_digest!:string`, `rules_digest!:string`, `sealed_digest!:string` |  |
 | `daemon.diagnostic` | `daemon` | `system-only` | `append` | `durable` | `code!:string`, `reason!:string`, `severity!:string`, `status:string` |  |
 | `daemon.started` | `daemon` | `system-only` | `append` | `durable` | `features:object`, `pid:integer`, `schema:string`, `schema_digest:string`, `status!:string`, `version:string` | `reset` |
 | `delivery.hold` | `agent` | `authorized-requester` | `state-transition` | `durable` | `held!:boolean`, `legacy_adoption:boolean`, `reason!:string`, `until_unix_ms!:integer` |  |

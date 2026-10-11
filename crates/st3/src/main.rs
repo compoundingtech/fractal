@@ -11925,6 +11925,13 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
         for (writer, difference) in &pending.disagreeing {
             output.push_str(&format!("  differs     {writer}: {difference}\n"));
         }
+        if !pending.lagging.is_empty() {
+            output.push_str(&format!(
+                "  lagging     {} (older rules; the rest verify without them while they are \
+                 more than half)\n",
+                names(&pending.lagging)
+            ));
+        }
         output.push_str(&format!("  verified    {}\n", names(&pending.verified)));
         for (writer, difference) in &pending.verifications_differ {
             output.push_str(&format!("  verifies    {writer}: different {difference}\n"));

@@ -151,6 +151,14 @@ pub trait Runtime: Send + Sync {
     /// only when their rules digests match.
     fn checkpoint_rules_digest(&self) -> String;
 
+    /// Whether this build's rules are a newer version of the rules with `rules_digest`. A
+    /// participant still sealing with such rules lags a deploy: the members with these rules may
+    /// verify without it. Rules this build does not know as older are never lagging, so members
+    /// on two unknown or equal versions keep waiting for each other.
+    fn checkpoint_rules_supersede(&self, _rules_digest: &str) -> bool {
+        false
+    }
+
     /// Fail before sealing history or copying a store when a runtime has no checkpoint contract.
     fn checkpoint_preflight(&self) -> Result<()> {
         Ok(())

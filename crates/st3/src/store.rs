@@ -3205,6 +3205,19 @@ impl Store {
         Ok(Self { graph, smalltalk })
     }
 
+    /// Simulate a build with other checkpoint rules on this node: it seals with `digest` and
+    /// takes the rules in `superseded` for older versions of its own.
+    #[cfg(test)]
+    pub(crate) fn set_checkpoint_rules(&self, digest: &str, superseded: &[&str]) {
+        assert!(
+            self.smalltalk
+                .checkpoint_rules
+                .set((digest.to_owned(), superseded.iter().map(|rules| (*rules).to_owned()).collect()))
+                .is_ok(),
+            "the rules are set once"
+        );
+    }
+
     /// Simulate a different build's registry on this node.
     #[cfg(test)]
     pub(crate) fn set_claim_registry(&self, registry: st3_schema::Registry) {
@@ -41541,7 +41554,7 @@ version 2
         // here. Retain the real v5 rule identity when constructing its historical certificate.
         plan.rules_digest = legacy_digest;
         for node in [&controller, &worker] {
-            node.publish_verification(&checkpoint, &terms, &plan, &proof)
+            node.publish_verification(&checkpoint, &terms, &BTreeSet::new(), &plan, &proof)
                 .unwrap();
         }
         assert!(!projection_replayed(&controller, "worker", &worker));

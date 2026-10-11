@@ -2800,6 +2800,15 @@ fn the_policy_renders_the_rules_description_with_only_the_limits_rule_changed_si
     );
 }
 
+#[test]
+fn this_build_replaces_the_rules_14_digest_members_still_seal_with() {
+    let mut digest = Sha256::new();
+    digest.update(b"st3-checkpoint-rules-v1\0");
+    digest.update(14_u32.to_be_bytes());
+    digest.update(RULES_V14_DESCRIPTION.as_bytes());
+    assert!(super::checkpoint_rules::supersedes(&hex::encode(digest.finalize())));
+}
+
 /// `slot_of` as it was before the policy file, to show the policy groups claims into the same
 /// slots under the same planner functions.
 fn legacy_slot_of(claim: &ClaimRecord) -> Option<(&'static str, Vec<String>)> {

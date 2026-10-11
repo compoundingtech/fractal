@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Members on the newest checkpoint rules verify and trim without a member that still seals with the rules version before",
+  "replay": {"status": "none", "detail": "No replay. Certificates already stable are unchanged."},
+  "schema": {"status": "changed", "detail": "checkpoint.verified gains an optional `lagging` array naming the participants verified without. No tables, columns, indexes or schema version change. A build without the field keeps such claims as waiting claims of a newer schema and admits them once upgraded."},
+  "rules": {"status": "none", "detail": "Rules version 15 is unchanged. The build lists the rules 14 digest as superseded: a participant whose seal differs only by naming rules 14 lags, and the others verify without it while they are more than half of the participants. Unknown, equal-version or newer rules still wait."},
+  "compatibility": {"status": "changed", "detail": "A member still on rules 14 no longer stalls checkpoints for the upgraded members. It trims nothing and adopts no certificate while it lags, and adopts the newest one from a peer once it runs rules 15. Verifications that name nobody as lagging are byte-for-byte what earlier builds write. st replication checkpoint status adds a `lagging` list to the pending checkpoint."},
+  "downtime": {"status": "none", "detail": "No restart requirement beyond the ordinary deploy."},
+  "manual": {"status": "changed", "detail": "Deploy this build to every upgraded member: a rules-15 member without it still waits for the lagging member's seal to match, so the upgraded members verify only once each of them runs this build. The lagging member should catch up to a build that contains this change."},
+  "recovery": {"status": "none", "detail": "Rolling back to the build before stalls new checkpoints while any member lags, as before. Checkpoints the upgraded members trimmed stay trimmed; the lagging member adopts them once it runs their rules."}
+}

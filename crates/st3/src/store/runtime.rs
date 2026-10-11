@@ -19,6 +19,10 @@ pub struct SmalltalkRuntime {
     /// Simulate different build registries on isolated nodes in compatibility tests.
     #[cfg(test)]
     pub(crate) claim_registry: std::sync::OnceLock<st3_schema::Registry>,
+    /// Simulate a build with other checkpoint rules on one node in mixed-version tests: the
+    /// digest it seals with, and the digests its rules replace.
+    #[cfg(test)]
+    pub(crate) checkpoint_rules: std::sync::OnceLock<(String, Vec<String>)>,
     pub(crate) conversation_owner_generation: std::sync::atomic::AtomicU64,
     pub(crate) conversation_owners: Mutex<VecDeque<(u64, Arc<conversation_reads::Owners>)>>,
     pub(crate) actual_cache: Mutex<HashMap<String, (u64, Option<Value>)>>,
@@ -401,7 +405,19 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn checkpoint_rules_digest(&self) -> String {
+        #[cfg(test)]
+        if let Some((digest, _)) = self.checkpoint_rules.get() {
+            return digest.clone();
+        }
         checkpoint_rules::rules_digest()
+    }
+
+    fn checkpoint_rules_supersede(&self, rules_digest: &str) -> bool {
+        #[cfg(test)]
+        if let Some((_, superseded)) = self.checkpoint_rules.get() {
+            return superseded.iter().any(|digest| digest == rules_digest);
+        }
+        checkpoint_rules::supersedes(rules_digest)
     }
 
     fn plan_checkpoint_drops(&self, sealed: &SealedSet) -> DropPlan {

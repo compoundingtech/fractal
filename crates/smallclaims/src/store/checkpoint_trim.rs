@@ -225,6 +225,11 @@ impl Store {
         if applied(&connection, cut, &certificate.terms.drop_digest)? {
             return Ok(Some(Application::Done));
         }
+        if self.lags_certificate(&certificate) {
+            // Its rules are older than the ones certified: it keeps every row, and goes on
+            // sealing newer checkpoints, until it runs those rules and adopts the manifest.
+            return Ok(None);
+        }
         if certificate.verifications.contains_key(&self.origin)
             && let Some((state, Some(seal_rowid))) = local_checkpoint(&connection, &checkpoint)?
             && state != "plan-changed"
@@ -330,6 +335,13 @@ impl Store {
         })
     }
 
+    /// Whether `certificate` names this node as lagging a rules version and this node still
+    /// runs other rules than the certified ones. Applying it would drop rows these rules may read.
+    fn lags_certificate(&self, certificate: &Certificate) -> bool {
+        certificate.terms.lagging.contains(&self.origin)
+            && certificate.terms.rules_digest != self.runtime.checkpoint_rules_digest()
+    }
+
     /// The newest checkpoint this node has trimmed or adopted, as its inventory advertises it.
     pub fn trimmed_checkpoint(&self) -> Result<Option<InventoryCheckpoint>> {
         Ok(self
@@ -431,6 +443,16 @@ impl Store {
             return Err(St3Error::new(
                 "checkpoint-manifest-invalid",
                 "the manifest's cut is not the certified one",
+            ));
+        }
+        if self.lags_certificate(certificate) {
+            return Err(St3Error::new(
+                "checkpoint-rules-lagging",
+                format!(
+                    "`{}` was certified while this node lagged with older rules; it adopts the \
+                     checkpoint once it runs the certified rules",
+                    manifest.checkpoint
+                ),
             ));
         }
         verify_checkpoint_manifest(manifest, &certificate.terms.drop_digest)?;

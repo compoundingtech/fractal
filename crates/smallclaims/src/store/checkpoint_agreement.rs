@@ -100,6 +100,10 @@ impl CheckpointClaim {
             retained_digest: self.text("retained_digest")?.to_owned(),
             graph_digest: self.text("graph_digest")?.to_owned(),
             reader_digest: self.text("reader_digest")?.to_owned(),
+            lagging: match self.fields.get("lagging") {
+                None => BTreeSet::new(),
+                Some(_) => self.names("lagging")?,
+            },
         })
     }
 
@@ -128,10 +132,56 @@ pub struct VerifiedTerms {
     pub retained_digest: String,
     pub graph_digest: String,
     pub reader_digest: String,
+    /// Participants whose seal matched in everything but the rules, which were an older version
+    /// of the verifiers' rules. They neither verify nor trim this checkpoint; each adopts its
+    /// manifest once it runs the certified rules. Empty when every participant verifies.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub lagging: BTreeSet<String>,
+}
+
+impl VerifiedTerms {
+    /// The participants that must each verify: every one but those lagging a rules version.
+    pub fn verifiers(&self) -> BTreeSet<String> {
+        self.participants.difference(&self.lagging).cloned().collect()
+    }
+}
+
+/// Whether participants lagging a rules version leave enough verifiers: more than half of the
+/// participants, so a member that upgraded first never certifies its new rules alone.
+pub fn lagging_allowed(participants: &BTreeSet<String>, lagging: &BTreeSet<String>) -> bool {
+    lagging.is_subset(participants) && 2 * (participants.len() - lagging.len()) > participants.len()
+}
+
+/// The participants lagging a rules version behind `ours`: each one whose newest seal of this
+/// checkpoint matches `ours` in everything but the rules, where `supersede` says this build's
+/// rules replace theirs. `None` while any participant has no seal or a seal that differs in
+/// another way, or when the laggards would leave too few verifiers.
+pub fn lagging_participants(
+    ours: &SealTerms,
+    seals: &BTreeMap<String, SealTerms>,
+    supersede: impl Fn(&str) -> bool,
+) -> Option<BTreeSet<String>> {
+    let mut lagging = BTreeSet::new();
+    for writer in &ours.participants {
+        let theirs = seals.get(writer)?;
+        if theirs == ours {
+            continue;
+        }
+        let only_rules = SealTerms {
+            rules_digest: ours.rules_digest.clone(),
+            ..theirs.clone()
+        } == *ours;
+        if !only_rules || !supersede(&theirs.rules_digest) {
+            return None;
+        }
+        lagging.insert(writer.clone());
+    }
+    lagging_allowed(&ours.participants, &lagging).then_some(lagging)
 }
 
 /// A stable checkpoint: one verification from each participant, all naming exactly those
-/// participants and carrying identical digests.
+/// participants and carrying identical digests. Participants the terms name as lagging a rules
+/// version are not waited for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Certificate {
     pub checkpoint: String,
@@ -268,10 +318,11 @@ pub fn certificates(claims: &[CheckpointClaim], checkpoint: &str) -> Vec<Certifi
     groups
         .into_iter()
         .filter_map(|(terms, mut verifications)| {
-            verifications.retain(|writer, _| terms.participants.contains(writer));
-            let complete = !terms.participants.is_empty()
-                && terms
-                    .participants
+            let verifiers = terms.verifiers();
+            verifications.retain(|writer, _| verifiers.contains(writer));
+            let complete = !verifiers.is_empty()
+                && lagging_allowed(&terms.participants, &terms.lagging)
+                && verifiers
                     .iter()
                     .all(|writer| verifications.contains_key(writer));
             complete.then(|| Certificate {
@@ -397,6 +448,10 @@ pub struct PendingCheckpointView {
     pub sealed: BTreeSet<String>,
     /// Participants with a seal that differs, and how.
     pub disagreeing: BTreeMap<String, String>,
+    /// Participants whose seal differs only in rules a version older than this build's. The
+    /// others verify without them while they leave more than half the participants verifying.
+    #[serde(default)]
+    pub lagging: BTreeSet<String>,
     /// Participants with no seal of this checkpoint.
     pub unsealed: BTreeSet<String>,
     /// Participants that verified, and whether their digests match each other.
@@ -728,26 +783,33 @@ impl Store {
         &self,
         checkpoint: &str,
         terms: &SealTerms,
+        lagging: &BTreeSet<String>,
         plan: &DropPlan,
         proof: &CheckpointProof,
     ) -> Result<()> {
+        let mut fields = BTreeMap::from([
+            ("cut_unix_ms".into(), json!(terms.cut_unix_ms)),
+            ("participants".into(), json!(terms.participants)),
+            ("sealed_digest".into(), json!(terms.sealed_digest)),
+            ("rules_digest".into(), json!(terms.rules_digest)),
+            ("drop_digest".into(), json!(plan.drop_digest)),
+            ("dropped_envelopes".into(), json!(plan.envelopes.len())),
+            ("dropped_claims".into(), json!(plan.claims.len())),
+            ("retained_digest".into(), json!(plan.retained_digest)),
+            ("graph_digest".into(), json!(proof.graph_digest)),
+            ("reader_digest".into(), json!(proof.reader_digest)),
+            ("checkpoint_protocol".into(), json!(CHECKPOINT_PROTOCOL)),
+            ("build".into(), json!(checkpoint_build())),
+        ]);
+        // Absent when every participant verifies, so these verifications are the ones a build
+        // without lagging participants writes.
+        if !lagging.is_empty() {
+            fields.insert("lagging".into(), json!(lagging));
+        }
         self.append_checkpoint_claim(
             checkpoint,
             CHECKPOINT_VERIFIED,
-            BTreeMap::from([
-                ("cut_unix_ms".into(), json!(terms.cut_unix_ms)),
-                ("participants".into(), json!(terms.participants)),
-                ("sealed_digest".into(), json!(terms.sealed_digest)),
-                ("rules_digest".into(), json!(terms.rules_digest)),
-                ("drop_digest".into(), json!(plan.drop_digest)),
-                ("dropped_envelopes".into(), json!(plan.envelopes.len())),
-                ("dropped_claims".into(), json!(plan.claims.len())),
-                ("retained_digest".into(), json!(plan.retained_digest)),
-                ("graph_digest".into(), json!(proof.graph_digest)),
-                ("reader_digest".into(), json!(proof.reader_digest)),
-                ("checkpoint_protocol".into(), json!(CHECKPOINT_PROTOCOL)),
-                ("build".into(), json!(checkpoint_build())),
-            ]),
+            fields,
             format!("checkpoint-verified:{}:{checkpoint}", self.origin),
         )
     }
@@ -808,7 +870,8 @@ impl Store {
     }
 
     /// One pass of checkpoint work: seal the newest due checkpoint, or verify it once every
-    /// participant's seal matches. A node that is catching up with a peer does nothing, since
+    /// participant's seal matches, or differs only in rules a version older than this build's
+    /// (see `lagging_participants`). A node that is catching up with a peer does nothing, since
     /// what it holds before the cut is still changing. Call it after exchanges and every few
     /// minutes. The proof copies the store and replays it, so run it off the request path.
     pub fn checkpoint_step(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
@@ -873,14 +936,13 @@ impl Store {
                     sealed_digest: terms.sealed_digest.clone(),
                     participants: terms.participants.clone(),
                 });
-            } else if terms
-                .participants
-                .iter()
-                .all(|writer| seals.get(writer) == Some(&terms))
-            {
+            } else if let Some(lagging) = lagging_participants(&terms, &seals, |rules| {
+                self.runtime.checkpoint_rules_supersede(rules)
+            }) {
                 self.verify_checkpoint(
                     &checkpoint,
                     &terms,
+                    &lagging,
                     sealed.seal_rowid,
                     context,
                     &mut actions,
@@ -894,12 +956,16 @@ impl Store {
         &self,
         checkpoint: &str,
         terms: &SealTerms,
+        lagging: &BTreeSet<String>,
         seal_rowid: i64,
         context: &CheckpointContext,
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<()> {
         self.runtime.checkpoint_preflight()?;
-        if terms.rules_digest != self.runtime.checkpoint_rules_digest() {
+        if terms.rules_digest != self.runtime.checkpoint_rules_digest()
+            || lagging.contains(&self.origin)
+            || !lagging_allowed(&terms.participants, lagging)
+        {
             // Verification is for these seal terms, never a different build's drop rules.
             // The normal step publishes replacement terms before attempting proof again.
             return Ok(());
@@ -970,7 +1036,7 @@ impl Store {
             &SealedIdentities::of(&sealed),
             Some(&plan),
         )?;
-        self.publish_verification(checkpoint, terms, &plan, &proof)?;
+        self.publish_verification(checkpoint, terms, lagging, &plan, &proof)?;
         actions.push(CheckpointAction::Verified {
             checkpoint: checkpoint.to_owned(),
             drop_digest: plan.drop_digest.clone(),
@@ -1061,6 +1127,17 @@ impl Store {
                 },
             };
             let seals = newest_seals(&claims, &checkpoint);
+            let lagging = participants
+                .iter()
+                .filter(|writer| {
+                    seals.get(*writer).is_some_and(|theirs| {
+                        theirs != &terms
+                            && seal_difference(&terms, theirs) == "rules"
+                            && self.runtime.checkpoint_rules_supersede(&theirs.rules_digest)
+                    })
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let reference = verified
                 .get(&self.origin)
                 .or_else(|| verified.values().next())
@@ -1087,12 +1164,14 @@ impl Store {
                     .collect(),
                 disagreeing: participants
                     .iter()
+                    .filter(|writer| !lagging.contains(*writer))
                     .filter_map(|writer| {
                         let theirs = seals.get(writer)?;
                         (theirs != &terms)
                             .then(|| (writer.clone(), seal_difference(&terms, theirs)))
                     })
                     .collect(),
+                lagging,
                 unsealed: participants
                     .iter()
                     .filter(|writer| !seals.contains_key(*writer))

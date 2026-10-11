@@ -3598,6 +3598,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("reader_digest", required_string()),
             ("checkpoint_protocol", required_integer()),
             ("build", string()),
+            ("lagging", array()),
         ],
         "checkpoint.excused" => &[("writer", required_string()), ("reason", required_string())],
         "subscription.mission-deferred" => &[
