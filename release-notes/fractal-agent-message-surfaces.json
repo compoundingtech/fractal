@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Promoted agent-message cards and folded outgoing delivery rows",
+  "replay": {"status": "none", "detail": "UI rendering changes do not alter replay or recovery triggers."},
+  "schema": {"status": "none", "detail": "No database schema, tables, indexes or migrations change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules, digests or mixed-build coordination change."},
+  "compatibility": {"status": "none", "detail": "New pure presentation components do not change client wire capabilities or harness admission. Applications continue to own message loading, recipient facts and receipt transport."},
+  "downtime": {"status": "none", "detail": "No additional service restart or interruption is introduced."},
+  "manual": {"status": "none", "detail": "Existing installations require no migration or operator action."},
+  "recovery": {"status": "none", "detail": "No stored state is changed and no new rollback or roll-forward procedure is needed."}
+}
