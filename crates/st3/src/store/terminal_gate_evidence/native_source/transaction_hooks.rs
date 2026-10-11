@@ -9,9 +9,12 @@ use std::sync::{
 };
 use std::thread::ThreadId;
 
+mod operator_error;
+
 #[derive(Default)]
 struct Adapter {
     source: OnceLock<NativeSource>,
+    operator_error: Arc<operator_error::Cell>,
     // Explicit one-use caller token. Uninitialized state by itself grants no permission.
     bootstrap: Mutex<Option<ThreadId>>,
     bootstrap_claimed: AtomicUsize,
@@ -55,6 +58,7 @@ impl Adapter {
         result
     }
     fn prepare(&self, tx: &Transaction<'_>) -> Result<()> {
+        self.operator_error.reset()?;
         self.prepare_calls.fetch_add(1, Ordering::Relaxed);
         self.measured("prepare", || {
             let Some(source) = self.source.get() else {
@@ -98,7 +102,22 @@ impl Adapter {
             ensure!(active, "missing managed scope");
             Ok(())
         })?;
-        self.measured("source-finish", || source.finish(tx))?;
+        let finished = self.measured("source-finish", || source.finish(tx));
+        // Installer may have converted the callback fault into an unready root.
+        // Drain even if finish failed during its subsequent savepoint cleanup.
+        if let Some(error) = self.operator_error.take()? {
+            return Err(error);
+        }
+        finished?;
+        if let Some(reason) = self.operator_error.constraint_reason()? {
+            self.measured("operator-constraint-fence", || {
+                tx.execute(
+                    "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
+                    [&reason],
+                )?;
+                source.installer.source_gap(tx, SOURCE, &reason)
+            })?;
+        }
         match self.fault.load(Ordering::Relaxed) {
             2 => anyhow::bail!("injected finalizer storage failure"),
             3 => panic!("injected finalizer panic"),
@@ -119,7 +138,7 @@ impl Adapter {
         let _token = self.token()?;
         let mut writer = store.connection.write();
         let tx = writer.transaction()?;
-        let source = NativeSource::attach(&tx, binding)?;
+        let source = NativeSource::attach_with_installer(&tx, binding, self.installer()?)?;
         self.source
             .set(source)
             .map_err(|_| anyhow::anyhow!("source already attached"))?;
@@ -140,12 +159,17 @@ impl Adapter {
             .source
             .set(NativeSource {
                 binding,
-                installer: Installer::new(vec![Box::new(TerminalGates)])?,
+                installer: adapter.installer()?,
             })
             .map_err(|_| anyhow::anyhow!("source already attached"))?;
         // No attestation or empty registration here. The first prepare validates the saved
         // binding and permanently gaps pending open-time/raw writes, including a leaked scope.
         Ok(adapter)
+    }
+    fn installer(&self) -> Result<Installer> {
+        Installer::new(vec![Box::new(operator_error::DelegatingOperator {
+            cell: self.operator_error.clone(),
+        })])
     }
 }
 

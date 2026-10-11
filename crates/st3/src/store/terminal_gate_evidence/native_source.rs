@@ -150,6 +150,13 @@ fn decode(raw: &str) -> Result<Value> {
 
 impl NativeSource {
     fn attach(tx: &Transaction<'_>, binding: Binding) -> Result<Self> {
+        Self::attach_with_installer(tx, binding, Installer::new(vec![Box::new(TerminalGates)])?)
+    }
+    fn attach_with_installer(
+        tx: &Transaction<'_>,
+        binding: Binding,
+        installer: Installer,
+    ) -> Result<Self> {
         binding.validate()?;
         // No scan/seed of an existing source, including existing operational projections.
         for table in [
@@ -193,7 +200,6 @@ impl NativeSource {
                 binding.exec
             ],
         )?;
-        let installer = Installer::new(vec![Box::new(TerminalGates)])?;
         installer.create_schema(tx)?;
         installer.register_source(tx, SOURCE, FINGERPRINT, 1)?;
         let job = installer.start(
