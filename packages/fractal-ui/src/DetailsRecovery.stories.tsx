@@ -7,7 +7,9 @@ import { Workbench, type WorkbenchProps } from './assistant-ui/workbench/Workben
 import { group, paneKey, type WorkbenchPane } from './assistant-ui/workbench/workbench-model'
 import { workbenchResources } from './assistant-ui/workbench/workbench-fixtures'
 import { DetailsPane, type DetailsLayoutIntent, type DetailsVariants } from './assistant-ui/details/DetailsPane'
-import { makeDetailsFixture, type DetailsState } from './assistant-ui/details/fixtures'
+import { makeDetailsFixture } from './assistant-ui/details/fixtures'
+import type { DetailsState } from './assistant-ui/details/model'
+import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
 import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
@@ -52,7 +54,7 @@ const meta = {
       <div {...stylex.props(styles.controls)}>{variants.map((value, index) => <Button key={index} size="sm" variant="quiet" data-recovery-variant={index} onPress={() => setVariant(index)}>{value.overview}{value.context}{value.spend}</Button>)}</div>
       <div {...stylex.props(styles.controls)}><Button size="sm" variant="quiet" data-recovery-action="loading" onPress={() => setObservation(observationFor('loading'))}>Loading</Button><Button size="sm" variant="quiet" data-recovery-action="failed" onPress={() => setObservation(current => ({ ...current, sync: failed }))}>Fail details</Button><Button size="sm" variant="quiet" data-recovery-action="busy" onPress={recover}>Busy</Button></div>
       <div {...stylex.props(styles.controls)}>{(['forbidden', 'unsupported'] as const).flatMap(code => [false, true].map(retained => <Button key={`${code}-${retained}`} size="sm" variant="quiet" data-recovery-failure-code={code} data-recovery-prior={String(retained)} onPress={() => setObservation({ content: retained ? 'busy' : 'loading', sync: { _tag: 'Failed', cause: { _tag: 'Server', code, message: code === 'forbidden' ? 'Access to this agent was denied.' : 'This gateway does not provide agent details.' } } })}>{code} · {retained ? 'retained' : 'first load'}</Button>))}</div>
-      <section aria-label="Mounted Details recovery" data-recovery-stage style={{ width }} {...stylex.props(styles.stage)}><ThemePortal><Workbench {...args} key={generation} workspaceId={`${args.workspaceId}-${generation}`} focusedPaneKey={paneKey(details)} renderPane={pane => pane.view === 'details' ? <DetailsPane variants={variants[variant]!} state={observation.content} syncStatus={observation.sync} hasPriorContent={observation.content !== 'loading' && observation.content !== 'error' && observation.content !== 'new'} intent={intent} onIntentChange={setIntent} onOpen={() => { throw new Error('Recovery gate unexpectedly opened a resource') }} onRetry={recover} /> : args.renderPane?.(pane)} /></ThemePortal></section>
+      <section aria-label="Mounted Details recovery" data-recovery-stage style={{ width }} {...stylex.props(styles.stage)}><ThemePortal><Workbench {...args} key={generation} workspaceId={`${args.workspaceId}-${generation}`} focusedPaneKey={paneKey(details)} renderPane={pane => pane.view === 'details' ? <DetailsPane {...detailsStoryInputs(observation.content)} variants={variants[variant]!} state={observation.content} syncStatus={observation.sync} hasPriorContent={observation.content !== 'loading' && observation.content !== 'error' && observation.content !== 'new'} intent={intent} onIntentChange={setIntent} onOpen={() => { throw new Error('Recovery gate unexpectedly opened a resource') }} onRetry={recover} /> : args.renderPane?.(pane)} /></ThemePortal></section>
     </div>
   },
 } satisfies Meta<Args>

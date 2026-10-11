@@ -9,6 +9,7 @@ import { group, paneKey, parsePaneKey, split, type WorkbenchPane } from './assis
 import { workbenchResources } from './assistant-ui/workbench/workbench-fixtures'
 import { DetailsPane, type DetailsLayoutIntent } from './assistant-ui/details/DetailsPane'
 import { DetailsLabelContext } from './assistant-ui/details/DetailsResources'
+import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -67,6 +68,7 @@ const meta = {
     const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
     const [state, setState] = React.useState<'busy' | 'loading' | 'error'>('busy')
     const renderPane = (pane: WorkbenchPane) => pane.view === 'details' ? <DetailsPane
+      {...detailsStoryInputs(state)}
       variants={{ overview: 'O2', context: 'C2', spend: 'S1', resources: 'R2', empty: 'E3' }}
       syncStatus={state === 'error' ? { _tag: 'Failed', cause: { _tag: 'Server', code: 'timeout', message: 'The agent snapshot request timed out.' } } : state === 'loading' ? { _tag: 'Connecting', attempt: 1, since: 1799999999000 } : { _tag: 'Live', since: 1799999999000 }}
       state={state} intent={intent} onIntentChange={setIntent}

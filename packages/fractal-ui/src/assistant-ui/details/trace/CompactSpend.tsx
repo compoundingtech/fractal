@@ -55,13 +55,13 @@ export const CompactSpend = ({ lane, descendantSpend, showUnavailableReasons = t
     </svg> : showUnavailableReasons && <p {...stylex.props(styles.note, styles.unknownNote)}>Session spend series was not retained.</p>}
     {showUnavailableReasons && !hasDescendantSeries && <p {...stylex.props(styles.note, styles.unknownNote)}>Descendant spend series was not retained.</p>}
     {(hasSeries || (!showUnavailableReasons && hasDescendantSeries)) && <div {...stylex.props(styles.axis)}><span>{clock.format(start)}</span><span>UTC</span><span>{clock.format(end)}</span></div>}
-    <p {...stylex.props(styles.note)}>API-equivalent · role aggregates{partial ? ' · chart shows retained marks; reported totals are exact' : ''}</p>
+    <p {...stylex.props(styles.note)}>API-equivalent · retained role observations{partial ? ' · chart and reported accumulation windows differ' : ''}</p>
 </div>
 }
 
 /** Loading twin of CompactSpend: same wrappers, gaps and 4:1 chart box, ink instead of values. */
-export const CompactSpendPending = (): ReactNode => <div {...stylex.props(styles.root)}>
-  <div {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span><span {...stylex.props(styles.descendants)}><span {...stylex.props(styles.pendingText)}>Subagents <strong>$0.00</strong></span></span></div>
+export const CompactSpendPending = ({showTotals=true}:{readonly showTotals?:boolean}): ReactNode => <div {...stylex.props(styles.root)}>
+  {showTotals&&<div {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span><span {...stylex.props(styles.descendants)}><span {...stylex.props(styles.pendingText)}>Subagents <strong>$0.00</strong></span></span></div>}
   <DetailsSkeletonPlot spend />
   <div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div>
   <p {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent · role aggregates</span></p>

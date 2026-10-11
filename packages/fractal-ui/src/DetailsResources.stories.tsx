@@ -9,8 +9,10 @@ import { workbenchResources } from './assistant-ui/workbench/workbench-fixtures'
 import { DetailsPane, type DetailsVariants, type DetailsLayoutIntent } from './assistant-ui/details/DetailsPane'
 import { traceHistorySection } from './assistant-ui/details/DetailsResources'
 import { hasDetailsChartData } from './assistant-ui/details/DetailsCharts'
-import { makeDetailsFixture, type DetailsState } from './assistant-ui/details/fixtures'
-import { detailsTraceFixtures, traceForDetailsState } from './assistant-ui/details/session-trace-provider'
+import { makeDetailsFixture } from './assistant-ui/details/fixtures'
+import type { DetailsState } from './assistant-ui/details/model'
+import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
+import { detailsTraceFixtures, traceForDetailsState } from './assistant-ui/details/trace/fixture-provider'
 import { adaptTrace } from './assistant-ui/details/trace/adapter'
 import { sessionTraceFixture } from './assistant-ui/details/trace/fixture'
 import type { TraceSeries } from './assistant-ui/details/trace-series'
@@ -68,7 +70,7 @@ const meta = {
         {(['idle', 'new', 'absent'] as const).map(state => <Button key={state} size="sm" variant="quiet" onPress={() => setStateOverride(state)}>Set {state}</Button>)}
       </header>
       <div {...stylex.props(comparison && styles.comparison)}>{mounted.map(item => <section key={item.name} aria-label={item.name} data-testid="resource-stage" style={{ width: item.width }} {...stylex.props(styles.root, ...baselineTheme, ...(args.scheme === 'light' ? lightTheme : []))}>
-        <ThemePortal><Workbench {...args} workspaceId={`${args.workspaceId}-${item.name}`} renderPane={() => <DetailsPane variants={item.variants} state={stateOverride ?? item.state} trace={item.trace} intent={intent}
+        <ThemePortal><Workbench {...args} workspaceId={`${args.workspaceId}-${item.name}`} renderPane={() => <DetailsPane {...detailsStoryInputs(stateOverride ?? item.state,item.trace)} variants={item.variants} state={stateOverride ?? item.state} intent={intent}
           onIntentChange={next => { setIntent(next); setIntentWrites(count => count + 1) }} onOpen={(key, split) => setOpens(current => [...current, { key, split }])} onRetry={() => setStateOverride('busy')} />}/></ThemePortal>
       </section>)}</div>
     </div>
@@ -278,16 +280,18 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
   requireContract(label.includes('Cumulative tokens'), 'Known cumulative token meter is missing')
   const scopeNote = spend.querySelector<HTMLElement>('[data-details-scope-note]')
   if (scopeNote) requireContract(scopeNote.getBoundingClientRect().height <= parseFloat(getComputedStyle(scopeNote).lineHeight) + 0.5, 'Unreported scope note is not one quiet line')
-  if (meter.scope._tag === 'Unknown') {
-    requireContract(!/main session|including subagents|excludes subagents|this agent|\bpartial\b/i.test(spend.textContent ?? '') && !spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and descendant spend"]'), 'Unreported total makes an unproven scope claim')
+  if (meter.tokensScope._tag === 'Unknown') {
+    requireContract(!/including subagents|excludes subagents|this agent|observed agent incarnations/i.test(label), 'Unreported total makes an unproven scope claim')
+    if (meter.usdScope._tag === 'Unknown') requireContract(!spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and descendant spend"]'), 'Unreported monetary total makes an unproven breakdown claim')
     const notes = spend.querySelectorAll('[data-details-partial-note]')
     requireContract(notes.length === 1 && notes[0]?.textContent === "Scope of this total isn't reported by this source.", 'Unreported token total lacks its exact scope explanation')
   } else {
-    requireContract(label === `Cumulative tokens · ${meter.scope._tag === 'Self' ? 'this agent' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
+    requireContract(label === `Cumulative tokens · ${meter.tokensScope._tag === 'Self' ? 'this agent' : meter.tokensScope._tag === 'AgentIncarnations' ? 'observed agent incarnations' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
     if (meter.tokensWindow._tag === 'Known') {
       const window = meter.tokensWindow.value
       if (window._tag === 'AllTime') requireContract(period === 'all time', 'Reported all-time window is absent')
-      else { const from = new Date(window.fromMs).toISOString(), to = new Date(window.toMs).toISOString(); requireContract(period.includes(from.slice(0, 10)) && period.includes(from.slice(11, 16)) && period.includes(to.slice(11, 16)) && period.includes('UTC'), 'Reported accumulation interval is absent from its separate date line') }
+      else if (window._tag === 'Interval') { const from = new Date(window.fromMs).toISOString(), to = new Date(window.toMs).toISOString(); requireContract(period.includes(from.slice(0, 10)) && period.includes(from.slice(11, 16)) && period.includes(to.slice(11, 16)) && period.includes('UTC'), 'Reported accumulation interval is absent from its separate date line') }
+      else requireContract(period.includes(window.label), 'Reported accumulation window label is absent')
     } else requireContract(spend.textContent?.includes("Accumulation window isn't reported by this source.") && !spend.textContent.includes('all time'), 'Unreported accumulation window claims all-time scope')
   }
 }
@@ -311,10 +315,10 @@ function assertFixtureFacts() {
   requireContract(full.nativeSessionId._tag === 'Known' && full.turns._tag === 'Known' && full.series._tag === 'Known', 'Full trace fixture lacks retained sources')
   const nativeSessionId = full.nativeSessionId.value
   const requests = sessionTraceFixture.requests.filter(request => request.sessionId === nativeSessionId).toSorted((a, b) => a.ts - b.ts)
-  requireContract(full.meters.context.usedTokens._tag === 'Known' && full.meters.context.usedTokens.source === 'st' && full.meters.context.usedTokens.value === 61206 && full.subagents._tag === 'Known' && full.meters.spend.scope._tag === 'IncludingSubagents', 'Full trace fixture loses snapshot provenance or attribution')
+  requireContract(full.meters.context.usedTokens._tag === 'Known' && full.meters.context.usedTokens.source === 'st' && full.meters.context.usedTokens.value === 61206 && full.subagents._tag === 'Known' && full.meters.spend.usdScope._tag === 'IncludingSubagents', 'Full trace fixture loses snapshot provenance or attribution')
   requireContract(requests.length === 17 && full.turns.value.points.length === requests.length && full.turns.value.points.every((point, index) => point.turnIndex === index + 1 && point.tMs === requests[index]?.ts) && requests.every(request => request.requests === 1), 'Trace turns are not the actual source requests')
   const partial = detailsTraceFixtures.partial, unknown = detailsTraceFixtures.unknown
-  requireContract(partial.series._tag === 'Unknown' && partial.meters.spend.mainUsd._tag === 'Unknown' && partial.meters.spend.subagentUsd._tag === 'Unknown' && partial.meters.spend.scope._tag === 'Unknown' && partial.meters.spend.scope.reason === 'not-attributed' && partial.meters.spend.tokens._tag === 'Known' && partial.meters.spend.tokens.source === 'st', 'Partial trace fixture invents attribution')
+  requireContract(partial.series._tag === 'Unknown' && partial.meters.spend.mainUsd._tag === 'Unknown' && partial.meters.spend.subagentUsd._tag === 'Unknown' && partial.meters.spend.usdScope._tag === 'Unknown' && partial.meters.spend.usdScope.reason === 'not-attributed' && partial.meters.spend.tokens._tag === 'Known' && partial.meters.spend.tokens.source === 'st', 'Partial trace fixture invents attribution')
   requireContract(unknown.nativeSessionId._tag === 'Unknown' && unknown.meters.spend.totalUsd._tag === 'Unknown', 'Unknown trace fixture invents identity or spend')
   const projection = adaptTrace(full), compaction = projection.lane.compactions[0], history = traceHistorySection(full)
   requireContract(compaction?.before === 897170 && compaction.after === 132952, 'Compaction includes the straddling bucket')
@@ -379,11 +383,11 @@ export const BucketFallback: Story = { args: { cases: widths.map(width => exampl
   try { axis.textContent = 'per turn'; await rejectsControl('Context axis renames buckets as turns', () => assertContext(pane, detailsTraceFixtures.bucketOnly)) } finally { axis.textContent = text }
   assertContext(pane, detailsTraceFixtures.bucketOnly)
 } }
-const scopeCases = widths.flatMap(width => [example(`including/${width}`, width, 'busy', {}, full), example(`self-all-time/${width}`, width, 'busy', {}, { ...full, meters: { ...full.meters, spend: { ...full.meters.spend, scope: { _tag: 'Self' }, tokensWindow: { ...zero, value: { _tag: 'AllTime' } } } } }), example(`unreported-window/${width}`, width, 'busy', {}, { ...full, meters: { ...full.meters, spend: { ...full.meters.spend, tokensWindow: missing } } })])
+const scopeCases = widths.flatMap(width => [example(`including/${width}`, width, 'busy', {}, full), example(`self-all-time/${width}`, width, 'busy', {}, { ...full, meters: { ...full.meters, spend: { ...full.meters.spend, usdScope: { _tag: 'Self' }, tokensScope: { _tag: 'Self' }, tokensWindow: { ...zero, value: { _tag: 'AllTime' } } } } }), example(`unreported-window/${width}`, width, 'busy', {}, { ...full, meters: { ...full.meters, spend: { ...full.meters.spend, tokensWindow: missing } } })])
 async function scopePlay(canvasElement: HTMLElement, cases: readonly Case[]) {
   await eachCase(canvasElement, cases, (pane, item) => { assertCraft(pane, item); assertScope(pane, item.trace!) })
   const pane = paneFor(canvasElement), label = pane.querySelector<HTMLElement>('[data-details-token-label]')!, text = label.textContent
-  try { label.textContent = 'Cumulative tokens · invented attribution'; const reason = cases.at(-1)!.trace!.meters.spend.scope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens · this agent'; await rejectsControl(reason, () => assertScope(pane, cases.at(-1)!.trace!)) } finally { label.textContent = text }
+  try { label.textContent = 'Cumulative tokens · invented attribution'; const reason = cases.at(-1)!.trace!.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens · this agent'; await rejectsControl(reason, () => assertScope(pane, cases.at(-1)!.trace!)) } finally { label.textContent = text }
   assertScope(pane, cases.at(-1)!.trace!)
 }
 export const ReportedSpendScope: Story = { args: { cases: scopeCases }, play: ({ canvasElement, args }) => scopePlay(canvasElement, args.cases) }
@@ -444,7 +448,7 @@ export const AllStates: Story = { args: { cases: allStatesCases, comparison: tru
 const e3Traces: readonly { name: string; trace: TraceSeries }[] = [
   { name: 'full', trace: full }, { name: 'partial', trace: detailsTraceFixtures.partial }, { name: 'unknown', trace: detailsTraceFixtures.unknown },
   { name: 'bucket-only', trace: detailsTraceFixtures.bucketOnly },
-  { name: 'unattributed', trace: { ...full, subagents: missing, meters: { ...full.meters, spend: { ...full.meters.spend, scope: { _tag: 'Unknown', reason: 'not-attributed' }, mainUsd: missing, subagentUsd: missing } } } },
+  { name: 'unattributed', trace: { ...full, subagents: missing, meters: { ...full.meters, spend: { ...full.meters.spend, usdScope: { _tag: 'Unknown', reason: 'not-attributed' }, mainUsd: missing, subagentUsd: missing } } } },
 ]
 const e3Cases = e3Traces.flatMap(({ name, trace }) => (['C1', 'C2', 'C3'] as const).flatMap((context, index) => (['S1', 'S2', 'S3'] as const).map(spend => example(`${name}/${context}/${spend}`, widths[index]!, 'busy', { context, spend }, trace))))
 export const E3ChartMatrix: Story = { args: { cases: e3Cases }, play: async ({ canvasElement, args }) => {

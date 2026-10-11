@@ -6,20 +6,21 @@ import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as 
 import { Icon, type IconName } from '../composition/Icons'
 import { SidebarAgentRow } from '../sidebar/SidebarAgentRow'
 import { ResourceCardV1, ResourceHoverV1, WholeResourceMeta } from '../resources/ResourceCardV1'
-import { fixtureSidebarNow } from './sidebar-fixtures'
 import { AgentHoverCard } from '../sidebar/SidebarAgentRow'
 import { AGENT_DRAG_MIME, agentPaneKey } from '../workbench/agent-drag'
-import { makeDetailsFixture, type DetailsResource, type DetailsSection, type DetailsState, type DetailsValue } from './fixtures'
+import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from './model'
 import type { TraceSeries, TraceSubagent, TraceUnknownReason } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
-import { traceForDetailsState } from './session-trace-provider'
+import { TraceCoverageNote } from './DetailsCharts'
 
 export type DetailsResourceForm = 'R1' | 'R2' | 'R3'
 export type DetailsEmptyRule = 'E1' | 'E2' | 'E3'
 export interface DetailsResourcesProps {
   readonly state: DetailsState
+  readonly sections: readonly DetailsSection[]
   /** Breakdown facts are independent of the st resource snapshot. */
-  readonly trace?: TraceSeries
+  readonly trace: TraceSeries
+  readonly now: number
   readonly form?: DetailsResourceForm
   readonly empty?: DetailsEmptyRule
   readonly onOpen: (uri: string, split: boolean) => void
@@ -30,19 +31,17 @@ export interface DetailsResourcesProps {
 export const DetailsLabelContext=React.createContext('')
 
 /** One pane-level column; collapse, hover and skeletons stay local, never synced. */
-export function DetailsResources({ state, trace, form = 'R1', empty = 'E1', onOpen, hiddenSections = [], styles: callerStyles }: DetailsResourcesProps) {
+export function DetailsResources({ state, sections: suppliedSections, trace, now, form = 'R1', empty = 'E1', onOpen, hiddenSections = [], styles: callerStyles }: DetailsResourcesProps) {
   const labelPrefix=React.useContext(DetailsLabelContext)
-  // Pending layout uses the populated fixture shape without exposing its facts.
-  const fixture = makeDetailsFixture(state === 'loading' ? 'busy' : state)
-  const layoutTrace = state === 'loading' ? traceForDetailsState('busy') : trace
-  const observedSubagents = fixture.sections.find(section => section.title === 'Subagents')
+  // Pending geometry derives only from the host's supplied observations.
+  const observedSubagents = suppliedSections.find(section => section.title === 'Subagents')
   const hasObservedSubagents = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
   const [collapsed, setCollapsed] = React.useState<Readonly<Record<string, boolean>>>({})
   const hidden = React.useMemo(() => new Set(hiddenSections), [hiddenSections])
   const toggle = React.useCallback((title: string) => setCollapsed(current => ({ ...current, [title]: !current[title] })), [])
   const open = React.useCallback((uri: string, split: boolean) => onOpen(agentPaneKey(uri), split), [onOpen])
-  const sections = state === 'error' ? [] : fixture.sections
-    .map(section => section.title === 'Subagents' ? traceSubagentSection(layoutTrace) : section.title === 'History' ? traceHistorySection(layoutTrace) : section)
+  const sections = state === 'error' ? [] : suppliedSections
+    .map(section => section.title === 'Subagents' ? { ...section, ...traceSubagentSection(trace) } : section.title === 'History' ? { ...section, ...traceHistorySection(trace) } : section)
     .filter(section => state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagents))
     .filter(section => visible(section.items, empty) || (section.title === 'Subagents' && hasObservedSubagents))
     .filter(section => !hidden.has(section.title))
@@ -60,7 +59,7 @@ export function DetailsResources({ state, trace, form = 'R1', empty = 'E1', onOp
           </AriaButton>
         </div>
         {!isCollapsed && <div {...stylex.props(styles.body)}>
-          <SectionContent section={section} observedSubagents={observedSubagents} trace={layoutTrace} form={form} empty={empty} open={open} pending={state === 'loading'} />
+          <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={state === 'loading'} />
         </div>}
       </section>
     })}
@@ -90,8 +89,9 @@ const humanSectionReasons: Readonly<Partial<Record<DetailsSection['title'], stri
   'Declared bindings': 'This source doesn’t report declared bindings.',
   History: 'This source doesn’t report session history.',
 }
-function unavailableReason(section: DetailsSection, trace: TraceSeries | undefined, empty: DetailsEmptyRule): string {
-  const subagentReason = trace?.subagents._tag === 'Unknown' ? trace.subagents.reason : 'no-provider'
+function unavailableReason(section: DetailsSection, trace: TraceSeries, empty: DetailsEmptyRule): string {
+  if (section.items._tag === 'Unknown' && section.unavailableReason !== undefined) return section.unavailableReason
+  const subagentReason = trace.subagents._tag === 'Unknown' ? trace.subagents.reason : 'no-provider'
   if (empty !== 'E3') return section.title === 'Subagents' ? humanSubagentReasons[subagentReason] : `This source doesn’t report ${section.title.toLowerCase()} yet.`
   return section.title === 'Subagents' ? humanSubagentReasons[subagentReason] : humanSectionReasons[section.title] ?? `This source doesn’t report ${section.title.toLowerCase()}.`
 }
@@ -109,12 +109,12 @@ function missingLineCountsNote(section: DetailsSection): string | undefined {
 }
 
 /** No native-session-to-st-agent identity is supplied; traced sessions stay neutral. */
-export function traceSubagentSection(trace: TraceSeries | undefined): DetailsSection {
-  if (trace?.subagents._tag !== 'Known') return { title: 'Subagents', items: { _tag: 'Unknown' } }
+export function traceSubagentSection(trace: TraceSeries): DetailsSection {
+  if (trace.subagents._tag !== 'Known') return { title: 'Subagents', items: { _tag: 'Unknown' } }
   return {
     title: 'Subagents',
     items: { _tag: 'Known', value: trace.subagents.value.map(subagent => {
-      const label = subagent.label ?? subagent.sessionId
+      const label = subagent.label._tag === 'Known' ? subagent.label.value : subagent.sessionId
       const detail = traceSubagentDetail(subagent)
       return {
         uri: `session:${subagent.sessionId}`,
@@ -124,12 +124,20 @@ export function traceSubagentSection(trace: TraceSeries | undefined): DetailsSec
     }) },
   }
 }
-const traceSubagentDetail = (subagent: TraceSubagent): string => `$${subagent.usd.toFixed(2)} · ${subagent.requests} requests · ${subagent.model}`
+/** Missing descendant facts are omitted, never fabricated parentage or timing. */
+const traceSubagentDetail = (subagent: TraceSubagent): string => [
+  `$${subagent.usd.toFixed(2)}`,
+  `${subagent.requests} requests`,
+  subagent.model._tag === 'Known' ? subagent.model.value : undefined,
+  subagent.parentSessionId._tag === 'Known' ? `Parent · ${subagent.parentSessionId.value}` : undefined,
+  subagent.firstMs._tag === 'Known' ? `First observed ${historyTimestamp.format(subagent.firstMs.value)} UTC` : undefined,
+  subagent.lastMs._tag === 'Known' ? `Last observed ${historyTimestamp.format(subagent.lastMs.value)} UTC` : undefined,
+].filter(value => value !== undefined).join(' · ')
 
 const historyTimestamp=new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short',timeZone:'UTC'})
 /** Incarnations retain their provider identity and observed lifetime facts. */
-export function traceHistorySection(trace: TraceSeries | undefined): DetailsSection {
-  if(trace?.history._tag!=='Known')return {title:'History',items:{_tag:'Unknown'}}
+export function traceHistorySection(trace: TraceSeries): DetailsSection {
+  if(trace.history._tag!=='Known')return {title:'History',items:{_tag:'Unknown'}}
   return {title:'History',items:{_tag:'Known',value:trace.history.value.map(incarnation=>({
     uri:`session:${incarnation.nativeSessionId}`,
     glyph:'◷',
@@ -144,8 +152,8 @@ export function traceHistorySection(trace: TraceSeries | undefined): DetailsSect
 }
 
 /** The loading shadow and populated body share markup, wrapping and intrinsic metadata fit. */
-function SectionContent({ section, observedSubagents, trace, form, empty, open, pending }: {
-  section: DetailsSection; observedSubagents: DetailsSection | undefined; trace: TraceSeries | undefined;
+function SectionContent({ section, observedSubagents, trace, now, form, empty, open, pending }: {
+  section: DetailsSection; observedSubagents: DetailsSection | undefined; trace: TraceSeries; now: number;
   form: DetailsResourceForm; empty: DetailsEmptyRule; open: (uri: string, split: boolean) => void; pending: boolean
 }) {
   const hasObserved = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
@@ -160,17 +168,19 @@ function SectionContent({ section, observedSubagents, trace, form, empty, open, 
     <div {...stylex.props(styles.content, pending && styles.skeletonHidden)}>
       {section.title === 'Subagents' && hasObserved && observedSubagents !== undefined && <>
         <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>Observed st resources</p></SkeletonLine>
-        <SectionItems section={observedSubagents} form={form} open={open} pending={pending} />
+        <SectionItems section={observedSubagents} now={now} form={form} open={open} pending={pending} />
       </>}
       {showBreakdown && <>
         {section.title === 'Subagents' && <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>Traced-session breakdown</p></SkeletonLine>}
+        {section.title === 'Subagents' && trace.subagents._tag === 'Known' && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>{trace.subagentCount._tag === 'Known' ? `Showing ${trace.subagents.value.length} of ${trace.subagentCount.value} traced sessions` : `Showing ${trace.subagents.value.length} traced sessions · Total count is unreported`}</p></SkeletonLine>}
         {section.items._tag === 'Unknown'
           ? <SkeletonLine pending={pending}><p data-details-reason={section.title} {...stylex.props(styles.metaLine, styles.reason)}>{unavailableReason(section, trace, empty)}</p></SkeletonLine>
           : section.items.value.length === 0
-            ? <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>None</p></SkeletonLine>
-            : <SectionItems section={section} form={form} open={open} pending={pending} />}
+            ? <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>{section.title === 'Subagents' && trace.coverage._tag !== 'Complete' ? 'No traced sessions retained.' : 'None'}</p></SkeletonLine>
+            : <SectionItems section={section} now={now} form={form} open={open} pending={pending} />}
       </>}
       {partialNote !== undefined && <SkeletonLine pending={pending}><p data-details-partial-note {...stylex.props(styles.metaLine, styles.reason)}>{partialNote}</p></SkeletonLine>}
+      {section.title === 'Subagents' && <SkeletonLine pending={pending}><TraceCoverageNote trace={trace} /></SkeletonLine>}
     </div>
   </div>
 }
@@ -204,7 +214,7 @@ function wrapsIdentity(resource: DetailsResource): boolean {
   return resource.uri.startsWith('branch:') || resource.uri.startsWith('pr:') || resource.uri.startsWith('mission:')
 }
 
-function SectionItems({ section, form, open, pending }: { section: DetailsSection; form: DetailsResourceForm; open: (uri: string, split: boolean) => void; pending: boolean }) {
+function SectionItems({ section, now, form, open, pending }: { section: DetailsSection; now: number; form: DetailsResourceForm; open: (uri: string, split: boolean) => void; pending: boolean }) {
   const [expanded,setExpanded]=React.useState(false)
   const items = section.items._tag === 'Known' ? section.items.value : []
   const capped = form === 'R3' && items.length > 3
@@ -212,15 +222,15 @@ function SectionItems({ section, form, open, pending }: { section: DetailsSectio
   // An absent agent status must not fall back to the card's projected status text.
   const row = (resource: DetailsResource, child: React.ReactNode) => <SkeletonRow key={resource.uri} pending={pending} label={resource.card.label} meta={resource.agent === undefined ? resource.card.detail : resource.agent.status === 'unobserved' ? undefined : resource.agent.statusLabel}>{child}</SkeletonRow>
   return <>
-    {form === 'R2' && <div role="list" aria-label={section.title} {...stylex.props(styles.dense)}>{shown.map(resource => row(resource, <DenseRow resource={resource} open={open} />))}</div>}
-    {form !== 'R2' && shown.map(resource => row(resource, <ResourceEntry resource={resource} open={open} />))}
+    {form === 'R2' && <div role="list" aria-label={section.title} {...stylex.props(styles.dense)}>{shown.map(resource => row(resource, <DenseRow resource={resource} now={now} open={open} />))}</div>}
+    {form !== 'R2' && shown.map(resource => row(resource, <ResourceEntry resource={resource} now={now} open={open} />))}
     {capped && <SkeletonLine pending={pending}><AriaButton onPress={()=>setExpanded(value=>!value)} {...stylex.props(styles.splitButton)}>{expanded?'Show fewer':`+${items.length - shown.length} more`}</AriaButton></SkeletonLine>}
   </>
 }
 
 /** Terminal previews are observed lines; diff and file previews reuse the canonical hover. */
-function HoverContent({ resource }: { resource: DetailsResource }) {
-  if (resource.agent !== undefined) return <AgentHoverCard row={resource.agent} reportedStatusOnly now={fixtureSidebarNow} />
+function HoverContent({ resource, now }: { resource: DetailsResource; now: number }) {
+  if (resource.agent !== undefined) return <AgentHoverCard row={resource.agent} reportedStatusOnly now={now} />
   return <div {...stylex.props(styles.hover)}>
     <strong {...stylex.props(styles.hoverTitle)}>{resource.card.label}</strong>
     {resource.terminal !== undefined
@@ -229,7 +239,7 @@ function HoverContent({ resource }: { resource: DetailsResource }) {
   </div>
 }
 
-function ResourceEntry({ resource, open }: { resource: DetailsResource; open: (uri: string, split: boolean) => void }) {
+function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
   const paneKey = agentPaneKey(resource.uri)
   const getItems = React.useCallback(() => [{ [AGENT_DRAG_MIME]: paneKey, 'text/plain': paneKey }], [paneKey])
   const { dragProps } = useDrag({ getItems, getAllowedDropOperations: () => ['copy'] })
@@ -237,7 +247,7 @@ function ResourceEntry({ resource, open }: { resource: DetailsResource; open: (u
   const capture=(event:React.MouseEvent|React.PointerEvent|React.KeyboardEvent)=>{splitPress.current=event.metaKey||event.ctrlKey}
   if (resource.agent !== undefined) {
     return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.agentEntry)}>
-      <div {...stylex.props(styles.agentRow)}><SidebarAgentRow item={resource.agent} variant="SR-2" reportedStatusOnly now={fixtureSidebarNow} onOpen={row => open(agentPaneKey(row.ref), splitPress.current)} /></div>
+      <div {...stylex.props(styles.agentRow)}><SidebarAgentRow item={resource.agent} variant="SR-2" reportedStatusOnly now={now} onOpen={row => open(agentPaneKey(row.ref), splitPress.current)} /></div>
       <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.splitButton, styles.inlineSplit)}>Open in split</AriaButton>
     </div>
   }
@@ -266,7 +276,7 @@ function resourceIcon(resource: DetailsResource): IconName {
 }
 
 /** Dense rows retain aligned metadata while branch and PR identities get two lines. */
-function DenseRow({ resource, open }: { resource: DetailsResource; open: (uri: string, split: boolean) => void }) {
+function DenseRow({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
   const paneKey = agentPaneKey(resource.uri)
   const getItems=React.useCallback(()=>[{[AGENT_DRAG_MIME]:paneKey,'text/plain':paneKey}],[paneKey])
   const {dragProps}=useDrag({getItems,getAllowedDropOperations:()=>['copy']})
@@ -282,7 +292,7 @@ function DenseRow({ resource, open }: { resource: DetailsResource; open: (uri: s
       <span data-details-resource-title data-resource-title-lines={wrapsIdentity(resource) ? 'wrap' : 1} {...stylex.props(styles.denseLabel, wrapsIdentity(resource) && styles.wrappedLabel)}>{resource.card.label}</span>
       <WholeResourceMeta numeric={resource.file !== undefined} styles={styles.denseMeta}>{meta}</WholeResourceMeta>
     </AriaButton>
-    <AriaTooltip placement="left" {...stylex.props(styles.tooltip)}><HoverContent resource={resource} /></AriaTooltip>
+    <AriaTooltip placement="left" {...stylex.props(styles.tooltip)}><HoverContent resource={resource} now={now} /></AriaTooltip>
   </TooltipTrigger>{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit)}><Icon name="panel" /></AriaButton>}</div>
 }
 

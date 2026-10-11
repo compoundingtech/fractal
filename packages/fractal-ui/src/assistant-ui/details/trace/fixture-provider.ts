@@ -1,6 +1,7 @@
 import type { TraceBucket, TraceCostSplit, TraceFact, TraceSeries } from '../trace-series.ts'
 import { sessionTraceFixture } from './fixture.ts'
 import { projectAgentTrace } from './projection.ts'
+import type { DetailsState } from '../model.ts'
 
 const asOfMs = sessionTraceFixture.windowEnd
 const known = <A>(value: A, source: 'st' | 'series' = 'series'): TraceFact<A> => ({ _tag: 'Known', value, source, asOfMs })
@@ -30,26 +31,37 @@ for (const request of sessionTraceFixture.requests) {
 }
 const compactions = sessionTraceFixture.events.flatMap((event) => event._tag === 'compaction' ? [{ tMs: event.ts, sessionId: event.sessionId }] : [])
 
-const stContextMeter={usedTokens:known(61206,'st'),windowTokens:known(1000000,'st'),compactions:known(6,'st'),lastCompactionMs:known(asOfMs-644758,'st')}
+const stContextMeter={reportedPercent:unknown,usedTokens:known(61206,'st'),windowTokens:known(1000000,'st'),compactions:known(6,'st'),lastCompactionMs:known(asOfMs-644758,'st')}
+const unavailableUsdMetadata={
+ mainUsdScope:unattributedScope,mainUsdWindow:unknown,mainUsdCoverage:{_tag:'Unavailable',reason:'no-provider'},
+ subagentUsdScope:unattributedScope,subagentUsdWindow:unknown,subagentUsdCoverage:{_tag:'Unavailable',reason:'no-provider'},
+ totalUsdCoverage:{_tag:'Unavailable',reason:'no-provider'},
+} as const
+const retainedWindow=known({_tag:'Interval',fromMs:sessionTraceFixture.windowStart,toMs:sessionTraceFixture.windowEnd} as const)
+const attributedCoverage={_tag:'Partial',attributedFraction:sessionTraceFixture.coverage.includedRequests/sessionTraceFixture.coverage.totalRequests} as const
 /** Sanitized captured numeric samples; not a claim of complete live-session coverage. */
 export const fullTraceFixture: TraceSeries = {
   agentId: 'agent/worker-1', nativeSessionId: known(main.session.id),
+  coverage:{_tag:'Partial',attributedFraction:sessionTraceFixture.coverage.includedRequests/sessionTraceFixture.coverage.totalRequests},
+  subagentCount:known(children.length),
   meters: {
     context: stContextMeter,
-    spend: { scope:{_tag:'IncludingSubagents'}, totalUsd: known(scene.totals.usd), mainUsd: known(main.totalUsd), subagentUsd: known(children.reduce((sum, lane) => sum + lane.totalUsd, 0)), tokens: known(scene.lanes.reduce((sum, lane) => sum + lane.tokens.total, 0)), tokensWindow: known({_tag:'Interval',fromMs:sessionTraceFixture.windowStart,toMs:sessionTraceFixture.windowEnd}), split: known(split) },
+    spend: { usdScope:{_tag:'IncludingSubagents'}, tokensScope:{_tag:'IncludingSubagents'}, usdWindow:retainedWindow,totalUsdCoverage:attributedCoverage,mainUsdScope:{_tag:'Self'},mainUsdWindow:retainedWindow,mainUsdCoverage:{_tag:'Complete'},subagentUsdScope:{_tag:'IncludingSubagents'},subagentUsdWindow:retainedWindow,subagentUsdCoverage:attributedCoverage, totalUsd: known(scene.totals.usd), mainUsd: known(main.totalUsd), subagentUsd: known(children.reduce((sum, lane) => sum + lane.totalUsd, 0)), tokens: known(scene.lanes.reduce((sum, lane) => sum + lane.tokens.total, 0)), tokensWindow: retainedWindow, split: known(split) },
   },
   series: known({ range: '1d', bucketMs, points: [...buckets.values()].toSorted((a, b) => a.tMs - b.tMs), compactions, coverage: { harnesses: ['omp'], requestsIncluded: sessionTraceFixture.coverage.includedRequests, requestsTotal: sessionTraceFixture.coverage.totalRequests, oldestMs: sessionTraceFixture.windowStart } }),
-  turns: known({ points: main.samples.map((sample, index) => ({ turnIndex: index + 1, tMs: sample.ts, contextTokens: sample.contextTokens, estimated: sample.isContextEstimated })), compactions }),
-  subagents: known(children.map((lane) => ({ sessionId: lane.session.id, parentSessionId: lane.session.parentId, label: lane.session.name ?? lane.session.title, model: lane.currentModel, usd: lane.totalUsd, requests: lane.requests, firstMs: lane.session.startedAt, lastMs: lane.endTs }))),
+  turns: known({ points: main.samples.map((sample, index) => ({ turnIndex: index + 1, tMs: sample.ts, contextTokens: sample.contextTokens, contextPercent:sample.contextFraction===null?null:sample.contextFraction*100, estimated: sample.isContextEstimated })), compactions }),
+  subagents: known(children.map((lane) => ({ sessionId: lane.session.id, parentSessionId: lane.session.parentId===null?unknown:known(lane.session.parentId), label: lane.session.name===null&&lane.session.title===null?unknown:known(lane.session.name ?? lane.session.title ?? lane.session.id), model: known(lane.currentModel), usd: lane.totalUsd, requests: lane.requests, firstMs: known(lane.session.startedAt), lastMs: known(lane.endTs) }))),
   history: known([{ nativeSessionId: main.session.id, startedMs: main.session.startedAt, endedMs: main.session.endedAt, usd: main.totalUsd, compactions: main.compactionCount }]),
 }
 
 /** Captured st totals have no child dimension; neither self nor inclusive scope is proven. */
 export const partialTraceFixture: TraceSeries = {
   agentId: 'agent/worker-1', nativeSessionId: known('native-session-example', 'st'),
+  coverage:{_tag:'Unavailable',reason:'no-provider'},
+  subagentCount:unknown,
   meters: {
     context: stContextMeter,
-    spend: { scope:unattributedScope, totalUsd: unknown, mainUsd: unknown, subagentUsd: unknown, tokens: known(480035214, 'st'), tokensWindow:unknown, split: unknown },
+    spend: { ...unavailableUsdMetadata,usdScope:unattributedScope, tokensScope:unattributedScope, usdWindow:unknown, totalUsd: unknown, mainUsd: unknown, subagentUsd: unknown, tokens: known(480035214, 'st'), tokensWindow:unknown, split: unknown },
   },
   series: unknown, turns: unknown, subagents: unknown, history: unknown,
 }
@@ -57,9 +69,16 @@ export const partialTraceFixture: TraceSeries = {
 /** Missing provider facts are omitted; unavailable sections explain the missing evidence. */
 export const unknownTraceFixture: TraceSeries = {
   agentId: 'agent/worker-1', nativeSessionId: unknown,
+  coverage:{_tag:'Unavailable',reason:'no-provider'},
+  subagentCount:unknown,
   meters: {
-    context: { usedTokens: unknown, windowTokens: unknown, compactions: unknown, lastCompactionMs: unknown },
-    spend: { scope:unattributedScope, totalUsd: unknown, mainUsd: unknown, subagentUsd: unknown, tokens: unknown, tokensWindow:unknown, split: unknown },
+    context: { reportedPercent:unknown, usedTokens: unknown, windowTokens: unknown, compactions: unknown, lastCompactionMs: unknown },
+    spend: { ...unavailableUsdMetadata,usdScope:unattributedScope, tokensScope:unattributedScope, usdWindow:unknown, totalUsd: unknown, mainUsd: unknown, subagentUsd: unknown, tokens: unknown, tokensWindow:unknown, split: unknown },
   },
   series: unknown, turns: unknown, subagents: unknown, history: unknown,
 }
+
+/** Explicit story data: no production provider imports this module. */
+export const bucketOnlyTraceFixture:TraceSeries={...fullTraceFixture,turns:{_tag:'Unknown',reason:'not-covered'}}
+export const detailsTraceFixtures={full:fullTraceFixture,bucketOnly:bucketOnlyTraceFixture,partial:partialTraceFixture,unknown:unknownTraceFixture} as const
+export const traceForDetailsState=(state:DetailsState):TraceSeries=>state==='busy'||state==='idle'?detailsTraceFixtures.full:state==='partial'||state==='absent'?detailsTraceFixtures.partial:detailsTraceFixtures.unknown

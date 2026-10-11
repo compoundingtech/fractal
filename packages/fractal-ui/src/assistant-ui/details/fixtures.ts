@@ -1,53 +1,19 @@
 import { fixtureSidebarNow, fixtureSidebarRows, fixtureMissionDTOs, fixtureAttentionDTOs } from './sidebar-fixtures'
 import type { SidebarAgentRow } from '../sidebar/model'
 import { files, resources } from './resource-fixtures'
-import type { ResourceMetadata, ResourceData as TasteResource, ResourceFile as TasteFile } from '../resources/resource-model'
+import type { ResourceData as TasteResource, ResourceFile as TasteFile } from '../resources/resource-model'
+import { detailsSectionOrder, type DetailsOverview, type DetailsResource, type DetailsSection, type DetailsSectionName, type DetailsState, type DetailsValue } from './model'
 /**
  * Fixture provenance: shapes and counts are modeled on one real `st --json agents`
  * observation (2026-10-08T07:58:26Z, sanitized machine `workstation-a`): working
  * agent, harness omp, status-since 06:49:52, incarnation started the previous day
  * 22:35:26 (9h23m age), context 61,206/1,000,000 with 6 compactions, cumulative
- * tokens 480,035,214, cost null (the provider does not report cost → stays
- * Unknown), active work 1, queued 0, subagents 0. The `busy` list perturbs counts
- * of the observed resource kinds deterministically (3 PRs, 5 files, 2 terminals,
- * 2 subagents); identities stay the sanitized public kit ones. Self vs descendant
- * spend stays Unknown in the overview: the st snapshot does not split it; trace
- * series arrive separately through the TraceSeries projection.
- * `partial` retains these st facts; `unknown` has no measured trace facts.
+ * tokens 480,035,214, cost unreported (the provider does not report cost).
+ * The `busy` list perturbs counts of the observed resource kinds deterministically
+ * (3 PRs, 5 files, 2 terminals, 2 subagents); identities stay the sanitized public
+ * kit ones. Metrics arrive separately through TraceSeries; the overview carries
+ * identity and timing observations only.
  */
-export const detailsStates = ['busy', 'partial', 'unknown', 'idle', 'new', 'absent', 'loading', 'error'] as const
-export type DetailsState = typeof detailsStates[number]
-export type DetailsValue<A> = ResourceMetadata<A>
-export interface DetailsOverview {
-  readonly title: string | undefined
-  readonly status: string | undefined
-  readonly machine: string | undefined
-  readonly harness: string | undefined
-  readonly model: string | undefined
-  /** Rendered duration strings, never a _tag; absent facts are undefined. */
-  readonly since: string | undefined
-  readonly age: string | undefined
-  readonly contextTokens: DetailsValue<number>
-  readonly contextCapacity: DetailsValue<number>
-  readonly usd: DetailsValue<number>
-  readonly tokens: DetailsValue<number>
-  readonly descendantUsd: DetailsValue<number>
-  readonly descendantTokens: DetailsValue<number>
-}
-export const detailsSectionOrder = ['Workspace', 'Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Subagents', 'Missions / queue', 'Attention', 'Declared bindings', 'History'] as const
-export type DetailsSectionName = typeof detailsSectionOrder[number]
-export interface DetailsResource {
-  readonly uri: string
-  readonly card: TasteResource
-  readonly glyph: string
-  readonly agent?: SidebarAgentRow
-  readonly file?: TasteFile
-  readonly terminal?: readonly string[]
-}
-export interface DetailsSection {
-  readonly title: DetailsSectionName
-  readonly items: DetailsValue<readonly DetailsResource[]>
-}
 export interface DetailsFixture {
   readonly state: DetailsState
   readonly overview: DetailsOverview
@@ -101,29 +67,24 @@ const busyItems: Readonly<Record<DetailsSectionName, DetailsValue<readonly Detai
 /** The one observed machine identity is sanitized; every field maps to a snapshot fact. */
 const busyOverview: DetailsOverview = {
   title: 'UI redesign milestone', status: 'working', machine: 'workstation-a', harness: 'omp', model: 'reported-model-a',
+  mission: 'UI redesign milestone',
   since: '1h 08m', age: '9h 23m',
-  contextTokens: known(61_206), contextCapacity: known(1_000_000),
-  usd: unknown, tokens: known(480_035_214), descendantUsd: unknown, descendantTokens: unknown,
 }
-/** Identity facts survive a sync gap; every measured number returns to Unknown. */
+/** Identity facts survive a sync gap; absent status and timing remain omitted. */
 const pendingOverview: DetailsOverview = {
   title: 'UI redesign milestone', status: undefined, machine: 'workstation-a', harness: 'omp', model: 'reported-model-a',
   since: undefined, age: undefined,
-  contextTokens: unknown, contextCapacity: unknown,
-  usd: unknown, tokens: unknown, descendantUsd: unknown, descendantTokens: unknown,
 }
 function rowOverview(row: SidebarAgentRow): DetailsOverview {
   return {
     title: row.title, status: row.status, machine: row.host, harness: row.harness, model: row.model,
     since: row.statusSince === undefined ? undefined : detailsDuration(fixtureSidebarNow - row.statusSince),
     age: undefined,
-    contextTokens: unknown, contextCapacity: unknown,
-    usd: unknown, tokens: unknown, descendantUsd: unknown, descendantTokens: unknown,
   }
 }
 function createFixture(state: DetailsState): DetailsFixture {
   const overview = state === 'busy' || state === 'partial' || state === 'absent' ? busyOverview
-    : state === 'new' ? { ...busyOverview, title: 'New workspace', status: 'pending', model: undefined, since: '0s', age: '0s', contextTokens: known(0), contextCapacity: unknown, tokens: known(0) }
+    : state === 'new' ? { ...busyOverview, title: 'New workspace', mission: undefined, status: 'pending', model: undefined, since: '0s', age: '0s' }
     : state === 'idle' ? rowOverview(idleRoot)
     : state === 'loading' || state === 'error' ? pendingOverview
     : pendingOverview

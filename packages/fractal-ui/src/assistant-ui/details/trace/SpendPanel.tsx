@@ -60,13 +60,13 @@ export const SpendPanel = ({ lane, componentsKnown = true, showUnavailableReason
       <dd {...stylex.props(styles.bar)}><svg {...stylex.props(styles.splitBar)} viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true"><rect width={100} height={8} fill={surface.rowActive} /><rect width={attributedTotal > 0 ? component.value / attributedTotal * 100 : 0} height={8} fill={component.color} /></svg></dd>
       <dd {...stylex.props(styles.value)}>{money.format(component.value)}</dd>
     </div>)}</dl>}
-    {partial && (attributed || (!showUnavailableReasons && hasSeries)) && <p {...stylex.props(styles.note)}>{attributed ? 'Split and chart show retained marks; session total is exact.' : 'Chart shows retained marks; reported totals are exact.'}</p>}
+    {partial && (attributed || (!showUnavailableReasons && hasSeries)) && <p {...stylex.props(styles.note)}>Chart and split show retained observations; reported accumulation windows may differ.</p>}
   </div>
 }
 
 /** Loading twin of SpendPanel: same wrappers, gaps and chart box, ink instead of values. */
-export const SpendPanelPending = (): ReactNode => <div {...stylex.props(styles.root)}>
-  <div {...stylex.props(styles.header)}><span><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span><span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent</span></span></div>
+export const SpendPanelPending = ({showTotals=true}:{readonly showTotals?:boolean}): ReactNode => <div {...stylex.props(styles.root)}>
+  <div {...stylex.props(styles.header)}>{showTotals&&<span><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span>}<span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent</span></span></div>
   <DetailsSkeletonPlot />
   <div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div>
   <dl {...stylex.props(styles.breakdown)}>{SPEND_COMPONENTS.map((component) => <div key={component.id} {...stylex.props(styles.component)}>
