@@ -37,9 +37,9 @@ Stories:
 
 `HarnessDeliveryGroup`, `AgentResultCard`, `BackgroundJobRow`, and `TerminalTail` are exported from `./assistant-ui`. Their pure typed contracts live in `delivery-model.ts`; applications normalize harness records and supply navigation/full-output callbacks. No transport or harness parser is part of the kit.
 
-A delivery preserves child order. Failed, cancelled and aborted results, non-zero command exits, and commands without a reported exit open initially. A single child renders directly without summary chrome. Agent reports reuse Markdown; raw JSON is independently disclosed as a per-node tree. Open thread is a host callback; unavailable navigation, Message and Resume have visible reasons.
+A delivery preserves child order. Failed, cancelled and aborted results, non-zero command exits, and commands without a reported exit open on arrival and on harness-state transitions; users can then collapse them. A single child renders directly without summary chrome. The compact disclosure stays mounted while opening and closing, preserving keyboard focus. Agent reports reuse Markdown; raw JSON is independently disclosed as a per-node tree, with 100-field pages and paged long scalar values. Open thread is a host callback; unavailable navigation, Message and Resume remain keyboard-reachable with visible, accessible reasons.
 
-Background exit chips use only the reported exit fact. An absent exit has no chip, even if output prints `rc=1`. The bg_40 control has exit 0 and diagnostic cross-mark lines: only those literal terminal lines receive a tint. Terminal output never goes through Markdown.
+Background exit chips use only the reported exit fact. An absent exit has no chip, even if output prints `rc=1`. The bg_40 control has exit 0 and diagnostic cross-mark lines: only those literal terminal lines receive a tint. Terminal output never goes through Markdown. The tail shows three lines, and recorded output is browsed in windows of at most 100 lines; Copy output retains access to the whole recorded text.
 
 These components replace the old batch notice, `HarnessNotice.SubagentResult`, and background-result notice presentations in the consuming application's dispatcher; the dispatcher is not present on this branch.
 
