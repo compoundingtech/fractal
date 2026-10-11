@@ -2,19 +2,12 @@ import { lstat, readdir, readFile } from 'node:fs/promises'
 import { join, resolve, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
-import { forbiddenLine } from '../../../apps/fractal-web/scripts/synthetic-fixtures/scan.mjs'
-
-const decode = line => {
-  const text = line.replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
-    .replace(/\\x([0-9a-f]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))).replace(/\\\//g, '/')
-  try { return decodeURIComponent(text) } catch { return text }
-}
-const checkoutPath = /~\/[.]megarepo\b|\/(?:[^\s"'<>]*\/)?(?:[.]megarepo|checkouts?|worktrees)\//i
+import { publicationLineMatcher } from '../../../apps/fractal-web/scripts/synthetic-fixtures/scan.mjs'
 
 /** Scan every published byte, including hashed chunks, maps, fonts and nested refs. */
 export async function scanBooks(roots, policy) {
-  // Validate an owner-supplied policy even when the book is empty.
-  forbiddenLine('', policy)
+  // Compile the shared owner-held policy once, even when the book is empty.
+  const forbidden = publicationLineMatcher(policy)
   const findings = []
   let files = 0
   const visit = async (file, root) => {
@@ -29,8 +22,7 @@ export async function scanBooks(roots, policy) {
     // hostnames and identities embedded in otherwise binary published assets.
     const text = (await readFile(file)).toString('utf8')
     text.split(/\r?\n/).forEach((line, index) => {
-      const normalized = decode(line)
-      if (checkoutPath.test(normalized) || forbiddenLine(normalized, policy)) findings.push({ root, file: relative(root, file), line: index + 1, kind: 'private-content' })
+      if (forbidden(line)) findings.push({ root, file: relative(root, file), line: index + 1, kind: 'private-content' })
     })
   }
   for (const root of roots) await visit(resolve(root), resolve(root))
