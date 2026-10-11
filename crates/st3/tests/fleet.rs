@@ -46,13 +46,13 @@ fn free_port() -> u16 {
 }
 
 /// One isolated node: its own directories, daemon, and replication worker.
-struct Node {
+pub(super) struct Node {
     name: String,
     root: PathBuf,
     /// The st3 executable this node runs; an older release for compatibility tests.
     binary: PathBuf,
-    port: u16,
-    env: Vec<(String, String)>,
+    pub(super) port: u16,
+    pub(super) env: Vec<(String, String)>,
     daemon: Option<Child>,
     worker: Option<Child>,
     /// Every argument list this test passed to an st3 process on this node.
@@ -60,7 +60,7 @@ struct Node {
 }
 
 impl Node {
-    fn new(parent: &Path, name: &str) -> Self {
+    pub(super) fn new(parent: &Path, name: &str) -> Self {
         Self::named(parent, name, name)
     }
 
@@ -162,7 +162,7 @@ impl Node {
         serde_json::from_str(&self.st_ok(&all)).unwrap()
     }
 
-    fn logs(&self) -> String {
+    pub(super) fn logs(&self) -> String {
         [
             "daemon.log",
             "daemon.stderr.log",
@@ -183,7 +183,7 @@ impl Node {
         .join("\n")
     }
 
-    async fn start(&mut self) {
+    pub(super) async fn start(&mut self) {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
         let up: Vec<&str> = if self.binary == Path::new(st3()) {
@@ -285,7 +285,7 @@ impl Node {
     }
 
     /// Configure this node as a config-peer fleet node, the way the running fleet is today.
-    fn legacy_config(&self, fleet_id: &str, secret: &Path, peers: &[(&str, u16)]) {
+    pub(super) fn legacy_config(&self, fleet_id: &str, secret: &Path, peers: &[(&str, u16)]) {
         let mut config = format!(
             "node = \"{}\"\nperson = \"{PERSON}\"\nfleet_id = \"{fleet_id}\"\nshared_secret_file = \"{}\"\npeer_listen = \"127.0.0.1:{}\"\n",
             self.name,
@@ -402,7 +402,7 @@ impl Node {
         }
     }
 
-    async fn note(&self, text: &str) -> String {
+    pub(super) async fn note(&self, text: &str) -> String {
         self.note_as(text, PERSON).await
     }
 
@@ -484,7 +484,12 @@ where
     panic!("timed out waiting until {what}");
 }
 
-async fn wait_for_notes(node: &Node, expected: &BTreeSet<String>, seconds: u64, nodes: &[&Node]) {
+pub(super) async fn wait_for_notes(
+    node: &Node,
+    expected: &BTreeSet<String>,
+    seconds: u64,
+    nodes: &[&Node],
+) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     loop {
         let notes = node.notes().await;
@@ -560,13 +565,9 @@ mission "harvest" state="ready" {{
                 .clone(),
         );
         fs::write(&child_file, source).unwrap();
-        node.st_ok(&[
-            "missions",
-            "publish",
-            child_file.to_str().unwrap(),
-            "--as",
-            PERSON,
-        ]);
+        node.st_ok(&["apply", child_file.to_str().unwrap(),
+        "--as",
+        PERSON,]);
     }
     let next = chrono::Utc::now() + chrono::Duration::seconds(30);
     let anchor =
@@ -593,13 +594,9 @@ mission "orchard/weekly" state="ready" {{
         )
     };
     fs::write(&parent_file, parent(&revisions[0])).unwrap();
-    node.st_ok(&[
-        "missions",
-        "publish",
-        parent_file.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    node.st_ok(&["apply", parent_file.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     node.st_ok(&[
         "missions",
         "start",
@@ -620,13 +617,9 @@ mission "orchard/weekly" state="ready" {{
 
     for index in 0..4 {
         fs::write(&parent_file, parent(&revisions[index % 2])).unwrap();
-        node.st_ok(&[
-            "missions",
-            "publish",
-            parent_file.to_str().unwrap(),
-            "--as",
-            PERSON,
-        ]);
+        node.st_ok(&["apply", parent_file.to_str().unwrap(),
+        "--as",
+        PERSON,]);
         if index > 0 {
             node.st_ok(&[
                 "work",
@@ -741,7 +734,7 @@ agent "move/worker" {
 "#,
     )
     .unwrap();
-    a.st_ok(&["agents", "apply", source.to_str().unwrap(), "--as", PERSON]);
+    a.st_ok(&["apply", "--no-gate-check", source.to_str().unwrap(), "--as", PERSON]);
     let status =
         |node: &Node| node.st_json(&["subject", "show", SUBJECT])["status"]["subjects"][0].clone();
     wait_until("amber runs the seat on both replicas", 30, || async {
@@ -767,7 +760,18 @@ agent "move/worker" {
         a.stop();
         b.st_ok(&["agents", "start", SUBJECT, "--host", "cobalt", "--source-offline", "--as", PERSON]);
     } else {
-        b.st_ok(&["agents", "start", SUBJECT, "--host", "cobalt", "--as", PERSON]);
+        let start = ["agents", "start", SUBJECT, "--host", "cobalt", "--as", PERSON];
+        let output = b.st(&start);
+        if !output.status.success() {
+            panic!(
+                "st3 {} on cobalt failed:\n{}{}\n{}\n{}",
+                start.join(" "),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+                desired_dump(&[&a, &b], SUBJECT).await,
+                b.logs()
+            );
+        }
     }
     wait_until("cobalt's running observation reaches both replicas", 30, || async {
         let replicas = if mode == SeatMove::SourceOffline { vec![&b] } else { vec![&a, &b] };
@@ -851,6 +855,37 @@ agent "move/worker" {
             String::from_utf8_lossy(&output.stdout)
         );
     }
+}
+
+/// What each node holds for a subject's declaration, so a start that stops on conflicting
+/// declarations says which unreferenced `intent.desired` heads it found and where they came from.
+async fn desired_dump(nodes: &[&Node], subject: &str) -> String {
+    let mut dump = String::new();
+    for node in nodes {
+        let status = node.st(&["--json", "subject", "show", subject]);
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap_or(Value::Null);
+        let row = &status["status"]["subjects"][0];
+        dump.push_str(&format!(
+            "--- {} {subject}: desired_token {} conflicts {}\n",
+            node.name, row["desired_token"], row["conflicts"]
+        ));
+        for claim in node.claims().await {
+            if claim["subject"] != subject || claim["kind"] != "intent.desired" {
+                continue;
+            }
+            let body = claim["body"].to_string();
+            dump.push_str(&format!(
+                "intent.desired id {} store_index {} origin {} actor {} predecessors {} body {}\n",
+                claim["id"],
+                claim["store_index"],
+                claim["origin"],
+                claim["actor"],
+                claim["predecessors"],
+                body.chars().take(400).collect::<String>()
+            ));
+        }
+    }
+    dump
 }
 
 fn authority_digest(node: &Node) -> String {
@@ -1278,13 +1313,9 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence_
          step \"only\" { agentless }\n}\n",
     )
     .unwrap();
-    a.st_ok(&[
-        "missions",
-        "publish",
-        mission.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    a.st_ok(&["apply", mission.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     wait_until(
         "both members hold the mission and call the pair in sync",
         90,
@@ -3971,7 +4002,7 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     node.start().await;
     let file = node.root.join("seat.kdl");
     fs::write(&file, format!("version 2\nagent \"example/watch\" {{ host \"fixture-watch\"; workspace {:?}; command \"true\"; restart \"never\" }}\n", node.root)).unwrap();
-    node.st_ok(&["agents", "apply", file.to_str().unwrap(), "--as", PERSON]);
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
     let cli = |args: &[&str]| -> Value {
         let output = node.command(args).env("ST_AGENT", "agent/example/watch").output().unwrap();
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
@@ -4016,6 +4047,8 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     node.restart().await;
     let output = node.command(&["--json", "gh", "own", "https://github.com/fixture/app/pull/12#pullrequestreview-802", "--as", "agent/example/watch"]).env("ST_AGENT", "agent/example/watch").output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    // Store::open also initializes projections, so inspect without the daemon's writer.
+    node.stop();
     let store = st3::store::Store::open(&node.state_dir().join("claims.sqlite3"), "fixture-watch").unwrap();
     for (kind, id) in [("comment", 801), ("review", 802)] {
         let subject = st3::github_watch::github_post_subject("fixture/app", kind, id);
@@ -4024,6 +4057,7 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     }
     assert_eq!(store.github_post_agent("fixture/app", "comment", 902).unwrap(), None);
     drop(store);
+    node.start().await;
     {
         let bodies = posts.lock().unwrap();
         assert_eq!(bodies.len(), 2);
@@ -4135,13 +4169,9 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     let seat = "agent/canary/portable";
     let declaration = root.path().join("seat.kdl");
     fs::write(&declaration, format!("version 2\nagent \"canary/portable\" {{ host \"fixture-move-amber\"; workspace \"{}\"; harness \"omp\" {{}} }}", workspace.display())).unwrap();
-    amber.st_ok(&[
-        "agents",
-        "apply",
-        declaration.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    amber.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     let receipts = workspace.join("receipts-agent-canary-portable.jsonl");
     wait_until("source native session becomes idle", 90, || async {
         amber.st_json(&["agents", "show", seat])["value"]["harness_state"] == "idle"

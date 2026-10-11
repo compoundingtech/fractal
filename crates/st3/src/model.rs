@@ -22,6 +22,22 @@ pub use smallclaims::replication::{
 
 pub const MAX_EVAL_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
+/// The error code of a send or reply addressed to a person.
+pub const PERSON_HAS_NO_INBOX_CODE: &str = "person-has-no-inbox";
+
+/// What a refused send or reply says. The order matters: print in the chat first; an attention
+/// item (`work ask`, `work update`) only when the person asked for one.
+pub const PERSON_HAS_NO_INBOX: &str = "people do not have inboxes: print your answer in the chat. To reach a person, print in the chat; only if the person asked for it, use `work ask` for a decision or `work update` for information";
+
+/// Refuse a message addressed to a person. `recipient` is the canonical recipient subject.
+/// Messages to agents are unchanged.
+pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
+    if recipient.starts_with("person/") {
+        return Err(St3Error::new(PERSON_HAS_NO_INBOX_CODE, PERSON_HAS_NO_INBOX));
+    }
+    Ok(())
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -210,6 +226,33 @@ pub(crate) fn authored_launch(launch: &LaunchSpec) -> Vec<&str> {
     }
     authored.extend(provider);
     authored
+}
+
+/// Authored seat purpose, independent of the runtime's launch/restart lifecycle.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentLifecycle {
+    Standing,
+    Owner,
+    Bounded,
+}
+
+impl AgentLifecycle {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "standing" => Some(Self::Standing),
+            "owner" => Some(Self::Owner),
+            "bounded" => Some(Self::Bounded),
+            _ => None,
+        }
+    }
+}
+
+/// Read only the current declaration; neither runtime state nor environment supplies a default.
+pub fn declared_agent_lifecycle(desired: Option<&Value>) -> Option<AgentLifecycle> {
+    let child = desired?.get("children")?.as_array()?.iter()
+        .find(|child| child.get("name").and_then(Value::as_str) == Some("lifecycle"))?;
+    AgentLifecycle::parse(child.get("arguments")?.as_array()?.first()?.as_str()?)
 }
 
 /// Presentation is independent of the durable seat identity.
@@ -550,6 +593,15 @@ pub struct MissionSpec {
     pub max_active_runs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// The agent told when a run fails, is cancelled or stalls; none unless the mission asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_to: Option<String>,
+    /// How long a run may go without progress before it is reported as stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+    /// Whether a completed run is reported too.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub report_completed: bool,
     #[serde(default)]
     pub revision_owners: Vec<String>,
     #[serde(default)]
@@ -824,6 +876,13 @@ pub struct MissionRunCreation {
     /// The mission run that must complete before this run's work starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    /// The agent this run reports to, when whoever starts it names one. It replaces the
+    /// mission's own `report-to`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_to: Option<String>,
+    /// Also report this run when it completes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub report_completed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1702,6 +1761,14 @@ pub struct AttentionItemView {
     pub variant_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// The agent whose conversation this item belongs to: the agent that asked, whose work a
+    /// gate reviews, that planned a launch or proposed a revision, or the seat itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    /// The answers a person can give from a client, for a prompt its harness lets st answer:
+    /// `allow` and `deny` for a Claude permission prompt. Empty when it is answered at its source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<String>,
     pub title: String,
     pub detail: String,
     /// The structured request a person-step ask carries.
@@ -1718,6 +1785,42 @@ pub struct AttentionItemView {
     pub requested_at_unix_ms: u128,
     #[serde(default)]
     pub actions: Vec<AttentionActionView>,
+}
+
+impl AttentionItemView {
+    /// Whether this item is an update: information its person asked for, which asks nothing.
+    pub fn is_update(&self) -> bool {
+        self.request
+            .as_ref()
+            .is_some_and(|request| request["type"] == "update")
+    }
+
+    /// Whether this item is an alert: it blocks or waits on an answer from its person.
+    pub fn is_alert(&self) -> bool {
+        attention_is_alert(&self.kind, self.is_update())
+    }
+
+    /// Every agent conversation this item shows in: its own, and for a login, every seat that
+    /// shares it, since one sign-in answers them all.
+    pub fn conversations(&self) -> Vec<String> {
+        let mut conversations = self.conversation.iter().cloned().collect::<Vec<_>>();
+        if self.kind == "harness-login" {
+            for seat in &self.targets {
+                if seat.starts_with("agent/") && !conversations.contains(seat) {
+                    conversations.push(seat.clone());
+                }
+            }
+        }
+        conversations
+    }
+}
+
+/// Whether an item of `kind` is an alert: it blocks or waits on its person. Asks, human gates,
+/// launch and revision approvals, agents' requests, harness prompts and logins, and a gate the
+/// person published that is broken all are. An update asks nothing, and a message stays in its
+/// conversation.
+pub fn attention_is_alert(kind: &str, update: bool) -> bool {
+    !update && kind != "unread-message"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1923,6 +2026,10 @@ pub struct MessageView {
 pub struct MessageSendReceipt {
     #[serde(flatten)]
     pub message: MessageView,
+    /// This daemon's accepted delivery kind. Absent on pre-silent daemons: tags alone
+    /// cannot confirm that an older daemon honors silent delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// The key that names this message: a request with the same key and content returns it again.
     #[serde(default)]
     pub idempotency_key: String,
@@ -2014,17 +2121,7 @@ pub struct Attachment {
     pub expires_at_unix_ms: u128,
 }
 
-/// A running terminal that this daemon owns on its own host: the PTY session a local attach
-/// connects to directly, with no WebSocket bridge through the daemon and no graph write.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LocalTerminal {
-    pub subject: String,
-    pub runtime_id: String,
-    /// The graph's incarnation, `DAEMON_PID:CREATED_AT`, which the PTY itself must prove.
-    pub incarnation_id: String,
-    /// The daemon's PTY root as an absolute path.
-    pub pty_root: std::path::PathBuf,
-}
+pub use st3_terminal_direct::LocalTerminal;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AttachRequest {
@@ -2246,6 +2343,16 @@ pub struct MissionRunView {
     pub scheduler_fault: Option<String>,
 }
 
+/// A bounded slice of the root graph for human mission presentation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionRunTreePage {
+    pub runs: Vec<MissionRunView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub frontier: u64,
+}
+
 /// Who set a finished run's outcome, from what, and why.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MissionRunOutcomeView {
@@ -2365,6 +2472,10 @@ pub struct StepRunView {
     pub progress_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_at_unix_ms: Option<u128>,
+    /// When st last nudged this attempt's holder for idling with nothing set to wake it, while
+    /// the step is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudged_at_unix_ms: Option<u128>,
     /// The `work complete` summary for the current attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_summary: Option<String>,
@@ -2660,6 +2771,33 @@ pub struct MissionRunOutcomeRequest {
     pub idempotency_key: String,
 }
 
+/// Who a running run reports to from now on. `report_to` of `None` clears it.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionRunReportRequest {
+    pub actor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub report_completed: bool,
+    pub idempotency_key: String,
+}
+
+/// Who a run reports to, as its latest report claim or its creation claim records it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MissionRunReportView {
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub report_completed: bool,
+    /// Whether this request changed it.
+    pub changed: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MissionRetireRequest {
     pub actor: String,
@@ -2817,5 +2955,27 @@ mod launch_change_tests {
         let mut other = command.clone();
         other.launch = LaunchSpec::Shell("sleep 2".into());
         assert_eq!(other.launch_changes(&command), ["launch"]);
+    }
+}
+
+#[cfg(test)]
+mod person_inbox_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_person_recipient_is_refused_and_the_error_orders_the_ways_to_reach_them() {
+        for recipient in ["agent/example/worker", "agent/worker", "daemon/runtime"] {
+            assert!(refuse_person_recipient(recipient).is_ok(), "{recipient}");
+        }
+        for recipient in ["person/ada", "person/requester"] {
+            let error = refuse_person_recipient(recipient).unwrap_err();
+            assert_eq!(error.code, PERSON_HAS_NO_INBOX_CODE);
+            assert_eq!(error.message, PERSON_HAS_NO_INBOX);
+        }
+        let chat = PERSON_HAS_NO_INBOX.find("print in the chat").unwrap();
+        assert!(chat < PERSON_HAS_NO_INBOX.find("`work ask`").unwrap());
+        assert!(chat < PERSON_HAS_NO_INBOX.find("`work update`").unwrap());
+        assert!(PERSON_HAS_NO_INBOX.contains("only if the person asked for it"));
+        assert!(!PERSON_HAS_NO_INBOX.contains("NO REPLY"));
     }
 }

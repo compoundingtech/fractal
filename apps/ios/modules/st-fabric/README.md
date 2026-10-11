@@ -1,8 +1,8 @@
-# Fabric development proof
+# Fabric carrier
 
-This local Expo module provides a temporary loopback HTTP listener backed by an app-owned iroh endpoint. Each accepted TCP connection opens a fresh direct service-ALPN fabric session. The ordinary TypeScript client then uses that listener without a transport change. Normal gateway entry still rejects loopback, and the proof never saves its listener, pairing credential or gateway configuration.
+This local Expo module is the phone's opt-in fabric carrier: an app-owned iroh endpoint and a temporary loopback HTTP listener. Each accepted TCP connection opens a fresh direct service-ALPN fabric session. The ordinary TypeScript client then uses that listener without a transport change. Normal gateway entry still rejects loopback, and a listener, a pairing credential or gateway configuration is never saved.
 
-The carrier is opt-in: normal pod installation compiles `StFabricDisabled.swift` and needs neither Rust nor an XCFramework. Even an enabled carrier rejects operations in Release. The Debug entry is a `com.compoundingtech.smalltalk.starter://fabric-proof` link, separate from ordinary pairing. Closing the proof returns to the saved gateway; entering the background stops its endpoint.
+It is opt-in at build time and at run time. Normal pod installation compiles `StFabricDisabled.swift` and needs neither Rust nor an XCFramework; `ST3_FABRIC=1` (older name `ST3_FABRIC_PROOF=1`) links the bridge. A linked bridge does nothing until the person turns Fabric on in the app (see [the app README](../../README.md#fabric-an-opt-in-carrier)); it makes no identity and starts no network monitor before then. The path monitor runs only while a bridge is open. The Debug entry `com.compoundingtech.smalltalk.starter://fabric-proof` stays development-only and is separate from ordinary pairing.
 
 ## Build
 
@@ -10,8 +10,8 @@ Install Rust targets `aarch64-apple-ios` and `aarch64-apple-ios-sim`, then from 
 
 ```sh
 sh modules/st-fabric/build.sh
-npx expo prebuild --platform ios --no-install
-ST3_FABRIC_PROOF=1 npm run pods
+pnpm exec expo prebuild --platform ios --no-install
+ST3_FABRIC=1 pnpm run pods
 ```
 
 Build Debug for an arm64 simulator of your own (`ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`); the proof framework has no x86_64 simulator slice. The script targets iOS 16.4, including its C/assembly dependencies, and writes the XCFramework under `ios/build` inside the pod root. On a shared build host, wait until `pgrep -x xcodebuild` finds no process before starting Xcode. Generated static libraries and the device/simulator XCFramework are ignored; do not commit them. To restore the default build, reinstall pods without `ST3_FABRIC_PROOF`.
@@ -52,7 +52,7 @@ FABRIC_BIN=/path/to/fabric cargo test --manifest-path apps/ios/modules/st-fabric
 cargo clippy --manifest-path apps/ios/modules/st-fabric/rust/Cargo.toml --locked --all-targets -- -D warnings
 ```
 
-The independent byte test checks framing and malformed input. The pinned-daemon check verifies unknown-node and missing-grant denial, a half-closed request, a 5 MiB response that would stall without Acks, and explicit stop delivering EOF to an idle upstream. Run `npm run typecheck` and `npm test` in `apps/ios` for the app checks.
+The independent byte test checks framing and malformed input. The pinned-daemon check verifies unknown-node and missing-grant denial, a half-closed request, a 5 MiB response that would stall without Acks, and explicit stop delivering EOF to an idle upstream. After the root frozen install, run `pnpm typecheck` and `pnpm test` in `apps/ios` for the app checks.
 
 ## Recorded simulator result
 
@@ -74,10 +74,10 @@ For a cellular trial without Metro, regenerate the ignored native project and ex
 
 ```sh
 cd apps/ios
-npx expo prebuild --platform ios --clean --no-install
+pnpm exec expo prebuild --platform ios --clean --no-install
 node modules/st-fabric/prepare-phone.mjs --offline-debug
 # Build the Rust framework, then install enabled pods as described above.
-ST3_FABRIC_PROOF=1 npm run pods
+ST3_FABRIC=1 pnpm run pods
 # Use Debug, FORCE_BUNDLING=1, and leave SKIP_BUNDLING unset.
 ```
 
