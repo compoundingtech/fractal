@@ -244,3 +244,21 @@ A cleanup infrastructure error produces `eval.verdict` with `verdict=void`.
 agent workspace reconciliation. It carries `host`, `workspace`, and an optional `repository`.
 The reconciler writes only changed values. Repository suggestions combine those observations
 with current checkout declarations; a gateway reads graph evidence and never scans host disks.
+
+### Local condition tables added after the baseline
+
+Condition declarations and entry/recovery `condition.state` claims are shared
+facts. Three host-owned tables serve background evaluation and reads:
+
+| Table | Scope | Authority / bound |
+| --- | --- | --- |
+| `local_condition_heads` | Local cache | Canonical latest transition pointer per declaration, authenticated origin and instance; 32 declarations, at most 256 remote instances each. Origin/phase/order local indexes support bounded 50-row writes; rebuilt by resumable indexed latest-state seeks. |
+| `local_condition_observations` | Local live overlay | Eight recent samples and hold phase; 32 declarations, eight instances each. Never replicated. |
+| `local_condition_notifications` | Local retry queue | Own-host transition deliveries with copied payloads that survive source trimming; oldest 256 rows materialized, at most 16 deliveries per tick and three attempts per malformed/deterministically rejected row. Transient failures remain queued; the queue is capped at 1,024 rows; excess oldest deliveries are discarded with a one-hour diagnostic. Message identity is durable and idempotent. |
+
+These tables do not enter shared projection digests. Graph state uses canonical
+latest selection; local cursors, heartbeat and retry counters live in `meta`.
+Reads never rebuild these tables. Store open creates them without changing
+storage version 18; no global claim index is built at startup.
+
+Locally authored condition transitions are atomically copied to the observation log for OTLP export. Normal notifications do not pin state claims as immutable evidence. Local quorum-free payload trim is a pending dependency; this replacement adds no checkpoint-only fallback and is not ready for queueing while retained graph state still accumulates.

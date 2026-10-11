@@ -119,6 +119,9 @@ mod accounts;
 mod roster_admission;
 pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
+mod conditions;
+pub use conditions::{ConditionInstanceView, ConditionRecord, ConditionView, DeclaredCondition};
+pub(crate) use conditions::{HEADS_PAGE, HEADS_PAGES_PER_TICK};
 mod attention_snapshot;
 pub(crate) use attention_snapshot::{NativePromptState, native_prompt_gone_key};
 // Registration stays opt-in until the shared installer certifies every source family.
@@ -1782,6 +1785,18 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 pub struct Store {
     graph: GraphStore,
     smalltalk: Arc<SmalltalkRuntime>,
+    observations_otlp_configured: std::sync::atomic::AtomicBool,
+}
+
+impl Store {
+    /// Runtime configuration, not a graph fact or a claim about collector health.
+    pub fn set_observations_otlp_configured(&self, configured: bool) {
+        self.observations_otlp_configured.store(configured, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn observations_otlp_configured(&self) -> bool {
+        self.observations_otlp_configured.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -3175,7 +3190,7 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, observations_otlp_configured: std::sync::atomic::AtomicBool::new(false) })
     }
 
     /// Open explicitly registered shadow views beside Smalltalk's production admission and
@@ -3187,7 +3202,7 @@ impl Store {
     ) -> Result<Self> {
         let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, smalltalk.clone())?;
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, observations_otlp_configured: std::sync::atomic::AtomicBool::new(false) })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -3202,7 +3217,7 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, observations_otlp_configured: std::sync::atomic::AtomicBool::new(false) })
     }
 
     /// Simulate a different build's registry on this node.
@@ -9372,6 +9387,14 @@ impl Store {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
 
+        let condition_subjects = intent.subjects.values().filter(|subject| subject.kind == "condition").map(|subject| subject.subject.as_str()).collect::<BTreeSet<_>>();
+        if !condition_subjects.is_empty() {
+            let mut existing = connection.prepare_cached("SELECT subject FROM desired WHERE kind='condition' LIMIT 33").map_err(internal)?;
+            let mut all = condition_subjects.iter().map(|subject| (*subject).to_owned()).collect::<BTreeSet<_>>();
+            for subject in existing.query_map([], |row| row.get::<_, String>(0)).map_err(internal)? { let subject = subject.map_err(internal)?; if !intent.subjects.get(&subject).is_some_and(|desired| desired.kind == "stop") { all.insert(subject); } }
+            if all.len() > crate::conditions::MAX_CONDITIONS { blockers.push("condition-limit: at most 32 conditions may be active in the fleet".into()); }
+        }
+
         if intent.deprecated_syntax.contains("pty") {
             warnings.push(
                 "deprecated-kdl-node: `pty {}` is temporarily accepted; use canonical `terminal {}` before the friend-ready v0"
@@ -14584,6 +14607,17 @@ impl Store {
         items.extend(self.harness_login_attention_items(person)?);
         items.extend(self.harness_prompt_attention_items(person)?);
         items.extend(self.custom_attention_items(person)?);
+        match self.condition_attention_items(person) {
+            Ok(conditions) => items.extend(conditions),
+            Err(error) => {
+                static LAST_WARNING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let now = u64::try_from(as_of).unwrap_or(u64::MAX);
+                let previous = LAST_WARNING.load(std::sync::atomic::Ordering::Relaxed);
+                if now.saturating_sub(previous)>=60_000 && LAST_WARNING.compare_exchange(previous,now,std::sync::atomic::Ordering::Relaxed,std::sync::atomic::Ordering::Relaxed).is_ok() {
+                    tracing::warn!(%error, "condition attention unavailable; other attention remains available");
+                }
+            },
+        }
         // A person who published a broken gate is the one to correct it.
         items.extend(
             self.broken_gate_items(person, as_of)?
@@ -17999,6 +18033,7 @@ impl Store {
                 | "sekret.exited"
                 | "sekret.refused"
                 | "sekret.changed"
+                | "condition.state"
         )
     }
 
@@ -18012,7 +18047,7 @@ impl Store {
             "SELECT COUNT(*), COUNT(*) FILTER (
                  WHERE kind NOT IN ('harness.usage', 'work.renewed', 'subagent.renewed',
                                     'sekret.called', 'sekret.exited', 'sekret.refused',
-                                    'sekret.changed')
+                                    'sekret.changed', 'condition.state')
                    AND NOT (
                      kind IN ('message.sent', 'message.staged', 'message.delivered',
                               'message.read', 'message.closed')
@@ -26430,6 +26465,39 @@ mod fleet_admission_tests {
             .unwrap()
     }
 
+    #[test]
+    fn departed_members_condition_heads_are_pruned_and_not_refolded() {
+        let member_key = key();
+        let names = (0..34).map(|number| format!("alpha-{number:02}")).collect::<Vec<_>>();
+        let keys = (0..34).map(|_| key()).collect::<Vec<_>>();
+        let mut admitted = vec![("laptop", &member_key)];
+        admitted.extend(names.iter().zip(&keys).map(|(name,key)| (name.as_str(),key)));
+        let (_anchor, a, members) = fleet(&admitted);
+        let laptop = &members[0];
+        let source = "version 2\ncondition \"fleet/disk\" { metric \"disk.free-percent\"; scope \"host\"; below 15; for \"1m\"; owner \"person/ada\" }";
+        let intent = crate::graph::parse_test_intent(source, "a").unwrap();
+        let plan = a.mission(&intent, IntentInput { kdl: source.into(), source_name: None }).unwrap();
+        a.apply_as(&intent, &plan.subject_tokens, "condition-membership", Some("person/ada")).unwrap();
+        let decl = a.declared_conditions().unwrap().remove(0).decl.unwrap();
+        let mut tracker = crate::conditions::Tracker::default();
+        tracker.observe(&decl, 10.0, 0);
+        let transition = tracker.observe(&decl, 10.0, 60_000);
+        laptop.record_condition_state(&crate::store::ConditionRecord {
+            decl: &decl, host: "laptop", instance: "laptop:/", tracker: &tracker,
+            transition, now: 60_000,
+        }).unwrap();
+        sync(laptop, &a);
+        a.seed_condition_heads(true).unwrap();
+        while a.condition_heads_seed_pending().unwrap() { a.seed_condition_heads(false).unwrap(); }
+        // Alphabetically last laptop must be discovered after more than32 keyed origins.
+        assert_eq!(a.conditions().unwrap()[0].instances.len(), 1);
+        laptop.leave_fleet("person/test").unwrap();
+        sync(laptop, &a);
+        a.seed_condition_heads(false).unwrap();
+        a.fold_condition_heads().unwrap();
+        assert!(a.conditions().unwrap()[0].instances.is_empty());
+    }
+
     /// The anchor `a` founds the fleet and admits each named member.
     fn fleet(members: &[(&str, &Arc<MemberKey>)]) -> (Arc<MemberKey>, Store, Vec<Store>) {
         let anchor = key();
@@ -27974,6 +28042,10 @@ fn classify_replicated_claim_with_registry(
                 claim.id, error.code, error.message
             ),
         ));
+    }
+    if claim.kind == "condition.state"
+        && !crate::conditions::valid_state_identity(&claim.subject, &claim.origin, &json!(fields)) {
+        return Err(St3Error::new("invalid-replicated-claim", "condition state origin, instance identity or payload bounds are invalid"));
     }
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     if claim.kind == "owned-set.revised" { owned_sets::validate_receipt(&claim.subject, &claim.body)?; }
@@ -43016,6 +43088,15 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
 
     #[test]
     fn an_unknown_field_is_retryable_and_an_old_schema_rejection_is_readmitted() {
+        assert_old_schema_rejection_is_readmitted("unknown-claim-field");
+    }
+
+    #[test]
+    fn an_old_unknown_subject_family_rejection_is_readmitted_after_upgrade() {
+        assert_old_schema_rejection_is_readmitted("unknown-subject-family");
+    }
+
+    fn assert_old_schema_rejection_is_readmitted(old_code: &str) {
         let source = Store::open_memory("source").unwrap();
         let claim = source
             .append_claim(&ClaimInput {
@@ -43028,6 +43109,13 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                 idempotency_key: Some("schema-upgrade-source".into()),
             })
             .unwrap();
+        if old_code == "unknown-subject-family" {
+            let mut old_registry = st3_schema::registry().clone();
+            old_registry.subjects.remove("host");
+            let rejection = classify_replicated_claim_with_registry(&claim, &old_registry).err().unwrap();
+            assert!(rejection.message.contains("unknown-subject-family"));
+            assert!(matches!(classify_replicated_claim_with_registry(&claim, st3_schema::registry()).unwrap(), ReplicatedClaimAdmission::Valid));
+        }
         let exchange = exchange_from(&source, &ReplicationInventory::default());
         let envelope = &exchange.envelopes[0];
 
@@ -43057,7 +43145,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                         claim.subject,
                         claim.kind,
                         format!(
-                            "replicated claim `{}` violates unknown-claim-field: field `future` is unknown",
+                            "replicated claim `{}` violates {old_code}: newer schema item is unknown",
                             claim.id
                         ),
                     ],
@@ -43078,6 +43166,35 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                 .id,
             claim.id
         );
+    }
+
+    #[test]
+    fn unresolved_subject_families_retry_once_per_schema_and_invalid_subjects_stay_invalid() {
+        let source = Store::open_memory("source").unwrap();
+        source.append_claim(&ClaimInput {
+            subject: "host/source".into(), kind: "transport.observed".into(), actor: None,
+            fields: BTreeMap::from([("status".into(),json!("up"))]), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some("invalid-subject".into()),
+        }).unwrap();
+        let mut exchange = exchange_from(&source, &ReplicationInventory::default());
+        exchange.envelopes = vec![rewrite_envelope(&exchange.envelopes[0], |payload| {
+            let claim = &mut payload.batch.claims[0];
+            claim.subject = "future-family/source".into();
+            claim.id = claim_hash(&claim.batch_id, &claim.subject, &claim.kind, &claim.origin, claim.actor.as_deref(), &claim.body, &claim.predecessors).unwrap();
+        })];
+        let target = Store::open_memory("target").unwrap();
+        let first = receive_and_project(&target, "source", &exchange);
+        assert_eq!(first.invalid, 1);
+        assert_eq!(target.validate_replication_backlog().unwrap().invalid, 0);
+        assert_eq!(target.replica_records(true).unwrap().len(), 1);
+        target.connection.batched(|tx| tx.execute("DELETE FROM meta WHERE key='unknown_subject_families_retried_digest'", [])).unwrap().unwrap();
+        assert_eq!(target.validate_replication_backlog().unwrap().invalid, 1);
+        assert_eq!(target.validate_replication_backlog().unwrap().invalid, 0);
+        assert_eq!(target.replica_records(true).unwrap()[0].state, "invalid");
+        // A known family with a malformed subject does not enter the schema-retry branch.
+        let mut claim = source.latest_claim("host/source", Some("transport.observed")).unwrap().unwrap();
+        claim.subject = "host/".into();
+        assert!(classify_replicated_claim_with_registry(&claim, st3_schema::registry()).is_err());
     }
 
     #[test]
@@ -57217,6 +57334,11 @@ fn append_claim_with_commit_context(
             })()?;
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
+            }
+            if outcome.1 && input.kind == "condition.state" {
+                // Commit the source history and replicated transition atomically. The normal
+                // observation exporter owns OTLP retries; received peer claims are not exported.
+                insert_local_observation_tx(transaction, &graph.origin, input, outcome.0.accepted_at_unix_ms)?;
             }
             if context.signature.is_some() {
                 // An idempotent repeat does not append/consume a signature. Remove its
