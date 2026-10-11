@@ -378,11 +378,10 @@ pub fn watch_events(
                 .into(),
             );
         }
-        // Queue positions and build-state changes are routine; membership changes need action.
-        if prior.get("merge_queue").is_some()
-            && facts.get("merge_queue").is_some()
-            && in_merge_queue(prior) != in_merge_queue(facts)
-        {
+        // These are normalized item facts: a null removes the field, while an omitted
+        // sighting retains the prior value. Absence therefore means outside the queue.
+        // Queue positions and build-state changes are routine; membership needs action.
+        if in_merge_queue(prior) != in_merge_queue(facts) {
             changes.push(
                 if in_merge_queue(facts) {
                     "entered the merge queue"
@@ -1122,6 +1121,22 @@ mod tests {
                 &json!({"state":"open"})
             )
             .is_empty()
+        );
+        let mut normalized = before.clone();
+        normalized.as_object_mut().unwrap().remove("merge_queue");
+        let mut queued = normalized.clone();
+        queued["merge_queue"] = json!({"state":"queued", "position":1});
+        assert_eq!(
+            watch_events(&watch(), Some(&normalized), &json!({}), &queued),
+            vec![WatchEvent::PullRequestChanged(vec![
+                "entered the merge queue".into()
+            ])]
+        );
+        assert_eq!(
+            watch_events(&watch(), Some(&queued), &json!({}), &normalized),
+            vec![WatchEvent::PullRequestChanged(vec![
+                "left the merge queue".into()
+            ])]
         );
     }
 
