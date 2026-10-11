@@ -90,3 +90,10 @@ change that policy or claim typed operator-storage classification. Its real stor
 negative injects the error into root publication AFTER apply, where it propagates.
 The future production requirement to abort on storage faults while fencing only
 logical coverage failures still needs a typed/error-disposition seam review.
+
+Additional fixture limitations from Intake's source review: while pending remains set,
+prepare repeats its gap UPDATE and Installer::source_gap on every managed transaction.
+A future adapter must short-circuit an already recorded gap, so unrelated writes do
+not pay repeated gap writes. A saved-binding mismatch currently makes prepare error
+and fails every write on this private Store; this abort behavior must not carry into a
+production coverage design. Neither limitation is production-approved by this slice.
