@@ -395,4 +395,13 @@ async fn submitted_incarnation_binds_the_receipt_and_survives_replay() {
         .await
         .unwrap();
     assert_eq!(read.submitted_incarnation, submitted.submitted_incarnation);
+    let claim_read: ClaimRecord = fixture.client.get(
+        &format!("/v1/claims/by-id/{}", urlencoding::encode(&receipt.id)),
+    ).await.unwrap();
+    assert_eq!(claim_read.body, receipt.body);
+    assert!(crate::model::work_submission_matches(&claim_read, &read.subject, read.attempt, SEAT, read.submitted_incarnation.as_deref(), &evidence));
+    let mut unknown = receipt.clone();
+    unknown.body["fields"]["submitted_incarnation"] = Value::Null;
+    assert!(!crate::model::work_submission_matches(&unknown, &read.subject, read.attempt, SEAT, Some("chooser:one"), &evidence));
+
 }
