@@ -4,8 +4,7 @@ use axum::extract::OriginalUri;
 use axum::http::HeaderMap;
 use smallclaims::hash::canonical_json_text;
 
-pub(super) const MAX_RESPONSE_BYTES: usize = 16 * 1024;
-pub(super) const DEFAULT_RESPONSE_BYTES: usize = 4 * 1024;
+use super::reads::{DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES};
 fn default_response_bytes() -> usize { DEFAULT_RESPONSE_BYTES }
 fn max_response_bytes() -> usize { MAX_RESPONSE_BYTES }
 const HEADER: &str = "x-st3-scg-read-authorization";
@@ -276,22 +275,35 @@ async fn read_inner(State(state): State<AppState>, Extension(session): Extension
 pub(in crate::api) async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
                           within_budget: bool) -> Result<(),ApiError> {
     let _transition=TRANSITIONS.lock().await;
-    let granted=latest(state,&receipt.grant_subject,GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
-    super::session(state,&granted,receipt.transport)?;
-    let policy=effective(state,&granted)?;
-    if fields(&policy)?["policy_revision"].as_u64()!=Some(receipt.policy_revision)
-        || u128::from(receipt.proof_expiry)<=client_now_ms() {
-        return Err(forbidden("read authorization expired or policy changed before delivery"));
-    }
+    // The consumed approval remains authoritative even if the grant expires or is revoked
+    // while the projection is being built. Record that final denial before returning it.
+    let authorization = (|| -> Result<(), ApiError> {
+        let granted=latest(state,&receipt.grant_subject,GRANTED)?.ok_or_else(|| forbidden("assistant grant absent"))?;
+        super::session(state,&granted,receipt.transport)?;
+        let policy=effective(state,&granted)?;
+        if fields(&policy)?["policy_revision"].as_u64()!=Some(receipt.policy_revision)
+            || u128::from(receipt.proof_expiry)<=client_now_ms() {
+            return Err(forbidden("read authorization expired or policy changed before delivery"));
+        }
+        Ok(())
+    })();
     let consumed=latest(state,&receipt.subject,USED)?.ok_or_else(|| forbidden("read consent receipt absent"))?;
     if consumed.id!=receipt.consumed_claim {return Err(forbidden("read consent receipt changed"));}
+    let delivered=within_budget && authorization.is_ok();
     append(state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,
         "policy_revision":receipt.policy_revision,"transport":receipt.transport,
-        "returned_bytes":if within_budget {bytes.len()} else {0},"budget_used":bytes.len(),
-        "response_digest":if within_budget {Some(hex::encode(Sha256::digest(bytes)))} else {None},
-        "outcome":if within_budget {"delivered"} else {"denied-budget"},
+        "max_response_bytes":receipt.max_response_bytes,
+        "returned_bytes":if delivered {bytes.len()} else {0},"budget_used":bytes.len(),
+        "response_digest":if delivered {Some(hex::encode(Sha256::digest(bytes)))} else {None},
+        "denial_code":authorization.as_ref().err().map(|error| error.code.as_str())
+            .or(if within_budget {None} else {Some("response-budget-exceeded")}),
+        "outcome":if authorization.is_err() {"denied-authorization"} else if within_budget {"delivered"} else {"denied-budget"},
         "timestamp":client_timestamp(client_now_ms())}),Some(&consumed))?;
-    Ok(())
+    if authorization.is_err() {
+        let grant_id=consumed.body.pointer("/fields/grant_id").and_then(Value::as_str);
+        audit(state,"read",&receipt.actor,receipt.transport,grant_id,&authorization)?;
+    }
+    authorization
 }
 
 #[cfg(test)]

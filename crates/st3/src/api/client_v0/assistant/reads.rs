@@ -61,6 +61,9 @@ fn allow(
     fields: &[&str],
     max_bytes: usize,
 ) -> Result<(), ApiError> {
+    if !(1..=MAX_RESPONSE_BYTES).contains(&max_bytes) {
+        return Err(validation(format!("max_response_bytes must be between 1 and {MAX_RESPONSE_BYTES}")));
+    }
     if let Some(unknown) = parameters.keys().find(|key| !fields.contains(&key.as_str())) {
         return Err(validation(format!("query parameter `{unknown}` is not allowed here")));
     }
@@ -500,4 +503,4 @@ async fn terminal(
 
 #[cfg(test)]
 #[path = "reads_tests.rs"]
-mod tests;
+pub(super) mod tests;
