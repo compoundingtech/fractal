@@ -128,7 +128,7 @@ export const Failed: Story = { args: { request: { ...questionRequest, answerable
   await expect(args.onRetry).toHaveBeenCalledTimes(1)
   await expect(args.onDecline).not.toHaveBeenCalled()
 } }
-export const Answered: Story = { args: { request: { ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', where: 'web', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2m' }, play: async ({ canvasElement }) => {
+export const Answered: Story = { args: { request: { ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', where: 'web', at: '2026-10-11T15:41:00Z' } }, now: Date.parse('2026-10-11T15:43:00Z') }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const row = canvas.getByRole('region', { name: 'Question outcome' })
   const trigger = canvas.getByRole('button', { name: /Answered.*This thread/ })
@@ -149,7 +149,7 @@ export const Answered: Story = { args: { request: { ...questionRequest, state: {
 export const AnsweredLight440: Story = { ...Answered, parameters: { scheme: 'light', width: 440 } }
 export const AnsweredDark1440: Story = { ...Answered, parameters: { scheme: 'dark', width: 1440 } }
 export const AnsweredLight1440: Story = { ...Answered, parameters: { scheme: 'light', width: 1440 } }
-export const AnsweredMultiple: Story = { args: { request: { ...questionRequest, questions: questionKinds.slice(0, 3), state: { _tag: 'answered', answers: { single: { selected: ['thread'] }, multi: { selected: [] }, text: { selected: [], other: 'Accessibility review' } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } }, ageLabel: '2m' }, play: async ({ canvasElement }) => {
+export const AnsweredMultiple: Story = { args: { request: { ...questionRequest, questions: questionKinds.slice(0, 3), state: { _tag: 'answered', answers: { single: { selected: ['thread'] }, multi: { selected: [] }, text: { selected: [], other: 'Accessibility review' } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } }, now: Date.parse('2026-10-11T15:43:00Z') }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const row = canvas.getByRole('region', { name: 'Question outcome' })
   const trigger = canvas.getByRole('button', { name: /Answered.*3 questions/ })
@@ -289,10 +289,11 @@ export const SharedDraftLight1440: Story = { ...SharedDraft, parameters: { schem
 export const ScrollAttentionLight440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 440 } }
 export const ScrollAttentionDark1440: Story = { ...ScrollAttention, parameters: { scheme: 'dark', width: 1440 } }
 export const ScrollAttentionLight1440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 1440 } }
-export const RelativeAge: Story = { args: { ageLabel: '2 minutes ago' }, play: async ({ canvasElement }) => {
+export const RelativeAge: Story = { args: { request: { ...questionRequest, askedAt: '2026-10-11T15:41:00Z' }, now: Date.parse('2026-10-11T15:43:59Z') }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await expect(canvas.getByText(/2 minutes ago/)).toBeVisible()
-  await expect(canvas.queryByText(questionRequest.askedAt, { exact: false })).toBeNull()
+  await expect(canvas.getByText(/ · 2m$/)).toBeVisible()
+  await expect(canvas.queryByText(/2 minutes ago/)).toBeNull()
+  await expect(canvas.queryByText('2026-10-11T15:41:00Z', { exact: false })).toBeNull()
 } }
 export const RelativeAgeLight440: Story = { ...RelativeAge, parameters: { scheme: 'light', width: 440 } }
 export const RelativeAgeDark1440: Story = { ...RelativeAge, parameters: { scheme: 'dark', width: 1440 } }
@@ -317,6 +318,28 @@ export const AnsweredLongChoice: Story = { ...Answered, args: { ...Answered.args
 export const AnsweredLongChoiceLight440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'light', width: 440 } }
 export const AnsweredLongChoiceDark1440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'dark', width: 1440 } }
 export const AnsweredLongChoiceLight1440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'light', width: 1440 } }
+export const AnsweredLongestAge: Story = { ...AnsweredLongChoice, args: { ...AnsweredLongChoice.args, timeZone: 'UTC', request: { ...AnsweredLongChoice.args!.request!, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: '2026-09-30T15:41:00Z' } } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*Keep the release review/ })
+  const label = trigger.querySelector('span')!
+  const age = canvas.getByText('Sep 30')
+  const chevron = trigger.lastElementChild!
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
+  await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
+  await expect(getComputedStyle(age).whiteSpace).toBe('nowrap')
+  await expect(getComputedStyle(age).flex).toBe('0 0 auto')
+  await expect(label.getBoundingClientRect().right).toBeLessThanOrEqual(age.getBoundingClientRect().left)
+  await expect(age.getBoundingClientRect().right).toBeLessThanOrEqual(chevron.getBoundingClientRect().left)
+  await expect(chevron.getBoundingClientRect().right).toBeLessThanOrEqual(trigger.getBoundingClientRect().right)
+  await userEvent.click(trigger)
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+  await expect(trigger).toHaveFocus()
+} }
+export const AnsweredLongestAgeLight440: Story = { ...AnsweredLongestAge, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredLongestAgeDark1440: Story = { ...AnsweredLongestAge, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredLongestAgeLight1440: Story = { ...AnsweredLongestAge, parameters: { scheme: 'light', width: 1440 } }
 export const AnsweredOriginalKeyboard: Story = { ...Answered, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const trigger = canvas.getByRole('button', { name: /Answered.*This thread/ })

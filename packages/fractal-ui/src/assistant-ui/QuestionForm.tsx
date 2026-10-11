@@ -4,6 +4,7 @@ import { Button, Disclosure, DisclosurePanel, RadioGroup, Radio, CheckboxGroup, 
 import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import type { Answers, AnswerDraft, Preview, QuestionRequestView, QuestionVariant, QuestionView } from './question-model'
+import { compactQuestionAge } from './question-age'
 export type * from './question-model'
 
 const OTHER = '__other'
@@ -27,7 +28,7 @@ export interface QuestionFormProps {
   readonly onJump?: () => void
   readonly composerTyping?: boolean
   readonly composerRouting?: { readonly _tag: 'HeldUntilAnswered' } | { readonly _tag: 'ChatAboutQuestion' }
-  readonly ageLabel?: string
+  readonly now?: number
   readonly locale?: string
   readonly timeZone?: string
   readonly onAttach?: (questionId: string, files: readonly File[]) => void
@@ -101,12 +102,12 @@ export const QuestionForm = (props: QuestionFormProps) => {
     else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); if (question.kind === 'multi') advance(); else choose(question, choiceId, true) }
     else if (event.key === 'n' && question.allowNote) { event.preventDefault(); setNotesOpen({ ...notesOpen, [question.id]: true }); requestAnimationFrame(() => noteRef.current?.focus()) }
   }
-  if (!pending(request)) return <QuestionSummary request={request} ageLabel={props.ageLabel} locale={props.locale} timeZone={props.timeZone} />
+  if (!pending(request)) return <QuestionSummary request={request} now={props.now} locale={props.locale} timeZone={props.timeZone} />
   const initialChoice = question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.id ?? question?.options.find(option => option.recommended)?.id ?? question?.options[0]?.id
   const choices = question === undefined ? [] : [...question.options, ...(question.allowOther ? [{ id: OTHER, label: 'Other…' }] : [])]
   return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
     <header {...stylex.props(styles.header)}><span aria-hidden="true">{request.questions[0]?.kind === 'permission' ? '◇' : request.questions[0]?.kind === 'plan' ? '≡' : '?'}</span><strong {...stylex.props(styles.sender)}>{request.agentLabel}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span></header>
-    <div {...stylex.props(styles.meta)}>{[request.source, props.ageLabel].filter(Boolean).join(' · ')}</div>
+    <div {...stylex.props(styles.meta)}>{[request.source, compactQuestionAge(Date.parse(request.askedAt), props.now, props.timeZone)].filter(Boolean).join(' · ')}</div>
     {props.onJump !== undefined ? <Button {...stylex.props(styles.button)} onPress={props.onJump}>Show in thread</Button> : null}
     <div ref={root} onKeyDownCapture={keys} {...stylex.props(styles.body)}>
       {request.questions.length > 1 ? <nav aria-label="Questions" {...stylex.props(styles.header)}>{request.questions.map((q, index) => <Button key={q.id} {...stylex.props(styles.button)} aria-current={step === index ? 'step' : undefined} onPress={() => go(index)}>{q.header ?? `Q${index + 1}`}</Button>)}<Button {...stylex.props(styles.button)} onPress={() => go(request.questions.length)} aria-current={review ? 'step' : undefined}>Review</Button></nav> : null}
@@ -157,7 +158,7 @@ const AnswerList = ({ request, answers }: { readonly request: QuestionRequestVie
 
 const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}{q.options.map(option => <div key={option.id}><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div>)}</div>)}</>
 
-export const QuestionSummary = ({ request, ageLabel, locale, timeZone }: { readonly request: QuestionRequestView; readonly ageLabel?: string; readonly locale?: string; readonly timeZone?: string }) => {
+export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly request: QuestionRequestView; readonly now?: number; readonly locale?: string; readonly timeZone?: string }) => {
   const absoluteFormat = React.useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: 'full', timeStyle: 'long', timeZone }), [locale, timeZone])
   const state = request.state
   if (state._tag === 'unrecorded') return <section {...stylex.props(styles.summary)} aria-label="Original question"><OriginalQuestions request={request} />{state.reason !== '' ? <p {...stylex.props(styles.meta)}>{state.reason}</p> : null}</section>
@@ -169,10 +170,11 @@ export const QuestionSummary = ({ request, ageLabel, locale, timeZone }: { reado
     const choice = request.questions.length > 1 ? `${request.questions.length} questions` : choices.join(', ') || (question?.kind === 'multi' && answer !== undefined ? 'none' : '')
     const answeredBy = [state.by !== '' ? `Answered by ${state.by}` : '', state.where !== undefined ? `in ${state.where}` : ''].filter(Boolean).join(' · ')
     const answeredAt = Date.parse(state.at)
+    const age = compactQuestionAge(answeredAt, now, timeZone)
     const absolute = Number.isFinite(answeredAt) ? absoluteFormat.format(answeredAt) : undefined
     return <section {...stylex.props(styles.summary)} aria-label="Question outcome">
       <Disclosure>{({ isExpanded }) => <>
-        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{ageLabel !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta, styles.summaryAge)}>{ageLabel}</time> : null}<span aria-hidden="true" {...stylex.props(styles.summaryChevron)}>{isExpanded ? '⌄' : '›'}</span></Button>
+        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{age !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta, styles.summaryAge)}>{age}</time> : null}<span aria-hidden="true" {...stylex.props(styles.summaryChevron)}>{isExpanded ? '⌄' : '›'}</span></Button>
         <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<details><summary>Original questions</summary><OriginalQuestions request={request} /></details></> : null}</DisclosurePanel>
       </>}</Disclosure>
     </section>
@@ -205,7 +207,7 @@ const styles = stylex.create({
   summaryTrigger: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minHeight: g.toolRow, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
   summaryLabel: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meta: { color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  summaryAge: { width: g.ageTrack, flexShrink: 0, whiteSpace: 'nowrap', textAlign: 'right' },
+  summaryAge: { flex: '0 0 auto', whiteSpace: 'nowrap', textAlign: 'right' },
   summaryChevron: { width: g.icon, flexShrink: 0, textAlign: 'right' },
   selectedDescription: { color: textVars.fgSoft },
   chip: { color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, paddingInline: s.xs, paddingBlock: s.xs2, backgroundColor: surfaceVars.rowActive, borderRadius: r.sm },
