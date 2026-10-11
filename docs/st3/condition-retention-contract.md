@@ -3,15 +3,16 @@
 This is the disk-first consumer of the coordination-free retention design, not a
 second trim protocol. Pinned main: `8f4f47e0bb059ee4d1dab98bc0c5633326fff2c5`.
 The local quorum-free payload/negative-set API is absent at that revision.
-Speed confirmed in message/8b4f833734c294fd that there is no usable dependency PR
-or implemented trim API. The current source-only design is
-`doc/fleet/smalltalk/speed/2026-10-11/coordination-free-retention-design-v3@9f5e695ade76c9c3869d2e3a1cc3f3762468c3dd5f0e1fff0fe89ddbb3bc52c8`,
-carrying Intake's v2 review
-`doc/fleet/smalltalk-intake/2026-10-11/retention-design-v2-review@b25afe4b26753c5a62b5577af63f33dccb3acbd32d34f645e004b67f9737547f`.
-V3 is still under review and certifies no family eligible for removal. Signer-key
-settlement, permanent authenticated nonce/authority/admission fences, signed
-payload removal, immutable positions and real N-1 exchange remain prerequisites.
-The closed majority-trim #2289 is not this dependency.
+Speed confirmed in message/3100632a375f5830 that there is still no usable
+local-trim API, certified removal family or PR 3–6 authority. The consolidated
+source-only design is
+`doc/fleet/smalltalk/speed/2026-10-11/coordination-free-retention-design-v4@33ace47253bec788d0c9b73302528887439775c76ec1a532ee934ae8ee8cb811`.
+Intake read v4 without a new source objection; that is not implemented API or
+payload-removal approval. V4 distinguishes advisory signature verdicts from the
+actual live fold and requires the union of every reader's winner set, complete
+carrier closure, permanent authenticated nonce/admission evidence, exact-ID/body
+reference closure, immutable positions and real N-1 exchange. No family is
+certified eligible. The closed majority-trim #2289 is not this dependency.
 
 Operations interprets Nathan's kilobyte requirement as retained condition-state
 history **per instance after local trim**, without checkpoint quorum. Count
@@ -22,17 +23,62 @@ This interpretation must be in PR 1 so Nathan can correct it in review.
 | Contract component | Required behavior |
 | --- | --- |
 | Domain/key | `(condition root, authenticated writer origin, instance name)`. The subject hashes all three; `host` must equal authenticated origin. Host selectors affect evaluation, not who may rewrite another origin. |
-| Winner | Greatest shared canonical key: numeric accepted time, origin, replica sequence, batch ID, immutable wire position, claim ID. Local `store_index` is navigation only. |
+| Winner | Preserve the union of all readers’ winning claims/carriers, not just the newest condition head. Within a reader’s logical key, use the greatest shared canonical key: numeric accepted time, origin, replica sequence, batch ID, immutable wire position, claim ID. Local `store_index` is navigation only. |
 | Full value | Each `condition.state` replaces all its fields. Missing optional `breach_since`, `value`, notification text or transition means absence, not a value inherited from an older record. Metric, thresholds, owner, phase, phase time, measurement time and sample ring belong to the full value. The root declaration remains its own durable intent. |
 | Keep | Current full state plus three previous transitions, four records per authenticated instance in canonical order. Late arrival must not displace a newer state by arrival index. |
-| Eligibility | A dominated source is removable only when the retained winners are finally valid under the reviewed admission contract. Unknown, provisional or invalid winner/authority refuses payload trim. State subjects are system-only; that fact alone does not prove generic admission finality. |
-| Permanent negatives | Commit compact deleted IDs and required authority/idempotency/reference evidence including permanent authenticated nonce, authority, operation and cardinality fences before payload removal, atomically; preserve monotonically across restart, adoption and old replay. Bare unauthenticated peer IDs never authorize deletion. |
-| References | Normal notifications no longer pin transition IDs as immutable evidence. Explicit person/agent evidence, repair/verdict targets, predecessor edges, operation/request identity and projection references must retain the required negative or rich metadata. Do not weaken their current semantics. |
+| Eligibility | First trace whether each actual reader uses advisory verdicts. A reader that does needs its reviewed signer-settlement contract. A live fold that does not needs stable semantic outputs under all admissible arrivals and unequal retained subsets; do not invent a verdict filter. Every indispensable field carrier, reference and fence must remain represented. Unknown authority, missing body/reference closure or unqualified transport refuses payload trim. System-only subjects or a green advisory verdict alone do not prove eligibility. |
+| Permanent negatives | Commit compact deleted IDs and required authority/idempotency/reference evidence including permanent authenticated nonce, authority, operation and cardinality fences before payload removal, atomically; preserve monotonically across restart, adoption and old replay. Carried non-verifying signature rows must retain the same nonce-predicate participation and authenticated source provenance; no verifies-only policy or arrival-selected source is introduced. Full-history nonce retention differs from agreed-trim forgetfulness and must be disclosed by the eventual implementation. Bare unauthenticated peer IDs never authorize deletion. |
+| References | Normal notifications no longer pin transition IDs as immutable evidence. Explicit evidence, exact-ID/body reads, historical cuts, repair targets, predecessor edges, operation/request identity, custom references and projection carriers need their payload or a verified compatible representation. Compact IDs alone do not satisfy a future historical-body request. Do not weaken their current semantics. |
 | Pending delivery | Each local outbox row copies immutable source ID, authenticated origin, root, and notification body. Removal of the source payload must not erase a pending notification. Deterministic message identity survives retry. Message retention stays unchanged. |
 | OTel | Atomically copy each newly authored transition into the existing local observation log with the same fields and timestamp. Existing OTLP cursor/backoff owns delivery; no exporter request runs inside a writer or evaluation request path. Peer transitions are not exported twice. Existing local observation retention can report export gaps. |
 | Signed container | Removing a logical source cannot rewrite an immutable signed envelope. Persist wire positions before removing any earlier row of a batch. The reviewed transport adapter must preserve verification and old replay protection. |
 | Mixed fleet | Every daemon understands condition facts before publication. The generic local trim mode must define checkpoint coexistence and old-binary exchange in both directions. No silent checkpoint fallback, no inventory-equality claim over intentionally unequal history. |
 | Bounds | Per-pass row, byte and time limits; no writer transaction over 100 ms. Scope work to changed instance keys, not all historical claims. A pending-key backlog must itself have a measured bound. |
+
+## Reader and reference closure still required
+
+The direct restart reader uses `condition_tracker` and canonical `latest_claim`;
+condition discovery/fold, cached views, attention and notification delivery have
+separate retained-head/payload requirements. Generic `latest_actual_at` also
+reads these subjects: its `fold_latest_values` clears registered fields for
+`StateTransition`, then merges fields. That supports full-value absence for
+registered condition fields, but is not proof of closure for every cross-kind,
+custom or historical-cut reader. The actual reader union and full projection
+must agree with untrimmed replay after shuffled arrivals and different trim cuts.
+
+A pending delivery copy and OTLP copy close those consumers only. They do not
+make arbitrary future `claim_by_id`, evidence, mission-input or repair requests
+safe after deleting a body. Until the reviewed generic contract closes those
+paths, current plus three is the requested tail, not a certified deletion set.
+
+## Reader table and fold-before-trim fence
+
+| Reader | Source it needs | Required retained winner or closure |
+| --- | --- | --- |
+| Heads, views, attention and Home | Newest body per authenticated origin/instance | Same-origin full replacement in canonical order; preserve every reader winner. |
+| Restart `condition_tracker` | Canonical latest `condition.state` via indexed `latest_claim` | Retained newest full body, not merely a head pointing at a retired row. |
+| `fold_condition_heads` | Every newly arrived row past `condition_heads_cursor` | Keep the entire unfolded tail until head and delivery closure commit. |
+| `st conditions show` sample ring | Values inside the newest body plus local routine overlay | Ring fields replace as a whole; old claims do not supply missing samples. |
+| Generic `latest_actual_at` | Registered fields of `StateTransition` | Full replacement clears registered old fields; preserve unknown/custom/reference carriers until audited. |
+| Local observation / OTLP | Atomic copy made at new own append | Independent copy with existing age/count retention and export cursor; received peers are not copied. |
+| Pending delivery | Immutable outbox copy made by seed/fold | Copy must commit before retiring a source that still requires a wake. |
+| Exact-ID/body, historical cut, evidence, repair and custom readers | Referenced source payload | Keep it or a reviewed compatible authenticated representation. Unknown future-reference closure refuses deletion. |
+
+No current application reader uses the three previous transitions. That tail is
+Nathan's retention policy, not an additional reader winner or an eligibility
+proof. For this family there is no merge of different authenticated origins:
+a later same-origin complete value replaces its instance's current value,
+subject to every reader/fence, actual verdict dependency and generic nonce/
+authority/transport contract. Repaired-away records and replacement-kind rules
+must remain outside normal winner selection under the generic reviewed contract.
+
+The trim adapter must not remove a `condition.state` row beyond
+`condition_heads_cursor`, or an own agent-owner transition in the one-hour wake
+window whose required outbox copy has not committed. Head/outbox writes and
+cursor advance share one fold transaction. The atomic observation copy alone
+is insufficient to authorize deleting an unfolded delivery source. A cached
+source that vanishes between read and fold is skipped rather than poisoning the
+whole page; this tolerance does not grant permission to delete the unfolded tail.
 
 ## Smallest bounded stand-in proposed
 
@@ -83,9 +129,25 @@ Local trim bounds retained state; it does not reduce these daily writes.
 | Compact retired IDs | At full local flapping capacity, about 105,216 new IDs/day/writer. Raw 32-byte hashes alone would be 3,366,912 bytes/day; hex, indexes and authenticated evidence add more. The actual format is unqualified. |
 | Nonce and admission fences | Permanent population includes every signed claim, not just trimmed transitions. Exact row/index bytes remain a generic-retention input; no net savings promised. |
 | Notification messages | Up to one ordinary durable agent message per transition, about 105,216 messages/day/writer at that extreme. Additional normal delivery/read claims remain unchanged. Person attention is projected from the current breach. Message retention is unchanged. |
-| Pending delivery outbox | Immutable payload copied once per queued local transition. The queue is uncapped, so an outage has no finite retained-byte bound. Only the oldest 256 rows are considered per tick. |
-| OTel/local export log | One local observation per authored transition. Existing local log retention, cursor and exporter backoff apply; outage gaps remain possible under that retention. It is not replicated condition history. |
+| Pending delivery outbox | Immutable payload copied once per queued local transition. The queue keeps at most 1,024 copied rows after enqueue; excess oldest rows and retry counters are discarded with a one-hour doctor diagnostic. Loss of queued wakes is explicit. Only the oldest 256 rows are considered per tick; each copied body still has the condition claim field bounds. |
+| OTel/local export log | One local observation per authored transition. Copies are written even without OTLP. Existing hourly trimming defaults to seven days and at most 20,000 rows per subject/kind; the newest row of each subject/kind always remains. There is no global byte cap or lifetime-key cap. Export cursor/backoff and possible outage gaps remain unchanged. It is not replicated condition history. |
 | Replicated writes and containers | Source transition plus ordinary notifications and transport overhead. No write-volume reduction is claimed. Each replica receives other writers' transitions too. `claims.body`, `replica_records.raw`, signed envelopes and their indexes must be counted separately by the trim dependency. |
+
+The generic design's observed rich retired-claim cost is about **865 bytes per
+claim**, not 32 bytes. At 411 retirements/day/instance that is about 355,515 bytes
+(347 KiB) per instance per day permanently, or roughly 86.8 MiB/day at 256 local
+instances, before the nonce ledger and other indexes. Depending on compactness,
+the review estimates roughly 100–350 KiB/instance/day, about 36–125 MiB per year.
+These are extrapolations from the existing negative-set measurement, not a
+measured future compact ledger. Its authenticated format is still unqualified.
+Keep this next to the 105,216/day figure: a kilobyte state tail excludes material
+permanent growth and requires Nathan's informed interpretation in review.
+
+Before source trim exists, storage **increases**: every new transition also adds
+an observation copy, even with no configured collector, and a temporary outbox
+copy for agent delivery. Local observation age/count trimming is independent of
+replicated payload removal. Doctor warns when declarations have no configured
+`observations.otlp`; the warning is configuration, not collector-health proof.
 
 The old 100–200 MB/day statement must therefore disappear as a promise of
 permanently accumulated **retained condition-state bodies** only after physical

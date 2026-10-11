@@ -7511,6 +7511,10 @@ fn doctor_report_with_operation_drift(
                 checks.push(DoctorCheck { name, status: status.into(), message });
             }
             if !conditions.is_empty() {
+                if !state.store.observations_otlp_configured() {
+                    checks.push(DoctorCheck { name: "condition-history".into(), status: "warn".into(),
+                        message: "conditions are declared but observations.otlp is not configured; transition history is only in the retained local observation log".into() });
+                }
                 match state.store.condition_evaluator_status() {
                     Ok((_, Some(error))) => checks.push(DoctorCheck { name: "condition-evaluator".into(), status: "warn".into(), message: error }),
                     Ok((Some(at), None)) => checks.push(DoctorCheck { name: "condition-evaluator".into(),
@@ -17808,6 +17812,10 @@ condition "fleet/disk" {
         let report = doctor_report(&state).unwrap().0;
         assert!(report.checks.iter().any(|check| check.name == "condition/fleet/disk"
             && check.status == "warn" && check.message.contains("breach")));
+        assert!(report.checks.iter().any(|check| check.name == "condition-history" && check.status == "warn"));
+        state.store.set_observations_otlp_configured(true);
+        let configured = doctor_report(&state).unwrap().0;
+        assert!(!configured.checks.iter().any(|check| check.name == "condition-history"));
         assert_eq!(state.store.index().unwrap(), before);
     }
 

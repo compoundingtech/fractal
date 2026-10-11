@@ -1,15 +1,15 @@
-# Hetz conditions evaluator measurement
+# Production-node conditions evaluator measurement
 
 Operations owns execution, deployment and approval. The builder builds and tests on
-hetz2, supplies the exact CI release artifact and analyzes the resulting finite
-reads. Do not compile, load-test or run a synthetic flapping workload on hetz.
-No measurements have been made on hetz for this replacement PR yet.
+build host, supplies the exact CI release artifact and analyzes the resulting finite
+reads. Do not compile, load-test or run a synthetic flapping workload on production node.
+No measurements have been made on production node for this replacement PR yet.
 
 ## Epochs and duration
 
 Freeze unrelated daemon deployments, configuration changes and planned maintenance
 for each window. Keep normal workload running. Record any account reset, fleet
-join, checkpoint, backup, collector outage or unusual workload; a affected window
+join, checkpoint, backup, collector outage or unusual workload; an affected window
 cannot establish the evaluator's steady cost. Keep and report every attempted
 window, including disturbed ones. Do not silently retry a bad result.
 
@@ -30,8 +30,8 @@ window, including disturbed ones. Do not silently retry a bad result.
 Requested total: **three 35-minute epochs (105 minutes), plus forward deployment
 and the all-member compatibility gate.** Stage 3 can occur later if rollout takes
 longer. Operations must record deployment and publication times and exact SHAs.
-Do not declare conditions against a mixed fleet. Do not induce a breach on hetz;
-transition and collector-retry behavior is tested on hetz2.
+Do not declare conditions against a mixed fleet. Do not induce a breach on production node;
+transition and collector-retry behavior is tested on build host.
 
 ## Finite reads
 
@@ -76,7 +76,7 @@ not a pass. A significant extra SQL rate, CPU increase, lost sample, regression 
 transaction max/p99 or writer hold above 100 ms keeps the gate closed. No threshold
 is loosened after the candidate results arrive. If ordinary workload makes six
 blocks inconclusive, Operations decides whether to run a separately documented
-longer comparison; the builder does not start more reads on hetz.
+longer comparison; the builder does not start more reads on production node.
 
 The steady-state evaluator performs bounded SQLite reads and cache writes. It
 cannot honestly be described as executing zero SQL. This protocol distinguishes
@@ -85,7 +85,7 @@ fixtures and CI results are reported separately from production observations.
 
 ## Storage evidence
 
-On hetz2, generate a finite long flapping history and export it to a fake OTLP
+On build host, generate a finite long flapping history and export it to a fake OTLP
 collector. Once the reviewed local trim API is available, apply it without a
 checkpoint quorum on a scratch store and report transition counts and serialized
 bytes before/after. Verify restart, head reconstruction, late replay, remote

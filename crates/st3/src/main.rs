@@ -6287,6 +6287,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_telemetry.phase("start-services");
     tokio::spawn(reconciler.clone().supervise());
     tokio::spawn(st3::profile::watch_runtime_lag());
+    store.set_observations_otlp_configured(config.observations.otlp.is_some());
     st3::conditions::evaluate::spawn(
         store.clone(), config.node.clone(), config.state_dir.join("claims.sqlite3"),
         notify.clone(), event_notify.clone(),

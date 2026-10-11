@@ -136,13 +136,47 @@ struct Notification<'a> {
     body: &'a str,
 }
 
-// Copy the pending delivery before checkpoint trimming can remove its source claim.
+// Copy pending delivery before local trimming can remove its source claim.
 // Old development rows with no payload still read their untrimmed source once.
 fn queue_notification(tx: &Transaction<'_>, index: i64) -> rusqlite::Result<()> {
     tx.execute("INSERT OR IGNORE INTO local_condition_notifications(store_index,payload)
         SELECT store_index,json_object('id',id,'origin',origin,'condition',
           CASE WHEN json_valid(body) THEN CAST(json_extract(body,'$.fields.condition') AS TEXT) END,'body',body)
         FROM claims WHERE store_index=?1", [index])?;
+    Ok(())
+}
+
+/// Bound copied pending payloads even if delivery never succeeds. Only transition
+/// windows use this queue; keep the newest records and diagnose dropped wakes.
+const NOTIFICATION_QUEUE_LIMIT: i64 = 1024;
+
+fn trim_notification_queue(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    let cutoff = tx.query_row(
+        "SELECT store_index FROM local_condition_notifications ORDER BY store_index DESC LIMIT 1 OFFSET ?1",
+        [NOTIFICATION_QUEUE_LIMIT - 1], |row| row.get::<_, i64>(0),
+    ).optional()?;
+    let Some(cutoff) = cutoff else { return Ok(()) };
+    let dropped = {
+        let mut query = tx.prepare("DELETE FROM local_condition_notifications WHERE store_index < ?1 RETURNING store_index")?;
+        query
+            .query_map([cutoff], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if !dropped.is_empty() {
+        for index in &dropped {
+            tx.execute(
+                "DELETE FROM meta WHERE key=?1",
+                [format!("condition_notification_attempt:{index}")],
+            )?;
+        }
+        tx.execute("INSERT INTO meta(key,value) VALUES ('condition_notification_discarded',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [format!("discarded {} oldest condition notifications at the {NOTIFICATION_QUEUE_LIMIT}-row outbox cap; delivery is lost; inspect condition state", dropped.len())])?;
+        set_meta_integer(
+            tx,
+            "condition_notification_discarded_at",
+            i64::try_from(condition_now()).unwrap_or(i64::MAX),
+        )?;
+    }
     Ok(())
 }
 
@@ -284,11 +318,18 @@ fn upsert_condition_head(
     instance: &str,
     index: i64,
 ) -> rusqlite::Result<()> {
-    let (origin, _accepted, _id, body): (String, String, String, String) = tx.query_row(
-        "SELECT origin,accepted_at_unix_ms,id,body FROM claims WHERE store_index=?1",
-        [index],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    )?;
+    let source: Option<(String, String, String, String)> = tx
+        .query_row(
+            "SELECT origin,accepted_at_unix_ms,id,body FROM claims WHERE store_index=?1",
+            [index],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    // A correctly ordered trim cannot remove the unfolded tail. Tolerate a
+    // vanished cached source rather than failing/retrying the entire fold page.
+    let Some((origin, _accepted, _id, body)) = source else {
+        return Ok(());
+    };
     let phase = serde_json::from_str::<Value>(&body)
         .ok()
         .and_then(|body| Phase::parse(body["fields"]["phase"].as_str()?));
@@ -669,7 +710,7 @@ impl Store {
                             queue_notification(tx, index)?;
                         }
                     }
-                    Ok::<_, rusqlite::Error>(())
+                    trim_notification_queue(tx)
                 })
                 .map_err(|error| anyhow::anyhow!("{error}"))??;
         }
@@ -857,6 +898,7 @@ impl Store {
                     }
                     upsert_condition_head(transaction, subject, instance, *index)?;
                 }
+                trim_notification_queue(transaction)?;
                 set_meta_integer(transaction, HEADS_CURSOR, last.max(cursor))
             })
             .map_err(|error| anyhow::anyhow!("{error}"))??;
@@ -1209,6 +1251,17 @@ impl Store {
     }
 
     pub fn flush_condition_notifications_report(&self) -> Result<ConditionNotificationReport> {
+        // Also clean an older development cache before materializing its delivery window.
+        let overflow = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_condition_notifications LIMIT 1 OFFSET ?1)",
+            [NOTIFICATION_QUEUE_LIMIT],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if overflow {
+            self.connection
+                .batched(trim_notification_queue)
+                .map_err(|error| anyhow::anyhow!("{error}"))??;
+        }
         let rows = {
             let connection = self.readers.get();
             let mut statement = connection.prepare_cached(NOTIFICATION_ROWS_QUERY)?;
@@ -2085,6 +2138,31 @@ condition "fleet/database" {
                 .contains("alder:/")
         );
         assert!(store.flush_condition_notifications().unwrap().is_empty());
+    }
+
+    #[test]
+    fn notification_outbox_evicts_oldest_payloads_and_attempts_with_a_diagnostic() {
+        let store = Store::open_memory("alder").unwrap();
+        store.connection.batched(|tx| {
+            for index in 1..=NOTIFICATION_QUEUE_LIMIT + 25 {
+                tx.execute("INSERT INTO local_condition_notifications(store_index,payload) VALUES (?1,'{}')", [index])?;
+            }
+            set_meta_integer(tx, "condition_notification_attempt:1", 2)?;
+            trim_notification_queue(tx)?;
+            assert_eq!(tx.query_row("SELECT count(*) FROM local_condition_notifications", [], |row| row.get::<_,i64>(0))?, NOTIFICATION_QUEUE_LIMIT);
+            assert_eq!(tx.query_row("SELECT min(store_index) FROM local_condition_notifications", [], |row| row.get::<_,i64>(0))?, 26);
+            assert!(meta_integer(tx, "condition_notification_attempt:1").unwrap().is_none());
+            upsert_condition_head(tx, "condition/vanished", "alder:/", i64::MAX)?;
+            Ok::<_,rusqlite::Error>(())
+        }).unwrap().unwrap();
+        assert!(
+            store
+                .condition_evaluator_status()
+                .unwrap()
+                .1
+                .unwrap()
+                .contains("discarded 25 oldest")
+        );
     }
 
     #[test]

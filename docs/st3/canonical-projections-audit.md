@@ -305,7 +305,7 @@ facts. Three host-owned tables serve background evaluation and reads:
 | --- | --- | --- |
 | `local_condition_heads` | Local cache | Canonical latest transition pointer per declaration, authenticated origin and instance; 32 declarations, at most 256 remote instances each. Origin/phase/order local indexes support bounded 50-row writes; rebuilt by resumable indexed latest-state seeks. |
 | `local_condition_observations` | Local live overlay | Eight recent samples and hold phase; 32 declarations, eight instances each. Never replicated. |
-| `local_condition_notifications` | Local retry queue | Own-host transition deliveries with copied payloads that survive source trimming; oldest 256 rows materialized, at most 16 deliveries per tick and three attempts per malformed/deterministically rejected row. Transient failures remain queued; the queue is uncapped. Message identity is durable and idempotent. |
+| `local_condition_notifications` | Local retry queue | Own-host transition deliveries with copied payloads that survive source trimming; oldest 256 rows materialized, at most 16 deliveries per tick and three attempts per malformed/deterministically rejected row. Transient failures remain queued; the queue is capped at 1,024 rows; excess oldest deliveries are discarded with a one-hour diagnostic. Message identity is durable and idempotent. |
 
 These tables do not enter shared projection digests. Graph state uses canonical
 latest selection; local cursors, heartbeat and retry counters live in `meta`.

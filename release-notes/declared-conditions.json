@@ -7,11 +7,11 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds condition and authenticated condition-instance subjects. condition.state is a system-only full replacement state. Storage stays 18; three local tables and desired-condition index are created on open. Pending notification payloads are copied so trimming cannot lose them."
+    "detail": "Adds condition and authenticated condition-instance subjects. condition.state is a system-only full replacement state. Storage stays 18; three local tables and desired-condition index are created on open. Pending notification payloads are copied so trimming cannot lose them. Runtime OTLP configuration is visible to doctor; missing exporter configuration warns. Copies are still written without export and keep the existing seven-day/20,000-per-key defaults (newest per key always retained)."
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint-only retention fallback. Required condition-state contract is current plus three previous transitions per authenticated instance with local quorum-free trim and permanent compact deleted IDs. The reviewed local trim/transport dependency is absent on pinned main 8f4f47e0b. This draft is not ready for queueing while source transition payloads accumulate. A four-state logical cache is proposed as the smallest bounded stand-in; it cannot establish the physical retained-byte target. Full locally authored history is atomically copied for existing OTLP export. Notifications no longer pin state claims as evidence, but ordinary durable message retention stays unchanged. Count deleted IDs, messages, outbox, signed containers and replicated daily writes separately."
+    "detail": "No checkpoint-only retention fallback. Required condition-state contract is current plus three previous transitions per authenticated instance with local quorum-free trim and permanent compact deleted IDs. The reviewed local trim/transport dependency is absent on pinned main 8f4f47e0b. This draft is not ready for queueing while source transition payloads accumulate. A four-state logical cache is proposed as the smallest bounded stand-in; it cannot establish the physical retained-byte target. Full locally authored history is atomically copied for existing OTLP export. Notifications no longer pin state claims as evidence, but ordinary durable message retention stays unchanged. Count deleted IDs, messages, outbox, signed containers and replicated daily writes separately. The ~865 B observed rich retired-claim cost extrapolates to ~347 KiB/instance/day permanently at extreme flapping, excluding the future nonce ledger; a four-body kilobyte tail does not bound negatives."
   },
   "compatibility": {
     "status": "changed",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Operations reviews and deploys; independent approval and measured hetz CPU/SQL gate required. Upgrade every daemon before new declarations and the reviewed local trim/negative-set compatibility gate before payload reclamation. Configure observations.otlp for full external history; collector gaps follow the existing local log retention. Retain existing disk/watchdog missions until a real breach/recovery and Operations approval. Disk metrics only; other metrics are refused until the follow-up lands. Existing 32 declaration/8 local instance/256 remote-head/discovery and notification materialization limits apply. Pending outbox is not yet capped; unexpected storage failures retain deliveries with diagnostics. State-only kilobyte figures exclude messages, tombstones and pending deliveries."
+    "detail": "Operations reviews and deploys; independent approval and measured production-node CPU/SQL gate required. Upgrade every daemon before new declarations and the reviewed local trim/negative-set compatibility gate before payload reclamation. Configure observations.otlp for full external history; collector gaps follow the existing local log retention. Retain existing disk/watchdog missions until a real breach/recovery and Operations approval. Disk metrics only; other metrics are refused until the follow-up lands. Existing 32 declaration/8 local instance/256 remote-head/discovery and notification materialization limits apply. Pending outbox keeps 1,024 rows, discarding oldest with a one-hour diagnostic; unexpected storage failures retain deliveries with diagnostics. State-only kilobyte figures exclude messages, tombstones and pending deliveries."
   },
   "recovery": {
     "status": "changed",

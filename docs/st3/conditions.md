@@ -146,9 +146,17 @@ normal semantics. Report four-state bytes, permanent negative IDs, notification
 messages, pending outbox, signed transport containers and replicated daily write
 volume separately. A kilobyte figure for a cache must not be reported as physical
 graph storage after trim. Production CPU/SQL claims require Operations'
-[finite hetz measurement](conditions-measurement.md); local or hosted fixtures do
+[finite production node measurement](conditions-measurement.md); local or hosted fixtures do
 not substitute for those numbers.
 
 Restarted local instances restore directly from their indexed state subjects while remote discovery continues. Anchored fleets reconstruct keyed current members; unkeyed legacy peers are outside that reconstruction contract (their new transitions are still folded). Departed members lose standing alerts without a recovery claim. Capacity diagnostics aggregate up to eight causes and stay visible until a new full seed starts: a lost remote breach might not transition again, so a clean fold cannot prove recovery. Narrow or replace the declaration, then verify discovery; a daemon restart also forces reconstruction and resets the warning. Replacing a declaration with identical text does not change its digest. Notification flushes materialize at most the oldest 256 queue rows and deliver at most four per owner/16 total; older queued transitions are retained, so owner fairness applies within that bounded window. Unexpected non-validation storage errors keep their rows indefinitely with diagnostics; no broad retry limit discards them.
 
 Retry rows currently have no cooldown: persistent failures can occupy all selected owner slots and delay younger owners. Per-row backoff and counted per-declaration capacity causes are follow-ups. A tick that repeatedly panics can restart large discovery rather than make progress; its watchdog diagnostic remains visible.
+
+Database-size sampling is hourly: a fast-growing database can cross its threshold
+up to an hour before the next reading, plus the configured hold. Native free-space
+readings continue every 30 seconds. OTLP copies are made even when export is not
+configured. Local log maintenance runs hourly; defaults are seven days and 20,000
+rows per subject/kind, always preserving the newest per key. This is not a global
+byte bound. Doctor warns on declarations without `observations.otlp`. Outbox
+capacity eviction loses a wake explicitly; its diagnostic lasts one hour.

@@ -1785,6 +1785,18 @@ pub type IdempotencyConflict = Vec<(String, String)>;
 pub struct Store {
     graph: GraphStore,
     smalltalk: Arc<SmalltalkRuntime>,
+    observations_otlp_configured: std::sync::atomic::AtomicBool,
+}
+
+impl Store {
+    /// Runtime configuration, not a graph fact or a claim about collector health.
+    pub fn set_observations_otlp_configured(&self, configured: bool) {
+        self.observations_otlp_configured.store(configured, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn observations_otlp_configured(&self) -> bool {
+        self.observations_otlp_configured.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -3178,7 +3190,7 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, observations_otlp_configured: std::sync::atomic::AtomicBool::new(false) })
     }
 
     /// Open explicitly registered shadow views beside Smalltalk's production admission and
@@ -3190,7 +3202,7 @@ impl Store {
     ) -> Result<Self> {
         let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, smalltalk.clone())?;
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, observations_otlp_configured: std::sync::atomic::AtomicBool::new(false) })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -3205,7 +3217,7 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
-        Ok(Self { graph, smalltalk })
+        Ok(Self { graph, smalltalk, observations_otlp_configured: std::sync::atomic::AtomicBool::new(false) })
     }
 
     /// Simulate a different build's registry on this node.
