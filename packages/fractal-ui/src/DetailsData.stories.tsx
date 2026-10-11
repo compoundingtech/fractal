@@ -139,6 +139,7 @@ function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens ·
   requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&section.querySelector('[data-details-partial-note]')?.textContent==="Accumulation window isn't reported by this source.", 'Token accumulation window was fabricated')
   const monetaryRow = Array.from(section.querySelectorAll('dt')).find(item => item.textContent?.startsWith('Total · self'))?.closest('div')
   const monetaryText = monetaryRow?.textContent
+  requireContract(typeof monetaryText === 'string', 'Monetary accumulation window inherited token window')
   requireContract(monetaryText?.includes('UTC') && !monetaryText.includes('all time'), 'Monetary accumulation window inherited token window')
   requireContract(monetaryText.includes('$12.34') && tokenRow?.textContent?.includes('480'), 'Native metrics disappeared without descendants')
 }
@@ -256,8 +257,10 @@ export const IndependentMetricScopes: Story = {
 function assertNativeWindow(root:HTMLElement) {
  const section=spend(root)
  const mainText=section.querySelector('[data-details-metric="main-usd"]')?.textContent
+ requireContract(typeof mainText === 'string', 'Native monetary metadata inherited inclusive metadata')
  requireContract(mainText?.includes('Main session · self')&&!mainText.includes('reported window')&&mainText.includes('UTC')&&!mainText.includes('Partial'), 'Native monetary metadata inherited inclusive metadata')
  const totalText=section.querySelector('[data-details-metric="total-usd"]')?.textContent
+ requireContract(typeof totalText === 'string', 'Producer window fabricated exact boundaries')
  requireContract(totalText?.includes('reported window · 7d')&&!totalText.includes('UTC'), 'Producer window fabricated exact boundaries')
  requireContract(mainText.includes('$12.34')&&totalText.includes('$100.00'), 'Independent monetary amounts were derived from one another')
 }
@@ -303,6 +306,7 @@ function assertPartialFacts(root:HTMLElement) {
 function assertContextSamples(root:HTMLElement) {
  assertPercentOnly(root)
  const section=root.querySelector('[data-details-chart="C3"]')
+ requireContract(section !== null, 'Percent-only retained observations were discarded')
  requireContract(section?.textContent?.includes('Peak 37%'), 'Percent-only retained observations were discarded')
  const titles=Array.from(section.querySelectorAll('circle title')).map(title=>title.textContent??'')
  requireContract(titles.length===2&&titles.every(title=>/\d+%/.test(title)&&!title.includes('tokens')), 'Historical occupancy escaped percentage units')

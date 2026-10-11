@@ -338,7 +338,10 @@ async function keyboardPlay({ canvasElement: canvas }: Play) {
     dialog.removeAttribute('aria-describedby')
     try { await rejectsControl('Recovery dialog lacks its announced name, cause and recovery', () => assertDialog(dialog)) } finally { dialog.setAttribute('aria-describedby', description) }
     const bodyRetry = pane.querySelector<HTMLElement>('[data-command-id="sync.retry.body"]')
-    if (bodyRetry) requireContract(!shown(bodyRetry) && Boolean(bodyRetry.closest('[inert]')), 'Body recovery remains exposed while Details is open')
+    if (bodyRetry) {
+      const inertAncestor = bodyRetry.closest('[inert]')
+      requireContract(!shown(bodyRetry) && inertAncestor !== null, 'Body recovery remains exposed while Details is open')
+    }
     const duplicateRetry = element(dialog, '[data-command-id="sync.retry.details"]').cloneNode(true)
     dialog.append(duplicateRetry)
     try { await rejectsControl('Recovery is not uniquely exposed', () => assertRecovery(doc)) } finally { duplicateRetry.parentNode?.removeChild(duplicateRetry) }
