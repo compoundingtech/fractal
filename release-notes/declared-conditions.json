@@ -28,5 +28,8 @@
   "recovery": {
     "status": "changed",
     "detail": "Roll forward after declarations exist. An older daemon cannot evaluate them. Unknown-family records rejected by old registries heal on an upgraded schema; other invalid records require normal replication repair. Notification storage failures retain rows, deterministic validation failures consume three attempts, partial successful deliveries remain visible, and discarded rows leave a diagnostic for one hour."
-  }
+  },
+  "commits": [
+    "75d7ff2434e708e6d99a528a9275455dd82d7370"
+  ]
 }
