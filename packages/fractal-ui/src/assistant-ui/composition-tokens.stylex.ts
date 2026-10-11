@@ -104,6 +104,7 @@ export const geometryVars = stylex.defineVars({
   sidebarMetric: '5ch',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
+  specimenNarrow: '440px', specimenWide: '1440px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
   modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
   statusWord: '80px',

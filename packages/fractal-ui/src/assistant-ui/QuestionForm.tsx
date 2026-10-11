@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, RadioGroup, Radio, CheckboxGroup, Checkbox, TextField, TextArea, Input, Label, FileTrigger } from 'react-aria-components'
-import { surfaceVars, textVars, borderVars, accentVars, statusVars } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import type { Answers, AnswerDraft, Preview, QuestionRequestView, QuestionVariant, QuestionView } from './question-model'
 export type * from './question-model'
@@ -103,7 +103,7 @@ export const QuestionForm = (props: QuestionFormProps) => {
   const initialChoice = question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.id ?? question?.options.find(option => option.recommended)?.id ?? question?.options[0]?.id
   const choices = question === undefined ? [] : [...question.options, ...(question.allowOther ? [{ id: OTHER, label: 'Other…' }] : [])]
   return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
-    <header {...stylex.props(styles.header)}><span aria-hidden="true">{request.questions[0]?.kind === 'permission' ? '◇' : request.questions[0]?.kind === 'plan' ? '≡' : '?'}</span><strong>{request.agentLabel}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span></header>
+    <header {...stylex.props(styles.header)}><span aria-hidden="true">{request.questions[0]?.kind === 'permission' ? '◇' : request.questions[0]?.kind === 'plan' ? '≡' : '?'}</span><strong {...stylex.props(styles.sender)}>{request.agentLabel}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span></header>
     <div {...stylex.props(styles.meta)}>{[request.source, props.ageLabel].filter(Boolean).join(' · ')}</div>
     {props.onJump !== undefined ? <Button {...stylex.props(styles.button)} onPress={props.onJump}>Show in thread</Button> : null}
     <div ref={root} onKeyDownCapture={keys} {...stylex.props(styles.body)}>
@@ -120,9 +120,9 @@ export const QuestionForm = (props: QuestionFormProps) => {
           update(question, { selected, ...(!selected.includes(OTHER) && draft[question.id]?.selected.includes(OTHER) ? { other: undefined } : {}) })
           if (addedOther) requestAnimationFrame(() => otherRef.current?.focus())
         }} isDisabled={request.state._tag === 'submitting'} isReadOnly={!request.answerable} isRequired={question.required === true} {...stylex.props(styles.body)}>
-          {choices.map((option, index) => <Checkbox key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true">{isSelected ? '☑' : '☐'} {index + 1}. </span><ChoiceLabel option={option} /></div>}</Checkbox>)}
+          {choices.map((option, index) => <Checkbox key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true">{isSelected ? '☑' : '☐'} {index + 1}. </span><ChoiceLabel option={option} selected={isSelected} /></div>}</Checkbox>)}
         </CheckboxGroup> : <RadioGroup aria-label={question.prompt} value={draft[question.id]?.selected[0] ?? ''} onChange={id => { if (!disabled) choose(question, id) }} isDisabled={request.state._tag === 'submitting'} isReadOnly={!request.answerable} isRequired={question.required !== false} {...stylex.props(styles.body)}>
-          {choices.map((option, index) => <Radio key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true">{isSelected ? '●' : '○'} {index + 1}. </span><ChoiceLabel option={option} /></div>}</Radio>)}
+          {choices.map((option, index) => <Radio key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true">{isSelected ? '●' : '○'} {index + 1}. </span><ChoiceLabel option={option} selected={isSelected} /></div>}</Radio>)}
         </RadioGroup>}
         {focusedPreview !== undefined ? <QuestionPreview preview={focusedPreview} /> : null}
         {question.allowOther && draft[question.id]?.selected.includes(OTHER) ? <TextField value={draft[question.id]?.other ?? ''} onChange={other => update(question, { other })} isDisabled={disabled}><Label>Your answer</Label><TextArea ref={otherRef} {...stylex.props(styles.field)} /></TextField> : null}
@@ -144,7 +144,7 @@ export const QuestionForm = (props: QuestionFormProps) => {
   </section>
 }
 
-const ChoiceLabel = ({ option }: { readonly option: QuestionView['options'][number] }) => <><span>{option.label}</span>{option.recommended ? <span {...stylex.props(styles.chip)}>Recommended</span> : null}{option.scope !== undefined ? <span {...stylex.props(styles.chip)}>{option.scope}</span> : null}{option.description !== undefined ? <p {...stylex.props(styles.meta)}>{option.description}</p> : null}</>
+const ChoiceLabel = ({ option, selected = false }: { readonly option: QuestionView['options'][number]; readonly selected?: boolean }) => <><span>{option.label}</span>{option.recommended ? <span {...stylex.props(styles.chip)}>Recommended</span> : null}{option.scope !== undefined ? <span {...stylex.props(styles.chip)}>{option.scope}</span> : null}{option.description !== undefined ? <p {...stylex.props(styles.meta, selected && styles.selectedDescription)}>{option.description}</p> : null}</>
 
 const AnswerList = ({ request, answers }: { readonly request: QuestionRequestView; readonly answers: Answers }) => <dl>{request.questions.map((q, index) => {
   const answer = answers[q.id]
@@ -160,7 +160,7 @@ export const QuestionSummary = ({ request }: { readonly request: QuestionRequest
   if (state._tag === 'unrecorded') return <section {...stylex.props(styles.summary)} aria-label="Original question"><OriginalQuestions request={request} />{state.reason !== '' ? <p {...stylex.props(styles.meta)}>{state.reason}</p> : null}</section>
   const answers = state._tag === 'answered' ? state.answers : state._tag === 'answered-elsewhere' ? state.answers : state._tag === 'expired' ? state.autoAnswer : undefined
   const footer = state._tag === 'answered' ? [state.by !== '' ? `Answered by ${state.by}` : '', state.where !== undefined ? `in ${state.where}` : '', state.at].filter(Boolean).join(' · ') : state._tag === 'answered-elsewhere' ? `Answered in ${state.where} · ${state.at}${state.draftDiscarded ? ' · your unsent web draft was discarded' : ''}` : state._tag === 'expired' ? `${state.at} · ${state.autoAnswer !== undefined ? 'auto-selected (timeout)' : 'continued without an answer'}` : state._tag === 'cancelled' ? [state.reason, state.at].filter(Boolean).join(' · ') : state._tag === 'chat-redirected' ? `${state.message} · ${state.at}` : ''
-  return <section {...stylex.props(styles.summary)} aria-label="Question outcome"><strong>{stateLabel(request)}</strong>{answers !== undefined ? <AnswerList request={request} answers={answers} /> : request.questions.map(q => <p key={q.id}>{q.prompt}</p>)}
+  return <section {...stylex.props(styles.summary)} aria-label="Question outcome"><strong {...stylex.props(styles.sender)}>{stateLabel(request)}</strong>{answers !== undefined ? <AnswerList request={request} answers={answers} /> : request.questions.map(q => <p key={q.id}>{q.prompt}</p>)}
     {footer !== '' ? <p {...stylex.props(styles.meta)}>{footer}</p> : null}
     <details><summary>Original questions</summary><OriginalQuestions request={request} /></details>
   </section>
@@ -175,20 +175,22 @@ export const NeedsYouBar = ({ requests, expanded, onToggle, transcriptVisibility
 export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <details key={request.id} {...stylex.props(styles.card)}><summary {...stylex.props(styles.inboxSummary)}>{request.agentLabel} · {request.questions[0]?.prompt}</summary><QuestionForm {...formProps?.(request.id)} request={request} variant="pinned" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} /></details>)}</section>
 
 const styles = stylex.create({
-  card: { padding: 12, maxWidth: 720, width: '100%', boxSizing: 'border-box', borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 8, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere' },
+  card: { padding: s.md, maxWidth: g.lane, width: '100%', boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.md, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   pinned: { padding: 0, borderWidth: 0, backgroundColor: 'transparent' },
   note: { alignSelf: 'flex-start', borderWidth: 0, backgroundColor: 'transparent', paddingInline: 0 },
   inboxSummary: { cursor: 'pointer', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' },
-  summary: { paddingBlock: 8, color: textVars.fg, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: borderVars.borderStrong },
-  body: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 },
-  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
-  meta: { color: textVars.fgMuted, fontSize: 12 },
-  chip: { color: textVars.fgSoft, fontSize: 11, paddingInline: 5, paddingBlock: 2, backgroundColor: surfaceVars.rowActive, borderRadius: 4 },
-  button: { paddingBlock: 6, paddingInline: 9, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 5, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 2 },
+  summary: { paddingBlock: s.md, color: textVars.fg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: borderVars.borderStrong, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  body: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0 },
+  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md },
+  sender: { fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
+  meta: { color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  selectedDescription: { color: textVars.fgSoft },
+  chip: { color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, paddingInline: s.xs, paddingBlock: s.xs2, backgroundColor: surfaceVars.rowActive, borderRadius: r.sm },
+  button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   danger: { color: statusVars.dangerFg },
-  option: { padding: 5, borderRadius: 4, outlineColor: accentVars.primary, outlineOffset: 2, cursor: 'pointer' },
-  selected: { backgroundColor: surfaceVars.rowActive }, focus: { outlineWidth: 2, outlineStyle: 'solid', outlineColor: accentVars.primary },
-  field: { width: '100%', boxSizing: 'border-box', padding: 8, backgroundColor: surfaceVars.rowActive, color: textVars.fg, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 4 },
-  preview: { margin: 0, padding: 10, backgroundColor: surfaceVars.rowActive, borderRadius: 4 },
-  pre: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 12 },
+  option: { padding: s.xs, borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, cursor: 'pointer' },
+  selected: { backgroundColor: surfaceVars.rowActive }, focus: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accentVars.primary },
+  field: { width: '100%', boxSizing: 'border-box', padding: s.md, backgroundColor: surfaceVars.rowActive, color: textVars.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  preview: { margin: 0, padding: s.md, backgroundColor: surfaceVars.rowActive, borderRadius: r.sm },
+  pre: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading },
 })
