@@ -75,7 +75,11 @@ const mixedWindows:TraceSeries={...partial,subagentsWindow:known({_tag:'Reported
  subagentUsd:known(22),subagentUsdWindow:known({_tag:'Reported',label:'7d'}),
 }}}
 const unknownTotalScope:TraceSeries={...mixedWindows,meters:{...mixedWindows.meters,spend:{...mixedWindows.meters.spend,usdScope:{_tag:'Unknown',reason:'not-attributed'}}}}
-const scenarios = { partial, boundary, boundary995, zeroCoverage, fullPartial, notCovered, independent: native, session: inclusive, partialFacts, percentOnly, percentSamples, mixedWindows, unknownTotalScope } as const
+const invalidCoverage=(fraction:number):TraceSeries=>({...inclusive,
+  meters:{...inclusive.meters,spend:{...inclusive.meters.spend,totalUsdCoverage:{_tag:'Partial',attributedFraction:fraction}}},
+})
+const invalidNaN=invalidCoverage(Number.NaN),invalidNegative=invalidCoverage(-0.1),invalidOverflow=invalidCoverage(1.1)
+const scenarios = { partial, boundary, boundary995, zeroCoverage, fullPartial, notCovered, independent: native, session: inclusive, partialFacts, percentOnly, percentSamples, mixedWindows, unknownTotalScope, invalidNaN, invalidNegative, invalidOverflow } as const
 interface Args extends DetailsPaneProps { scenario: keyof typeof scenarios; scheme: 'dark' | 'light'; width: 320 | 400 | 520 }
 const styles = stylex.create({
   frame: { height: 720, minHeight: 0, overflow: 'hidden', backgroundColor: surface.canvas },
@@ -100,7 +104,7 @@ const meta = {
   },
   render: ({ scenario, scheme, width, ...props }) => <section aria-label={`Data case ${scenario}`} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
     <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-${scenario}`} scheme={scheme}
-      renderPane={() => <DetailsPane {...props} trace={scenarios[scenario]} />}/></ThemePortal>
+      renderPane={() => <DetailsPane {...props} trace={scenarios[scenario]} pendingTrace={scenarios[scenario]} />}/></ThemePortal>
   </section>,
 } satisfies Meta<Args>
 export default meta
@@ -351,10 +355,28 @@ export const ContextSamplesPercentOnly: Story = {
     await rejectsControl('Historical occupancy escaped percentage units',()=>assertContextSamples(wrong))
   },
 }
+function assertInvalidCoverageSurvives(canvas:HTMLElement) {
+ const root=canvas.querySelector<HTMLElement>('[data-testid="details-pane"]')
+ requireContract(root,'Invalid row blanked the Details pane')
+ requireContract(root.querySelector('[data-details-metric="total-usd"] [data-details-coverage]')?.textContent==='Partial','Invalid fraction fabricated an attribution percentage')
+ requireContract(root.querySelector('[data-details-metric="main-usd"]')?.textContent?.includes('$12.34')&&root.querySelector('[data-details-metric="subagent-usd"]')?.textContent?.includes('$3.21'),'Invalid coverage erased valid monetary rows')
+ requireContract(root.querySelector('section[aria-label="Overview"]')&&root.querySelector('[data-details-chart^="C"]')&&root.querySelector('section[aria-label="Workspace"]'),'Invalid coverage erased sibling sections')
+}
+const invalidPartialPlay=async({canvasElement}:{canvasElement:HTMLElement})=>{
+ assertInvalidCoverageSurvives(canvasElement)
+ const blank=canvasElement.cloneNode(true) as HTMLElement
+ blank.querySelector('[data-testid="details-pane"]')?.remove()
+ await rejectsControl('Invalid row blanked the Details pane',()=>assertInvalidCoverageSurvives(blank))
+ const percentage=falsifyText(canvasElement,'[data-details-metric="total-usd"] [data-details-coverage]','Partial · NaN% attributed')
+ await rejectsControl('Invalid fraction fabricated an attribution percentage',()=>assertInvalidCoverageSurvives(percentage))
+}
+export const InvalidPartialNaN:Story={args:{scenario:'invalidNaN'},play:invalidPartialPlay}
+export const InvalidPartialNegative:Story={args:{scenario:'invalidNegative'},play:invalidPartialPlay}
+export const InvalidPartialOverflow:Story={args:{scenario:'invalidOverflow'},play:invalidPartialPlay}
 export const AllStates: Story = {
   render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{Object.entries(scenarios).map(([name, trace]) => <section key={name} aria-label={name} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
     <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-all-${name}`} scheme={scheme}
-      renderPane={() => <DetailsPane {...props} trace={trace} />}/></ThemePortal>
+      renderPane={() => <DetailsPane {...props} trace={trace} pendingTrace={trace} />}/></ThemePortal>
   </section>)}</div>,
   play:async({canvasElement})=>{
     assertAllStates(canvasElement)

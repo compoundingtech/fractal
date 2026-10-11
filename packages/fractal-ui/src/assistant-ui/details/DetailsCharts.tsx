@@ -2,7 +2,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { ReactNode } from 'react'
 import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex.ts'
 import type { TraceSeries, TraceUnknownReason } from './trace-series.ts'
-import { contextPercent, type TraceAccumulationWindow, type TraceCoverage, type TraceFact, type TraceSpendScope } from './trace-series.ts'
+import { contextPercent, traceCoverageState, type TraceAccumulationWindow, type TraceCoverage, type TraceCoverageState, type TraceFact, type TraceSpendScope } from './trace-series.ts'
 import { Button, Tooltip, TooltipTrigger } from 'react-aria-components'
 import type { DetailsEmptyRule } from './DetailsResources.tsx'
 import { compactNumber, money, clock } from './trace/chart.ts'
@@ -67,16 +67,16 @@ const tokenScopeLabel = (trace:TraceSeries):{readonly label:string;readonly wind
  window:accumulationParts(trace.meters.spend.tokensWindow),
 })
 const totalLabel=(trace:TraceSeries):string=>`${trace.meters.spend.totalUsdCoverage._tag==='Complete'?'Total':'Recorded spend'}${spendScopeLabel(trace)}`
-/** A partial attribution is never rounded into a claim of complete coverage. */
-const partialPercent=(fraction:number):number=>{
- if(!Number.isFinite(fraction)||fraction<0||fraction>1)throw new RangeError('Attribution fraction must be finite and between 0 and 1')
- return Math.min(99,Math.floor(fraction*100))
+/** Both row props and pending footprints normalize only the malformed row's coverage. */
+const coverageLabel=(coverage:TraceCoverageState):string|undefined=>{
+ const state=traceCoverageState(coverage)
+ return state._tag==='Complete'?undefined:state._tag==='PartialUnreported'?'Partial':state._tag==='Partial'?`Partial · ${Math.min(99,Math.floor(state.attributedFraction*100))}% attributed`:state._tag==='NotCovered'?`Not tracked for ${state.harnessName}`:'Attribution coverage unavailable'
 }
-const coverageLabel=(coverage:TraceCoverage):string|undefined=>coverage._tag==='Complete'?undefined:coverage._tag==='Partial'?`Partial · ${partialPercent(coverage.attributedFraction)}% attributed`:coverage._tag==='NotCovered'?`Not tracked for ${coverage.harnessName}`:'Attribution coverage unavailable'
 export const TraceCoverageNote = ({trace,coverage=trace.coverage}:{readonly trace:TraceSeries;readonly coverage?:TraceCoverage}):ReactNode => {
- if(coverage._tag==='Complete')return null
- if(coverage._tag==='NotCovered')return <TooltipTrigger delay={0}><Button data-details-coverage {...stylex.props(styles.coverageTrigger)}>{coverageLabel(coverage)}</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>Spend is recorded only for OMP sessions today.</Tooltip></TooltipTrigger>
- return <p data-details-coverage {...stylex.props(styles.scopeNote)}>{coverageLabel(coverage)}</p>
+ const state=traceCoverageState(coverage)
+ if(state._tag==='Complete')return null
+ if(state._tag==='NotCovered')return <TooltipTrigger delay={0}><Button data-details-coverage {...stylex.props(styles.coverageTrigger)}>{coverageLabel(state)}</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>Spend is recorded only for OMP sessions today.</Tooltip></TooltipTrigger>
+ return <p data-details-coverage {...stylex.props(styles.scopeNote)}>{coverageLabel(state)}</p>
 }
 
 /** Both live and pending rows use the same reported window and wrapping boundaries. */

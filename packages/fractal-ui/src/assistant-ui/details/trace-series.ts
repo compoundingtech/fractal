@@ -3,6 +3,11 @@ export type TraceUnknownReason = 'no-provider'|'not-covered'|'not-attributed'|'o
 export type TraceFact<A> = {readonly _tag:'Known';readonly value:A;readonly source:'st'|'series';readonly asOfMs?:number}|{readonly _tag:'Unknown';readonly reason:TraceUnknownReason;readonly detail?:string}
 export type TraceSpendScope = {readonly _tag:'Self'}|{readonly _tag:'IncludingSubagents'}|{readonly _tag:'AgentIncarnations'}|{readonly _tag:'Unknown';readonly reason:'not-attributed'}
 export type TraceCoverage = {readonly _tag:'Complete'}|{readonly _tag:'Partial';readonly attributedFraction:number}|{readonly _tag:'NotCovered';readonly harnessName:string}|{readonly _tag:'Unavailable';readonly reason:TraceUnknownReason}
+/** Per-row presentation state; malformed direct props do not invalidate sibling facts. */
+export type TraceCoverageState = TraceCoverage | {readonly _tag:'PartialUnreported'}
+export const traceCoverageState=(coverage:TraceCoverageState):TraceCoverageState=>
+ coverage._tag==='Partial'&&(!Number.isFinite(coverage.attributedFraction)||coverage.attributedFraction<0||coverage.attributedFraction>1)
+  ? {_tag:'PartialUnreported'} : coverage
 /** Reported accumulation window for each metric, independent of chart retention. */
 export type TraceAccumulationWindow = {readonly _tag:'AllTime'}|{readonly _tag:'Interval';readonly fromMs:number;readonly toMs:number}|{readonly _tag:'Reported';readonly label:string}
 export interface TraceCostSplit {readonly uncachedInputUsd:number;readonly cacheReadUsd:number;readonly cacheWriteUsd:number;readonly outputUsd:number}
