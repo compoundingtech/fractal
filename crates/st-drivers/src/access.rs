@@ -22,10 +22,13 @@ impl AccessMode {
         }
     }
 
-    pub fn from_environment() -> Result<Self> {
+    /// The daemon always supplies the resolved install mode, including legacy bypass.
+    /// A hand-run driver has no install policy and preserves its complete provider argv.
+    pub fn from_environment() -> Result<Option<Self>> {
         match std::env::var(MODE_ENV).as_deref() {
-            Ok("auto") => Ok(Self::Auto),
-            Ok("bypass") | Err(std::env::VarError::NotPresent) => Ok(Self::Bypass),
+            Ok("auto") => Ok(Some(Self::Auto)),
+            Ok("bypass") => Ok(Some(Self::Bypass)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
             _ => anyhow::bail!("ST_ACCESS_MODE must be auto or bypass"),
         }
     }

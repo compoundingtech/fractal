@@ -98,9 +98,7 @@ pub fn agent_document(
         ));
         harness_body.nodes_mut().push(node);
     }
-    if !harness_body.nodes().is_empty() {
-        harness.set_children(harness_body);
-    }
+    harness.set_children(harness_body);
     body.nodes_mut().push(harness);
     if let Some(key) = creation_key {
         body.nodes_mut().push(creation_tags(key));

@@ -18,6 +18,10 @@ Real sandboxing is separate later work. Codex hook trust is bypassed in both mod
 These are driver defaults for st-launched seats. They do not modify the provider's
 account settings or change a manually launched provider. Authored permission options
 and Codex config profiles remain authoritative, including old bypass arguments.
+The daemon supplies the resolved mode through `ST_ACCESS_MODE`, including `bypass`
+for an existing config without the key. Hand-run `st driver` commands without this
+environment value preserve their provider arguments; they can set it explicitly
+to use the install policy.
 New seat and planner declarations omit permission arguments. An automatically resumed
 Codex thread receives its named profile through `thread/resume`, before the TUI
 loads it, and the driver verifies the returned active profile.

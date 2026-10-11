@@ -2767,10 +2767,13 @@ pub fn run_controlled_paths(
         !codex_argv.is_empty(),
         "Codex controlled launch argv is empty"
     );
-    let mode = crate::access::AccessMode::from_environment()?;
-    let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
-    let endpoint = std::env::var("ST3_ENDPOINT").ok();
-    let codex_argv = managed_codex_argv(mode, endpoint.as_deref(), &workspace, codex_argv)?;
+    let codex_argv = if let Some(mode) = crate::access::AccessMode::from_environment()? {
+        let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
+        let endpoint = std::env::var("ST3_ENDPOINT").ok();
+        managed_codex_argv(mode, endpoint.as_deref(), &workspace, codex_argv)?
+    } else {
+        codex_argv
+    };
     // Install before any protocol preflight child exists, exactly as the catalog entry point does.
     crate::provider_session::install_signal_handler();
     let producer_version = ensure_supported_protocol(&codex_argv[0])?;

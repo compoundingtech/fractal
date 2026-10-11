@@ -21317,8 +21317,8 @@ mission "unrequested/work" state="ready" { goal "Do unrelated work." }
         assert!(matches!(
             &planner_launch,
             crate::model::LaunchSpec::Argv(arguments)
-                if arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
-                    && arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
+                if !arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
+                    && !arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
         ));
         assert!(store.mission_spec("planned/work", None).unwrap().is_none());
         assert!(store.active_mission_runs().unwrap().is_empty());

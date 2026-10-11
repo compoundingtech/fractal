@@ -148,14 +148,15 @@ pub fn run_controlled_paths(
         !claude_argv.is_empty(),
         "Claude driver '{runtime_id}' has no provider argv"
     );
-    let mode = crate::access::AccessMode::from_environment()?;
-    let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
-    let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
-        matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
-            || arg.starts_with("--permission-mode=")
-    });
     let mut claude_argv = claude_argv;
-    claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions));
+    if let Some(mode) = crate::access::AccessMode::from_environment()? {
+        let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
+        let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
+            matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
+                || arg.starts_with("--permission-mode=")
+        });
+        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions));
+    }
     let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
     let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
