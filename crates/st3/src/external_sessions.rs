@@ -7752,8 +7752,9 @@ mod tests {
         // it would otherwise page a rebuilt fold as if it were the old one.
         let reopened = timeline_slice(&session, order, None, 10).unwrap();
         assert_ne!(reopened.generation, first.generation);
-        assert_eq!(texts(&reopened.items), texts(&first.items));
-        assert_eq!(texts(&reopened.items), ["one", "two"]);
+        assert_eq!(reopened.items, first.items);
+        // Slices are newest-first by sequence, even when native timestamps tie.
+        assert_eq!(texts(&reopened.items), ["two", "one"]);
     }
 
     #[test]
