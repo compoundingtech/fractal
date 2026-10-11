@@ -4995,9 +4995,13 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
         for child in children.as_array().ok_or_else(invalid)? {
             document.nodes_mut().push(render_desired_node(child)?);
         }
-        if !document.nodes().is_empty() {
+        if !document.nodes().is_empty() || name == "harness" {
             node.set_children(document);
         }
+    } else if name == "harness" {
+        // Older normalized trees omitted empty children. A validated harness
+        // always has a body, so recover that required syntax when rendering it.
+        node.set_children(KdlDocument::new());
     }
     Ok(node)
 }
@@ -5068,7 +5072,9 @@ fn canonical_node(node: &KdlNode) -> Result<Value, St3Error> {
             serde_json::to_value(properties).expect("BTreeMap serializes"),
         );
     }
-    if !children.is_empty() {
+    if !children.is_empty()
+        || (node.name().value() == "harness" && node.children().is_some())
+    {
         output.insert("children".into(), Value::Array(children));
     }
     Ok(Value::Object(output))
@@ -6177,6 +6183,32 @@ message "external" {
         }
         for key in [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV] {
             assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", "", &format!("env {{\n {key} \"native\"\n}}\n")), "node").unwrap_err().code, "invalid-native-seed");
+        }
+    }
+
+    #[test]
+    fn plain_harness_bodies_survive_normalization_and_legacy_rendering() {
+        for harness in ["claude", "codex", "pi", "omp", "opencode"] {
+            let source = format!(
+                "version 2\nagent \"worker\" {{ workspace \"/work\"; harness {harness:?} {{}} }}\n"
+            );
+            let intent = parse_test_intent(&source, "node").unwrap();
+            assert!(parse_test_intent(&source.replace("{}", ""), "node").is_err());
+            let desired = &intent.subjects["agent/node.worker"].desired;
+            let body = desired["children"].as_array().unwrap()
+                .iter().find(|child| child["name"] == "harness").unwrap();
+            assert_eq!(body["children"], json!([]));
+            for legacy in [false, true] {
+                let mut tree = desired.clone();
+                if legacy {
+                    let body = tree["children"].as_array_mut().unwrap()
+                        .iter_mut().find(|child| child["name"] == "harness").unwrap();
+                    body.as_object_mut().unwrap().remove("children");
+                }
+                let node = render_desired_node(&tree).unwrap();
+                let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
+                assert_eq!(restored.subjects["agent/node.worker"].desired, *desired);
+            }
         }
     }
 
