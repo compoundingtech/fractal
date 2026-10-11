@@ -369,7 +369,9 @@ export const ShellSendInTranscript: Story = { render: () => <EmbraceRuntimeProvi
   await userEvent.click(fold)
   const message = canvas.getByRole('button', { name: /Review.*Please review the release report/ })
   await expect(message.closest('[data-work-kind="messages-sent"]')).toHaveAttribute('data-harness-weight', 'card')
-  await expect(canvas.queryByText(/message.send --to/)).toBeNull()
+  const work = canvas.getByTestId('work-log')
+  await expect(within(work).getAllByTestId('work-log-outgoing-message')).toHaveLength(1)
+  await expect(work.querySelectorAll('[data-tool-status]')).toHaveLength(0)
   await userEvent.click(message)
   await expect(canvas.getByText('The patch keeps the existing protocol and updates the examples.')).toBeVisible()
   await userEvent.click(fold)
@@ -378,4 +380,22 @@ export const ShellSendInTranscript: Story = { render: () => <EmbraceRuntimeProvi
 export const ShellSendInTranscriptLight440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'light', width: 440 } }
 export const ShellSendInTranscriptDark1440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'dark', width: 1440 } }
 export const ShellSendInTranscriptLight1440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'light', width: 1440 } }
+const observedCommand: ToolCallItem = { ...shellSend, id: 'observed-command', callId: 'observed-command', input: { command: 'print-report' }, result: { content: 'Report printed', at: '2026-10-11T15:40:01Z' } }
+const orphanSend: ToolCallItem = { ...shellSend, id: 'orphan-send', callId: 'orphan-send', callSeen: false }
+const mixedWork = workLogTurnFromItems([observedCommand, orphanSend], { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })
+export const ObservedCommandAndOrphanSend: Story = { render: () => <EmbraceRuntimeProvider options={{ messages: [quotedPrompt, observedCommand, orphanSend], isRunning: false, onNew: fn() }}>
+  <Transcript title="Mixed work" turns={[{ id: 'mixed-turn', prompt: quotedPrompt, items: [observedCommand, orphanSend], work: mixedWork, outgoingMessages: { 'orphan-send': outgoingMessage } }]} sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} onOpenTool={fn()} />
+</EmbraceRuntimeProvider>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const fold = await canvas.findByRole('button', { name: /Worked.*1 command.*1 message sent/ })
+  await expect(fold).not.toHaveTextContent('2 commands')
+  await userEvent.click(fold)
+  const work = canvas.getByTestId('work-log')
+  await expect(work.querySelectorAll('[data-tool-status]')).toHaveLength(1)
+  await expect(within(work).getAllByTestId('work-log-outgoing-message')).toHaveLength(1)
+  await expect(within(work).getByTestId('work-log-outgoing-message')).toHaveAttribute('data-item-id', 'orphan-send')
+} }
+export const ObservedCommandAndOrphanSendLight440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'light', width: 440 } }
+export const ObservedCommandAndOrphanSendDark1440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'dark', width: 1440 } }
+export const ObservedCommandAndOrphanSendLight1440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })

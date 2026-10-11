@@ -17,6 +17,8 @@ export interface WorkLogCall {
   readonly changedPath?: string
   /** A run's own command or script source; display it only as code inside the raw disclosure. */
   readonly command?: string
+  /** True only when this observed run contributed to the turn's command count. */
+  readonly countedAsCommand?: boolean
 }
 export interface WorkLogTurn {
   readonly calls: readonly WorkLogCall[]
@@ -147,6 +149,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
     return [{
       id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,
+      countedAsCommand: kind === 'run' && call.callSeen,
       detail: toolOutput(call.result?.content) || undefined,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
       changedPath: kind === 'edit' && call.callSeen && call.status === 'success' ? path : undefined,

@@ -35,7 +35,7 @@ export function WorkLogV1({ turn, outgoingMessages, listStyle, renderCallDetail,
   const failed = turn.failed || failedCall !== undefined
   const workLabel = turn.running ? 'Working' : settled ? `Worked${durationLabel ? ` for ${durationLabel}` : ''}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
   const messagesSent = turn.calls.filter(call => outgoingMessages?.[call.id] !== undefined).length
-  const commands = turn.commands === undefined ? undefined : Math.max(0, turn.commands - turn.calls.filter(call => call.kind === 'run' && outgoingMessages?.[call.id] !== undefined).length)
+  const commands = turn.commands === undefined ? undefined : Math.max(0, turn.commands - turn.calls.filter(call => call.countedAsCommand === true && outgoingMessages?.[call.id] !== undefined).length)
   const summary = [workLabel, settled && commands ? `${commands} ${commands === 1 ? 'command' : 'commands'}` : undefined, settled && messagesSent ? `${messagesSent} ${messagesSent === 1 ? 'message sent' : 'messages sent'}` : undefined, settled && turn.changedFiles ? `${turn.changedFiles} ${turn.changedFiles === 1 ? 'file changed' : 'files changed'}` : undefined].filter(value => value !== undefined).join(' · ')
   const started = turn.running ? NaN : Date.parse(turn.startedAt ?? '')
   const failedCommand = failedCall?.kind === 'run' ? failedCall.argsSummary ?? failedCall.title : undefined
@@ -46,7 +46,7 @@ export function WorkLogV1({ turn, outgoingMessages, listStyle, renderCallDetail,
     {interactiveCalls ? <Button isDisabled={!settled} aria-expanded={!settled || open} onPress={() => setOpen(value => !value)} {...stylex.props(styles.summary, failed && styles.failureInk)}><Icon name={!settled || open ? 'chevron-down' : 'chevron-right'} size={12} />{summaryContent}</Button> : <div {...stylex.props(styles.summary, styles.staticCall, failed && styles.failureInk)}>{summaryContent}</div>}
     {(!interactiveCalls || !settled || open) && <><div {...stylex.props(styles.list, listStyle)}>{turn.calls.map(call => {
       const message = outgoingMessages?.[call.id]
-      return message === undefined ? <TimelineCall key={call.id} call={call} /> : <OutgoingMessageRow key={call.id} {...message} />
+      return message === undefined ? <TimelineCall key={call.id} call={call} /> : <div key={call.id} data-testid="work-log-outgoing-message" data-item-id={call.id}><OutgoingMessageRow {...message} /></div>
     })}</div>{expandedBody}<hr data-testid="work-log-divider" {...stylex.props(styles.divider)} /></>}
     {failed && <ErrorOverlay id={`work-failure-${turn.calls[0]?.id ?? 'turn'}`} title={failedCommand === undefined ? 'Run failed.' : 'Command did not complete'} detail={errorReason(failedCall?.detail ?? turn.failureNote ?? '')} rawDetail={detail} command={failedCall === undefined ? failedCommandSource(turn.failureNote ?? '') : readableCommand(failedCall)} onRetry={onRetry} onOpenOutput={failedCall === undefined || onOpenOutput === undefined ? undefined : () => onOpenOutput(failedCall)} />}
     {turn.interrupted && <div {...stylex.props(styles.promoted)}><Icon name="stop" size={14} /><span>Run interrupted.</span></div>}

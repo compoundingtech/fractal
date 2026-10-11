@@ -136,7 +136,7 @@ const styles = stylex.create({
   line: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, minWidth: 0 },
   messageBody: { maxHeight: 340, overflowY: 'auto', minWidth: 0, overflowWrap: 'anywhere', outlineColor: accentVars.primary, outlineOffset: 2 },
   avatar: { width: 22, height: 22, display: 'grid', alignItems: 'center', justifyItems: 'center', backgroundColor: surfaceVars.rowActive, borderRadius: 5, fontSize: 12 },
-  chip: { paddingInline: 6, paddingBlock: 2, borderRadius: 4, backgroundColor: surfaceVars.rowActive, color: textVars.fgMuted, fontSize: 11 },
+  chip: { paddingInline: 6, paddingBlock: 2, borderRadius: 4, backgroundColor: surfaceVars.rowActive, color: textVars.fgSoft, fontSize: 11 },
   meta: { color: textVars.fgMuted, fontSize: 11 },
   subject: { marginBlock: 8, fontSize: 13 },
   button: { padding: 5, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 4, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 2 },
