@@ -71,6 +71,10 @@ struct Meter {
 }
 static METER: OnceLock<Mutex<Meter>> = OnceLock::new();
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "performance/ledger.rs"]
+pub mod ledger;
+
 /// Clear process-wide accounting before an isolated metrics test starts its requests.
 /// Callers must not run alongside other tests that rely on the meter's contents.
 #[cfg(feature = "test-support")]
@@ -396,10 +400,16 @@ pub fn with_cpu<T>(kind: Option<&str>, client: Option<&str>, work: impl FnOnce()
     struct Charge {
         charged: Charged,
         started: u64,
+        #[cfg(any(test, feature = "test-support"))]
+        ledger: Option<(u64, usize)>,
     }
     impl Drop for Charge {
         fn drop(&mut self) {
             CURRENT.with(|label| label.borrow_mut().take());
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(span) = self.ledger {
+                ledger::close(span);
+            }
             let cpu_us = thread_cpu_ns().saturating_sub(self.started) / 1000;
             let now = Instant::now();
             let Charged { kind, client } = &self.charged;
@@ -419,6 +429,8 @@ pub fn with_cpu<T>(kind: Option<&str>, client: Option<&str>, work: impl FnOnce()
         }
     }
     let _charge = Charge {
+        #[cfg(any(test, feature = "test-support"))]
+        ledger: ledger::open(kind),
         charged,
         started: thread_cpu_ns(),
     };

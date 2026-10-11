@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+"""Verify a collections-v1 two-arm study from its retained files alone.
+
+A pure function from a study directory to a verdict: no network, clock or host reads. The
+controller writes the directory; this script decides nothing about how it was produced.
+
+Layout (every path relative to the study directory):
+  manifest.json            {"arms": {"B": {"commit", "tree", "parents"}, "C": {...}},
+                            "order": ["B1", "C1", "C2", "B2"], "test": EXACT_NAME,
+                            "argv": {"B": [...], "C": [...]}, "env": {...}}
+  builds/<arm>.json         {"binary_sha256"}
+  inputs.json               {"after-B1": FILES, "before-C1": FILES, "before-C2": FILES,
+                             "before-B2": FILES, "after-B2": FILES}, FILES = {name: {size, sha256}}
+  executions/<id>/run.json  {"arm", "argv", "env", "exit", "binary_sha256"}
+  executions/<id>/log.txt   the test binary's combined output
+  executions/<id>/upgrade/load.json, executions/<id>/load.json   the two regime reports
+
+Usage: ci-collections-verify STUDY_DIR   prints the verdict JSON; exits 0 when it could decide.
+       ci-collections-verify --self-test runs the refusal and acceptance controls.
+"""
+import copy
+import json
+import math
+import os
+import re
+import sys
+import tempfile
+
+SUBSCRIBERS = 22
+SEATS = 30
+WINDOWS = ["missions", "work", "attention", "summary", "glasses", "arrangements"]
+PUBLISHED = ["attention", "summary", "glasses", "arrangements"]
+REGIMES = {"upgrade/load.json": "upgrade-under-load", "load.json": "steady-after-migration"}
+INPUTS = ["after-B1", "before-C1", "before-C2", "before-B2", "after-B2"]
+BUDGET_MS = 300.0
+BUDGET_FORMS = [
+    re.compile(r"^(upgrade-under-load|steady-after-migration): .+: p99 [0-9.]+ ms is over its [0-9.]+ ms budget$"),
+    re.compile(r"^(upgrade-under-load|steady-after-migration): the daemon used [0-9.]+ cores, over its [0-9.]+ budget$"),
+]
+MISSED = re.compile(r"the daemon missed (\d+) budgets:")
+
+OVERLAY_FIELDS = ["cpu", "reconcile", "reconcile_inner", "reconcile_mode", "reconcile_uncertainty_ns",
+                  "collection_routes"]
+RECONCILE_KINDS = ["task reconcile-pass", "task reconcile-deadline"]
+CPU_FIELDS = ["process_before_s", "process_after_s", "load_before_s", "load_after_s", "daemon_s",
+              "interval_s", "read_before_start_ms", "read_after_end_ms", "mark_before_start_ms",
+              "mark_after_end_ms", "inner_mark_before_start_ms", "inner_mark_after_end_ms"]
+# The CPU reads and ledger marks sit just outside the timed interval; further than this and the
+# interval they bound is not the one `daemon_cores` divides by.
+OFFSET_LIMIT_MS = 100.0
+INPUT_AFTER = {"B1": ["after-B1"], "C1": ["before-C1"], "C2": ["before-C2"],
+               "B2": ["before-B2", "after-B2"]}
+
+
+def number(value):
+    """A finite, non-negative JSON number that is not a boolean."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= 0)
+
+
+def count(value):
+    """A non-negative JSON integer that is not a boolean."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def reconcile_uncertainty_ns(outer, inner):
+    """The harness's gap between the bounds (daemon_load.rs `reconcile_uncertainty_ns`)."""
+    return max(sum(c["cpu_ns"] for c in outer.values()) - sum(c["cpu_ns"] for c in inner.values()), 0)
+
+
+def reconcile_mode(outer, inner):
+    """The harness's mode rule (daemon_load.rs `reconcile_mode`), recomputed from both bounds."""
+    for charges in (outer, inner):
+        if any(charges.get(kind, {}).get("status") != "complete" for kind in RECONCILE_KINDS):
+            return "unknown"
+    if outer["task reconcile-pass"]["spans"] == 0:
+        return "unknown"
+    upper = sum(c["cpu_ns"] for c in outer.values())
+    lower = sum(c["cpu_ns"] for c in inner.values())
+    if lower > upper:
+        return "unknown"
+    if upper < 30_000_000_000:
+        return "low"
+    return "high" if lower >= 45_000_000_000 else "unknown"
+
+
+class Refused(Exception):
+    def __init__(self, check, why):
+        super().__init__(f"{check}: {why}")
+        self.check = check
+
+
+def read_json(root, path):
+    try:
+        with open(os.path.join(root, path), encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, ValueError) as error:
+        raise Refused("files", f"{path}: {error}")
+
+
+def read_text(root, path):
+    try:
+        with open(os.path.join(root, path), encoding="utf-8", errors="replace") as file:
+            return file.read()
+    except OSError as error:
+        raise Refused("files", f"{path}: {error}")
+
+
+def classify(run, log, reports, test):
+    """PASS, BUDGET-ONLY-ADVERSE or FAILED for one execution (§10). The libtest result must agree
+    with the exit: exit 0 is one `ok`; a budget miss is one panic, the gate's, and one `FAILED`."""
+    results = re.findall(rf"^test {re.escape(test)} \.\.\. (ok|FAILED)$", log, re.M)
+    if run["exit"] == 0:
+        return "PASS" if len(reports) == 2 and results == ["ok"] and "panicked at" not in log else "FAILED"
+    if run["exit"] != 101 or len(reports) != 2 or results != ["FAILED"] or log.count("panicked at") != 1:
+        return "FAILED"
+    # The one panic is the gate's assertion in daemon_load.rs, and its whole message is the
+    # announced budget lines: the header on the next line, exactly N budget lines, then the
+    # panic's own trailer. Anything else in that message is another failure.
+    lines = log.splitlines()
+    at = next(index for index, line in enumerate(lines) if "panicked at" in line)
+    if not re.search(r"panicked at \S*tests/daemon_load\.rs:\d+:\d+:$", lines[at]):
+        return "FAILED"
+    missed = MISSED.fullmatch(lines[at + 1].strip()) if at + 1 < len(lines) else None
+    if not missed:
+        return "FAILED"
+    announced = int(missed.group(1))
+    budget = lines[at + 2: at + 2 + announced]
+    trailer = lines[at + 2 + announced] if at + 2 + announced < len(lines) else ""
+    if (len(budget) != announced or announced == 0
+            or not all(any(form.match(line.strip()) for form in BUDGET_FORMS) for line in budget)
+            or not (trailer.startswith("note: run with `RUST_BACKTRACE") or trailer.startswith("stack backtrace:"))):
+        return "FAILED"
+    return "BUDGET-ONLY-ADVERSE"
+
+
+def check_selection(manifest, run, log, execution):
+    arm = run["arm"]
+    if run["argv"] != manifest["argv"][arm] or run["env"] != manifest["env"]:
+        raise Refused("selection", f"{execution}: argv or env differ from the manifest")
+    if log.count("running 1 test\n") != 1 or re.search(r"running (?!1 test)\d+ tests?", log):
+        raise Refused("selection", f"{execution}: not exactly one test ran")
+    if "skipped:" in log:
+        raise Refused("selection", f"{execution}: the test skipped")
+    results = re.findall(rf"^test {re.escape(manifest['test'])} \.\.\. (ok|FAILED)$", log, re.M)
+    if len(results) != 1:
+        raise Refused("selection", f"{execution}: no single result for {manifest['test']}")
+
+
+def check_report(report, path, execution, arm, manifest):
+    regime = REGIMES[path]
+    if report.get("regime") != regime or report.get("profile") != "collections-v1":
+        raise Refused("reports", f"{execution}/{path}: regime or profile does not match its path")
+    if report.get("actual_ci_checkout") != manifest["arms"][arm]["commit"]:
+        raise Refused("source", f"{execution}/{path}: built from another checkout")
+    missing = [field for field in OVERLAY_FIELDS if field not in report]
+    if missing:
+        raise Refused("source", f"{execution}/{path}: no measurement overlay fields {missing}")
+    cpu = report["cpu"] or {}
+    if any(not number(cpu.get(field)) for field in CPU_FIELDS):
+        raise Refused("cpu", f"{execution}/{path}: the CPU interval is incomplete, negative or not finite")
+    if not number(report.get("seconds")) or not number(report.get("daemon_cores")):
+        raise Refused("cpu", f"{execution}/{path}: seconds or daemon_cores is not a finite number")
+    if cpu["process_after_s"] < cpu["process_before_s"] or cpu["load_after_s"] < cpu["load_before_s"]:
+        raise Refused("cpu", f"{execution}/{path}: CPU readings run backward")
+    offsets = [cpu[field] for field in CPU_FIELDS if field.endswith("_ms")]
+    if any(not 0 <= offset <= OFFSET_LIMIT_MS for offset in offsets):
+        raise Refused("cpu", f"{execution}/{path}: reads or marks {offsets} ms outside the interval")
+    # The outer marks enclose the CPU reads, which enclose the inner marks, which enclose the
+    # timed interval.
+    if not (cpu["mark_before_start_ms"] >= cpu["read_before_start_ms"] >= cpu["inner_mark_before_start_ms"]
+            and cpu["mark_after_end_ms"] >= cpu["read_after_end_ms"] >= cpu["inner_mark_after_end_ms"]):
+        raise Refused("cpu", f"{execution}/{path}: the ledger's marks are not nested around the CPU reads")
+    daemon = (cpu["process_after_s"] - cpu["process_before_s"]) - (cpu["load_after_s"] - cpu["load_before_s"])
+    if (abs(daemon - cpu["daemon_s"]) > 1e-6 or abs(cpu["interval_s"] - report.get("seconds", -1)) > 1e-6
+            or cpu["interval_s"] <= 0 or abs(report["daemon_cores"] - daemon / cpu["interval_s"]) > 1e-9):
+        raise Refused("cpu", f"{execution}/{path}: daemon_cores is not its CPU over its interval")
+    for bound in ("reconcile", "reconcile_inner"):
+        if not isinstance(report[bound], dict) or set(report[bound]) != set(RECONCILE_KINDS):
+            raise Refused("reconcile", f"{execution}/{path}: {bound} charges for {sorted(report[bound] or [])}")
+        for kind in RECONCILE_KINDS:
+            charge = report[bound][kind]
+            if (not isinstance(charge, dict)
+                    or charge.get("status") not in ("complete", "incomplete", "lossy", "unknown")
+                    or not all(count(charge.get(field))
+                               for field in ["cpu_ns", "spans", "open_at_start", "open_at_end", "mark_spread_ns"])
+                    or charge["open_at_start"] > charge["spans"] or charge["open_at_end"] > charge["spans"]
+                    or (charge["status"] == "complete" and charge["spans"] == 0 and charge["cpu_ns"] != 0)):
+                raise Refused("reconcile", f"{execution}/{path}: no well-formed {bound} {kind} charge")
+    if report["reconcile_mode"] not in ("low", "high", "unknown"):
+        raise Refused("reconcile", f"{execution}/{path}: unknown mode {report['reconcile_mode']!r}")
+    uncertainty = reconcile_uncertainty_ns(report["reconcile"], report["reconcile_inner"])
+    if report.get("reconcile_uncertainty_ns") != uncertainty:
+        raise Refused("reconcile", f"{execution}/{path}: uncertainty {report.get('reconcile_uncertainty_ns')} is not {uncertainty}")
+    if report["reconcile_mode"] != reconcile_mode(report["reconcile"], report["reconcile_inner"]):
+        raise Refused("reconcile", f"{execution}/{path}: mode {report['reconcile_mode']} disagrees with its charges")
+    paths = report.get("paths", {})
+    if (not count(report.get("roster_subscribers")) or report["roster_subscribers"] != SUBSCRIBERS
+            or not count(report.get("long_poll_seats")) or report["long_poll_seats"] != SEATS):
+        raise Refused("population", f"{execution}/{path}: roster subscribers or seats short")
+    for window in WINDOWS:
+        subscribers = report.get("collection_subscribers", {}).get(window)
+        if not count(subscribers) or subscribers != SUBSCRIBERS:
+            raise Refused("population", f"{execution}/{path}: {window} subscribers short")
+    for name in ["agents roster"] + WINDOWS:
+        for suffix in [" snapshot", " connect+snapshot"]:
+            sample = paths.get(name + suffix)
+            if (not isinstance(sample, dict) or not count(sample.get("count"))
+                    or sample["count"] != SUBSCRIBERS or not number(sample.get("p99_ms"))):
+                raise Refused("population", f"{execution}/{path}: {name}{suffix} has no {SUBSCRIBERS} samples")
+    if report.get("failed") != {}:
+        raise Refused("population", f"{execution}/{path}: failures {report.get('failed')!r}")
+    if "collection_resyncs" not in report:
+        raise Refused("resyncs", f"{execution}/{path}: resyncs not reported")
+    routes = report.get("collection_routes", {})
+    expected = "published" if arm == "C" else "native"
+    for window in ["agents"] + WINDOWS:
+        counts = routes.get(window, {})
+        if (not isinstance(counts, dict) or set(counts) - {"published", "native", "unknown"}
+                or not all(count(value) for value in counts.values())
+                or sum(counts.values()) != SUBSCRIBERS):
+            raise Refused("routes", f"{execution}/{path}: {window} routes {counts} are not {SUBSCRIBERS} first snapshots")
+    for window in PUBLISHED:
+        counts = routes[window]
+        if counts.get(expected) != SUBSCRIBERS or any(counts.get(other, 0) != 0
+                                                       for other in {"published", "native", "unknown"} - {expected}):
+            raise Refused("routes", f"{execution}/{path}: {window} first snapshots not all {expected}: {counts}")
+
+
+def verify(root):
+    try:
+        return verify_files(root)
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as error:
+        raise Refused("files", f"malformed study: {type(error).__name__}: {error}")
+
+
+def verify_files(root):
+    manifest = read_json(root, "manifest.json")
+    if manifest.get("order") != ["B1", "C1", "C2", "B2"]:
+        raise Refused("plan", "the order is not B1, C1, C2, B2")
+    builds = {arm: read_json(root, f"builds/{arm}.json")["binary_sha256"] for arm in ["B", "C"]}
+    inputs = read_json(root, "inputs.json")
+    ran = [execution for execution in manifest["order"]
+           if os.path.isdir(os.path.join(root, "executions", execution))]
+    needed = [check for execution in ran for check in INPUT_AFTER[execution]]
+    if not needed or any(check not in inputs for check in needed):
+        raise Refused("inputs", f"input hashes missing at {[c for c in needed if c not in inputs] or 'every checkpoint'}")
+    present = [check for check in INPUTS if check in inputs]
+    if any(inputs[check] != inputs[present[0]] for check in present):
+        raise Refused("inputs", "the generated inputs changed between checkpoints")
+    names = set(inputs[present[0]])
+    if not {"generated-1.sqlite3", "generated-1-peer.sqlite3"} <= names or not names <= {
+        "generated-1.sqlite3", "generated-1.sqlite3-wal",
+        "generated-1-peer.sqlite3", "generated-1-peer.sqlite3-wal",
+    }:
+        raise Refused("inputs", f"unexpected input files {sorted(names)}")
+    executions, stopped, seen = {}, None, set()
+    for execution in manifest["order"]:
+        directory = os.path.join("executions", execution)
+        if not os.path.isdir(os.path.join(root, directory)):
+            executions[execution] = {"class": "NOT-RUN"}
+            continue
+        if stopped:
+            raise Refused("plan", f"{execution} ran after {stopped} FAILED")
+        run = read_json(root, f"{directory}/run.json")
+        if run["arm"] != execution[0] or run["binary_sha256"] != builds[run["arm"]]:
+            raise Refused("source", f"{execution}: another binary")
+        log = read_text(root, f"{directory}/log.txt")
+        reports = {}
+        for path in REGIMES:
+            if os.path.exists(os.path.join(root, directory, path)):
+                raw = read_text(root, f"{directory}/{path}")
+                if raw in seen:
+                    raise Refused("reports", f"{execution}/{path}: the same bytes as another report")
+                seen.add(raw)
+                reports[path] = json.loads(raw)
+        kind = classify(run, log, reports, manifest["test"])
+        executions[execution] = {"class": kind, "exit": run["exit"]}
+        if kind == "FAILED":
+            stopped = execution
+            continue
+        check_selection(manifest, run, log, execution)
+        for path, report in reports.items():
+            check_report(report, path, execution, run["arm"], manifest)
+        executions[execution]["reports"] = reports
+    identity = {"arms": manifest["arms"], "binaries": builds, "inputs": inputs[present[0]]}
+    if stopped or any(value["class"] == "NOT-RUN" for value in executions.values()):
+        return {"qualification": "NOT ACCEPTED", "why": "not every planned execution completed",
+                "identity": identity,
+                "executions": {key: {k: v for k, v in value.items() if k != "reports"}
+                               for key, value in executions.items()}}
+    return {"qualification": "ACCEPTED-FOR-COMPARISON", "identity": identity, **compare(executions),
+            "executions": {key: {k: v for k, v in value.items() if k != "reports"}
+                           for key, value in executions.items()}}
+
+
+def compare(executions):
+    latency, cores = {}, {}
+    for path, regime in REGIMES.items():
+        reports = {key: value["reports"][path] for key, value in executions.items()}
+        latency[regime] = {
+            window: {key: reports[key]["paths"][f"{window} snapshot"]["p99_ms"] for key in reports}
+            for window in PUBLISHED
+        }
+        latency[regime]["met"] = all(
+            reports[key]["paths"][f"{window} snapshot"]["p99_ms"] < BUDGET_MS
+            for key in ["C1", "C2"] for window in PUBLISHED
+        )
+        raw = {key: reports[key]["daemon_cores"] for key in reports}
+        modes = {key: reports[key]["reconcile_mode"] for key in reports}
+        base = (raw["B1"] + raw["B2"]) / 2
+        candidate = (raw["C1"] + raw["C2"]) / 2
+        if len(set(modes.values())) != 1 or "unknown" in modes.values():
+            verdict = "UNKNOWN"
+        else:
+            verdict = "NO-WORSE" if candidate <= base else "WORSE"
+        cores[regime] = {"raw": raw, "modes": modes, "base_mean": base,
+                         "candidate_mean": candidate, "verdict": verdict}
+    return {"latency": latency, "cores": cores}
+
+
+# Controls ---------------------------------------------------------------------------------
+
+def fixture_report(arm, regime, cores=1.5, reconcile_s=10.0):
+    paths = {}
+    for name in ["agents roster"] + WINDOWS:
+        for suffix in [" snapshot", " connect+snapshot"]:
+            paths[name + suffix] = {"count": SUBSCRIBERS, "p50_ms": 20.0, "p99_ms": 120.0, "max_ms": 130.0}
+    route = "published" if arm == "C" else "native"
+    return {
+        "profile": "collections-v1", "regime": regime, "actual_ci_checkout": f"{arm}" * 40,
+        "daemon_cores": cores, "roster_subscribers": SUBSCRIBERS, "long_poll_seats": SEATS,
+        "collection_subscribers": {window: SUBSCRIBERS for window in WINDOWS},
+        "collection_resyncs": {"summary": SUBSCRIBERS} if arm == "C" else {},
+        "collection_routes": dict(
+            {window: {route: SUBSCRIBERS} for window in PUBLISHED},
+            agents={"published": SUBSCRIBERS}, missions={"native": SUBSCRIBERS},
+            work={"native": SUBSCRIBERS}),
+        "seconds": 125.0,
+        "cpu": {"process_before_s": 100.0, "process_after_s": 100.0 + cores * 125.0 + 20.0,
+                "load_before_s": 10.0, "load_after_s": 30.0, "daemon_s": cores * 125.0,
+                "interval_s": 125.0, "read_before_start_ms": 0.01, "read_after_end_ms": 0.01,
+                "mark_before_start_ms": 0.02, "mark_after_end_ms": 0.02,
+                "inner_mark_before_start_ms": 0.005, "inner_mark_after_end_ms": 0.005},
+        "reconcile": {
+            "task reconcile-pass": {"cpu_ns": int(reconcile_s * 1e9), "spans": 40, "open_at_start": 1,
+                                    "open_at_end": 0, "mark_spread_ns": 2000, "status": "complete"},
+            "task reconcile-deadline": {"cpu_ns": 0, "spans": 0, "open_at_start": 0,
+                                        "open_at_end": 0, "mark_spread_ns": 2000, "status": "complete"},
+        },
+        "reconcile_mode": "high" if reconcile_s >= 45 else "low" if reconcile_s < 30 else "unknown",
+        # The inner bound charges 1 ms less: a pass that ran in the gaps.
+        "reconcile_inner": {
+            "task reconcile-pass": {"cpu_ns": int(reconcile_s * 1e9) - 1_000_000, "spans": 39,
+                                    "open_at_start": 0, "open_at_end": 0, "mark_spread_ns": 2000,
+                                    "status": "complete"},
+            "task reconcile-deadline": {"cpu_ns": 0, "spans": 0, "open_at_start": 0,
+                                        "open_at_end": 0, "mark_spread_ns": 2000, "status": "complete"},
+        },
+        "reconcile_uncertainty_ns": 1_000_000,
+        "paths": paths, "failed": {},
+    }
+
+
+def fixture(root, mutate=None):
+    argv = {"B": ["binaries/B", "TEST", "--exact", "--nocapture"],
+            "C": ["binaries/C", "TEST", "--exact", "--nocapture"]}
+    manifest = {"arms": {arm: {"commit": arm * 40, "tree": "t", "parents": ["p"]} for arm in "BC"},
+                "order": ["B1", "C1", "C2", "B2"], "test": "TEST", "argv": argv, "env": {"ST_LOAD_GATE": "1"}}
+    files = {"generated-1.sqlite3": {"size": 1, "sha256": "a"},
+             "generated-1-peer.sqlite3": {"size": 1, "sha256": "b"}}
+    study = {"manifest.json": manifest,
+             "builds/B.json": {"binary_sha256": "bb"}, "builds/C.json": {"binary_sha256": "cc"},
+             "inputs.json": {check: copy.deepcopy(files) for check in INPUTS}}
+    for index, execution in enumerate(["B1", "C1", "C2", "B2"]):
+        arm = execution[0]
+        study[f"executions/{execution}/run.json"] = {
+            "arm": arm, "argv": argv[arm], "env": {"ST_LOAD_GATE": "1"}, "exit": 0,
+            "binary_sha256": "bb" if arm == "B" else "cc"}
+        study[f"executions/{execution}/log.txt"] = "running 1 test\ntest TEST ... ok\n"
+        for path, regime in REGIMES.items():
+            study[f"executions/{execution}/{path}"] = fixture_report(arm, regime, cores=1.5 + index / 100)
+    if mutate:
+        mutate(study)
+    for path, value in study.items():
+        full = os.path.join(root, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as file:
+            file.write(value if isinstance(value, str) else json.dumps(value))
+
+
+def self_test():
+    def report(execution, path="load.json"):
+        return lambda study: study[f"executions/{execution}/{path}"]
+    def set_in(execution, change, path="load.json"):
+        return lambda study: change(study[f"executions/{execution}/{path}"])
+    refusals = {
+        "a dropped summary subscriber": set_in("C1", lambda r: r["collection_subscribers"].update(summary=21)),
+        "a duplicate sample": set_in("C1", lambda r: r["paths"]["summary snapshot"].update(count=23)),
+        "a missing sample": set_in("C2", lambda r: r["paths"].pop("glasses connect+snapshot")),
+        "the 38037971326 drop signature": set_in("C1", lambda r: r.update(failed={"agents roster snapshot": 1})),
+        "resyncs not reported": set_in("C1", lambda r: r.pop("collection_resyncs")),
+        "a non-retryable resync": set_in("C2", lambda r: r.update(failed={"summary window received resync": 1})),
+        "a report under the other regime's path": lambda s: s.update({
+            "executions/B1/upgrade/load.json": dict(s["executions/B1/load.json"], daemon_cores=9.0)}),
+        "byte-identical reports": lambda s: s.update({"executions/B2/load.json": s["executions/B1/load.json"]}),
+        "the other arm's checkout": set_in("C1", lambda r: r.update(actual_ci_checkout="B" * 40)),
+        "inputs changed before C2": lambda s: s["inputs.json"]["before-C2"]["generated-1.sqlite3"].update(sha256="x"),
+        "a skipped test": lambda s: (s.update({"executions/B1/log.txt": "running 1 test\nskipped: set ST_LOAD_GATE=1 to run the load test\ntest TEST ... ok\n"}),
+                                     s.pop("executions/B1/load.json"), s.pop("executions/B1/upgrade/load.json")),
+        "a population failure among budget misses": lambda s: (
+            s["executions/C1/run.json"].update(exit=101),
+            s.update({"executions/C1/log.txt": "running 1 test\nthe daemon missed 2 budgets:\n"
+                      "upgrade-under-load: summary snapshot: p99 400 ms is over its 300 ms budget\n"
+                      "upgrade-under-load: only 21 of 22 subscribers received a valid summary snapshot\n"
+                      "test TEST ... FAILED\n"})),
+        "two tests ran": lambda s: s.update({"executions/C2/log.txt": "running 2 tests\ntest TEST ... ok\n"}),
+        "a candidate view served natively": set_in("C2", lambda r: r["collection_routes"].update(glasses={"native": 22})),
+        "no measurement overlay": set_in("B2", lambda r: r.pop("reconcile")),
+        "an execution after a failed one": lambda s: s["executions/C1/run.json"].update(exit=3),
+        "a mode that disagrees with its charges": set_in("C1", lambda r: r.update(reconcile_mode="high")),
+        "a run with no reconcile pass called low": set_in("B1", lambda r: r["reconcile"]["task reconcile-pass"].update(spans=0)),
+        "a CPU read far outside the interval": set_in("B2", lambda r: r["cpu"].update(read_after_end_ms=500.0)),
+        "cores that are not their CPU over the interval": set_in("C2", lambda r: r.update(daemon_cores=0.5)),
+        "a missing input checkpoint": lambda s: s["inputs.json"].pop("before-C1"),
+        "a malformed report": set_in("C1", lambda r: r.update(paths=None)),
+        "no failed map": set_in("C1", lambda r: r.pop("failed")),
+        "routes over 22": set_in("C2", lambda r: r["collection_routes"]["summary"].update(native=5)),
+        "exit 0 with a FAILED result": lambda s: s.update({"executions/C1/log.txt": "running 1 test\ntest TEST ... FAILED\n"}),
+        "a budget miss beside another panic": lambda s: (
+            s["executions/B1/run.json"].update(exit=101),
+            s.update({"executions/B1/log.txt": "running 1 test\nthread 'x' panicked at src/a.rs:1:1:\nboom\n"
+                      "thread 'main' panicked at tests/daemon_load.rs:322:5:\nthe daemon missed 1 budgets:\n"
+                      "upgrade-under-load: summary snapshot: p99 4401 ms is over its 300 ms budget\n"
+                      "test TEST ... FAILED\n"})),
+        "an unknown mode string": set_in("B2", lambda r: r.update(reconcile_mode="medium")),
+        "a CPU reading that is not finite": set_in("C1", lambda r: r["cpu"].update(load_after_s=float("inf"))),
+        "CPU running backward": set_in("C2", lambda r: r["cpu"].update(load_after_s=5.0)),
+        "marks inside the CPU reads": set_in("B1", lambda r: r["cpu"].update(mark_before_start_ms=0.001)),
+        "a missing reconcile kind": set_in("B2", lambda r: r["reconcile"].pop("task reconcile-deadline")),
+        "a non-budget line after the announced budgets": lambda s: (
+            s["executions/B1/run.json"].update(exit=101),
+            s.update({"executions/B1/log.txt": "running 1 test\nthread 'main' panicked at crates/st3/tests/daemon_load.rs:322:5:\n"
+                      "the daemon missed 1 budgets:\n"
+                      "upgrade-under-load: summary snapshot: p99 4401 ms is over its 300 ms budget\n"
+                      "upgrade-under-load: only 21 of 22 subscribers received a valid summary snapshot\n"
+                      "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+                      "test TEST ... FAILED\n"})),
+        "a budget block from another panic site": lambda s: (
+            s["executions/B1/run.json"].update(exit=101),
+            s.update({"executions/B1/log.txt": "running 1 test\nthread 'worker' panicked at crates/st3/src/api.rs:10:5:\n"
+                      "the daemon missed 1 budgets:\n"
+                      "upgrade-under-load: summary snapshot: p99 4401 ms is over its 300 ms budget\n"
+                      "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+                      "test TEST ... FAILED\n"})),
+        "an understated uncertainty": set_in("C1", lambda r: r.update(reconcile_uncertainty_ns=0)),
+        "a mode its bounds do not allow": set_in("C2", lambda r: (
+            r["reconcile"]["task reconcile-pass"].update(cpu_ns=30_000_500_000),
+            r["reconcile_inner"]["task reconcile-pass"].update(cpu_ns=29_000_000_000),
+            r.update(reconcile_mode="low", reconcile_uncertainty_ns=1_000_500_000))),
+        "an inner bound above the outer": set_in("B1", lambda r: (
+            r["reconcile_inner"]["task reconcile-pass"].update(cpu_ns=11_000_000_000),
+            r.update(reconcile_uncertainty_ns=0))),
+        "no inner bound": set_in("B2", lambda r: r.pop("reconcile_inner")),
+        "an incomplete inner bound called low": set_in("C1", lambda r: r["reconcile_inner"]["task reconcile-deadline"].update(status="lossy")),
+        "inner marks outside the CPU reads": set_in("C2", lambda r: r["cpu"].update(inner_mark_after_end_ms=0.5)),
+        "seconds that are not a number": set_in("B1", lambda r: r.update(seconds=float("nan"))),
+        "cores that are not finite": set_in("B2", lambda r: r.update(daemon_cores=float("inf"))),
+        "a p99 that is not a number": set_in("C1", lambda r: r["paths"]["glasses snapshot"].update(p99_ms=None)),
+        "a fractional subscriber count": set_in("C2", lambda r: r.update(roster_subscribers=22.0)),
+        "a negative route count": set_in("C1", lambda r: r["collection_routes"]["summary"].update(published=23, native=-1)),
+        "more spans open than ran": set_in("B1", lambda r: r["reconcile"]["task reconcile-deadline"].update(open_at_end=1)),
+        "CPU charged to no span": set_in("B2", lambda r: (
+            r["reconcile"]["task reconcile-deadline"].update(cpu_ns=5),
+            r["reconcile_inner"]["task reconcile-deadline"].update(cpu_ns=5))),
+        "an extra reconcile kind": set_in("B1", lambda r: r["reconcile"].update({"task other": dict(r["reconcile"]["task reconcile-pass"])})),
+    }
+    # Each control must be refused by the check it targets, not by an earlier accident.
+    expected = {
+        "a dropped summary subscriber": "population", "a duplicate sample": "population",
+        "a missing sample": "population", "the 38037971326 drop signature": "population",
+        "resyncs not reported": "resyncs", "a non-retryable resync": "population",
+        "a report under the other regime's path": "reports", "byte-identical reports": "reports",
+        "the other arm's checkout": "source", "inputs changed before C2": "inputs",
+        "a skipped test": "plan", "a population failure among budget misses": "plan",
+        "two tests ran": "selection", "a candidate view served natively": "routes",
+        "no measurement overlay": "source", "an execution after a failed one": "plan",
+        "a mode that disagrees with its charges": "reconcile",
+        "a run with no reconcile pass called low": "reconcile",
+        "a CPU read far outside the interval": "cpu",
+        "cores that are not their CPU over the interval": "cpu",
+        "a missing input checkpoint": "inputs", "a malformed report": "files",
+        "no failed map": "population", "routes over 22": "routes",
+        "exit 0 with a FAILED result": "plan", "a budget miss beside another panic": "plan",
+        "an unknown mode string": "reconcile", "a CPU reading that is not finite": "cpu",
+        "CPU running backward": "cpu", "marks inside the CPU reads": "cpu",
+        "a missing reconcile kind": "reconcile", "an understated uncertainty": "reconcile",
+        "a mode its bounds do not allow": "reconcile", "an extra reconcile kind": "reconcile",
+        "an inner bound above the outer": "reconcile", "no inner bound": "source",
+        "an incomplete inner bound called low": "reconcile", "inner marks outside the CPU reads": "cpu",
+        "seconds that are not a number": "cpu", "cores that are not finite": "cpu",
+        "a p99 that is not a number": "population", "a fractional subscriber count": "population",
+        "a negative route count": "routes", "more spans open than ran": "reconcile",
+        "CPU charged to no span": "reconcile",
+        "a non-budget line after the announced budgets": "plan",
+        "a budget block from another panic site": "plan",
+    }
+    failures = []
+    for name, mutate in refusals.items():
+        with tempfile.TemporaryDirectory() as root:
+            fixture(root, mutate)
+            try:
+                verdict = verify(root)
+            except Refused as error:
+                if error.check != expected[name]:
+                    failures.append(f"{name}: refused by {error.check}, not {expected[name]}: {error}")
+                continue
+            failures.append(f"accepted {name}: {verdict['qualification']}")
+    # The control it must accept: every candidate summary window resynced once, then got its
+    # snapshot, all published; a baseline budget miss is reported, not a failure.
+    def accepted(study):
+        for execution in ["B1", "B2"]:
+            study[f"executions/{execution}/run.json"]["exit"] = 101
+            study[f"executions/{execution}/log.txt"] = (
+                "running 1 test\nthread 'main' panicked at crates/st3/tests/daemon_load.rs:322:5:\nthe daemon missed 1 budgets:\n"
+                "upgrade-under-load: summary snapshot: p99 4401 ms is over its 300 ms budget\n"
+                "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n"
+                f"test TEST ... FAILED\n")
+    with tempfile.TemporaryDirectory() as root:
+        fixture(root, accepted)
+        try:
+            verdict = verify(root)
+            if verdict["qualification"] != "ACCEPTED-FOR-COMPARISON":
+                failures.append(f"refused the valid study: {verdict}")
+            elif verdict["cores"]["steady-after-migration"]["verdict"] != "NO-WORSE" or not verdict["latency"]["upgrade-under-load"]["met"]:
+                failures.append(f"wrong comparison: {verdict}")
+            if any(verdict["executions"][key]["class"] != "BUDGET-ONLY-ADVERSE" for key in ["B1", "B2"]):
+                failures.append(f"baseline budget misses misclassified: {verdict['executions']}")
+        except Refused as error:
+            failures.append(f"refused the valid study: {error}")
+    # Mixed reconcile modes leave cores UNKNOWN.
+    with tempfile.TemporaryDirectory() as root:
+        fixture(root, set_in("B2", lambda r: (
+            r["reconcile"]["task reconcile-pass"].update(cpu_ns=int(60e9)),
+            r["reconcile_inner"]["task reconcile-pass"].update(cpu_ns=int(60e9) - 1_000_000),
+            r.update(reconcile_mode="high"))))
+        verdict = verify(root)
+        if verdict["cores"]["steady-after-migration"]["verdict"] != "UNKNOWN":
+            failures.append("mixed modes did not leave cores UNKNOWN")
+    for failure in failures:
+        print(f"FAIL: {failure}")
+    print(f"{len(refusals)} refusal controls, 2 acceptance controls: {'FAILED' if failures else 'ok'}")
+    return 1 if failures else 0
+
+
+def main(argv):
+    if argv[1:] == ["--self-test"]:
+        return self_test()
+    if len(argv) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    try:
+        verdict = verify(argv[1])
+    except Refused as error:
+        verdict = {"qualification": "NOT ACCEPTED", "check": error.check, "why": str(error)}
+    print(json.dumps(verdict, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
