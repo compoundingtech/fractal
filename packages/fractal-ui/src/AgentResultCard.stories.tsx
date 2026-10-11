@@ -66,14 +66,16 @@ export const OpenThreadUnavailable: Story = { play: statePlay }
 export const UnavailableReasonsOnFocus: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const page = within(canvasElement.ownerDocument.body)
-  for (const reason of [resultFixture.messageReason, resultFixture.resumeReason]) {
-    for (const description of canvas.getAllByText(reason)) await expect(description).not.toBeVisible()
-  }
+  await expect(page.queryByRole('tooltip')).toBeNull()
   const message = canvas.getAllByRole('button', { name: 'Message' })[0]!
+  await expect(message).toHaveAccessibleDescription(resultFixture.messageReason)
+  await expect(message).toHaveAttribute('aria-describedby')
+  await expect(canvas.getAllByRole('button', { name: 'Resume' })[0]).toHaveAccessibleDescription(resultFixture.resumeReason)
   message.focus()
   const tooltip = await page.findByRole('tooltip')
   await expect(tooltip).toHaveTextContent(resultFixture.messageReason)
   await expect(tooltip).toBeVisible()
+  await expect(page.getAllByRole('tooltip')).toHaveLength(1)
   await expect(message).toHaveAccessibleDescription(resultFixture.messageReason)
   await userEvent.tab()
   await waitFor(async () => { await expect(page.getByRole('tooltip')).toHaveTextContent(resultFixture.resumeReason) })
