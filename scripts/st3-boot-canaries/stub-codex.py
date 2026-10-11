@@ -197,6 +197,10 @@ class AppServer:
             self.send(client, {"id": ident, "result": {
                 "config": {"approval_policy": None},
                 "origins": {"approval_policy": None}}})
+        elif method == "hooks/list":
+            self.send(client, {"id": ident, "result": {"data": [
+                {"cwd": cwd, "hooks": []} for cwd in params.get("cwds", [])
+            ]}})
         elif method == "thread/start":
             if not self.thread_id:
                 self.thread_id = str(uuid.uuid4())

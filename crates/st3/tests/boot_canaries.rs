@@ -156,7 +156,9 @@ fn canary(harness: &str, scenario: &str) {
     if !passed {
         eprintln!("boot canary evidence: {}", evidence.display());
         let _ = evidence_root.keep();
-    } else if keep && !scenario.starts_with("access-") {
+    } else if keep && scenario.starts_with("access-") {
+        let _ = evidence_root.keep();
+    } else if keep {
         // Passing runs are not worth uploading.
         let _ = std::fs::remove_dir_all(&evidence);
     }
