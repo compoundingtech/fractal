@@ -11,6 +11,24 @@ const GUARD: &str = "test_native_terminal_guard";
 const RAW_BYTES: usize = 16 * 1024;
 const SOURCE_BYTES: usize = 256 * 1024;
 const ROWS: usize = 16;
+// Private single-source fixture only. Same-source metadata fanout is not a
+// production work bound; the controls measure the closed factory's layout.
+const GAP_FENCE_SQL: &str = "SELECT available,
+    EXISTS(SELECT 1 FROM ivm_install_jobs WHERE source=?1 AND phase IN ('scan','catchup') LIMIT 1),
+    EXISTS(SELECT 1 FROM ivm_install_roots WHERE source=?1 AND
+      (ready<>0 OR CASE WHEN typeof(error)='text' AND octet_length(error)<=512
+        THEN error IS NOT ?2 ELSE 1 END) LIMIT 1)
+    FROM ivm_install_sources WHERE name=?1";
+
+fn gap_reason(reason: &str) -> String {
+    let end = reason
+        .char_indices()
+        .map(|(i, c)| i + c.len_utf8())
+        .take_while(|end| *end <= 512)
+        .last()
+        .unwrap_or(0);
+    reason[..end].to_owned()
+}
 
 #[derive(Clone, serde::Serialize)]
 struct Binding {
@@ -345,6 +363,24 @@ impl NativeSource {
         Ok((revision, pending, gap))
     }
 
+    fn persist_gap_if_needed(&self, tx: &Transaction<'_>, reason: &str) -> Result<()> {
+        let reason = gap_reason(reason);
+        // For <=512-byte UTF-8, Installer's first-1024-chars transform is identity.
+        // Missing or invalid source metadata deliberately fails closed here.
+        let (available, jobs, roots): (i64, bool, bool) =
+            tx.query_row(GAP_FENCE_SQL, params![SOURCE, reason], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+        ensure!(
+            matches!(available, 0 | 1),
+            "invalid private source availability"
+        );
+        if available != 0 || jobs || roots {
+            self.installer.source_gap(tx, SOURCE, &reason)?;
+        }
+        Ok(())
+    }
+
     fn scoped_state(&self, tx: &Transaction<'_>) -> Result<(i64, bool, Option<String>, bool)> {
         let (revision,pending,gap,identity,active):(i64,bool,Option<String>,String,bool)=tx.query_row(
             "SELECT revision,pending,gap,identity,managed_scope FROM test_native_terminal_guard WHERE id=1 AND typeof(identity)='text' AND octet_length(identity)<=16384 AND (gap IS NULL OR (typeof(gap)='text' AND octet_length(gap)<=512))",
@@ -364,7 +400,7 @@ impl NativeSource {
             return Ok(());
         }
         if let Some(gap) = gap {
-            self.installer.source_gap(tx, SOURCE, &gap)?;
+            self.persist_gap_if_needed(tx, &gap)?;
             return Ok(());
         }
         let result = (|| {
@@ -411,12 +447,12 @@ impl NativeSource {
             if error.downcast_ref::<rusqlite::Error>().is_some() {
                 return Err(error);
             }
-            let reason = error.to_string().chars().take(256).collect::<String>();
+            let reason = gap_reason(&error.to_string());
             tx.execute(
                 "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
                 [&reason],
             )?;
-            self.installer.source_gap(tx, SOURCE, &reason)?;
+            self.persist_gap_if_needed(tx, &reason)?;
         }
         Ok(())
     }

@@ -74,11 +74,13 @@ impl Adapter {
                 let reason = gap
                     .as_deref()
                     .unwrap_or("preexisting raw pending or managed scope");
-                tx.execute(
-                    "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
-                    [reason],
-                )?;
-                source.installer.source_gap(tx, SOURCE, reason)?;
+                if gap.is_none() || !pending {
+                    tx.execute(
+                        "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
+                        [reason],
+                    )?;
+                }
+                source.persist_gap_if_needed(tx, reason)?;
             }
             tx.execute(
                 "UPDATE test_native_terminal_guard SET managed_scope=1 WHERE id=1",
@@ -115,7 +117,7 @@ impl Adapter {
                     "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
                     [&reason],
                 )?;
-                source.installer.source_gap(tx, SOURCE, &reason)
+                source.persist_gap_if_needed(tx, &reason)
             })?;
         }
         match self.fault.load(Ordering::Relaxed) {
