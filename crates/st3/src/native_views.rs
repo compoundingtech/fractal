@@ -283,6 +283,7 @@ fn answer(value: &Value) -> Value {
         &[
             ("question", "question"),
             ("custom", "custom"),
+            ("custom", "customInput"),
             ("note", "note"),
         ],
     );
@@ -357,7 +358,9 @@ pub(crate) fn tool_output_view(
             })
         }
         "ask" => {
-            out["answers"] = if details.get("answers").is_some_and(Value::is_array) {
+            out["answers"] = if details.get("results").is_some_and(Value::is_array) {
+                rows(details, "results", answer)
+            } else if details.get("answers").is_some_and(Value::is_array) {
                 rows(details, "answers", answer)
             } else if details.get("question").is_some() {
                 json!([answer(details)])
@@ -723,6 +726,41 @@ mod tests {
             tool_output_view("read", "r", true, None),
             json!({"type":"generic","tool":"read","call_id":"r","is_error":true})
         );
+    }
+
+    #[test]
+    fn batched_ask_answers_keep_selections_and_custom_input() {
+        let details = json!({
+            "results": [
+                {"id":"db","question":"Which database should the prototype use?",
+                 "options":["SQLite","Postgres","In-memory"],"multi":false,
+                 "selectedOptions":["SQLite"],"note":"prefer zero-ops for the demo"},
+                {"id":"features","question":"Which features ship?",
+                 "options":["Auth","Search","Export","Sharing"],"multi":true,
+                 "selectedOptions":["Auth","Export"]},
+                {"id":"deploy","question":"Where do we deploy?",
+                 "options":["Fly.io","Vercel"],"multi":false,"selectedOptions":[],
+                 "customInput":"Cloudflare Workers","custom":"legacy fallback"}
+            ],
+            "answers": [{"question":"Ignored fallback","selected":["legacy"]}]
+        });
+        let view = tool_output_view("ask", "a", false, Some(&details));
+        let answers = view["answers"].as_array().unwrap();
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[0]["selected"], json!(["SQLite"]));
+        assert_eq!(answers[0]["note"], "prefer zero-ops for the demo");
+        assert_eq!(answers[1]["selected"], json!(["Auth", "Export"]));
+        assert_eq!(answers[2]["selected"], json!([]));
+        assert_eq!(answers[2]["custom"], "Cloudflare Workers");
+        assert!(answers.iter().all(|answer| answer.get("id").is_none()));
+        let fallback = tool_output_view(
+            "ask",
+            "a",
+            false,
+            Some(&json!({"answers":[{"question":"Which?","selected":["A"],"custom":"Other"}]})),
+        );
+        assert_eq!(fallback["answers"][0]["custom"], "Other");
+        assert_eq!(fallback["answers"][0]["selected"], json!(["A"]));
     }
 
     #[test]
