@@ -1052,15 +1052,15 @@ pub(super) fn project_minimal_run(
     // A run-tree rebuild retains this definition too, and a full replay keeps the canonically
     // first claim's. Independent daemons can write different revisions of one internal mission:
     // each words an ended ask's reason from its own view. So the canonically first claim gives
-    // the revision as well as the source, over a definition of the same revision or one another
-    // minimal run wrote; this does not change definition state or a published definition.
+    // the revision as well as the source, over a definition another minimal run wrote; this
+    // does not change definition state, and a published definition, of any revision, stays.
     let definition_source: Option<(String, bool)> = tx
         .query_row(
-            "SELECT claim_id, revision=?2 OR EXISTS(SELECT 1 FROM claims
+            "SELECT claim_id, EXISTS(SELECT 1 FROM claims
                  WHERE claims.id=mission_definitions.claim_id
                  AND claims.kind IN ('work.person-asked','mission-run.created'))
              FROM mission_definitions WHERE mission_id=?1",
-            params![mission.id, mission.revision],
+            [&mission.id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
