@@ -32,6 +32,7 @@ pub(crate) mod open_timing;
 pub mod layout;
 pub mod live;
 pub mod pane;
+mod drafts_store;
 mod prefs;
 mod resource_sidebar;
 mod pty;
@@ -428,6 +429,8 @@ pub struct Ui {
     revoke: Option<String>,
     /// Home items put off until later. Demo only: kept in memory on this machine.
     snoozed: HashSet<String>,
+    /// The drafts as last read from or written to this device's drafts file.
+    drafts_saved: HashMap<String, String>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
     pub(crate) glasses: Option<glass::Glasses>,
@@ -685,6 +688,7 @@ impl Ui {
             new_mission: None,
             revoke: None,
             snoozed: HashSet::new(),
+            drafts_saved: HashMap::new(),
             glasses: None,
             session_focus: None,
             build: false,
@@ -833,6 +837,35 @@ impl Ui {
             let loaded = prefs::load(&path);
             self.simple = simplified(&loaded);
             self.terminal_first = loaded.terminal_first == Some(true);
+        }
+    }
+
+    /// Bring back what was typed and not sent when the last stui ended, read once at start. A box
+    /// already holding text keeps it.
+    pub(crate) fn load_drafts(&mut self) {
+        #[cfg(not(test))]
+        if let Some(path) = drafts_store::path() {
+            let saved = drafts_store::load(&path);
+            for (key, text) in &saved {
+                self.conversation_state
+                    .drafts
+                    .entry(key.clone())
+                    .or_insert_with(|| text.clone());
+            }
+            self.drafts_saved = saved;
+        }
+    }
+
+    /// Write the boxes to this device when they changed since the last write, so a crash or a
+    /// restart loses nothing typed. Cheap when nothing changed: one comparison.
+    pub(crate) fn step_drafts(&mut self) {
+        #[cfg(not(test))]
+        if self.conversation_state.drafts != self.drafts_saved
+            && let Some(path) = drafts_store::path()
+            && drafts_store::save(&path, &self.drafts_saved, &self.conversation_state.drafts)
+                .is_ok()
+        {
+            self.drafts_saved = self.conversation_state.drafts.clone();
         }
     }
 
@@ -2388,7 +2421,9 @@ impl Ui {
             header,
             false,
         );
-        let rule_y = area.y + header_height - 1;
+        // A header that wraps taller than a small pane leaves no room for its rule.
+        let header_height = header_height.min(area.height);
+        let rule_y = area.y + header_height.saturating_sub(1);
         buf.set_stringn(
             area.x,
             rule_y,
@@ -2642,7 +2677,9 @@ impl Ui {
                 }
             }
         }
-        if composer_height > 0 {
+        // A pane too short for the box shows as much of it as fits, and never draws below itself.
+        let bottom = area.y + area.height;
+        if composer_height > 0 && body.y + body.height < bottom {
             let y = body.y + body.height;
             buf.set_stringn(
                 area.x,
@@ -2687,7 +2724,9 @@ impl Ui {
             }
             for (index, attachment) in thumbnails.iter().enumerate() {
                 let x = area.x + 2 + index as u16 * (THUMBNAIL.width + 1);
-                if x + THUMBNAIL.width > area.x + area.width {
+                if x + THUMBNAIL.width > area.x + area.width
+                    || y + 1 + THUMBNAIL.height > bottom
+                {
                     break;
                 }
                 self.draw_thumbnail(
@@ -2702,19 +2741,24 @@ impl Ui {
                 );
             }
             for (offset, line) in composer.iter().enumerate() {
-                buf.set_line(area.x, y + 1 + strip + offset as u16, line, area.width);
+                let row = y + 1 + strip + offset as u16;
+                if row >= bottom {
+                    break;
+                }
+                buf.set_line(area.x, row, line, area.width);
             }
             self.hit(
                 Rect {
                     x: area.x,
                     y: y + 1,
                     width: area.width,
-                    height: composer.len().max(1) as u16,
+                    height: (composer.len().max(1) as u16).min(bottom - y - 1),
                 },
                 Hit::Composer,
             );
             // Where this stui can listen, the box offers it: a click or Ctrl+R.
             if crate::voice::available()
+                && y + 1 + strip < bottom
                 && self.composing(&agent.id)
                 && self.voice_for(&agent.id).is_none()
             {

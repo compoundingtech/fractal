@@ -46,13 +46,14 @@ pub fn log_panics(build: &str) {
     let build = build.to_owned();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if let Some(file) = directory().and_then(|runs| runs.parent().map(|dir| dir.join("panics.log")))
-        {
-            write_panic(
-                &file,
-                &build,
-                &format!("{info}\n{}", std::backtrace::Backtrace::force_capture()),
-            );
+        let what = format!("{info}\n{}", std::backtrace::Backtrace::force_capture());
+        // Beside the run files in the cache, and beside `connection.log` in the state
+        // directory, where a person looking at what stui left behind looks first.
+        let state =
+            super::prefs::path().and_then(|prefs| prefs.parent().map(|dir| dir.join("panics.log")));
+        let cache = directory().and_then(|runs| runs.parent().map(|dir| dir.join("panics.log")));
+        for file in [cache, state].into_iter().flatten() {
+            write_panic(&file, &build, &what);
         }
         previous(info);
     }));
@@ -65,7 +66,11 @@ fn write_panic(file: &Path, build: &str, what: &str) {
     if std::fs::metadata(file).is_ok_and(|meta| meta.len() > 200_000) {
         let _ = std::fs::remove_file(file);
     }
-    if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
         let _ = writeln!(out, "{} {build} {what}\n", now_unix());
     }
 }
@@ -217,7 +222,10 @@ mod tests {
         let file = root.join("stui").join("panics.log");
         write_panic(&file, "build-1", "panicked at src/x.rs:1:1: boom");
         let first = std::fs::read_to_string(&file).unwrap();
-        assert!(first.contains("build-1") && first.contains("boom"), "{first}");
+        assert!(
+            first.contains("build-1") && first.contains("boom"),
+            "{first}"
+        );
         write_panic(&file, "build-1", "second");
         assert!(std::fs::read_to_string(&file).unwrap().contains("second"));
         std::fs::write(&file, "x".repeat(200_001)).unwrap();

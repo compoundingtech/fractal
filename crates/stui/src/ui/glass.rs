@@ -4145,6 +4145,41 @@ mod tests {
     }
 
     #[test]
+    fn a_long_draft_renders_at_every_size_beside_alerts() {
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", agent)]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        let paragraph = "A long thought, 日本語の文章 👩‍👩‍👧‍👦 e\u{301} with a tail. ";
+        for round in 0..40 {
+            typed(&mut ui, paragraph);
+            if round % 3 == 0 {
+                press(&mut ui, KeyCode::Enter, KeyModifiers::ALT);
+            }
+            for (width, height) in [(20, 6), (24, 8), (40, 12), (80, 24), (120, 32), (200, 60), (33, 7)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+        assert!(ui.conversation_state.drafts[agent].len() > 1000);
+        // Every size a window or a split pane can have, with the box full of text.
+        for width in (20..=150).step_by(7) {
+            for height in 6..=40 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+        ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Right);
+        for width in (20..=150).step_by(11) {
+            for height in 6..=40 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn the_palette_opens_subjects_in_tabs_and_home_opens_over_them() {
         let mut ui = glass();
         ctrl(&mut ui, 'k');
