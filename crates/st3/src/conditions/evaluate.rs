@@ -9,9 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
+use serde_json::Value;
 
-use super::probe;
-use super::{ConditionDecl, Metric, Tracker, Transition};
+use super::probe::{self, ProcessSampler};
+use super::{ConditionDecl, Metric, Scope, Tracker, Transition, Window};
 use crate::disk::DiskSpace;
 use crate::store::{ConditionRecord, Store};
 
@@ -26,7 +27,11 @@ pub fn spawn(
 ) {
     tokio::spawn(async move {
         let disks = probe::DiskSampler::spawn();
-        let probe = HostProbe::new(database.clone(), disks.clone());
+        let probe = HostProbe::new(
+            database.clone(),
+            Box::new(crate::api::request_latency_windows),
+            disks.clone(),
+        );
         let mut evaluator = Evaluator::new(host.clone(), Box::new(probe));
         let mut interval =
             tokio::time::interval(std::time::Duration::from_millis(super::EVALUATE_EVERY_MS));
@@ -83,7 +88,11 @@ pub fn spawn(
                     tracing::error!(%error, "condition evaluator worker failed; rebuilding it");
                     evaluator = Evaluator::new(
                         host.clone(),
-                        Box::new(HostProbe::new(database.clone(), disks.clone())),
+                        Box::new(HostProbe::new(
+                            database.clone(),
+                            Box::new(crate::api::request_latency_windows),
+                            disks.clone(),
+                        )),
                     );
                 }
             }
@@ -96,7 +105,11 @@ pub(crate) trait Probe: Send {
     /// Free space on each local filesystem, by mount point.
     fn filesystems(&mut self) -> BTreeMap<String, DiskSpace>;
     fn filesystem_of(&mut self, path: &str) -> Option<DiskSpace>;
+    fn memory_available_percent(&mut self) -> Option<f64>;
+    fn processes(&mut self, names: &[&str], now: u128) -> BTreeMap<String, probe::ProcessReading>;
     fn database_bytes(&mut self) -> Option<f64>;
+    /// The request-latency report: each target's and route's 1m, 5m and 1h windows.
+    fn slo_windows(&mut self) -> Value;
     fn errors(&self) -> Vec<String> {
         Vec::new()
     }
@@ -107,15 +120,23 @@ pub(crate) trait Probe: Send {
 pub(crate) struct HostProbe {
     database: PathBuf,
     database_sample: Option<(std::time::Instant, Option<f64>)>,
+    processes: ProcessSampler,
     disks: probe::DiskSampler,
+    slo: Box<dyn Fn() -> Value + Send>,
 }
 
 impl HostProbe {
-    pub fn new(database: PathBuf, disks: probe::DiskSampler) -> Self {
+    pub fn new(
+        database: PathBuf,
+        slo: Box<dyn Fn() -> Value + Send>,
+        disks: probe::DiskSampler,
+    ) -> Self {
         Self {
             database,
             database_sample: None,
+            processes: ProcessSampler::default(),
             disks,
+            slo,
         }
     }
 }
@@ -127,6 +148,14 @@ impl Probe for HostProbe {
 
     fn filesystem_of(&mut self, path: &str) -> Option<DiskSpace> {
         self.disks.filesystem_of(path)
+    }
+
+    fn memory_available_percent(&mut self) -> Option<f64> {
+        probe::read_memory_available_percent()
+    }
+
+    fn processes(&mut self, names: &[&str], now: u128) -> BTreeMap<String, probe::ProcessReading> {
+        self.processes.sample(names, now)
     }
 
     fn database_bytes(&mut self) -> Option<f64> {
@@ -142,10 +171,18 @@ impl Probe for HostProbe {
         value
     }
 
+    fn slo_windows(&mut self) -> Value {
+        (self.slo)()
+    }
     fn errors(&self) -> Vec<String> {
         self.disks.errors()
     }
     fn prepare(&mut self, decls: &[ConditionDecl]) {
+        let names = decls
+            .iter()
+            .filter_map(|decl| decl.process.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        self.processes.retain_names(&names);
         self.disks.configure(
             decls.iter().any(|decl| {
                 matches!(decl.metric, Metric::DiskFreePercent | Metric::DiskFreeBytes)
@@ -181,7 +218,11 @@ pub(crate) struct Evaluator {
 #[derive(Default)]
 struct Readings {
     filesystems: Option<BTreeMap<String, DiskSpace>>,
+    memory: Option<Option<f64>>,
+    processes: Option<BTreeMap<String, probe::ProcessReading>>,
     database: Option<Option<f64>>,
+    slo: Option<Value>,
+    claim_bytes: Option<Option<f64>>,
 }
 
 impl Evaluator {
@@ -270,6 +311,27 @@ impl Evaluator {
             .collect::<Vec<_>>();
         self.probe.prepare(&decls);
         let mut readings = Readings::default();
+        if decls
+            .iter()
+            .any(|decl| decl.metric == Metric::DbAuthoredBytesPerDay)
+        {
+            match store
+                .fold_condition_claim_bytes(now)
+                .and_then(|()| store.condition_claim_bytes_per_day(now))
+            {
+                Ok(value) => readings.claim_bytes = Some(value),
+                Err(error) => report.errors.push(format!("authored bytes: {error:#}")),
+            }
+        }
+        let process_names = decls
+            .iter()
+            .filter_map(|decl| decl.process.as_deref())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !process_names.is_empty() {
+            readings.processes = Some(self.probe.processes(&process_names, now));
+        }
         let mut live = BTreeSet::new();
         for decl in &decls {
             let subject = decl.subject();
@@ -449,11 +511,88 @@ impl Evaluator {
                     .map(|(mount, space)| (format!("{host}:{mount}"), disk(space)))
                     .collect(),
             },
+            Metric::MemoryAvailablePercent => readings
+                .memory
+                .get_or_insert_with(|| self.probe.memory_available_percent())
+                .map(|value| vec![(host, value)])
+                .unwrap_or_default(),
+            Metric::ProcessCpuCores | Metric::ProcessRssBytes => {
+                let reading = readings
+                    .processes
+                    .as_ref()
+                    .and_then(|processes| processes.get(decl.process.as_deref()?));
+                let value = match decl.metric {
+                    Metric::ProcessCpuCores => reading.and_then(|reading| reading.cpu_cores),
+                    _ => reading.map(|reading| reading.rss_bytes),
+                };
+                value.map(|value| vec![(host, value)]).unwrap_or_default()
+            }
             Metric::DbSizeBytes => readings
                 .database
                 .get_or_insert_with(|| self.probe.database_bytes())
                 .map(|value| vec![(host, value)])
                 .unwrap_or_default(),
+            Metric::DbAuthoredBytesPerDay => readings
+                .claim_bytes
+                .flatten()
+                .map(|value| vec![(host, value)])
+                .unwrap_or_default(),
+            Metric::DaemonCpuCores | Metric::SloBurnRate | Metric::SloP99Ms => {
+                let windows = readings.slo.get_or_insert_with(|| self.probe.slo_windows());
+                slo_value(windows, decl)
+                    .map(|value| vec![(host, value)])
+                    .unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// A route or daemon CPU condition's value, from the request-latency report.
+pub fn slo_value(report: &Value, decl: &ConditionDecl) -> Option<f64> {
+    let window = decl.window.as_str();
+    let targets = report["targets"].as_array()?;
+    if decl.metric == Metric::DaemonCpuCores {
+        let cpu = targets.iter().find(|target| target["name"] == "cpu")?;
+        return cpu["windows"][window]["cores"].as_f64();
+    }
+    debug_assert_eq!(decl.scope, Scope::Route);
+    let route = decl.route.as_deref()?;
+    let windows = targets
+        .iter()
+        .find(|target| target["name"] == route)
+        .map(|target| &target["windows"])
+        .or_else(|| {
+            report["paths"]
+                .as_array()?
+                .iter()
+                .find(|path| path["path"] == route)
+                .map(|path| &path["windows"])
+        });
+    let Some(windows) = windows else {
+        // A target with no samples yet has no burn; a route with none has no row at all.
+        return (decl.metric == Metric::SloBurnRate
+            && crate::slo::targets()
+                .latency
+                .iter()
+                .any(|target| target.name == route))
+        .then_some(0.0);
+    };
+    let window = &windows[window];
+    let count = window["count"].as_u64().unwrap_or(0);
+    match decl.metric {
+        Metric::SloBurnRate => Some(window["over_target_share"].as_f64().unwrap_or(0.0) / 0.01),
+        _ if count == 0 => None,
+        _ => window["p99_ms"].as_f64(),
+    }
+}
+
+impl Window {
+    /// The window's span, for text.
+    pub fn millis(self) -> u128 {
+        match self {
+            Self::OneMinute => 60_000,
+            Self::FiveMinutes => 5 * 60_000,
+            Self::OneHour => 3_600_000,
         }
     }
 }
@@ -463,6 +602,7 @@ mod tests {
     use super::*;
     use crate::graph::parse_test_intent as parse_intent;
     use crate::model::IntentInput;
+    use serde_json::json;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
@@ -471,7 +611,7 @@ mod tests {
         let path = directory.path().join("db.sqlite3");
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(100).unwrap();
-        let mut probe = HostProbe::new(path, probe::DiskSampler::spawn());
+        let mut probe = HostProbe::new(path, Box::new(|| json!({})), probe::DiskSampler::spawn());
         assert_eq!(probe.database_bytes(), Some(100.0));
         file.set_len(200).unwrap();
         assert_eq!(probe.database_bytes(), Some(100.0));
@@ -483,6 +623,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct Fake {
         free: Arc<Mutex<BTreeMap<String, (u64, u64)>>>,
+        cpu: Arc<Mutex<Option<f64>>>,
+        slo: Arc<Mutex<Value>>,
         panic_once: Arc<std::sync::atomic::AtomicBool>,
         database: Arc<Mutex<Option<f64>>>,
     }
@@ -515,8 +657,34 @@ mod tests {
         fn filesystem_of(&mut self, path: &str) -> Option<DiskSpace> {
             self.filesystems().remove(path)
         }
+        fn memory_available_percent(&mut self) -> Option<f64> {
+            None
+        }
+        fn processes(
+            &mut self,
+            names: &[&str],
+            _now: u128,
+        ) -> BTreeMap<String, probe::ProcessReading> {
+            let cpu = *self.cpu.lock().unwrap();
+            names
+                .iter()
+                .filter(|_| cpu.is_some())
+                .map(|name| {
+                    (
+                        (*name).to_owned(),
+                        probe::ProcessReading {
+                            cpu_cores: cpu,
+                            rss_bytes: 1.0,
+                        },
+                    )
+                })
+                .collect()
+        }
         fn database_bytes(&mut self) -> Option<f64> {
-            *self.database.lock().unwrap()
+            self.database.lock().unwrap().or(Some(1_000.0))
+        }
+        fn slo_windows(&mut self) -> Value {
+            self.slo.lock().unwrap().clone()
         }
     }
 
@@ -530,9 +698,10 @@ condition "fleet/disk" {
   recover-for "1m"
   owner "agent/ops"
 }
-condition "fleet/database" {
-  metric "db.size-bytes"
-  scope "member"
+condition "fleet/collector-cpu" {
+  metric "process.cpu-cores"
+  scope "process"
+  process "collector"
   host "alder"
   above 1.5
   recover 1
@@ -583,7 +752,7 @@ condition "fleet/elsewhere" {
             .lock()
             .unwrap()
             .extend([("/".to_owned(), (50, 100)), ("/data".to_owned(), (10, 100))]);
-        *fake.database.lock().unwrap() = Some(0.2);
+        *fake.cpu.lock().unwrap() = Some(0.2);
         let mut evaluator = Evaluator::new("alder", Box::new(fake.clone()));
         let start = 1_760_000_000_000u128;
         let mut transitions = Vec::new();
@@ -652,7 +821,7 @@ condition "fleet/elsewhere" {
         assert_eq!(messages.len(), 2);
 
         // A person's breach messages no one: it is an alert on their home until it recovers.
-        *fake.database.lock().unwrap() = Some(3.0);
+        *fake.cpu.lock().unwrap() = Some(3.0);
         run(&mut evaluator, 1230, 1320, &mut transitions, &mut messages);
         assert_eq!(transitions.len(), 3);
         assert_eq!(messages.len(), 2);
@@ -660,8 +829,11 @@ condition "fleet/elsewhere" {
             .attention_snapshot(Some("person/ada"), start + 1320 * S)
             .unwrap();
         let alert = alerts.iter().find(|item| item.kind == "condition").unwrap();
-        assert_eq!(alert.title, "Condition breached: fleet/database on alder");
-        *fake.database.lock().unwrap() = Some(0.5);
+        assert_eq!(
+            alert.title,
+            "Condition breached: fleet/collector-cpu on alder"
+        );
+        *fake.cpu.lock().unwrap() = Some(0.5);
         run(&mut evaluator, 1350, 1440, &mut transitions, &mut messages);
         assert_eq!(transitions.len(), 4);
         assert!(
@@ -711,7 +883,6 @@ condition "fleet/size" { metric "db.size-bytes"; scope "member"; above 2000; for
             .apply_as(&intent, &plan.subject_tokens, "size", Some("person/ada"))
             .unwrap();
         let fake = Fake::default();
-        *fake.database.lock().unwrap() = Some(1_000.0);
         let mut evaluator = Evaluator::new("alder", Box::new(fake.clone()));
         evaluator.tick(&store, 1_000).unwrap();
         *fake.database.lock().unwrap() = Some(3000.0);
@@ -930,9 +1101,7 @@ condition "fleet/size" { metric "db.size-bytes"; scope "member"; above 2000; for
         store
             .apply_as(&intent, &plan.subject_tokens, "budget", Some("person/ada"))
             .unwrap();
-        let fake = Fake::default();
-        *fake.database.lock().unwrap() = Some(1_000.0);
-        let mut evaluator = Evaluator::new("alder", Box::new(fake));
+        let mut evaluator = Evaluator::new("alder", Box::new(Fake::default()));
         let now = super::super::now_ms();
         assert_eq!(evaluator.tick(&store, now).unwrap().recorded, 0);
         assert_eq!(
@@ -950,5 +1119,71 @@ condition "fleet/size" { metric "db.size-bytes"; scope "member"; above 2000; for
             24
         );
         assert!(evaluator.unrecorded.is_empty());
+    }
+
+    #[test]
+    fn slo_values_come_from_the_request_latency_windows() {
+        let report = json!({
+            "targets": [
+                {"name": "person-read", "windows": {"1h": {"count": 1000, "p99_ms": 140.0, "over_target_share": 0.03}}},
+                {"name": "write-ack", "windows": {"1h": {"count": 0, "p99_ms": 0.0, "over_target_share": 0.0}}},
+                {"name": "cpu", "windows": {"5m": {"cores": 0.4, "measured_seconds": 300}}},
+            ],
+            "paths": [
+                {"path": "GET /v1/client/now", "target": "person-read", "windows": {"5m": {"count": 3, "p99_ms": 80.0, "over_target_share": 0.0}}},
+            ],
+        });
+        let decl = |metric: &str, route: Option<&str>, window: Option<&str>| {
+            let mut children = vec![
+                json!({"name": "metric", "arguments": [metric]}),
+                json!({"name": "scope", "arguments": [if route.is_some() { "route" } else { "member" }]}),
+                json!({"name": "above", "arguments": [1]}),
+                json!({"name": "for", "arguments": ["5m"]}),
+                json!({"name": "owner", "arguments": ["agent/speed"]}),
+            ];
+            if let Some(route) = route {
+                children.push(json!({"name": "route", "arguments": [route]}));
+            }
+            if let Some(window) = window {
+                children.push(json!({"name": "window", "arguments": [window]}));
+            }
+            crate::conditions::parse_condition(
+                "condition/x",
+                &json!({"name": "condition", "arguments": ["x"], "children": children}),
+            )
+            .unwrap()
+        };
+        let burn = slo_value(&report, &decl("slo.burn-rate", Some("person-read"), None)).unwrap();
+        assert!((burn - 3.0).abs() < 1e-9, "{burn}");
+        assert_eq!(
+            slo_value(&report, &decl("slo.p99-ms", Some("person-read"), None)),
+            Some(140.0)
+        );
+        assert_eq!(
+            slo_value(&report, &decl("slo.p99-ms", Some("write-ack"), None)),
+            None
+        );
+        assert_eq!(
+            slo_value(&report, &decl("slo.burn-rate", Some("write-ack"), None)),
+            Some(0.0)
+        );
+        assert_eq!(
+            slo_value(
+                &report,
+                &decl("slo.p99-ms", Some("GET /v1/client/now"), Some("5m"))
+            ),
+            Some(80.0)
+        );
+        assert_eq!(
+            slo_value(
+                &report,
+                &decl("slo.burn-rate", Some("GET /v1/unknown"), None)
+            ),
+            None
+        );
+        assert_eq!(
+            slo_value(&report, &decl("daemon.cpu-cores", None, None)),
+            Some(0.4)
+        );
     }
 }

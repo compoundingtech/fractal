@@ -98,3 +98,26 @@ adapter and these trim controls therefore remain a merge gate. A four-state
 logical cache is only a bounded stand-in for review and does not demonstrate
 physical byte reclamation. A stable-checkpoint rule cannot substitute for the
 required local, quorum-free retention.
+
+## CPU follow-up attribution bootstrap
+
+Spend conditions are deferred until the usage reader is bounded and measured;
+this candidate's evaluator has no usage-period read or spend probe. Do not
+add a usage-cost performance campaign through this conditions change.
+
+The authored-byte cache initially seeks into the whole fleet's last-day claim
+range. Each tick visits at most 25 ranges of 2,000 indices (50,000 fleet indices);
+only own-origin rows pass the filter before byte lengths are computed. For D
+whole-fleet indices in the initial day, catch-up needs about ceil(D/50,000) ticks,
+plus newly arriving rows. An illustrative 50,000 own rows at 1.5 KiB/body represent
+73.2 MiB of source bodies plus metadata, before any indexes; that is source
+population arithmetic, not application-copy bytes or a measured physical read
+volume. If most indices are remote, only a small subset is summed, but the fleet
+range still has to be visited. Actual page/cache/kernel read bytes and the fleet
+day-sized population are absent and must be reported with Operations' candidate
+window. No production query or additional read is authorized by this estimate.
+
+The attribution reading can scale one covered hour by 24 and counts the first
+window hour whole. A busy startup hour therefore inflates its daily estimate.
+It is informational attribution and must not drive first-user physical disk
+alerts; physical net growth still needs a measured hourly size history.

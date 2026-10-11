@@ -33,8 +33,9 @@ path.
 | host | `disk.free-bytes` | bytes |
 | member | `db.size-bytes` | physical database plus WAL bytes |
 
-CPU, process, memory, spend, authored-byte attribution and SLO conditions are a
-separate follow-up PR. This disk-first daemon refuses those declarations. Physical
+CPU, process, memory, authored-byte attribution and SLO adapters are
+covered by the [stacked follow-up](conditions-cpu.md). Deploy the follow-up to every daemon before declaring its metrics.
+Spend is deferred until its usage reader is bounded and measured. Physical
 24-hour database growth also remains a later adapter of the shared hourly sampler;
 operations must supply a measured last-week baseline before that declaration.
 

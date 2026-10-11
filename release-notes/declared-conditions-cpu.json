@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add CPU, process, memory, attribution and SLO adapters after disk conditions.",
+  "replay": {
+    "status": "none",
+    "detail": "Uses disk condition head/observation reconstruction and direct local restart restoration. No replay of historical condition transitions."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds the local hourly authored-claim-byte table on open. Storage version stays 18; no replicated schema or generated client change beyond the disk prerequisite."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Inherits the disk prerequisite's unresolved local quorum-free trim and permanent negative-set/transport contract. No checkpoint fallback. Do not queue before disk payload-retention controls and independent approval. OTel copies, copied notification payloads and unchanged durable message retention remain intact."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Adds root declaration metric/process/route/window support. Disk-only daemons refuse these declarations; upgrade all members before publishing CPU or other follow-up declarations. Authored bytes are attribution, not physical growth; no first-user condition on attribution. Uses existing performance/SLO windows without changing Meter::record_request or snapshot. cost.usd-per-day is refused and deferred until its usage reader is bounded and measured; the evaluator no longer reads usage_period_rows."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Ordinary restart; holds restart and standing breaches restore silently. Evaluator cadence stays 30 seconds, database size remains hourly; native process CPU needs two PID/start-time samples. No new service, collector or load generator. Executable names longer than 15 bytes are rejected; short-lived children between samples are undercounted and the per-PID scan cost remains unmeasured."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Operations reviews/deploys after disk-first is deployed and independently approved. No builder merge or deployment. First-user physical daily growth requires the shared hourly sampler and Operations baseline; existing ops missions stay until real breach/recovery and Operations agreement. Production CPU/SQL evidence remains required and unmeasured; missing native readings and bounded process enumeration remain visible limits. Attribution cache authority and two-day retention are documented separately from the three disk tables. Authored-byte catch-up walks at most 50,000 whole-fleet claim indices per tick and only sums own rows; read bytes are unmeasured. One-hour coverage can be scaled by 24 and the boundary hour counts whole, so this informational estimate must not drive first-user disk alerts."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Roll forward after these declarations exist: a disk-only daemon cannot evaluate CPU/rest metrics. Stop declarations before returning to disk-only code. Notification idempotency and OTLP retry/cursor behavior follow the disk prerequisite."
+  }
+}

@@ -1,9 +1,10 @@
 //! Conditions: a threshold on something the daemon measures, declared in KDL like an account,
 //! that st evaluates itself and that wakes its owner only when its state changes.
 //!
-//! A condition names a metric, a scope (host or member), a threshold, how long it
+//! A condition names a metric, a scope (host, process, member or route), a threshold, how long it
 //! must hold, and an owner. Each daemon evaluates the instances that live on it, at a fixed low
-//! rate and never on the request path: a host's free disk space and its own physical database-plus-WAL size. Entering breach wakes the owner once and recovery tells it
+//! rate and never on the request path: a host's disks and processes, its own database,
+//! and its own request-latency windows. Entering breach wakes the owner once and recovery tells it
 //! once. Between the two a hysteresis threshold and a hold time keep a value near the line from
 //! flapping.
 //!
@@ -38,15 +39,21 @@ pub const RING: usize = 8;
 pub enum Scope {
     /// A host's filesystems and memory.
     Host,
-    /// A fleet member's daemon: its database, its spend, its own CPU.
+    /// The processes of one name on a host.
+    Process,
+    /// A fleet member's daemon: its database and its own CPU.
     Member,
+    /// A daemon's request-latency target or route.
+    Route,
 }
 
 impl Scope {
     fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "host" => Self::Host,
+            "process" => Self::Process,
             "member" => Self::Member,
+            "route" => Self::Route,
             _ => return None,
         })
     }
@@ -54,7 +61,9 @@ impl Scope {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Host => "host",
+            Self::Process => "process",
             Self::Member => "member",
+            Self::Route => "route",
         }
     }
 }
@@ -65,14 +74,43 @@ pub enum Metric {
     /// Percent of a filesystem an unprivileged process can still use.
     DiskFreePercent,
     DiskFreeBytes,
+    /// `MemAvailable` as a percent of `MemTotal`.
+    MemoryAvailablePercent,
+    /// Cores the named processes used between two samples, summed.
+    ProcessCpuCores,
+    ProcessRssBytes,
     /// The claim database file and its write-ahead log.
     DbSizeBytes,
+    /// Bytes of claims this member wrote in the last 24 hours. Every member stores every claim, so
+    /// this is what each member adds to every database in the fleet.
+    DbAuthoredBytesPerDay,
+    /// The daemon's own CPU, from its request-latency windows.
+    DaemonCpuCores,
+    /// The share of a target's samples over target, as a multiple of the 1% a p99 target allows:
+    /// 1 spends the error budget exactly as fast as it is earned.
+    SloBurnRate,
+    SloP99Ms,
 }
 
 const METRICS: &[(&str, Metric, Scope)] = &[
     ("disk.free-percent", Metric::DiskFreePercent, Scope::Host),
     ("disk.free-bytes", Metric::DiskFreeBytes, Scope::Host),
+    (
+        "memory.available-percent",
+        Metric::MemoryAvailablePercent,
+        Scope::Host,
+    ),
+    ("process.cpu-cores", Metric::ProcessCpuCores, Scope::Process),
+    ("process.rss-bytes", Metric::ProcessRssBytes, Scope::Process),
     ("db.size-bytes", Metric::DbSizeBytes, Scope::Member),
+    (
+        "db.authored-bytes-per-day",
+        Metric::DbAuthoredBytesPerDay,
+        Scope::Member,
+    ),
+    ("daemon.cpu-cores", Metric::DaemonCpuCores, Scope::Member),
+    ("slo.burn-rate", Metric::SloBurnRate, Scope::Route),
+    ("slo.p99-ms", Metric::SloP99Ms, Scope::Route),
 ];
 
 impl Metric {
@@ -99,11 +137,25 @@ impl Metric {
             .expect("every metric has a scope")
     }
 
+    /// Whether `window` applies: the request-latency windows are 1m, 5m and 1h.
+    fn takes_window(self) -> bool {
+        matches!(
+            self,
+            Self::SloBurnRate | Self::SloP99Ms | Self::DaemonCpuCores
+        )
+    }
+
     /// A value as a person reads it.
     pub fn describe(self, value: f64) -> String {
         match self {
-            Self::DiskFreePercent => format!("{}%", round(value)),
-            Self::DiskFreeBytes | Self::DbSizeBytes => bytes(value),
+            Self::DiskFreePercent | Self::MemoryAvailablePercent => format!("{}%", round(value)),
+            Self::DiskFreeBytes
+            | Self::ProcessRssBytes
+            | Self::DbSizeBytes
+            | Self::DbAuthoredBytesPerDay => bytes(value),
+            Self::ProcessCpuCores | Self::DaemonCpuCores => format!("{} cores", round(value)),
+            Self::SloBurnRate => format!("{}x budget", round(value)),
+            Self::SloP99Ms => format!("{} ms", round(value)),
         }
     }
 }
@@ -150,6 +202,32 @@ impl Comparison {
 }
 
 /// The request-latency window a route or daemon CPU condition reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Window {
+    OneMinute,
+    FiveMinutes,
+    OneHour,
+}
+
+impl Window {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "1m" => Self::OneMinute,
+            "5m" => Self::FiveMinutes,
+            "1h" => Self::OneHour,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OneMinute => "1m",
+            Self::FiveMinutes => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+}
+
 /// A condition declaration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConditionDecl {
@@ -161,6 +239,11 @@ pub struct ConditionDecl {
     pub hosts: Vec<String>,
     /// A disk metric's filesystem, by a path on it. None is every local filesystem.
     pub path: Option<String>,
+    /// A process metric's process name, as `/proc/PID/comm` shows it.
+    pub process: Option<String>,
+    /// A route metric's target name (`person-read`) or route (`GET /v1/client/now`).
+    pub route: Option<String>,
+    pub window: Window,
     pub comparison: Comparison,
     pub threshold: f64,
     /// The value it must pass back over to recover. Equal to the threshold without hysteresis.
@@ -200,6 +283,9 @@ const CHILDREN: &[&str] = &[
     "scope",
     "host",
     "path",
+    "process",
+    "route",
+    "window",
     "above",
     "below",
     "recover",
@@ -310,8 +396,9 @@ pub fn parse_condition(subject: &str, desired: &Value) -> Result<ConditionDecl, 
         )
     })?;
     let scope_name = one_string(desired, "scope")?.ok_or("a condition needs a `scope`")?;
-    let scope = Scope::parse(&scope_name)
-        .ok_or_else(|| format!("unknown scope `{scope_name}`; use host or member"))?;
+    let scope = Scope::parse(&scope_name).ok_or_else(|| {
+        format!("unknown scope `{scope_name}`; use host, process, member or route")
+    })?;
     if scope != metric_scope {
         return Err(format!(
             "metric `{metric_name}` is measured per {}, not per {scope_name}",
@@ -339,6 +426,32 @@ pub fn parse_condition(subject: &str, desired: &Value) -> Result<ConditionDecl, 
             return Err(format!("path `{path}` is not absolute"));
         }
     }
+    let process = one_string(desired, "process")?;
+    match (scope, &process) {
+        (Scope::Process, None) => return Err("a process condition needs a `process`".into()),
+        (Scope::Process, Some(name)) if name.len() > 15 => {
+            return Err(format!(
+                "process `{name}` is longer than the 15 bytes /proc/PID/comm keeps"
+            ));
+        }
+        (Scope::Process, Some(_)) | (_, None) => {}
+        (_, Some(_)) => return Err("only a process condition takes a `process`".into()),
+    }
+    let route = one_string(desired, "route")?;
+    match (scope, &route) {
+        (Scope::Route, None) => return Err("a route condition needs a `route`".into()),
+        (Scope::Route, Some(_)) | (_, None) => {}
+        (_, Some(_)) => return Err("only a route condition takes a `route`".into()),
+    }
+    let window = match one_string(desired, "window")? {
+        None if metric == Metric::DaemonCpuCores => Window::FiveMinutes,
+        None => Window::OneHour,
+        Some(_) if !metric.takes_window() => {
+            return Err(format!("metric `{metric_name}` takes no `window`"));
+        }
+        Some(value) => Window::parse(&value)
+            .ok_or_else(|| format!("window `{value}` is not one of 1m, 5m or 1h"))?,
+    };
     let (comparison, threshold) =
         match (one_number(desired, "above")?, one_number(desired, "below")?) {
             (Some(value), None) => (Comparison::Above, value),
@@ -403,6 +516,9 @@ pub fn parse_condition(subject: &str, desired: &Value) -> Result<ConditionDecl, 
         scope,
         hosts,
         path,
+        process,
+        route,
+        window,
         comparison,
         threshold,
         recover_at,
@@ -976,48 +1092,65 @@ mod tests {
     fn a_declaration_that_cannot_be_evaluated_is_refused() {
         let base = || {
             vec![
-                json!({"name":"metric", "arguments":["db.size-bytes"]}),
-                json!({"name":"scope", "arguments":["member"]}),
-                json!({"name":"above", "arguments":[1000]}),
-                json!({"name":"for", "arguments":["10m"]}),
-                json!({"name":"owner", "arguments":["person/ada"]}),
+                json!({"name": "metric", "arguments": ["process.cpu-cores"]}),
+                json!({"name": "scope", "arguments": ["process"]}),
+                json!({"name": "process", "arguments": ["collector"]}),
+                json!({"name": "above", "arguments": [1.5]}),
+                json!({"name": "for", "arguments": ["10m"]}),
+                json!({"name": "owner", "arguments": ["person/ada"]}),
             ]
         };
-        let parse =
-            |children| parse_condition("condition/fleet/database", &body(Value::Array(children)));
+        let parse = |children: Vec<Value>| {
+            parse_condition("condition/fleet/disk", &body(Value::Array(children)))
+        };
         assert!(parse(base()).is_ok());
-        for metric in [
-            "process.cpu-cores",
-            "memory.available-percent",
-            "daemon.cpu-cores",
-            "slo.burn-rate",
-            "cost.usd-per-day",
-            "db.authored-bytes-per-day",
-        ] {
+        let replace = |index: usize, child: Value| {
             let mut children = base();
-            children[0] = json!({"name":"metric", "arguments":[metric]});
-            assert!(parse(children).unwrap_err().contains("unknown metric"));
-        }
-        let mut children = base();
-        children[1] = json!({"name":"scope", "arguments":["host"]});
-        assert!(parse(children).unwrap_err().contains("measured per member"));
-        for child in ["process", "route", "window", "severity"] {
-            let mut children = base();
-            children.push(json!({"name":child, "arguments":["invented"]}));
-            assert!(parse(children).unwrap_err().contains("does not accept"));
-        }
-        let mut children = base();
-        children.push(json!({"name":"below", "arguments":[1]}));
-        assert!(parse(children).unwrap_err().contains("not both"));
-        let mut children = base();
-        children.push(json!({"name":"recover", "arguments":[2000]}));
-        assert!(parse(children).unwrap_err().contains("at or below"));
-        let mut children = base();
-        children.remove(3);
-        assert!(parse(children).unwrap_err().contains("needs `for`"));
-        let mut children = base();
-        children[4] = json!({"name":"owner", "arguments":["ada"]});
-        assert!(parse(children).unwrap_err().contains("not an agent"));
+            children[index] = child;
+            parse(children).unwrap_err()
+        };
+        assert!(
+            replace(0, json!({"name": "metric", "arguments": ["cpu"]})).contains("unknown metric")
+        );
+        // Spend remains unavailable until the usage reader is bounded and measured.
+        assert!(
+            replace(
+                0,
+                json!({"name": "metric", "arguments": ["cost.usd-per-day"]})
+            )
+            .contains("unknown metric")
+        );
+        assert!(
+            replace(1, json!({"name": "scope", "arguments": ["host"]}))
+                .contains("measured per process")
+        );
+        assert!(
+            replace(2, json!({"name": "route", "arguments": ["person-read"]}))
+                .contains("needs a `process`")
+        );
+        assert!(
+            replace(
+                2,
+                json!({"name": "process", "arguments": ["a-process-name-too-long"]})
+            )
+            .contains("15 bytes")
+        );
+        assert!(replace(4, json!({"name": "recover", "arguments": [1]})).contains("needs `for`"));
+        assert!(
+            replace(5, json!({"name": "owner", "arguments": ["ada"]})).contains("not an agent")
+        );
+        let mut both = base();
+        both.push(json!({"name": "below", "arguments": [1]}));
+        assert!(parse(both).unwrap_err().contains("not both"));
+        let mut loose = base();
+        loose.push(json!({"name": "recover", "arguments": [2]}));
+        assert!(parse(loose).unwrap_err().contains("at or below"));
+        let mut unknown = base();
+        unknown.push(json!({"name": "severity", "arguments": ["high"]}));
+        assert!(parse(unknown).unwrap_err().contains("does not accept"));
+        let mut window = base();
+        window.push(json!({"name": "window", "arguments": ["5m"]}));
+        assert!(parse(window).unwrap_err().contains("takes no `window`"));
     }
 
     #[test]
