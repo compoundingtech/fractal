@@ -992,9 +992,18 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.broken_gate_items_from_failures(person, as_of, self.operational_failures()?)
+    }
+
+    pub(super) fn broken_gate_items_from_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        failures: Vec<AttentionRequestView>,
+    ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for failure in self.operational_failures()? {
+        for failure in failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -1037,18 +1046,32 @@ impl Store {
         Ok(items)
     }
 
+    // The independently folding operational reader is now used only by parity controls.
+    #[cfg(test)]
     pub(super) fn operational_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        let (items, _) = self.operational_attention_items_with_failures(person, as_of)?;
+        Ok(items)
+    }
+
+    /// Return this call's history cut for the broken-gate reducer, without caching authority.
+    /// Read it at its original first-use point, after the derived fault families below.
+    pub(super) fn operational_attention_items_with_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
         let connection = self.readers.get();
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
         items.extend(self.unstarted_seat_attention_items(person, as_of)?);
-        for failure in self.operational_failures()? {
+        let failures = self.operational_failures()?;
+        for failure in &failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -1176,14 +1199,14 @@ impl Store {
             // Diagnostic history stays immutable; current work/runtime state decides whether
             // this episode still needs an owner. This changes no canonical timing fold.
             let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake(&failure, as_of)? else {
+                let Some(context) = self.current_exhausted_work_wake(failure, as_of)? else {
                     continue;
                 };
                 Some(context)
             } else {
                 None
             };
-            let mut item = attention_item_from_failure(failure);
+            let mut item = attention_item_from_failure(failure.clone());
             item.kind = "fault".into();
             if f["condition"] == MISSING_AGENT_CONDITION {
                 item.mission_run = Some(source.clone());
@@ -1211,7 +1234,7 @@ impl Store {
             }
             items.push(item);
         }
-        Ok(items)
+        Ok((items, failures))
     }
 
     fn current_exhausted_work_wake(
