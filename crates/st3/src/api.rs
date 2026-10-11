@@ -1193,9 +1193,7 @@ async fn response_envelope_unbounded(
                         handler_started.elapsed().as_millis() as i64,
                     );
                     if let Some(writer_wait) = writer_wait.as_ref() {
-                        let (wait_ms, ops) = writer_wait.totals();
-                        server.record("st.writer.wait_ms", wait_ms);
-                        server.record("st.writer.ops", i64::try_from(ops).unwrap_or(i64::MAX));
+                        crate::otel::record_writer_wait(server, writer_wait.totals());
                     }
                 }
                 response
@@ -1449,8 +1447,13 @@ fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
+/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+pub(crate) fn request_latency_target_windows() -> Value {
+    request_latency().lock().unwrap().targets_only(Instant::now())
+}
+
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
-fn request_latency_windows() -> Value {
+pub(crate) fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 
