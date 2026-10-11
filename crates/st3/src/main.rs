@@ -2719,9 +2719,9 @@ enum AssistantGrantCommand {
         #[arg(long)]
         shim_public_key: String,
         #[arg(long, default_value_t = 4096)]
-        default_response_bytes: u32,
+        default_response_bytes: usize,
         #[arg(long, default_value_t = 16384)]
-        max_response_bytes: u32,
+        max_response_bytes: usize,
     },
 }
 
@@ -9514,7 +9514,8 @@ async fn run_devices(
                     client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
                         api_version: CLIENT_V0_API_VERSION.into(), issuer, key_id,
                         attestor_public_key, shim_public_key,
-                        default_response_bytes, max_response_bytes,
+                        default_response_bytes: Some(default_response_bytes),
+                        max_response_bytes: Some(max_response_bytes),
                     }).await?
                 }
             };
@@ -31597,6 +31598,27 @@ mod tests {
             .is_err(),
             "read-only and full-control pairing must be mutually exclusive"
         );
+    }
+
+    #[test]
+    fn assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets() {
+        let cli = Cli::try_parse_from([
+            "st3", "devices", "--as", "person/operator", "grant", "read-trust",
+            "assistant-grant/fixture", "--issuer", "scg/approval-host", "--key-id",
+            "approval-key/fixture", "--attestor-public-key", "attestor-fixture",
+            "--shim-public-key", "shim-fixture", "--default-response-bytes", "1024",
+            "--max-response-bytes", "2048",
+        ]).unwrap();
+        assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
+        let Command::Devices(DevicesArgs { command: Some(DevicesCommand::Grant {
+            command: AssistantGrantCommand::ReadTrust { grant, issuer, key_id,
+                attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes },
+        }), .. }) = cli.command else { panic!("expected assistant read trust"); };
+        assert_eq!(grant, "assistant-grant/fixture");
+        assert_eq!(issuer, "scg/approval-host");
+        assert_eq!(key_id, "approval-key/fixture");
+        assert_ne!(attestor_public_key, shim_public_key);
+        assert_eq!((default_response_bytes, max_response_bytes), (1024, 2048));
     }
 
     #[test]
