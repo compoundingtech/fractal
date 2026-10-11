@@ -13,7 +13,7 @@ import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { darkTheme } from './assistant-ui/embrace-theme'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
-import { agentMessage, agentMessageVias, outgoingMessage, broadcastMessage, longAgentMessage } from './agent-message-fixtures'
+import { agentMessage, agentMessageVias, outgoingMessage, broadcastMessage, longAgentMessage, largeAgentMessage } from './agent-message-fixtures'
 
 const meta = { title: 'Fractal UI/Agent Messages', component: AgentMessage, parameters: { layout: 'fullscreen' }, args: { ...agentMessage, onCopyId: fn(), onLoadFull: fn(), onOpenReply: fn() }, decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' ? lightTheme : darkTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<typeof AgentMessage>
 export default meta
@@ -242,4 +242,54 @@ export const OutgoingBroadcastLight1440: Story = { ...OutgoingBroadcast, paramet
 export const OutgoingFailedLight440: Story = { ...OutgoingFailed, parameters: { scheme: 'light', width: 440 } }
 export const OutgoingFailedDark1440: Story = { ...OutgoingFailed, parameters: { scheme: 'dark', width: 1440 } }
 export const OutgoingFailedLight1440: Story = { ...OutgoingFailed, parameters: { scheme: 'light', width: 1440 } }
+export const BroadcastWithoutCount: Story = { render: () => <OutgoingMessageRow {...broadcastMessage} delivery={{ _tag: 'Broadcast' }} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByRole('button', { name: /Broadcast.*Please review/ })).toHaveAttribute('aria-expanded', 'false')
+  await expect(canvas.queryByText('all seats')).toBeNull()
+  await expect(canvas.queryByText('3 seats')).toBeNull()
+} }
+export const FetchedLongMessage: Story = {
+  args: { body: { _tag: 'Preview', markdown: 'The release review is ready…' } },
+  render: function FetchedLongArgs(args) {
+    const [, updateArgs] = useArgs()
+    return <AgentMessage {...args} onLoadFull={() => { args.onLoadFull?.(); updateArgs({ body: { _tag: 'Full', markdown: longAgentMessage } }) }} />
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement)
+    const load = canvas.getByRole('button', { name: 'Show full message' })
+    await expect(canvas.queryByText('End of the full release review.')).toBeNull()
+    await userEvent.click(load)
+    await waitFor(() => expect(canvas.getByText('End of the full release review.')).toBeVisible())
+    await expect(canvas.getByRole('button', { name: 'Hide full message' })).toHaveAttribute('aria-expanded', 'true')
+    await expect(load).toHaveTextContent('Full message loaded')
+    await expect(load).toHaveFocus()
+    await expect(canvas.queryByRole('button', { name: 'Show full message' })).toBeNull()
+    await expect(args.onLoadFull).toHaveBeenCalledTimes(1)
+  },
+}
+export const LargeBodies: Story = { render: () => <>
+  <AgentMessage {...agentMessage} body={{ _tag: 'Full', markdown: largeAgentMessage }} />
+  <OutgoingMessageRow {...outgoingMessage} message={largeAgentMessage} />
+</>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvasElement.querySelector('[data-message-renderer="plain"]')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: 'Show full message' }))
+  const full = canvas.getByRole('region', { name: 'Full message' })
+  await expect(full.querySelector('[data-message-renderer="plain"] pre')?.textContent).toBe(largeAgentMessage)
+  await expect(full.querySelector('[data-testid="markdown"]')).toBeNull()
+  await expect(full.querySelector('[data-syntax-token]')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: /Review.*Large report/ }))
+  await expect(canvasElement.querySelectorAll('[data-message-renderer="plain"]')).toHaveLength(2)
+  await expect(canvasElement.querySelectorAll('[data-message-renderer="plain"] pre')[1]?.textContent).toBe(largeAgentMessage)
+  await expect(canvasElement.querySelector('[data-message-renderer="plain"] code')).toBeNull()
+} }
+export const BroadcastWithoutCountLight440: Story = { ...BroadcastWithoutCount, parameters: { scheme: 'light', width: 440 } }
+export const BroadcastWithoutCountDark1440: Story = { ...BroadcastWithoutCount, parameters: { scheme: 'dark', width: 1440 } }
+export const BroadcastWithoutCountLight1440: Story = { ...BroadcastWithoutCount, parameters: { scheme: 'light', width: 1440 } }
+export const FetchedLongMessageLight440: Story = { ...FetchedLongMessage, parameters: { scheme: 'light', width: 440 } }
+export const FetchedLongMessageDark1440: Story = { ...FetchedLongMessage, parameters: { scheme: 'dark', width: 1440 } }
+export const FetchedLongMessageLight1440: Story = { ...FetchedLongMessage, parameters: { scheme: 'light', width: 1440 } }
+export const LargeBodiesLight440: Story = { ...LargeBodies, parameters: { scheme: 'light', width: 440 } }
+export const LargeBodiesDark1440: Story = { ...LargeBodies, parameters: { scheme: 'dark', width: 1440 } }
+export const LargeBodiesLight1440: Story = { ...LargeBodies, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })

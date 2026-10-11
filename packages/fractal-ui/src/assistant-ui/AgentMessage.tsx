@@ -37,6 +37,11 @@ export interface AgentMessageProps {
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels. */
 export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? ' › ' : ''}{part}</React.Fragment>)}</span><span {...stylex.props(styles.visuallyHidden)}>{id}</span></span>
 
+/** Large untrusted bodies bypass synchronous Markdown parsing and code highlighting entirely. */
+const MessageBody = ({ text }: { readonly text: string }) => text.length > 16000
+  ? <div data-message-renderer="plain"><p {...stylex.props(styles.meta)}>Large message · shown as plain text</p><pre {...stylex.props(styles.plainText)}>{text}</pre></div>
+  : <div data-message-renderer="markdown"><EmbraceMarkdownPreview markdown={text} /></div>
+
 /** A promoted incoming card. Transport and full-body loading belong to its owner. */
 export const AgentMessage = ({ id, from, to, via, body, subject, replyTo, at, arrivedWhileWorking, delivery, onLoadFull, onCopyId, onOpenReply, fullMessageUnavailableReason }: AgentMessageProps) => {
   const [loadRequested, setLoadRequested] = React.useState(false)
@@ -55,17 +60,17 @@ export const AgentMessage = ({ id, from, to, via, body, subject, replyTo, at, ar
     </header>
     {subject !== undefined ? <h3 {...stylex.props(styles.subject)}>{subject}</h3> : null}
     {replyTo !== undefined ? <div {...stylex.props(styles.meta)}>Reply to {onOpenReply !== undefined ? <Button {...stylex.props(styles.button)} onPress={() => onOpenReply(replyTo)}><AgentIdHierarchy id={replyTo} /></Button> : <AgentIdHierarchy id={replyTo} />}</div> : null}
-    {body._tag === 'Full' && body.markdown.length > 4000 ? <Disclosure>
+    {body._tag === 'Full' && body.markdown.length > 4000 ? <Disclosure defaultExpanded={loaded}>
       {({ isExpanded }) => <>
         <Button slot="trigger" {...stylex.props(styles.button)}>{isExpanded ? 'Hide full message' : 'Show full message'}</Button>
-        {!isExpanded ? <div {...stylex.props(styles.messageBody)}><EmbraceMarkdownPreview markdown={preview} /></div> : null}
-        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Full message"><EmbraceMarkdownPreview markdown={body.markdown} /></div> : null}</DisclosurePanel>
+        {!isExpanded ? <div {...stylex.props(styles.messageBody)}><MessageBody text={preview} /></div> : null}
+        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Full message"><MessageBody text={body.markdown} /></div> : null}</DisclosurePanel>
       </>}
-    </Disclosure> : <div {...stylex.props(styles.messageBody)}><EmbraceMarkdownPreview markdown={body._tag === 'Full' ? body.markdown : preview} /></div>}
+    </Disclosure> : <div {...stylex.props(styles.messageBody)}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} /></div>}
     {body._tag !== 'Full' || loaded ? <div {...stylex.props(styles.header)}>
       {!loaded ? <span {...stylex.props(styles.meta)}>Message preview</span> : null}
       <Button {...stylex.props(styles.button)} isPending={body._tag === 'Loading'} isDisabled={!loaded && onLoadFull === undefined} aria-disabled={loaded || undefined} aria-describedby={reasonId} onPress={loaded ? undefined : () => { setLoadRequested(true); onLoadFull?.() }}>{loaded ? 'Full message loaded' : body._tag === 'Loading' ? 'Loading full message…' : body._tag === 'Failed' ? 'Retry full message' : 'Show full message'}</Button>
-      <span id={reasonId} tabIndex={onLoadFull === undefined ? 0 : undefined} {...stylex.props(styles.meta)}>{loaded ? 'The full message is shown.' : onLoadFull === undefined ? fullMessageUnavailableReason ?? 'This surface cannot load the full message.' : body._tag === 'Loading' ? 'Fetching the full message; the preview is kept.' : ''}</span>
+      <span id={reasonId} tabIndex={onLoadFull === undefined ? 0 : undefined} {...stylex.props(styles.meta)}>{loaded ? 'The full message has been received.' : onLoadFull === undefined ? fullMessageUnavailableReason ?? 'This surface cannot load the full message.' : body._tag === 'Loading' ? 'Fetching the full message; the preview is kept.' : ''}</span>
       {body._tag === 'Failed' ? <span role="alert" {...stylex.props(styles.danger)}>{body.reason} · the preview is kept</span> : null}
     </div> : null}
     {id !== undefined ? <footer {...stylex.props(styles.header, styles.meta)}><span>message/<AgentIdHierarchy id={id} /></span>{onCopyId !== undefined ? <Button {...stylex.props(styles.button)} onPress={() => onCopyId(id)}>Copy id</Button> : null}</footer> : null}
@@ -95,7 +100,7 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, defaultE
         <div {...stylex.props(styles.line)}>
           <Button slot="trigger" {...stylex.props(styles.trigger)}>
             <span aria-hidden="true">{isExpanded ? '▾' : '▸'} →</span>
-            <span>{delivery._tag === 'Broadcast' ? delivery.recipientCount !== undefined ? `${delivery.recipientCount} seats` : 'all seats' : recipients[0] !== undefined ? <AgentIdHierarchy id={recipients[0].id} /> : 'Message sent'}</span>
+            <span>{delivery._tag === 'Broadcast' ? delivery.recipientCount !== undefined ? `${delivery.recipientCount} seats` : 'Broadcast' : recipients[0] !== undefined ? <AgentIdHierarchy id={recipients[0].id} /> : 'Message sent'}</span>
             <span {...stylex.props(styles.excerpt)} title={firstLine}>{firstLine}</span>
           </Button>
           {recipients.map(recipient => <span key={recipient.id} role={recipient.receipt?._tag === 'Failed' ? 'note' : undefined} tabIndex={recipient.receipt?._tag === 'Failed' ? 0 : undefined} aria-label={recipient.receipt?._tag === 'Failed' ? `${recipient.id} · failed · ${recipient.receipt.reason}` : undefined} {...stylex.props(styles.receipt, recipient.receipt?._tag === 'Failed' && styles.danger)} title={recipient.receipt?._tag === 'Failed' ? recipient.receipt.reason : undefined}>
@@ -103,7 +108,7 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, defaultE
           </span>)}
           {at !== undefined ? <time {...stylex.props(styles.meta)}>{at}</time> : null}
         </div>
-        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.body)}><EmbraceMarkdownPreview markdown={message} />{recipients.flatMap(recipient => recipient.receipt?._tag === 'Failed' ? [<p key={recipient.id} {...stylex.props(styles.danger)}>{recipient.id}: {recipient.receipt.reason}</p>] : [])}</div> : null}</DisclosurePanel>
+        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.body)}><MessageBody text={message} />{recipients.flatMap(recipient => recipient.receipt?._tag === 'Failed' ? [<p key={recipient.id} {...stylex.props(styles.danger)}>{recipient.id}: {recipient.receipt.reason}</p>] : [])}</div> : null}</DisclosurePanel>
       </>}
     </Disclosure>
   </div>
@@ -125,5 +130,6 @@ const styles = stylex.create({
   receipt: { flexShrink: 0, fontSize: 10, color: tokens.muted, paddingInline: 4, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 4, outlineColor: accentTokens.accent, outlineOffset: 2 },
   body: { padding: 8, overflowWrap: 'anywhere', maxHeight: 340, overflowY: 'auto' },
   danger: { color: tokens.danger },
+  plainText: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 },
   visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
 })

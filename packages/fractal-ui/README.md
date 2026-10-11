@@ -54,9 +54,9 @@ The ACH model is retained with small display extensions: `autoSelected` records 
 
 ### Agent messages
 
-`AgentMessage` is a card with pure sender, recipient, via and tagged body props. The host owns fetching, copying and reply navigation. Long complete messages render only a bounded excerpt until disclosed; full output scrolls within the card. A clicked full-body action remains focusable as the host replaces its preview with the loaded body. Missing full-body access has an explicit keyboard-reachable reason.
+`AgentMessage` is a card with pure sender, recipient, via and tagged body props. The host owns fetching, copying and reply navigation. Long complete messages render only a bounded excerpt until disclosed; a fetched long body opens immediately while retaining focus on its load action. Expanded output scrolls within the card. Markdown parsing/highlighting is capped at 16,000 characters; larger incoming and outgoing bodies render as literal plain text, never as an unbounded Markdown tree. Missing full-body access has an explicit keyboard-reachable reason.
 
-`OutgoingMessageRow` is one work-log line per send, including broadcasts. Recipient count is a reported fact, not a guess from partial receipts. Each reported recipient gets its own injected/queued/revived/failed receipt; missing status is omitted. Failed receipts expose their reason through keyboard focus and the expanded body. The host counts `data-work-kind="messages-sent"` rows in its turn fold.
+`OutgoingMessageRow` is one work-log line per send, including broadcasts. Recipient count is a reported fact, not a guess from partial receipts; without a count the row says only “Broadcast”. Each reported recipient gets its own injected/queued/revived/failed receipt; missing status is omitted. Failed receipts expose their reason through keyboard focus and the expanded body. The host counts `data-work-kind="messages-sent"` rows in its turn fold.
 
 These components replace the incoming `HarnessNotice` Irc/Delivery presentations and outgoing peer-message/file-change presentations in application adapters. The kit does not parse message envelopes or resolve recipient receipts.
 
