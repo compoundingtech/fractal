@@ -217,3 +217,17 @@ test('dense rows keep one titled account/provider caption and preserve meter/res
     assert.equal(marked.querySelector('[aria-label]').getAttribute('aria-label'), 'Conflicting source evidence')
   } finally { await view.dispose() }
 })
+
+test('caller-owned compact captions keep suffix-only identities distinct and canonical detail intact', async () => {
+  const north = { ...rows[0], id: 'shared-north', identity: 'sample-provider/shared-workspace-north', compactIdentity: 'sp:…north' }
+  const south = { ...rows[0], id: 'shared-south', identity: 'sample-provider/shared-workspace-south', compactIdentity: 'sp:…south' }
+  const view = await mount({ rows: [north, south] })
+  try {
+    const compact = [...view.container.querySelectorAll('[data-usage-meter-identity="compact"]')]
+    assert.deepEqual(compact.map(node => node.textContent), ['sp:…north', 'sp:…south'])
+    assert.equal(new Set(compact.map(node => node.textContent)).size, 2)
+    assert.ok(rowOf(view.container, north.id).querySelector('[data-usage-meter-account]').title.includes(north.identity))
+    await view.render({ selectedId: north.id })
+    assert.ok(view.container.querySelector('[data-usage-meter-detail]').textContent.includes(north.identity))
+  } finally { await view.dispose() }
+})

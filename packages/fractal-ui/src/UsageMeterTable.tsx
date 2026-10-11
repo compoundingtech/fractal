@@ -137,7 +137,7 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
       </TableHeader>
       <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
         {rows.map(row => <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={`${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note === undefined ? '' : ` · ${row.note}`}`} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}>{row.identity}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span></Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={`${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note === undefined ? '' : ` · ${row.note}`}`} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}>{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}>{row.compactIdentity}</span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
@@ -161,21 +161,23 @@ const styles = stylex.create({
   header: { zIndex: 1, color: ink.fgMuted, fontSize: type.denseSize, fontWeight: type.weightRegular, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   headerContent: { display: 'flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap', overflow: 'hidden' },
   sortIndicator: { display: { default: 'inline-block', ':empty': 'none' }, flexShrink: 0, color: ink.fgSoft },
-  accountColumn: { width: { default: '22%', '@container (width < 15rem)': '41%' } },
-  governingColumn: { width: { default: '25%', '@container (width < 15rem)': '30%' } },
-  resetColumn: { width: { default: '19%', '@container (width < 15rem)': '20%' } },
-  comparisonColumn: { width: '25%', display: { default: 'table-cell', '@container (width < 15rem)': 'none' } },
+  accountColumn: { width: { default: '25%', '@container (width < 15rem)': '41%' } },
+  governingColumn: { width: { default: '23%', '@container (width < 15rem)': '30%' } },
+  resetColumn: { width: '20%' },
+  comparisonColumn: { width: '23%', display: { default: 'table-cell', '@container (width < 15rem)': 'none' } },
   moreColumn: { width: '9%' },
   row: { backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   selectedRow: { backgroundColor: surface.rowActive },
   cell: { outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   accountLabel: { color: ink.fg },
+  fullIdentity: { display: { default: 'inline', '@container (width < 36rem)': 'none' } },
+  compactIdentity: { display: { default: 'none', '@container (width < 36rem)': 'inline' } },
   identity: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   note: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   meter: { minWidth: 0 },
-  compactMeter: { display: 'flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap' },
+  compactMeter: { display: 'flex', alignItems: 'center', gap: 0, whiteSpace: 'nowrap' },
   compactWindow: { flexShrink: 0, maxWidth: '5ch' },
-  compactReading: { flex: 1, gap: '2px' },
+  compactReading: { flex: 1, gap: 0 },
   windowLabel: { display: 'block', color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meterReading: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0 },
   reading: { flexShrink: 0, color: ink.fgSoft, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },

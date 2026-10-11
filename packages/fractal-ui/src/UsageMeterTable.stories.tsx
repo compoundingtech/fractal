@@ -56,6 +56,7 @@ const rows: readonly UsageMeterRow[] = [
 
 const denseRows: readonly UsageMeterRow[] = Array.from({ length: 11 }, (_, index): UsageMeterRow => ({
   id: `fictional-account-${index + 1}`, label: `Account ${index + 1}`, identity: `provider-${index % 3 + 1}/account-${index + 1}`,
+  compactIdentity: `p${index % 3 + 1}:…nt-${String(index + 1).padStart(2, '0')}`,
   governing: { label: '5h', text: `${95 - index * 7}%`, fraction: (95 - index * 7) / 100, tone: index < 3 ? 'critical' : index < 5 ? 'warning' : 'ok' },
   comparison: { label: '1w', text: `${70 - index * 5}%`, fraction: (70 - index * 5) / 100, tone: index < 3 ? 'warning' : 'ok' },
   reset: '2h', ...(index % 3 === 0 ? { resetCount: index % 4 } : {}), omitted: index % 3, stale: false,

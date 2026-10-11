@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Usage-meter rows accept caller-owned compact account captions at narrow widths, keeping distinguishing suffixes visible instead of clipping repeated identity prefixes. Canonical identities remain in row detail and titles. Account columns gain width by shrinking meter gaps before text; aligned 22px rows and reported reset evidence are preserved. Fictional stories and suffix-only identity controls exercise the real component.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Optional display captions do not change source or wire contracts. Callers without compact captions retain their canonical caption." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

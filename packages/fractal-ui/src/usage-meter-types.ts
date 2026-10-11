@@ -23,6 +23,8 @@ export interface UsageMeterRow {
   readonly id: string
   readonly label: string
   readonly identity: string
+  /** Caller-owned, distinguishable compact caption; canonical identity remains in detail. */
+  readonly compactIdentity?: string
   readonly governing: UsageMeterCell
   readonly comparison?: UsageMeterCell
   readonly reset: string
