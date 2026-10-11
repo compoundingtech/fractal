@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, RadioGroup, Radio, CheckboxGroup, Checkbox, TextField, TextArea, Input, Label, FileTrigger } from 'react-aria-components'
-import { accentTokens, tokens } from './embrace-tokens.stylex'
+import { surfaceVars, textVars, borderVars, accentVars, statusVars } from './composition-tokens.stylex'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import type { Answers, AnswerDraft, Preview, QuestionRequestView, QuestionVariant, QuestionView } from './question-model'
 export type * from './question-model'
@@ -175,20 +175,20 @@ export const NeedsYouBar = ({ requests, expanded, onToggle, transcriptVisibility
 export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <details key={request.id} {...stylex.props(styles.card)}><summary {...stylex.props(styles.inboxSummary)}>{request.agentLabel} · {request.questions[0]?.prompt}</summary><QuestionForm {...formProps?.(request.id)} request={request} variant="pinned" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} /></details>)}</section>
 
 const styles = stylex.create({
-  card: { padding: 12, maxWidth: 720, width: '100%', boxSizing: 'border-box', borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 8, backgroundColor: tokens.panel, color: tokens.ink, minWidth: 0, overflowWrap: 'anywhere' },
+  card: { padding: 12, maxWidth: 720, width: '100%', boxSizing: 'border-box', borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 8, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere' },
   pinned: { padding: 0, borderWidth: 0, backgroundColor: 'transparent' },
   note: { alignSelf: 'flex-start', borderWidth: 0, backgroundColor: 'transparent', paddingInline: 0 },
   inboxSummary: { cursor: 'pointer', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' },
-  summary: { paddingBlock: 8, color: tokens.ink, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: tokens.line },
+  summary: { paddingBlock: 8, color: textVars.fg, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: borderVars.borderStrong },
   body: { display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 },
   header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
-  meta: { color: tokens.muted, fontSize: 12 },
-  chip: { color: tokens.muted, fontSize: 11, paddingInline: 5, paddingBlock: 2, backgroundColor: tokens.recess, borderRadius: 4 },
-  button: { paddingBlock: 6, paddingInline: 9, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 5, backgroundColor: tokens.recess, color: tokens.ink, cursor: 'pointer', outlineColor: accentTokens.accent, outlineOffset: 2 },
-  danger: { color: tokens.danger },
-  option: { padding: 5, borderRadius: 4, outlineColor: accentTokens.accent, outlineOffset: 2, cursor: 'pointer' },
-  selected: { backgroundColor: tokens.recess }, focus: { outlineWidth: 2, outlineStyle: 'solid', outlineColor: accentTokens.accent },
-  field: { width: '100%', boxSizing: 'border-box', padding: 8, backgroundColor: tokens.recess, color: tokens.ink, borderWidth: 1, borderStyle: 'solid', borderColor: tokens.line, borderRadius: 4 },
-  preview: { margin: 0, padding: 10, backgroundColor: tokens.recess, borderRadius: 4 },
+  meta: { color: textVars.fgMuted, fontSize: 12 },
+  chip: { color: textVars.fgMuted, fontSize: 11, paddingInline: 5, paddingBlock: 2, backgroundColor: surfaceVars.rowActive, borderRadius: 4 },
+  button: { paddingBlock: 6, paddingInline: 9, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 5, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 2 },
+  danger: { color: statusVars.dangerFg },
+  option: { padding: 5, borderRadius: 4, outlineColor: accentVars.primary, outlineOffset: 2, cursor: 'pointer' },
+  selected: { backgroundColor: surfaceVars.rowActive }, focus: { outlineWidth: 2, outlineStyle: 'solid', outlineColor: accentVars.primary },
+  field: { width: '100%', boxSizing: 'border-box', padding: 8, backgroundColor: surfaceVars.rowActive, color: textVars.fg, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 4 },
+  preview: { margin: 0, padding: 10, backgroundColor: surfaceVars.rowActive, borderRadius: 4 },
   pre: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 12 },
 })

@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, within } from 'storybook/test'
+import axe from 'axe-core'
 import { HarnessNotice } from './assistant-ui/composition/HarnessNotice'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
 import type { HarnessWeight } from './assistant-ui/embrace-data/model'
@@ -56,6 +57,8 @@ export const Dark: Story = {
     const read = within(canvas.getByTestId('harness-weight-row')).getByRole('button', { name: 'Read summary' })
     await userEvent.click(read)
     await expect(read).toHaveAttribute('aria-expanded', 'true')
+    const contrast = await axe.run(canvasElement, { runOnly: { type: 'rule', values: ['color-contrast'] } })
+    await expect(contrast.violations).toEqual([])
   },
 }
 export const Light: Story = { ...Dark, args: { scheme: 'light' } }

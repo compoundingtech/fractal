@@ -39,6 +39,8 @@ Stories:
 
 `composerRouting` distinguishes a message held until the question is answered from a note about the question; typing copy follows the host-reported route. `ageLabel` is host-supplied relative time. Forms cap desktop width at 720px, inbox entries start as two-line disclosures, and pinned forms omit duplicate card chrome. The question stories compose the production composer, share drafts keyed by request id, and drive attention visibility with a real IntersectionObserver.
 
+Question surfaces use the shared Fractal composition palette directly, inheriting the nearest ancestor's StyleX theme. They require no component-specific palette decorator; the dark/light harness weight composition includes an axe color-contrast play.
+
 The generic `EmbraceToolCall`/`EmbraceToolItem` seam is explicitly read-only: its `ReadOnlyToolQuestion` type cannot carry a web-answer capability. Singular `{question, options}` and batched `{questions}` arguments keep their options; structured result `details.results`/flat `selectedOptions` facts render `QuestionSummary`. Calls that closed without recorded answer facts use `unrecorded`, not an invented answer. Live adapters supply richer typed requests and the terminal callback.
 
 The ACH model is retained with small display extensions: `autoSelected` records per-question timeout picks; `answered.where` labels terminal/web provenance; `chat-redirected` represents the catalog outcome; `unrecorded` keeps archived missing-result facts honest. Optional `variant` defaults to transcript; `composerTyping` labels held composer text; `onAttach` hands real selected files to the host instead of implementing upload/storage in the kit.

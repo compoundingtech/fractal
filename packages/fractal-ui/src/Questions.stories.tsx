@@ -250,4 +250,12 @@ export const SharedDraftLight1440: Story = { ...SharedDraft, parameters: { schem
 export const ScrollAttentionLight440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 440 } }
 export const ScrollAttentionDark1440: Story = { ...ScrollAttention, parameters: { scheme: 'dark', width: 1440 } }
 export const ScrollAttentionLight1440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 1440 } }
+export const RelativeAge: Story = { args: { ageLabel: '2 minutes ago' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByText(/2 minutes ago/)).toBeVisible()
+  await expect(canvas.queryByText(questionRequest.askedAt, { exact: false })).toBeNull()
+} }
+export const RelativeAgeLight440: Story = { ...RelativeAge, parameters: { scheme: 'light', width: 440 } }
+export const RelativeAgeDark1440: Story = { ...RelativeAge, parameters: { scheme: 'dark', width: 1440 } }
+export const RelativeAgeLight1440: Story = { ...RelativeAge, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' }, scroll: { maxHeight: 1000, overflowY: 'auto', maxWidth: 720 }, scrollSpace: { height: 1600 } })
