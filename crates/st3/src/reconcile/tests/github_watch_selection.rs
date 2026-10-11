@@ -57,9 +57,9 @@ fn settled_watch_stage_has_a_constant_three_statement_budget() {
         let reads = reconciler.incremental.reads_of(ITEM);
         assert!(reads.contains("kind:intent.desired"));
         assert!(reads.contains("kind:record.repaired"));
-        let before = smallclaims::sqlite::work::total();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
         reconciler.reconcile_github_watches_stage();
-        let cost = smallclaims::sqlite::work::total() - before;
+        let cost = scope.finish();
         assert!(
             cost.statements <= 3 && cost.vm_steps <= 100 && cost.fullscan_steps == 0,
             "settled watch stage must only observe the empty change feed, roster={count}: {cost:?}"

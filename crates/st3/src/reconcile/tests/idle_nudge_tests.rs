@@ -427,7 +427,7 @@ fn a_wait_that_is_not_a_pull_request_holds_until_it_goes_quiet() {
 }
 
 #[test]
-fn a_pull_request_queue_exit_wakes_directly_without_a_duplicate_idle_nudge() {
+fn a_watched_pull_request_queue_exit_wakes_directly_without_a_duplicate_idle_nudge() {
     let idle = fixture();
     let step = idle.hold("queued", "queue");
     idle.watch();
