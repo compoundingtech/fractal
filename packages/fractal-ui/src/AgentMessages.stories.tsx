@@ -318,4 +318,36 @@ export const PagedMultiMegabyteMessage: Story = {
 export const PagedMultiMegabyteMessageLight440: Story = { ...PagedMultiMegabyteMessage, parameters: { scheme: 'light', width: 440 } }
 export const PagedMultiMegabyteMessageDark1440: Story = { ...PagedMultiMegabyteMessage, parameters: { scheme: 'dark', width: 1440 } }
 export const PagedMultiMegabyteMessageLight1440: Story = { ...PagedMultiMegabyteMessage, parameters: { scheme: 'light', width: 1440 } }
+export const LargeSingleLineOutgoing: Story = { render: () => <OutgoingMessageRow {...outgoingMessage} message={'Single line report '.repeat(180000)} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const trigger = canvas.getByRole('button', { name: /Review.*Single line report/ })
+  await expect(trigger.textContent!.length).toBeLessThan(240)
+  await expect(trigger.querySelector('[title]')?.getAttribute('title')?.length).toBeLessThanOrEqual(200)
+  await expect(canvasElement.querySelector('[data-message-window]')).toBeNull()
+  await userEvent.click(trigger)
+  await expect(trigger).toHaveFocus()
+  await expect(canvasElement.querySelectorAll('[data-message-window]')).toHaveLength(1)
+  await expect(canvasElement.querySelector('[data-message-window]')?.textContent?.length).toBe(16000)
+} }
+export const LargeSingleLineOutgoingLight440: Story = { ...LargeSingleLineOutgoing, parameters: { scheme: 'light', width: 440 } }
+export const LargeSingleLineOutgoingDark1440: Story = { ...LargeSingleLineOutgoing, parameters: { scheme: 'dark', width: 1440 } }
+export const LargeSingleLineOutgoingLight1440: Story = { ...LargeSingleLineOutgoing, parameters: { scheme: 'light', width: 1440 } }
+export const LastMessagePage: Story = { render: () => <OutgoingMessageRow {...outgoingMessage} message={'Boundary report '.repeat(1100)} defaultExpanded />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const next = canvas.getByRole('button', { name: 'Next message page' })
+  await userEvent.click(next)
+  await expect(next).toHaveFocus()
+  await expect(next).toHaveAttribute('aria-disabled', 'true')
+  await expect(next).toHaveAccessibleDescription('Next unavailable: last page.')
+  const lastWindow = canvasElement.querySelector('[data-message-window]')?.textContent
+  await userEvent.click(next)
+  await expect(next).toHaveFocus()
+  await expect(canvasElement.querySelector('[data-message-window]')?.textContent).toBe(lastWindow)
+  await expect(canvasElement.querySelectorAll('[data-message-window]')).toHaveLength(1)
+  await userEvent.click(canvas.getByRole('button', { name: 'Previous message page' }))
+  await expect(next).not.toHaveAttribute('aria-disabled', 'true')
+} }
+export const LastMessagePageLight440: Story = { ...LastMessagePage, parameters: { scheme: 'light', width: 440 } }
+export const LastMessagePageDark1440: Story = { ...LastMessagePage, parameters: { scheme: 'dark', width: 1440 } }
+export const LastMessagePageLight1440: Story = { ...LastMessagePage, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })

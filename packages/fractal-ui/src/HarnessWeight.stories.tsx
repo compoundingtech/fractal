@@ -62,6 +62,10 @@ export const Dark: Story = {
       for (const [name, weightClass] of [['AgentMessage', 'card'], ['OutgoingMessageRow', 'row']] as const) {
         await expect(canvas.getByTestId(`harness-weight-${weight}`).querySelector(`[data-component-name="${name}"]`)).toHaveAttribute('data-weight-class', weightClass)
       }
+      await expect(specimens.querySelector('[data-component-name="AgentMessage"] article')).toHaveAttribute('data-harness-weight', 'card')
+      const outgoing = specimens.querySelector('[data-component-name="OutgoingMessageRow"] [data-work-kind="messages-sent"]') as HTMLElement
+      await expect(outgoing).toHaveAttribute('data-harness-weight', 'row')
+      await expect(within(outgoing).getByRole('button')).toHaveAttribute('aria-expanded', 'false')
     }
     const read = within(canvas.getByTestId('harness-weight-row')).getByRole('button', { name: 'Read summary' })
     await userEvent.click(read)

@@ -108,7 +108,7 @@ export interface OutgoingMessageRowProps {
 
 /** One send is one work-log item, including broadcasts; receipts are per recipient. */
 export const OutgoingMessageRow = ({ message, recipients, delivery, at, defaultExpanded = false }: OutgoingMessageRowProps) => {
-  const firstLine = message.split('\n', 1)[0] ?? ''
+  const firstLine = message.slice(0, 200).split('\n', 1)[0] ?? ''
   return <div {...stylex.props(styles.outgoing)} data-harness-weight="row" data-work-kind="messages-sent">
     <Disclosure defaultExpanded={defaultExpanded}>
       {({ isExpanded }) => <>
