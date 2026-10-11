@@ -33,6 +33,14 @@ Stories:
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
 - **Fractal UI / Questions**: harness-neutral read-only and answerable questions, all settled outcomes, attention surfaces, and keyboard/negative-control stories at 440 and 1440 pixels in both schemes. Drafts and callbacks are host-owned; the terminal hand-off is explicit.
 
+### Harness questions
+
+`QuestionForm` uses controlled `draft`/`onDraftChange` props and React Aria radio/checkbox groups. `autoFocus`, question-step transitions, Other and note editing transfer focus; Escape returns to the selected/recommended choice without answering or clearing the draft. Multi-select keeps custom text when another option changes. `NeedsYouBar` receives transcript visibility from the host and hides at 60%; its pinned form and the inbox must receive the same host-owned draft.
+
+The generic `EmbraceToolCall`/`EmbraceToolItem` seam is explicitly read-only: its `ReadOnlyToolQuestion` type cannot carry a web-answer capability. Singular `{question, options}` and batched `{questions}` arguments keep their options; structured result `details.results`/flat `selectedOptions` facts render `QuestionSummary`. Calls that closed without recorded answer facts use `unrecorded`, not an invented answer. Live adapters supply richer typed requests and the terminal callback.
+
+The ACH model is retained with small display extensions: `autoSelected` records per-question timeout picks; `answered.where` labels terminal/web provenance; `chat-redirected` represents the catalog outcome; `unrecorded` keeps archived missing-result facts honest. Optional `variant` defaults to transcript; `composerTyping` labels held composer text; `onAttach` hands real selected files to the host instead of implementing upload/storage in the kit.
+
 ## Families
 
 `kit.tsx` exports these families. Each is labeled, keyboard-reachable and token-driven:

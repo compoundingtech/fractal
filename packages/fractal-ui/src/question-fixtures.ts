@@ -19,7 +19,8 @@ export const questionStates: readonly QuestionState[] = [
   { _tag: 'answered-elsewhere', answers: { single: { selected: ['inbox'] } }, where: 'terminal', at: '15:41 UTC', draftDiscarded: true },
   { _tag: 'expired', at: '15:42 UTC', autoAnswer: { single: { selected: ['thread'], autoSelected: true } } },
   { _tag: 'expired', at: '15:42 UTC' },
-  { _tag: 'cancelled', reason: 'User skipped the question', at: '15:41 UTC' },
+  { _tag: 'cancelled', reason: 'Skipped · turn ended', at: '15:41 UTC' },
   { _tag: 'chat-redirected', message: 'Discuss the release before choosing.', at: '15:41 UTC' },
+  { _tag: 'unrecorded', reason: 'Answer details were not recorded.' },
 ]
 export const questionRequest: QuestionRequestView = { id: 'ask-release-1', source: 'omp · ask', agentLabel: 'orbit', askedAt: '15:40 UTC', questions: [questionKinds[0]!], state: { _tag: 'pending' }, answerable: false, allowChatRedirect: false }
