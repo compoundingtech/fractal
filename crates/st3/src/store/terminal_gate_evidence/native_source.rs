@@ -6,7 +6,7 @@ use crate::model::{DesiredSubject, GateSpec, MemberKind, MissionSpec};
 use smallclaims::ivm::install::{Installer, Limits, Outcome, ScanPage};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 
-const FINGERPRINT: &str = "private-native.v1;one-literal-gate;empty-local-unmanaged;octet-header;16-subject+16-batch-rows;no-repair;native-pending-revision";
+const FINGERPRINT: &str = "private-native.v2;managed-scope;one-literal-gate;empty-local-unmanaged;octet-header;16-subject+16-batch-rows;no-repair;native-pending-revision";
 const GUARD: &str = "test_native_terminal_guard";
 const RAW_BYTES: usize = 16 * 1024;
 const SOURCE_BYTES: usize = 256 * 1024;
@@ -178,10 +178,11 @@ impl NativeSource {
             origin TEXT NOT NULL,mission TEXT NOT NULL,run_id TEXT NOT NULL,
             generation_id TEXT NOT NULL,step TEXT NOT NULL,exec TEXT NOT NULL,
             revision INTEGER NOT NULL CHECK(revision>=0),
-            pending INTEGER NOT NULL CHECK(pending IN (0,1)),gap TEXT,payload TEXT);",
+            pending INTEGER NOT NULL CHECK(pending IN (0,1)),gap TEXT,payload TEXT,
+            managed_scope INTEGER NOT NULL DEFAULT 0 CHECK(managed_scope IN (0,1)));",
         )?;
         tx.execute(
-            "INSERT INTO test_native_terminal_guard VALUES(1,?1,?2,?3,?4,?5,?6,?7,0,0,NULL,NULL)",
+            "INSERT INTO test_native_terminal_guard VALUES(1,?1,?2,?3,?4,?5,?6,?7,0,0,NULL,NULL,0)",
             params![
                 binding.identity()?,
                 binding.origin,
@@ -334,14 +335,19 @@ impl NativeSource {
     }
 
     fn state(&self, tx: &Transaction<'_>) -> Result<(i64, bool, Option<String>)> {
-        let (revision,pending,gap,identity):(i64,bool,Option<String>,String)=tx.query_row(
-            "SELECT revision,pending,gap,identity FROM test_native_terminal_guard WHERE id=1 AND typeof(identity)='text' AND octet_length(identity)<=16384 AND (gap IS NULL OR (typeof(gap)='text' AND octet_length(gap)<=512))",
-            [],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        let (revision, pending, gap, _) = self.scoped_state(tx)?;
+        Ok((revision, pending, gap))
+    }
+
+    fn scoped_state(&self, tx: &Transaction<'_>) -> Result<(i64, bool, Option<String>, bool)> {
+        let (revision,pending,gap,identity,active):(i64,bool,Option<String>,String,bool)=tx.query_row(
+            "SELECT revision,pending,gap,identity,managed_scope FROM test_native_terminal_guard WHERE id=1 AND typeof(identity)='text' AND octet_length(identity)<=16384 AND (gap IS NULL OR (typeof(gap)='text' AND octet_length(gap)<=512))",
+            [],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
         ensure!(
             identity == self.binding.identity()?,
             "native binding replaced"
         );
-        Ok((revision, pending, gap))
+        Ok((revision, pending, gap, active))
     }
 
     /// The fixture calls this explicitly in its writer transaction, after ALL native writes.
@@ -395,6 +401,10 @@ impl NativeSource {
             Ok::<_, anyhow::Error>(())
         })();
         if let Err(error) = result {
+            // Coverage refusals persist a gap. Storage faults abort the outer transaction.
+            if error.downcast_ref::<rusqlite::Error>().is_some() {
+                return Err(error);
+            }
             let reason = error.to_string().chars().take(256).collect::<String>();
             tx.execute(
                 "UPDATE test_native_terminal_guard SET gap=?1,pending=1 WHERE id=1",
@@ -714,11 +724,14 @@ impl NativeSource {
     /// Fixture-only Doctor line. Public Doctor is deliberately NOT wired to this adapter.
     fn doctor_line(&self, tx: &Transaction<'_>) -> Value {
         let evidence = (|| {
-            let (_, pending, gap) = self.state(tx)?;
+            let (_, pending, gap, active) = self.scoped_state(tx)?;
             if let Some(gap) = gap {
                 anyhow::bail!("native evidence incomplete: {gap}");
             }
-            ensure!(!pending, "native evidence incomplete/pending");
+            ensure!(
+                !pending && !active,
+                "native evidence incomplete/pending or managed scope"
+            );
             let root = self.installer.root(tx, VIEW)?;
             let body:Option<String>=tx.query_row("SELECT body FROM test_terminal_members WHERE namespace=?1 AND key='gate/native'",
                 [root.namespace.as_str()],|r|r.get(0)).optional()?;
@@ -740,3 +753,6 @@ impl NativeSource {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod transaction_hooks;
