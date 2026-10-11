@@ -64,6 +64,8 @@ These components replace the incoming `HarnessNotice` Irc/Delivery presentations
 
 `TranscriptTurn.outgoingMessages` maps host-normalized sends to their underlying work-call ids. The production work log replaces each mapped shell row with its outgoing card and counts it as a message, not a command. Parsing transport envelopes stays outside the kit. The transcript story exercises the folded shell-send replacement; display-hidden reminder routing through “Show system events” belongs to HarnessMarker, not these message surfaces. Both message components inherit the nearest Fractal composition theme, and all independently scrollable body regions have keyboard-focusable labelled landmarks.
 
+Message cards and story roots use only composition palette, type, spacing, radius and geometry tokens. Headers establish medium-weight shared UI typography; metadata, tags and plain-text output use the shared meta/dense scales rather than inheriting page defaults.
+
 Command subtraction uses the projected `countedAsCommand` fact, not merely the run kind: orphan results never contributed to the command count and must not remove an unrelated observed command. Custom work-log owners supply that fact only when the call contributed to their count.
 
 ## Families

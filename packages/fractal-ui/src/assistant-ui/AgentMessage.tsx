@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
-import { surfaceVars, textVars, borderVars, accentVars, statusVars } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 
 export type AgentMessageVia =
   | { readonly _tag: 'Irc' }
@@ -66,7 +66,7 @@ export const AgentMessage = ({ id, from, to, via, body, subject, replyTo, at, ar
   return <article {...stylex.props(styles.card)} aria-label={`Message from ${from}`} data-harness-weight="card" data-agent-message-direction="incoming">
     <header {...stylex.props(styles.header)}>
       <span aria-hidden="true" {...stylex.props(styles.avatar)}>{from.slice(0, 1).toUpperCase()}</span>
-      <strong><AgentIdHierarchy id={from} /></strong>
+      <strong {...stylex.props(styles.sender)}><AgentIdHierarchy id={from} /></strong>
       {to !== undefined ? <><span aria-hidden="true">→</span><AgentIdHierarchy id={to} /></> : null}
       <span {...stylex.props(styles.chip)}>{({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span>
       {at !== undefined ? <time {...stylex.props(styles.meta)}>{at}</time> : null}
@@ -110,7 +110,7 @@ export interface OutgoingMessageRowProps {
 export const OutgoingMessageRow = ({ message, recipients, delivery, at, defaultExpanded = false }: OutgoingMessageRowProps) => {
   const firstLine = message.slice(0, 200).split('\n', 1)[0] ?? ''
   const recipientCount = delivery._tag === 'Broadcast' ? delivery.recipientCount ?? (recipients.length > 0 ? recipients.length : undefined) : undefined
-  return <div {...stylex.props(styles.card, styles.outgoing)} data-harness-weight="card" data-work-kind="messages-sent">
+  return <div {...stylex.props(styles.card)} data-harness-weight="card" data-work-kind="messages-sent">
     <Disclosure defaultExpanded={defaultExpanded}>
       {({ isExpanded }) => <>
         <div {...stylex.props(styles.line)}>
@@ -131,21 +131,21 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, defaultE
 }
 
 const styles = stylex.create({
-  card: { padding: 12, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 8, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere' },
-  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, minWidth: 0 },
-  line: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, minWidth: 0 },
-  messageBody: { maxHeight: 340, overflowY: 'auto', minWidth: 0, overflowWrap: 'anywhere', outlineColor: accentVars.primary, outlineOffset: 2 },
-  avatar: { width: 22, height: 22, display: 'grid', alignItems: 'center', justifyItems: 'center', backgroundColor: surfaceVars.rowActive, borderRadius: 5, fontSize: 12 },
-  chip: { paddingInline: 6, paddingBlock: 2, borderRadius: 4, backgroundColor: surfaceVars.rowActive, color: textVars.fgSoft, fontSize: 11 },
-  meta: { color: textVars.fgMuted, fontSize: 11 },
-  subject: { marginBlock: 8, fontSize: 13 },
-  button: { padding: 5, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 4, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 2 },
-  outgoing: { fontSize: 12 },
-  trigger: { flex: '1 1 100%', minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, borderWidth: 0, padding: 0, backgroundColor: 'transparent', color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: 3 },
-  excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: textVars.fgMuted },
-  receipt: { maxWidth: '100%', overflowWrap: 'anywhere', fontSize: 10, color: textVars.fgMuted, paddingInline: 4, borderWidth: 1, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: 4, outlineColor: accentVars.primary, outlineOffset: 2 },
-  body: { padding: 8, overflowWrap: 'anywhere', maxHeight: 340, overflowY: 'auto' },
+  card: { padding: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.md, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
+  sender: { fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
+  line: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.sm, minWidth: 0 },
+  messageBody: { maxHeight: g.workExpandedMax, overflowY: 'auto', minWidth: 0, overflowWrap: 'anywhere', outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
+  avatar: { width: g.controlSm, height: g.controlSm, display: 'grid', alignItems: 'center', justifyItems: 'center', backgroundColor: surfaceVars.rowActive, borderRadius: r.sm, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  chip: { paddingInline: s.sm, paddingBlock: s.xs2, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading },
+  meta: { color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  subject: { marginBlock: s.md, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
+  button: { padding: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  trigger: { flex: '1 1 100%', minWidth: 0, display: 'flex', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: 'transparent', color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  receipt: { maxWidth: '100%', overflowWrap: 'anywhere', fontSize: t.denseSize, lineHeight: t.metaLeading, color: textVars.fgMuted, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
+  body: { padding: s.md, overflowWrap: 'anywhere', maxHeight: g.workExpandedMax, overflowY: 'auto' },
   danger: { color: statusVars.dangerFg },
-  plainText: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.5 },
-  visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
+  plainText: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  visuallyHidden: { position: 'absolute', width: g.hairline, height: g.hairline, padding: 0, margin: 0, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
 })

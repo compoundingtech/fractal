@@ -10,11 +10,10 @@ import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import type { TextItem, ToolCallItem } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
-import { darkTheme } from './assistant-ui/embrace-theme'
-import { tokens } from './assistant-ui/embrace-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, typeVars as t, spaceVars as s, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
 import { agentMessage, agentMessageVias, outgoingMessage, broadcastMessage, longAgentMessage, largeAgentMessage } from './agent-message-fixtures'
 
-const meta = { title: 'Fractal UI/Agent Messages', component: AgentMessage, parameters: { layout: 'fullscreen' }, args: { ...agentMessage, onCopyId: fn(), onLoadFull: fn(), onOpenReply: fn() }, decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' ? lightTheme : darkTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<typeof AgentMessage>
+const meta = { title: 'Fractal UI/Agent Messages', component: AgentMessage, parameters: { layout: 'fullscreen' }, args: { ...agentMessage, onCopyId: fn(), onLoadFull: fn(), onOpenReply: fn() }, decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' && lightTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<typeof AgentMessage>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Short: Story = { play: async ({ canvasElement, args }) => {
@@ -398,4 +397,4 @@ export const ObservedCommandAndOrphanSend: Story = { render: () => <EmbraceRunti
 export const ObservedCommandAndOrphanSendLight440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'light', width: 440 } }
 export const ObservedCommandAndOrphanSendDark1440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'dark', width: 1440 } }
 export const ObservedCommandAndOrphanSendLight1440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'light', width: 1440 } }
-const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: 16, display: 'flex', flexDirection: 'column', gap: 16, backgroundColor: tokens.canvas, color: tokens.ink, fontFamily: 'sans-serif' }, narrow: { width: 440, maxWidth: '100%' }, wide: { width: 1440, maxWidth: '100%' } })
+const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, display: 'flex', flexDirection: 'column', gap: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading }, narrow: { width: g.specimenNarrow, maxWidth: '100%' }, wide: { width: g.specimenWide, maxWidth: '100%' } })
