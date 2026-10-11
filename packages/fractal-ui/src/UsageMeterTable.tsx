@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Cell, Column, Row, Table, TableBody, TableHeader } from 'react-aria-components'
+import { Button, Cell, Column, Row, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { UsageMeterCell, UsageMeterFact, UsageMeterHistory, UsageMeterRow, UsageMeterSortKey, UsageMeterTableProps } from './usage-meter-types'
 import { usageMeterGrid } from './UsageMeterGrid.stylex.ts'
@@ -31,14 +31,16 @@ const columns: readonly { readonly id: UsageMeterSortKey; readonly label: string
   { id: 'more', label: 'More', narrowLabel: '+N' },
 ]
 const isSortKey = (key: string | number): key is UsageMeterSortKey => columns.some(column => column.id === key)
+const resetEvidence = (row: UsageMeterRow): string =>
+  `Reset ${row.reset}${row.resetAt === undefined ? '' : ` · ${row.resetAt}`} · ${row.resetCount === undefined ? 'Reset count unreported' : `${row.resetCount} reported resets`}`
 
 const Meter = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCell; readonly stale: boolean; readonly compact?: boolean }) => <div data-usage-meter-tone={meter.tone} {...stylex.props(styles.meter, compact && styles.compactMeter)}>
-  <span title={compact ? meter.label : undefined} {...stylex.props(styles.windowLabel, compact && styles.compactWindow)}>{meter.label}</span>
+  <span title={meter.label} {...stylex.props(styles.windowLabel, compact && styles.compactWindow)}>{meter.label}</span>
   <div {...stylex.props(styles.meterReading, compact && styles.compactReading)}>
     {meter.fraction !== undefined && meter.tone !== 'unknown' && <span aria-hidden="true" data-usage-meter-bar {...stylex.props(styles.track, stale && styles.staleBar)}>
       <span {...stylex.props(styles.fill, meter.tone === 'warning' && styles.warningFill, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerFill, styles.fraction(meter.fraction))} />
     </span>}
-    <span {...stylex.props(styles.reading, meter.tone === 'warning' && styles.warningText, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerText, stale && styles.staleText)}>{meter.text}</span>
+    <span title={meter.text} {...stylex.props(styles.reading, meter.tone === 'warning' && styles.warningText, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerText, stale && styles.staleText)}>{meter.text}</span>
   </div>
 </div>
 
@@ -57,7 +59,7 @@ export const UsageMeterHistoryChart = ({ history }: { readonly history: UsageMet
   const last = history.points.at(-1)
   return <section aria-label={history.label} data-usage-meter-history="ready" {...stylex.props(styles.history)}>
     <h4 {...stylex.props(styles.title)}>{history.label}</h4>
-    <p {...stylex.props(styles.identity)}>{history.text}</p>
+    <p title={history.text} {...stylex.props(styles.identity)}>{history.text}</p>
     {history.points.length === 0 ? <p {...stylex.props(styles.staleText)}>No periods supplied</p> : <>
       <ol aria-label={`${history.label} by period`} {...stylex.props(styles.bars)}>
         {history.points.map(point => <li key={point.id} aria-label={`${point.label}: ${point.text}${point.partial ? ', period still open' : ''}`} title={`${point.label}: ${point.text}${point.partial ? ' (open)' : ''}`} data-usage-meter-history-point={point.id} data-partial={point.partial || undefined} data-unmeasured={point.value === undefined || undefined} {...stylex.props(styles.slot)}>
@@ -75,7 +77,7 @@ export const UsageMeterHistoryChart = ({ history }: { readonly history: UsageMet
 /** Complete supplied evidence, without reconstructing windows or interpreting source policy. */
 export const UsageMeterRowDetail = ({ row, history, onClose }: { readonly row: UsageMeterRow; readonly history?: UsageMeterHistory; readonly onClose: () => void }): React.ReactElement => <section aria-label={`${row.label} usage details`} data-usage-meter-detail={row.id} {...stylex.props(styles.detail)}>
   <header {...stylex.props(styles.detailHeader)}><h3 {...stylex.props(styles.title)}>{row.label}</h3><Button aria-label="Close usage details" onPress={onClose} {...stylex.props(styles.button)}>Close</Button></header>
-  <p {...stylex.props(styles.identity)}>{row.identity}</p>
+  <p title={row.identity} {...stylex.props(styles.identity)}>{row.identity}</p>
   {row.stale && <p {...stylex.props(styles.staleText)}>Stale · last-known values</p>}
   {row.note !== undefined && <p {...stylex.props(styles.note)}>{row.note}</p>}
   <Facts facts={row.detail.facts} />
@@ -86,7 +88,7 @@ export const UsageMeterRowDetail = ({ row, history, onClose }: { readonly row: U
     <Facts facts={window.facts} />
   </section>)}
   <h4 {...stylex.props(styles.title)}>Resets</h4>
-  <p {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</p>
+  <p title={resetEvidence(row)} {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</p>
   <Facts facts={row.detail.resets} />
   {history !== undefined && <UsageMeterHistoryChart history={history} />}
 </section>
@@ -131,20 +133,23 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
       if (isSortKey(descriptor.column) && descriptor.direction !== undefined) onSort({ key: descriptor.column, direction: descriptor.direction })
     }} {...stylex.props(usageMeterGrid.table, styles.table)}>
       <TableHeader {...stylex.props(usageMeterGrid.header)}>
-        {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting data-usage-meter-column={column.id} {...stylex.props(usageMeterGrid.column, styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
-          {({ sortDirection }) => <span {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === 'ascending' ? '↑' : sortDirection === 'descending' ? '↓' : ''}</span></span>}
+        {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting textValue={column.label} data-usage-meter-column={column.id} {...stylex.props(usageMeterGrid.column, styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
+          {({ sortDirection }) => <span title={column.label} {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === 'ascending' ? '↑' : sortDirection === 'descending' ? '↓' : ''}</span></span>}
         </Column>)}
       </TableHeader>
       <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
-        {rows.map(row => <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={`${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note === undefined ? '' : ` · ${row.note}`}`} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}>{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}>{row.compactIdentity}</span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span></Cell>
+        {rows.map(row => {
+          const accountEvidence = `${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note === undefined ? '' : ` · ${row.note}`}`
+          const resetDescription = resetEvidence(row)
+          return <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
+          <Cell textValue={accountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={accountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}><span aria-hidden="true">{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}>{row.compactIdentity}</span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{accountEvidence}</span></VisuallyHidden></span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span></Cell>
+          <Cell textValue={resetDescription} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={resetDescription} {...stylex.props(styles.reset)}><span aria-hidden="true">{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{resetDescription}</span></VisuallyHidden></span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Button aria-label={`Show all windows and evidence for ${row.label}`} aria-expanded={selected?.id === row.id} onPress={() => onSelect(row.id)} {...stylex.props(styles.moreButton)}>
             <span {...stylex.props(styles.wideCount)}>+{row.omitted}</span><span {...stylex.props(styles.narrowCount)}>+{row.omitted + (row.comparison === undefined ? 0 : 1)}</span>
           </Button></Cell>
-        </Row>)}
+        </Row>})}
       </TableBody>
     </Table>
     {selected !== undefined && <UsageMeterRowDetail row={selected} history={history} onClose={onCloseDetail} />}
@@ -172,12 +177,12 @@ const styles = stylex.create({
   accountLabel: { color: ink.fg },
   fullIdentity: { display: { default: 'inline', '@container (width < 36rem)': 'none' } },
   compactIdentity: { display: { default: 'none', '@container (width < 36rem)': 'inline' } },
-  identity: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  identity: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   note: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   meter: { minWidth: 0 },
   compactMeter: { display: 'flex', alignItems: 'center', gap: 0, whiteSpace: 'nowrap' },
-  compactWindow: { flexShrink: 0, maxWidth: '5ch' },
-  compactReading: { flex: 1, gap: 0 },
+  compactWindow: { flexShrink: 1, minWidth: 0, maxWidth: '5ch' },
+  compactReading: { flex: 1, gap: 0, minWidth: 'min-content' },
   windowLabel: { display: 'block', color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meterReading: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0 },
   reading: { flexShrink: 0, color: ink.fgSoft, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },

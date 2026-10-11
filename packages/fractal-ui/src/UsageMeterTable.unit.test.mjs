@@ -204,7 +204,7 @@ test('dense rows keep one titled account/provider caption and preserve meter/res
   const view = await mount()
   try {
     const caption = rowOf(view.container, 'row-a').querySelector('[data-usage-meter-account]')
-    assert.equal(caption.textContent, 'plan one')
+    assert.equal(caption.firstElementChild.textContent, 'plan one')
     assert.equal(caption.title, 'Alpha desk · plan one')
     assert.equal(rowOf(view.container, 'row-a').querySelectorAll('[data-usage-meter-account]').length, 1)
     assert.deepEqual([...view.container.querySelectorAll('[data-usage-meter-column]')].map(header => header.dataset.usageMeterColumn), ['account', 'governing', 'reset', 'comparison', 'more'])
@@ -230,4 +230,61 @@ test('caller-owned compact captions keep suffix-only identities distinct and can
     await view.render({ selectedId: north.id })
     assert.ok(view.container.querySelector('[data-usage-meter-detail]').textContent.includes(north.identity))
   } finally { await view.dispose() }
+})
+
+test('narrow usage meter captions, headings and reset evidence have complete accessible disclosures', async () => {
+  const supplied = { ...rows[0], identity: 'example-provider/shared-workspace-distinguishing-suffix', compactIdentity: 'ep:…uffix', resetAt: '2030-05-03T12:00:00Z' }
+  const view = await mount({ rows: [supplied] })
+  try {
+    assert.deepEqual([...view.container.querySelectorAll('[data-usage-meter-column] [title]')].map(label => label.title), ['Acct', 'Window gov', 'Reset', 'Comparison', 'More'])
+    const cells = rowOf(view.container, supplied.id).querySelectorAll('[role="rowheader"], [role="gridcell"]')
+    const account = cells[0].firstElementChild, reset = cells[2].firstElementChild
+    assert.ok(account.title.includes(supplied.identity))
+    assert.equal(account.querySelector('[data-usage-meter-full-value]').textContent, account.title)
+    assert.ok(reset.title.includes(supplied.resetAt))
+    assert.ok(reset.title.includes('0 reported resets'))
+    assert.equal(reset.querySelector('[data-usage-meter-full-value]').textContent, reset.title)
+  } finally { await view.dispose() }
+})
+
+test('quota drawer exposes exact cost/token and reset values with a missing-disclosure control', async () => {
+  const { QuotaDrawer } = await server.ssrLoadModule('/src/QuotaDrawer.tsx')
+  const { quotaAccounts, quotaColumns, quotaClock } = await server.ssrLoadModule('/src/quota-design-fixtures.ts')
+  const { assertQuotaDrawerDisclosure } = await server.ssrLoadModule('/src/quota-design-density-proof.ts')
+  const seed = quotaAccounts[0]
+  const supplied = { ...seed, label: 'Fictional shared workspace with a distinguishing suffix', usd: 123.456, tokens: 1234567, usdCoverage: true, resetCount: 0,
+    windows: [{ ...seed.windows[0], governing: true, resetAt: '2030-05-03T12:00:00Z' }] }
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container), events = []
+  const record = value => events.push(value)
+  const render = async (unit, accounts = [supplied]) => act(async () => root.render(React.createElement(QuotaDrawer, {
+    accounts, columns: quotaColumns, now: quotaClock, status: { kind: 'current', text: 'Updated now' }, variant: 'columns',
+    sort: { key: 'governing', direction: 'descending' }, unit, provider: '', plan: '', state: '', grouped: false, collapsed: false,
+    onSort: record, onUnit: record, onFilter: record, onGrouped: record, onCollapsed: record, onOpenUsage: record, onEscape: record,
+  })))
+  try {
+    await render('usd')
+    const drawer = container.querySelector('[data-quota-drawer]')
+    assertQuotaDrawerDisclosure(drawer)
+    assert.ok(drawer.querySelector('[data-quota-cell="account"] button [title]').title.includes(supplied.label))
+    let amount = drawer.querySelector('[data-quota-cell="amount"] > [title]')
+    assert.equal(amount.title, '123.456 USD')
+    assert.equal(amount.querySelector('[data-quota-full-value]').textContent, amount.title)
+    assert.equal(amount.querySelector('[aria-hidden="true"]').textContent, '$123.46')
+    const reset = drawer.querySelector('[data-quota-cell="reset"] > [title]')
+    assert.ok(reset.title.includes('2030-05-03T12:00:00Z'))
+    assert.ok(reset.title.includes('0 reported resets'))
+    const title = amount.title, full = amount.querySelector('[data-quota-full-value]')
+    amount.title = ''; full.textContent = ''
+    assert.throws(() => assertQuotaDrawerDisclosure(drawer), /full-value disclosure/)
+    amount.title = title; full.textContent = title
+    assertQuotaDrawerDisclosure(drawer)
+    await render('tokens')
+    amount = container.querySelector('[data-quota-cell="amount"] > [title]')
+    assert.equal(amount.title, '1234567 tokens')
+    assert.match(amount.querySelector('[aria-hidden="true"]').textContent, /1\.2M/)
+    await render('usd', [{ ...supplied, usd: undefined, tokens: undefined, usdCoverage: false }])
+    assert.equal(container.querySelector('[data-quota-cell="amount"] > [title]').title, 'Tokens unreported')
+    assert.equal(events.length, 0, 'Reading disclosure values does not trigger an account action')
+  } finally { await act(async () => root.unmount()); container.remove() }
 })

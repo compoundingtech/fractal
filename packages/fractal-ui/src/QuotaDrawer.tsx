@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Cell, Column, Row, Table, TableBody, TableHeader } from 'react-aria-components'
+import { Button, Cell, Column, Row, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex.ts'
 import type { QuotaAccount, QuotaDrawerProps, QuotaSortKey, QuotaWindow } from './quota-design-types.ts'
 import { filterQuotaAccounts, quotaAccountAmount, quotaGoverningResetAt, quotaOmittedWindowCount, quotaProviderSubtotal, quotaRoleWindow, quotaSortKeys, quotaVisibleWindows, quotaWindowFraction, sortQuotaAccounts } from './quota-design-sort.ts'
@@ -116,10 +116,10 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
           if (row?.account !== undefined) props.onOpenUsage(row.account.id)
         }} {...stylex.props(usageMeterGrid.table, styles.table)}>
           <TableHeader {...stylex.props(usageMeterGrid.header)}>
-            <Column id="account" data-quota-column="account" isRowHeader {...stylex.props(usageMeterGrid.column, styles.column, styles.accountColumn)}>Account</Column>
-            {displayColumns.map(column => <Column key={column.id} id={`window:${column.id}`} data-quota-column={`window:${column.id}`} {...stylex.props(usageMeterGrid.column, styles.column, styles.windowColumn(displayColumns.length))}>{column.label}</Column>)}
-            <Column id="amount" data-quota-column="amount" {...stylex.props(usageMeterGrid.column, styles.column, styles.amountColumn)}>{props.unit === 'usd' ? '$ / tok' : 'Tokens'}</Column>
-            <Column id="reset" data-quota-column="reset" {...stylex.props(usageMeterGrid.column, styles.column, styles.resetColumn)}>Reset</Column>
+            <Column id="account" data-quota-column="account" textValue="Account" isRowHeader {...stylex.props(usageMeterGrid.column, styles.column, styles.accountColumn)}><span title="Account">Account</span></Column>
+            {displayColumns.map(column => <Column key={column.id} id={`window:${column.id}`} data-quota-column={`window:${column.id}`} textValue={column.label} {...stylex.props(usageMeterGrid.column, styles.column, styles.windowColumn(displayColumns.length))}><span title={column.label}>{column.label}</span></Column>)}
+            <Column id="amount" data-quota-column="amount" textValue={props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'} {...stylex.props(usageMeterGrid.column, styles.column, styles.amountColumn)}><span title={props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'}><span aria-hidden="true">{props.unit === 'usd' ? '$ / tok' : 'Tokens'}</span><VisuallyHidden><span data-quota-full-value>{props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'}</span></VisuallyHidden></span></Column>
+            <Column id="reset" data-quota-column="reset" textValue="Reset" {...stylex.props(usageMeterGrid.column, styles.column, styles.resetColumn)}><span title="Reset">Reset</span></Column>
           </TableHeader>
           <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <div data-quota-empty {...stylex.props(styles.empty)}>{props.accounts.length === 0 ? 'No quota accounts published' : 'No accounts match these filters'}<span {...stylex.props(styles.emptyNote)}>{props.accounts.length === 0 ? 'Accounts will appear when the source publishes inventory.' : 'Change provider, plan or state to see retained accounts.'}</span></div>}>
             {rows.map(row => {
@@ -128,10 +128,11 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
                 const members = row.accounts ?? []
                 const subtotal = quotaProviderSubtotal(members, props.unit)
                 const parts = [subtotal.usdAccounts > 0 ? `${usdFormat.format(subtotal.usd)} (${subtotal.usdAccounts} accts)` : undefined, subtotal.tokenAccounts > 0 ? `${tokenFormat.format(subtotal.tokens)} tok (${subtotal.tokenAccounts} accts)` : undefined, subtotal.unknownAccounts > 0 ? `${subtotal.unknownAccounts} unknown` : undefined].filter(part => part !== undefined)
+                const subtotalEvidence = `${subtotal.usd} USD across ${subtotal.usdAccounts} accounts; ${subtotal.tokens} tokens across ${subtotal.tokenAccounts} accounts; ${subtotal.unknownAccounts} unknown accounts`
                 return <Row key={row.id} id={row.id} textValue={row.label} isDisabled data-quota-provider={row.label} {...stylex.props(usageMeterGrid.row, styles.groupRow)}>
                   <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={`${row.label} · ${members.length} accounts · subtotal ${parts.join(' + ')}`} aria-label={`${row.label} reported subtotal: ${parts.join('; ')}`} {...stylex.props(usageMeterGrid.truncate, styles.groupLabel)}>{row.label} · {members.length}</span></Cell>
                   {displayColumns.map(column => <Cell key={column.id} {...stylex.props(usageMeterGrid.cell, styles.cell)} />)}
-                  <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={`Subtotal ${parts.join(' + ')}`} {...stylex.props(usageMeterGrid.truncate, styles.amount)}>{parts.join(' + ')}</span></Cell>
+                  <Cell textValue={subtotalEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={subtotalEvidence} {...stylex.props(usageMeterGrid.truncate, styles.amount)}><span aria-hidden="true">{parts.join(' + ')}</span><VisuallyHidden><span data-quota-full-value>{subtotalEvidence}</span></VisuallyHidden></span></Cell>
                   <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)} />
                 </Row>
               }
@@ -141,10 +142,13 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
               const governing = quotaRoleWindow(account, 'governing')
               const stale = retained || account.state === 'stale' || account.state === 'failed'
               const reset = resetText(account, props.now)
+              const accountEvidence = `${account.label} · ${account.provider} · ${account.plan} · ${account.state}`
+              const amountEvidence = amount.value === undefined ? 'Tokens unreported' : `${amount.value} ${amount.unit === 'usd' ? 'USD' : 'tokens'}`
+              const resetEvidence = `${reset === '—' ? 'Governing reset unknown' : `Governing reset ${reset}`}${governing?.resetAt === undefined ? '' : ` · ${governing.resetAt}`} · ${account.resetCount === undefined ? 'Reset count unknown' : `${account.resetCount} reported resets`}`
               return <Row key={row.id} id={row.id} textValue={account.label} data-quota-row={account.id} data-quota-state={account.state} {...stylex.props(usageMeterGrid.row, styles.row)}>
                 <Cell data-quota-cell="account" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
-                  <div {...stylex.props(styles.accountLine)} title={`${account.label} · ${account.provider} · ${account.plan} · ${account.state}`}>
-                    <Button aria-label={`Open usage for ${account.label} · ${account.provider}${account.state !== 'current' ? ` · ${account.state}` : ''}`} onPress={() => props.onOpenUsage(account.id)} {...stylex.props(usageMeterGrid.truncate, styles.accountButton)}>{account.label} · {account.provider}</Button>
+                  <div {...stylex.props(styles.accountLine)} title={accountEvidence}>
+                    <Button aria-label={`Open usage for ${accountEvidence}`} onPress={() => props.onOpenUsage(account.id)} {...stylex.props(usageMeterGrid.truncate, styles.accountButton)}><span title={accountEvidence}>{account.label} · {account.provider}</span></Button>
                     {omitted > 0 ? <Button aria-label={`Open all windows and evidence for ${account.label}, ${omitted} omitted windows`} onPress={() => props.onOpenUsage(account.id)} data-quota-more={omitted} {...stylex.props(styles.moreButton)}>+{omitted}</Button> : <span data-quota-more={0} />}
                   </div>
                 </Cell>
@@ -154,8 +158,8 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
                     {props.variant !== 'columns' && visible.length === 0 && <span {...stylex.props(styles.metadata)}>—</span>}
                   </div>
                 </Cell>)}
-                <Cell data-quota-cell="amount" {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={amountText(amount.value, amount.unit)} {...stylex.props(usageMeterGrid.truncate, styles.amount)}>{amountText(amount.value, amount.unit)}</span></Cell>
-                <Cell data-quota-cell="reset" {...stylex.props(usageMeterGrid.cell, styles.cell)}><span aria-label={reset === '—' ? 'Governing reset unknown' : `Governing reset ${reset}`} title={`${reset === '—' ? 'Governing reset unknown' : `Governing reset ${reset}`} · ${account.resetCount === undefined ? 'Reset count unknown' : `${account.resetCount} reported resets`}`} {...stylex.props(usageMeterGrid.truncate, styles.resetToken)}>{reset}</span></Cell>
+                <Cell data-quota-cell="amount" textValue={amountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={amountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.amount)}><span aria-hidden="true">{amountText(amount.value, amount.unit)}</span><VisuallyHidden><span data-quota-full-value>{amountEvidence}</span></VisuallyHidden></span></Cell>
+                <Cell data-quota-cell="reset" textValue={resetEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={resetEvidence} {...stylex.props(usageMeterGrid.truncate, styles.resetToken)}><span aria-hidden="true">{reset}</span><VisuallyHidden><span data-quota-full-value>{resetEvidence}</span></VisuallyHidden></span></Cell>
               </Row>
             })}
           </TableBody>

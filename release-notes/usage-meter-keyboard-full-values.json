@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Usage-meter account cells expose full account names to keyboard and screen-reader users. Enter opens details with the complete identity wrapped instead of cut off. Narrow table headers, costs, token amounts and reset evidence retain their full values in accessible text and hover titles. Compact meters preserve their numeric reading when space runs out.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Display and accessibility changes only; existing presentation facts and callbacks are unchanged." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

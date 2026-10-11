@@ -29,3 +29,22 @@ export function assertQuotaDrawerDensity(drawer: HTMLElement) {
   if (last.bottom > scroll.getBoundingClientRect().bottom + 1) throw new Error('Final account must fit inside the drawer viewport')
   return { accounts: rows.length, heights, maxOffset, scrollHeight: scroll.scrollHeight, viewportHeight: scroll.clientHeight }
 }
+
+/** Native titles and full screen-reader values survive visual truncation. */
+export const assertQuotaDrawerDisclosure = (drawer: HTMLElement): void => {
+  for (const header of drawer.querySelectorAll<HTMLElement>('[data-quota-column]')) {
+    const label = header.querySelector<HTMLElement>('[title]')
+    const full = label?.querySelector<HTMLElement>('[data-quota-full-value]')?.textContent ?? label?.textContent
+    if (label === null || !label.title || full !== label.title) throw new Error('Missing full header disclosure')
+  }
+  for (const row of drawer.querySelectorAll<HTMLElement>('[data-quota-row]')) {
+    const account = row.querySelector<HTMLButtonElement>('[data-quota-cell="account"] button')
+    const caption = account?.querySelector<HTMLElement>('[title]')
+    if (account === null || caption === null || caption === undefined || !caption.title.includes(caption.textContent ?? '') || !account.getAttribute('aria-label')?.includes(caption.title)) throw new Error('Missing full account disclosure')
+    for (const column of ['amount', 'reset']) {
+      const value = row.querySelector<HTMLElement>(`[data-quota-cell="${column}"] > [title]`)
+      const full = value?.querySelector<HTMLElement>('[data-quota-full-value]')
+      if (value === null || !value.title || full?.textContent !== value.title) throw new Error(`Missing full-value disclosure: ${column}`)
+    }
+  }
+}
