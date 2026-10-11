@@ -6,6 +6,8 @@ pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
 mod generated;
+/// W3C context injection, enabled by the optional `trace-propagation` feature.
+pub mod propagation;
 pub use contract::*;
 pub use generated::*;
 
@@ -266,6 +268,16 @@ impl RawTerminalMode {
 pub struct RawTerminalAttachmentRequest {
     pub runtime_incarnation: String,
     pub mode: RawTerminalMode,
+}
+
+/// The PTY session a daemon's own host runs for a terminal: what a client connects to itself.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LocalTerminalLocation {
+    pub subject: String,
+    pub runtime_id: String,
+    /// The graph's incarnation, `PTY_DAEMON_PID:CREATED_AT`, which the PTY itself must prove.
+    pub incarnation_id: String,
+    pub pty_root: std::path::PathBuf,
 }
 
 /// A single-use raw PTY stream capability, extracted from the client-v0 response envelope.
@@ -597,6 +609,8 @@ pub enum CollectionEvent {
         items: Vec<TimelineEntry>,
         /// Availability before the live window; absent on deltas means unchanged.
         has_more: Option<bool>,
+        /// The conversation header (contract §3) when this frame carries one.
+        header: Option<serde_json::Value>,
     },
     /// Subscribe again: the server could not bring this subscription up to date.
     /// `code` and `message` say why when a temporary failure caused it, such as a conversation
@@ -656,6 +670,7 @@ impl CollectionEvent {
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
                 has_more: field(&frame, "has_more")?,
+                header: frame.get("header").cloned(),
                 id,
             }),
             Some("resync") => Ok(Self::Resync {
@@ -728,10 +743,33 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
+    /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
+    /// with the same key, again). Any other answer, or none, says nothing.
+    pub fn applied(&self) -> Option<&str> {
+        match self {
+            ClientError::Api(_, _, envelope) => envelope
+                .details
+                .get("applied")
+                .and_then(|value| value.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether the request may have been taken without the person hearing so: its answer was lost
+    /// (a transport failure, a deadline) or st said `applied: "unknown"`. A request in this state is
+    /// repeated unchanged, never rebuilt with a new key.
+    pub fn outcome_unknown(&self) -> bool {
+        matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
+    }
+
     /// What went wrong in words a person reads: no codes and no Rust names. st's own message
     /// follows where it says something the sentence does not.
     pub fn plain(&self) -> String {
         match self {
+            ClientError::Api(..) if self.applied() == Some("unknown") => {
+                "st may have taken it and has not confirmed it yet; sending it again is safe".into()
+            }
             ClientError::Api(code, message, _) => plain_message(Some(code), message),
             ClientError::Transport(message) if message.contains("deadline") => {
                 "st took too long to answer; it may or may not have done it".into()
@@ -825,6 +863,8 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
             "this image was removed after its retention window; the message text remains".into()
         }
         ErrorCode::ValidationFailed
+        | ErrorCode::ProjectionDetailTooLarge
+        | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
         | ErrorCode::RuntimeNotLocal
@@ -1233,6 +1273,22 @@ impl Client {
         history: bool,
     ) -> Result<Envelope<Page>, ClientError> {
         self.list_internal_with_filters("agents", cursor, limit, history, &[("status", status)])
+            .await
+    }
+    /// The agents list as of this request: the daemon waits briefly for a roster at least as
+    /// new as the request instead of answering from the newest one it has published.
+    pub async fn agents_list_fresh(
+        &self,
+        status: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+        history: bool,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut filters = vec![("fresh", "true")];
+        if let Some(status) = status {
+            filters.push(("status", status));
+        }
+        self.list_internal_with_filters("agents", cursor, limit, history, &filters)
             .await
     }
     /// List only native sessions that are not already managed by st3.
@@ -2248,6 +2304,17 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn prompt_respond(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PromptRespondParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::prompt_respond(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn review_approve(
         &self,
         id: impl Into<String>,
@@ -2534,6 +2601,14 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    /// Local diagnostic acceptance; retry the identical disjoint intervals and report ID.
+    pub async fn observations_report(
+        &self,
+        report: &ObservationReport,
+    ) -> Result<ObservationResponse, ClientError> {
+        self.post("/v1/client/observations", report).await
+    }
+
     pub async fn pairing_begin(
         &self,
         request: &PairingBegin,
@@ -2624,6 +2699,48 @@ impl Client {
             percent_encode_segment(terminal_id.trim_start_matches("terminal/"))
         ))
         .await
+    }
+
+    /// Whether this client talks to a daemon on this machine over its Unix socket, as opposed to
+    /// a paired device's remote gateway.
+    pub fn is_local_socket(&self) -> bool {
+        matches!(self.endpoint, Endpoint::Unix(_))
+    }
+
+    /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
+    /// A read of the local store; only a Unix socket serves it.
+    pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
+        self.get("/v1/internal/fleet/membership").await
+    }
+
+    /// Where `subject`'s running terminal lives, read from this host's daemon without any graph
+    /// write: `Some` names the PTY session this host owns, which the caller connects to itself,
+    /// and `None` means another host owns it (or this endpoint is not a local socket, or a
+    /// daemon from before direct attachment lacks the route). The daemon only says where; it
+    /// never carries a byte.
+    pub async fn local_terminal(
+        &self,
+        subject: &str,
+    ) -> Result<Option<LocalTerminalLocation>, ClientError> {
+        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+            return Ok(None);
+        }
+        // Sessions routes answer in the daemon's own envelope, with the value under `value`.
+        #[derive(Deserialize)]
+        struct Answer {
+            value: LocalTerminalLocation,
+        }
+        match self
+            .get::<Answer>(&format!(
+                "/v1/sessions/local-terminal/{}",
+                percent_encode_segment(subject)
+            ))
+            .await
+        {
+            Ok(answer) => Ok(Some(answer.value)),
+            Err(ClientError::Api(ErrorCode::RuntimeNotLocal | ErrorCode::NotFound, ..)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Acquire a fresh, single-use capability for a fenced raw PTY connection.
@@ -3156,6 +3273,7 @@ impl Client {
                         "x-st3-features",
                         "custom-subjects.v1, conversation-blocks.v1",
                     );
+                    request = propagation::inject_http(request);
                     if let Some(key) = key {
                         request = request.header("idempotency-key", key);
                     }
@@ -3220,6 +3338,7 @@ impl Client {
                 ));
             }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
+                .or_else(|decode| core_api_error(&bytes).ok_or(decode))
                 .map_err(|decode| ClientError::Protocol(format!("HTTP {status}: {decode}")))?;
             return Err(ClientError::Api(
                 error.code.clone(),
@@ -3229,6 +3348,31 @@ impl Client {
         }
         serde_json::from_slice(&bytes).map_err(|error| ClientError::Protocol(error.to_string()))
     }
+}
+
+/// The error a daemon's own `/v1/` routes (outside `/v1/client/`) answer with: a code and a
+/// message, without the client-v0 error version. A code this client does not know stays unread.
+fn core_api_error(bytes: &[u8]) -> Option<ErrorEnvelope> {
+    #[derive(Deserialize)]
+    struct Core {
+        code: ErrorCode,
+        message: String,
+        #[serde(default)]
+        request_id: String,
+        #[serde(default)]
+        details: std::collections::BTreeMap<String, serde_json::Value>,
+    }
+    let core: Core = serde_json::from_slice(bytes).ok()?;
+    Some(ErrorEnvelope {
+        api_version: "st3.v1".into(),
+        error_version: String::new(),
+        request_id: core.request_id,
+        code: core.code,
+        message: core.message,
+        retryable: false,
+        retry_after_ms: None,
+        details: core.details,
+    })
 }
 
 fn unreachable_error(endpoint: &str, error: &(dyn std::error::Error + 'static)) -> ClientError {
@@ -3305,6 +3449,9 @@ async fn unix_request(
     if body.is_some() {
         builder = builder.header("content-type", content_type);
     }
+    if let Some(headers) = builder.headers_mut() {
+        propagation::inject_headers(headers);
+    }
     let response = sender
         .send_request(
             builder
@@ -3361,6 +3508,7 @@ fn websocket_request(
     let mut request = url
         .into_client_request()
         .map_err(|error| ClientError::Protocol(error.to_string()))?;
+    propagation::inject_headers(request.headers_mut());
     request.headers_mut().insert(
         hyper::header::HeaderName::from_static("x-st3-features"),
         hyper::header::HeaderValue::from_static("custom-subjects.v1, conversation-blocks.v1"),
@@ -3727,6 +3875,40 @@ mod tests {
         )
     }
 
+    fn with_applied(applied: &str) -> ClientError {
+        let mut error = api(
+            ErrorCode::Unknown,
+            "the database has not confirmed the send",
+        );
+        if let ClientError::Api(_, _, envelope) = &mut error {
+            envelope
+                .details
+                .insert("applied".into(), serde_json::json!(applied));
+        }
+        error
+    }
+
+    #[test]
+    fn an_answer_that_says_whether_it_applied_decides_what_is_safe() {
+        // A code this client does not know still decodes (to Unknown), and `applied` says the rest.
+        let unknown = with_applied("unknown");
+        assert_eq!(unknown.applied(), Some("unknown"));
+        assert!(unknown.outcome_unknown());
+        assert_eq!(
+            unknown.plain(),
+            "st may have taken it and has not confirmed it yet; sending it again is safe"
+        );
+        let none = with_applied("none");
+        assert_eq!(none.applied(), Some("none"));
+        assert!(!none.outcome_unknown());
+        // A lost answer is unknown too, with or without a word from st; a plain refusal is not.
+        assert!(
+            ClientError::Transport("client-v0 request deadline exceeded".into()).outcome_unknown()
+        );
+        assert!(!api(ErrorCode::Forbidden, "no").outcome_unknown());
+        assert_eq!(api(ErrorCode::Forbidden, "no").applied(), None);
+    }
+
     #[test]
     fn errors_read_as_sentences_and_say_whether_trying_again_may_help() {
         let stale = api(
@@ -3748,6 +3930,14 @@ mod tests {
         assert_eq!(gone.plain(), "it is gone: agent `agent/x` does not exist");
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
+        for code in [
+            ErrorCode::ProjectionDetailTooLarge,
+            ErrorCode::ProjectionDetailInvalidSource,
+        ] {
+            let refusal = api(code, "the requested detail was refused");
+            assert_eq!(refusal.plain(), "the requested detail was refused");
+            assert!(!refusal.is_transient());
+        }
         // A terminal out of reach comes back; one whose process exited does not.
         let away = api(
             ErrorCode::TerminalUnavailable,
@@ -3801,8 +3991,6 @@ mod tests {
     }
 
     use super::*;
-    use futures_util::SinkExt as _;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
     fn every_schema_error_code_is_typed_and_round_trips() {

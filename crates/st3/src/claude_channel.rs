@@ -170,7 +170,7 @@ pub async fn run(
                             }
                             let body = body(client, message).await?;
                             let attachments = crate::blobs::materialize_for_seat(client, subject, &agent_dir.join("attachments"), message).await?;
-                            Ok::<_, anyhow::Error>(Some(st_drivers::ding::with_dictation_notice(
+                            Ok::<_, anyhow::Error>(Some(st_drivers::ding::with_tag_notices(
                                 st_drivers::ding::st3_notification_with_attachments(&message.subject, &message.from, &message.to,
                                     message.title.as_deref(), &body, &st_drivers::ding::st3_body_sha256(&body), &attachments), &message.tags)))
                         }.await;
@@ -591,7 +591,8 @@ fn request(line: &str, initialized: &mut bool) -> Result<Option<Value>> {
     let result = match request["method"].as_str() {
         Some("initialize") => {
             json!({"protocolVersion":"2025-03-26","capabilities":{"experimental":{"claude/channel":{}}},
-            "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")}})
+            "serverInfo":{"name":"st","version":env!("CARGO_PKG_VERSION")},
+            "instructions":st_drivers::ding::CHANNEL_INSTRUCTIONS})
         }
         Some("notifications/initialized") => {
             *initialized = true;
@@ -623,6 +624,16 @@ mod tests {
         assert_eq!(
             initialize["result"]["capabilities"]["experimental"]["claude/channel"],
             json!({})
+        );
+        assert_eq!(
+            initialize["result"]["instructions"],
+            st_drivers::ding::CHANNEL_INSTRUCTIONS
+        );
+        assert!(
+            initialize["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("people have no inbox, so do not reply with st")
         );
         let tools = request(
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,

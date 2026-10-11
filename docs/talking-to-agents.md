@@ -14,6 +14,43 @@ st devices --as person/ada pair --full-control 'Garden phone'
 
 Enter the returned pairing ID and code in the app with your paired-only gateway URL. Use [gateway setup](st3/client-v0/README.md#tailnet-carrier) and [the phone connection guide](../apps/ios/README.md#connect); never forward the privileged daemon socket. `--full-control` lets this trusted device send messages and use the work controls. An offline app keeps its last view; reconnect before sending an action.
 
+Large native tool output is a preview, not the complete result. In stui, use
+**Ctrl+Up/Down** to focus a tool or image and **Ctrl+Enter** to expand or collapse tool
+output. **o** in the classic view, or **Ctrl+E** in glasses, expands all tool rows and
+loads visible clipped output one value at a time. Scrolling another clipped row into
+view loads it next; offscreen rows are not prefetched. Already loaded rows stay in
+memory when scrolled away, until collapsed. Restoring saved expansion state does not
+start loading full output. Native images load automatically when their image row is
+visible, without prefetching offscreen images. stui does this only on terminals known
+to support graphics and shares the one-value-at-a-time content reader. **Ctrl+U**,
+outside the composer, still loads or hides images explicitly; a hidden image stays
+hidden when scrolled back into view. Other terminals keep explicit loading through
+the half-block renderer. **Ctrl+O** keeps its pane-zoom action. On the phone,
+**Show all** loads the clipped result and **Show less** collapses it; visible image
+boxes load automatically, and a failed image offers **Retry loading image**.
+Image media type and byte size become exact after loading. Expanded native output
+and fetched native images stay in memory only; collapsing output or hiding an image
+releases the fetched data, as does leaving the retained timeline. Reopening explicitly
+loads it again. This does not change mail attachment opening: stui still saves a
+received mail image under its attachment directory and opens the machine's viewer.
+In Simple density, full output and inline images stay beneath their individual call
+inside an opened tool bundle; loading the last call does not replace the other calls.
+
+## In the web conversation
+
+Tool rows show a short description rather than raw commands or infrastructure paths.
+Protocol events are hidden by default; the conversation menu can show payload-free
+event notices for inspection. Process and agent senders use readable captions.
+
+The pinned **Todos · phase completed/total** disclosure reads the accepted harness
+snapshot, independently of transcript loading. It remains above the composer while
+the conversation reconnects. A missing snapshot is not an empty task list, and stale
+or truncated snapshots keep their freshness and full-source progress labels.
+
+If a conversation cannot be found or access is not granted, ask the gateway owner
+to grant access to the surface. Your saved work is unchanged.
+
+
 ## From the CLI
 
 Capture the message ID so you can check it or keep the same thread:
@@ -40,16 +77,18 @@ st conversations send agent/garden/worker --from person/ada \
 
 Attachments are fetched by the member that reads or delivers the message. Ordinary workspace files do not replicate; put longer text in a graph document or a repository and send its reference. See [message examples](../examples/st3/SEND-A-MESSAGE-PROPERLY.md).
 
-## Home shows what needs you
+## Home shows your alerts
 
-Home is your attention inbox: approvals, decisions, feedback requests, failures that need action, and information addressed to you. An agent working normally does not need a Home card. Follow progress under **Missions** and talk under **Agents**; clearing a card does not erase its history.
+An alert is anything that blocks or waits on you: an ask, a human gate, a launch or revision approval, or a harness prompt. Each alert belongs to the conversation of the agent behind it, and it clears itself when it is answered anywhere or its origin ends. Home lists your alerts, then information addressed to you (updates), which asks nothing and is not counted as an alert. An agent working normally does not need a Home card. Follow progress under **Missions** and talk under **Agents**; clearing a card does not erase its history.
 
 The CLI shows the same person-facing work:
 
 ```sh
 st now
-st attention ls --as person/ada
+st alerts ls --as person/ada
 ```
+
+`st attention` is the older name of `st alerts` and still works.
 
 ## Ask for a human answer
 
@@ -102,10 +141,10 @@ st work ask --for person/ada --title 'Read the garden README' \
   --idempotency-key garden-readme-feedback --as "$ST_AGENT"
 ```
 
-Ada answers in Home, or uses the exact person-step ID from the attention inbox:
+Ada answers in Home, or uses the exact person-step ID from her alerts:
 
 ```sh
-st attention ls --as person/ada
+st alerts ls --as person/ada
 printf 'Person step-run ID to answer: '
 read -r person_step
 st work show "$person_step"

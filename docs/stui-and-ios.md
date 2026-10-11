@@ -12,7 +12,7 @@ stui
 
 stui opens a space with tabs and splits. **Ctrl+S** shows or hides the sidebar; choose **Agents** or **Missions** there. **Ctrl+K** finds an agent, mission, machine, space, or text in conversations; type a name and press **Enter** to open it.
 
-- **Home** shows attention items: decisions, requests, unread messages, and failures that need you. Open it with **Ctrl+H** when you are not typing, or click the need-you count. Follow each card's displayed actions; opening a card does not approve it.
+- **Home** (Now) lists your alerts, then updates that ask nothing. An alert is anything waiting on your answer: an ask, a review gate, a launch or revision approval, a harness prompt or login. Open it with **Ctrl+H** when you are not typing, or click the alert count in the top bar; the bar prints nothing when there are none. Each alert also shows in its agent's conversation, above the message box, with one-tap answers (a Claude permission prompt's allow and deny beside the call it would make, a request's named answers) and **open in Now** for the whole card. Follow each card's displayed actions; opening a card does not approve it.
 - **Agents** opens a seat's conversation, with messages, the harness transcript, and tool output. Scroll to read earlier entries; type in the message box and press **Enter** to reply.
 - **Missions** shows each run's steps, progress, waiting reason, and who is working on it.
 - **Usage** shows observed tokens, estimated cost, and account limits. Click **$ usage** in the top bar (widen the terminal if needed); **b** changes grouping and **p** changes the period.
@@ -46,19 +46,19 @@ There is no App Store or TestFlight build; build it yourself on a Mac with full 
 mkdir -p ~/src
 git clone https://github.com/compoundingtech/smalltalk.git ~/src/smalltalk
 cd ~/src/smalltalk
-npm ci --prefix clients/typescript/st3-views --ignore-scripts --no-audit --no-fund
+corepack enable
+pnpm install --frozen-lockfile
 cd apps/ios
-npm ci
-npx expo prebuild --platform ios --clean --no-install
-npm run pods
-npm run export:ios
+pnpm exec expo prebuild --platform ios --clean --no-install
+pnpm run pods
+pnpm run export:ios
 open ios/smalltalk.xcworkspace
 ```
 
 In Xcode, select the **smalltalk** scheme and your connected iPhone. Under **Signing & Capabilities**, choose your own Apple Development team and automatic provisioning; use a unique bundle identifier if your team cannot register the default. Enable Developer Mode on the phone when asked. From `apps/ios`, [build and install](https://docs.expo.dev/guides/local-app-development/) onto the phone:
 
 ```sh
-npx expo run:ios --device --configuration Release
+pnpm exec expo run:ios --device --configuration Release
 ```
 
 Choose your iPhone when prompted. Release embeds the JavaScript so you can use the app without Metro.

@@ -213,6 +213,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
                         in_reply_to: None,
                         session_id: None,
                         tags: vec![],
+                        kind: st3_client::MessageKind::Wake,
                         attachments: vec![],
                         signature: None,
                     },
@@ -676,6 +677,8 @@ async fn a_stale_seat_publishing_last_cannot_lower_usage_or_disable_the_limits_p
             &st3::store::LimitsPolicy {
                 stop_at_weekly_percent: 95,
                 keep: Default::default(),
+                exempt_accounts: Default::default(),
+                exempt_harnesses: Default::default(),
                 notify: "agent/example/operations".into(),
                 fresh_ms: 3_600_000,
             },
@@ -785,6 +788,8 @@ async fn usage_hides_legacy_unknowns_preserves_account_identity_and_stops_at_95_
             &st3::store::LimitsPolicy {
                 stop_at_weekly_percent: 95,
                 keep: Default::default(),
+                exempt_accounts: Default::default(),
+                exempt_harnesses: Default::default(),
                 notify: "agent/example/operations".into(),
                 fresh_ms: 3_600_000,
             },
@@ -870,6 +875,8 @@ async fn weekly_usage_survives_a_member_restart_with_a_partial_harness_report() 
                         &st3::store::LimitsPolicy {
                             stop_at_weekly_percent: 95,
                             keep: Default::default(),
+                            exempt_accounts: Default::default(),
+                            exempt_harnesses: Default::default(),
                             notify: "agent/example/operations".into(),
                             fresh_ms: 3_600_000,
                         },
@@ -917,13 +924,9 @@ agent "example/operations/coordinator" {
     value(
         &run_cli(
             &socket,
-            &[
-                "agents",
-                "apply",
-                parent.to_str().unwrap(),
-                "--as",
-                "person/operator",
-            ],
+            &["apply", "--no-gate-check", parent.to_str().unwrap(),
+            "--as",
+            "person/operator",],
         )
         .await,
     );
@@ -945,7 +948,7 @@ agent "example/operations/deputy" {
     let applied = run_cli_with_agent_env(
         &socket,
         actor,
-        &["agents", "apply", deputy.to_str().unwrap(), "--as", actor],
+        &["apply", "--no-gate-check", deputy.to_str().unwrap(), "--as", actor],
     )
     .await;
     value(&applied);
@@ -962,13 +965,9 @@ agent "example/operations/deputy" {
         &run_cli_with_agent_env(
             &socket,
             actor,
-            &[
-                "missions",
-                "publish",
-                mission.to_str().unwrap(),
-                "--as",
-                actor,
-            ],
+            &["apply", mission.to_str().unwrap(),
+            "--as",
+            actor,],
         )
         .await,
     );
@@ -2338,6 +2337,7 @@ mission "cli/child" state="ready" {
     assert_eq!(now["value"]["filters"]["person"], "person/alex");
 
     for arguments in [
+        vec!["alerts", "ls", "--as", "person/alex"],
         vec!["attention", "ls", "--as", "person/alex"],
         vec!["agents", "ls"],
         vec!["agents", "tree"],
@@ -2511,14 +2511,14 @@ mission "cli/child" state="ready" {
     assert_eq!(history["value"]["items"][0]["state"], "revoked");
 
     for (arguments, heading) in [
-        (vec!["now", "--as", "person/alex"], "NEEDS YOU"),
+        // Nothing waits on alex: now says nothing about alerts, not even a zero.
+        (vec!["now", "--as", "person/alex"], "Work: st work ls"),
         (vec!["machines"], "MACHINES"),
         (vec!["activity", "--limit", "10"], "ACTIVITY"),
         (vec!["devices", "--as", "person/alex", "--all"], "DEVICES"),
-        (
-            vec!["attention", "ls", "--as", "person/alex"],
-            "HUMAN ATTENTION",
-        ),
+        (vec!["alerts", "ls", "--as", "person/alex"], "ALERTS FOR"),
+        // The older name still works.
+        (vec!["attention", "ls", "--as", "person/alex"], "ALERTS FOR"),
         (vec!["agents", "ls"], "AGENTS"),
         (vec!["agents", "tree"], "AGENT TREE"),
         (vec!["work", "ls"], "WORK"),
@@ -3712,13 +3712,9 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
         value(
             &run_cli(
                 &socket,
-                &[
-                    "agents",
-                    "apply",
-                    source.to_str().unwrap(),
-                    "--as",
-                    "person/avery",
-                ],
+                &["apply", "--no-gate-check", source.to_str().unwrap(),
+                "--as",
+                "person/avery",],
             )
             .await,
         );
@@ -3830,13 +3826,9 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     value(
         &run_cli(
             &socket,
-            &[
-                "agents",
-                "apply",
-                source.to_str().unwrap(),
-                "--as",
-                "person/avery",
-            ],
+            &["apply", "--no-gate-check", source.to_str().unwrap(),
+            "--as",
+            "person/avery",],
         )
         .await,
     );
@@ -4066,13 +4058,9 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
     value(
         &run_cli(
             &socket,
-            &[
-                "missions",
-                "publish",
-                mission.to_str().unwrap(),
-                "--as",
-                "person/avery",
-            ],
+            &["apply", mission.to_str().unwrap(),
+            "--as",
+            "person/avery",],
         )
         .await,
     );

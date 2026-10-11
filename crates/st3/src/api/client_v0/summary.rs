@@ -3,17 +3,6 @@
 use super::*;
 use st3_ui_model::missions::{Display, Word};
 
-pub(super) fn home_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "human-gate"
-            | "launch-approval"
-            | "revision-approval"
-            | "person-step"
-            | "agent-request"
-            | "harness-prompt"
-    ) || kind.starts_with("custom.")
-}
 pub(super) fn working(agent: &Value) -> bool {
     agent["state"] == "running"
         && agent["harness_state"] == "working"
@@ -46,10 +35,8 @@ pub(super) fn native(
         .map_err(|e| anyhow::anyhow!(e.message))?;
     let store = &state.store;
     let attention = store.attention_snapshot(person.as_deref(), now)?;
-    let needs = attention
-        .iter()
-        .filter(|item| home_kind(&item.kind))
-        .count();
+    // What needs the person is what waits on their answer: an update asks nothing.
+    let alerts = attention.iter().filter(|item| item.is_alert()).count();
     let gates = attention
         .iter()
         .filter(|item| item.kind == "human-gate")
@@ -114,16 +101,35 @@ pub(super) fn native(
                 && (m["active"] == true || gates.contains(m["id"].as_str().unwrap_or_default()))
         })
         .count();
-    let mut agents = client_agent_resources_cached(store, false, snapshot.store_index)?;
+    // A daemon's reads never fold the roster: count from its newest publication, and say which.
+    let mut agents_as_of = None;
+    let mut agents = if store.agent_roster_refresher_running() {
+        let Some((cut, cards, published_at)) = store.published_agent_roster(snapshot.store_index, false)
+        else {
+            store.request_agent_roster_refresh();
+            anyhow::bail!("the agents roster is still being prepared; retry shortly");
+        };
+        if cut < snapshot.store_index {
+            store.request_agent_roster_refresh();
+        }
+        agents_as_of = Some(json!({"store_index": cut, "published_at": client_timestamp(published_at)}));
+        (*cards).clone()
+    } else {
+        client_agent_resources_cached(store, false, snapshot.store_index)?
+    };
     overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
     let working = agents.iter().filter(|agent| working(agent)).count();
     let machines = machine_summary_resources(state, snapshot, session)?;
     let machine_counts = machine_counts(&machines, &agents, &client_host_id(&state.node), now);
-    let mut value = json!({"person_id":person,"needs_you":needs,"working_agents":working,"active_missions":active,"machines":machine_counts});
+    let mut value = json!({"person_id":person,"alerts":alerts,"needs_you":alerts,"working_agents":working,"active_missions":active,"machines":machine_counts});
     value["revision"] = json!(smallclaims::hash::canonical_hash(&value)?);
     value["id"] = json!("summary/current");
     value["kind"] = json!("summary");
     value["updated_at"] = json!(client_timestamp(now));
+    // Outside the revision: a newer roster with the same counts changes nothing a client shows.
+    if let Some(as_of) = agents_as_of {
+        value["agents_as_of"] = as_of;
+    }
     Ok(vec![value])
 }
 
@@ -172,6 +178,9 @@ pub(super) fn retain_timestamp(items: &mut [Value], previous: &BTreeMap<String, 
             && old["person_id"] == item["person_id"]
         {
             item["updated_at"] = old["updated_at"].clone();
+            if !old["agents_as_of"].is_null() {
+                item["agents_as_of"] = old["agents_as_of"].clone();
+            }
         }
     }
 }

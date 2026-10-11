@@ -40,7 +40,7 @@
     { "id": "work.list", "method": "GET", "path": "/v1/client/work", "response": "Page" },
     { "id": "work.get", "method": "GET", "path": "/v1/client/work/{id}", "response": "Resource" },
     { "id": "resources.list", "method": "GET", "path": "/v1/client/resources", "response": "ResourcesPage" },
-    { "id": "agents.list", "method": "GET", "path": "/v1/client/agents", "response": "Page" },
+    { "id": "agents.list", "method": "GET", "path": "/v1/client/agents", "response": "Page", "query": { "fresh": "optional true: wait up to two seconds for a roster at least as new as the request" } },
     { "id": "agents.get", "method": "GET", "path": "/v1/client/agents/{id}", "response": "Resource" },
     { "id": "agent-workspace.get", "method": "GET", "path": "/v1/client/agent-workspaces/{id}", "response": "AgentWorkspace", "scope": "read.projections" },
     { "id": "agent-declaration.get", "method": "GET", "path": "/v1/client/agent-declarations/{id}", "response": "AgentDeclaration", "scope": "read.declarations" },
@@ -73,6 +73,7 @@
     {"id": "glasses.get", "method": "GET", "path": "/v1/client/glasses/{id}", "response": "Glass", "scope": "read.glasses"}
   ],
   "commands": [
+    {"id": "observations.report", "method": "POST", "path": "/v1/client/observations", "request": "ObservationReport", "response": "ObservationResponse", "authentication": "paired-session", "max_request_bytes": 65536, "durable_receipt": false, "replicated": false, "snapshot_fence": false},
     { "id": "action.submit", "method": "POST", "path": "/v1/client/actions", "request": "ActionRequest", "response": "ActionResult" },
     { "id": "pairing.begin", "method": "POST", "path": "/v1/client/pairings", "request": "PairingBegin", "response": "PairingChallenge", "local_only": true },
     { "id": "pairing.complete", "method": "POST", "path": "/v1/client/pairings/{id}/complete", "request": "PairingComplete", "response": "PairedSession" },
@@ -84,11 +85,12 @@
   "actions": {
     "arrangement.edit": { "capability": "control.arrangements", "parameters": "ArrangementEditParameters", "max_response_bytes": 1048576 },
     "custom.reply": {"capability": "control.attention", "parameters": "CustomReplyParameters"},
+    "prompt.respond": {"capability": "control.attention", "parameters": "PromptRespondParameters"},
     "review.approve": { "capability": "control.attention", "parameters": "TargetParameters" },
     "review.reject": { "capability": "control.attention", "parameters": "TargetParameters" },
     "review.request-changes": { "capability": "control.attention", "parameters": "TargetParameters" },
     "attention.resolve": { "capability": "control.attention", "parameters": "AttentionResolveParameters" },
-    "message.send": { "capability": "control.messages", "parameters": "MessageSendParameters" },
+    "message.send": { "capability": "control.messages", "parameters": "MessageSendParameters", "description": "Message kind is silent or wake (default). Silent stays unread and is offered in capped batches at the next wake. Replies default to wake independently of their parent. Person and system wake events always wake. Signed silent messages carry st3-silent in signed tags. Old daemons ignore the kind field and do not hold silent mail; upgrade all owner daemons before relying on silent delivery. Raw send/by-key receipts confirm the accepted kind; unfamiliar tags alone do not confirm holding." },
     "message.read": { "capability": "control.messages", "parameters": "TargetParameters" },
     "message.close": { "capability": "control.messages", "parameters": "TargetParameters" },
     "launch.create": { "capability": "control.launches", "parameters": "LaunchCreateParameters" },

@@ -7,6 +7,13 @@ use std::cell::RefCell;
 pub(super) const STAGED_SUBJECTS_QUERY: &str =
     "SELECT DISTINCT subject FROM claims WHERE json_extract(body,'$.owned_set') IS NOT NULL";
 
+// One statement proves both absences in a current SQLite snapshot. Any receipt, including a
+// repaired or malformed one, conservatively requires the existing full authority evaluation.
+const EMPTY_DESIRED_AUTHORITY_QUERY: &str =
+    "SELECT NOT EXISTS(SELECT 1 FROM claims WHERE kind='owned-set.revised')
+        AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1
+                       AND json_extract(body,'$.owned_set') IS NOT NULL)";
+
 struct SnapshotRows {
     connection: usize,
     rows: BTreeMap<Option<u64>, Vec<View>>,
@@ -511,6 +518,21 @@ pub(super) fn owner(
     Ok(owners.into_iter().next())
 }
 
+/// The owning sets of every member at `at`, from one read of the set receipts. A member with
+/// more than one is what [`owner`] refuses as a conflict.
+pub(super) fn owners_at(
+    connection: &Connection,
+    at: Option<u64>,
+) -> Result<BTreeMap<String, BTreeSet<String>>, St3Error> {
+    let mut owners = BTreeMap::<String, BTreeSet<String>>::new();
+    for view in rows(connection, at)? {
+        for member in view.receipt.members.keys().chain(view.receipt.retired.keys()) {
+            owners.entry(member.clone()).or_default().insert(view.id.clone());
+        }
+    }
+    Ok(owners)
+}
+
 pub(super) fn refuse_unmanaged(connection: &Connection, member: &str) -> Result<(), St3Error> {
     if let Some(set) = owner(connection, member, None)? {
         return Err(St3Error::new(
@@ -655,20 +677,9 @@ pub(super) fn plan_tx(
             manual_seats |= manual_member(transaction, member)?;
         }
     }
-    for desired in input
-        .subjects
-        .values()
-        .filter(|d| crate::rollout::manual(d))
-    {
-        if let Some(member) = &desired.member {
-            if let Err(refusal) = crate::native_resume::rollout_support(member) {
-                blockers.push(format!("{}: {}", desired.subject, refusal.reason));
-            }
-        } else {
-            blockers.push(format!(
-                "{}: manual rollout needs a native seat launch",
-                desired.subject
-            ));
+    for desired in input.subjects.values().filter(|d| crate::rollout::manual(d)) {
+        if desired.member.as_ref().is_none_or(|member| !matches!(member.launch, crate::model::LaunchSpec::Argv(_))) {
+            blockers.push(format!("{}: manual rollout needs a typed native harness launch", desired.subject));
         }
     }
     let membership = fleet_membership_tx(transaction).map_err(internal)?;
@@ -809,7 +820,7 @@ pub(super) fn plan_tx(
                                     "{s}: when-idle requires the same native account binding"
                                 ));
                             }
-                            if let Err(refusal) = crate::native_resume::rollout_support(new) {
+                            if !manual && let Err(refusal) = crate::native_resume::rollout_support(new) {
                                 blockers.push(format!("{s}: {}", refusal.reason));
                             }
                             if new.host != old.host || new.driver != old.driver {
@@ -952,6 +963,13 @@ pub(super) fn plan_tx(
             .map(|(subject, _)| subject.as_str()),
         Some(current_index(transaction).map_err(internal)?),
     )?;
+    let rollouts = input.subjects.values().filter(|desired| crate::rollout::manual(desired))
+        .filter_map(|desired| {
+            let refusal = desired.member.as_ref()
+                .and_then(|member| crate::native_resume::rollout_support(member).err())?;
+            Some((desired.subject.clone(), json!({"action":"cutover","policy":{"mode":"manual"},
+                "blocking":[refusal.reason]})))
+        }).collect();
     let preview = Preview {
         declaration_diffs,
         rollout: options.rollout.clone(),
@@ -960,7 +978,7 @@ pub(super) fn plan_tx(
         source: options.source.clone(),
         changes,
         effects,
-        rollouts: BTreeMap::new(),
+        rollouts,
         expected_subjects: heads,
         digest,
         mass_retirement: mass,
@@ -1277,6 +1295,9 @@ impl Store {
         if desired.is_empty() {
             return Ok(BTreeSet::new());
         }
+        for declaration in desired {
+            smallclaims::touched::note_read(|| declaration.subject.clone());
+        }
         self.read_snapshot(|_| {
             self.with_owned_set_snapshot_reads(|| {
                 let connection = self.readers.get();
@@ -1349,8 +1370,21 @@ impl Store {
     /// method to return before writing or performing the effect.
     pub fn owned_desired_guard(&self, desired: &DesiredSubject) -> Result<(), St3Error> {
         smallclaims::sqlite::debug_assert_no_pinned_read();
-        // Every invocation starts a current read snapshot. Reuse receipt rows only within
-        // this fence, so its several authority checks agree without refolding the history.
+        smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
+        smallclaims::touched::note_read(|| desired.subject.clone());
+        let empty: bool = {
+            let connection = self.readers.get();
+            connection
+                .prepare_cached(EMPTY_DESIRED_AUTHORITY_QUERY)
+                .map_err(internal)?
+                .query_row([&desired.subject], |row| row.get(0))
+                .map_err(internal)?
+        };
+        if empty {
+            return Ok(());
+        }
+        // A negative probe is not authorization. Start another current snapshot for the full
+        // fence and reuse receipt rows only within it, never across invocations or effects.
         self.read_snapshot(|_| {
             Ok(self.with_owned_set_snapshot_reads(|| {
                 let connection = self.readers.get();

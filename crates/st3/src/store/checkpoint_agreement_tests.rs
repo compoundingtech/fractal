@@ -883,8 +883,14 @@ fn participants_trim_the_stable_checkpoint_and_keep_every_identity() {
     let held = claim_ids(&alder);
     let index = alder.index().unwrap();
     for node in [&alder, &birch] {
+        let reclaim_before = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
         assert_eq!(kinds(&step(node, &context)), ["trimmed"]);
+        let reclaimed = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
+        assert_eq!(reclaimed.0 - reclaim_before.0, 1,
+            "checkpoint application and its nested finish reclaim once");
         assert!(step(node, &context).is_empty());
+        assert_eq!(smallclaims::store::checkpoint::allocator_reclaim_stats_for_test(), reclaimed,
+            "periodic completed-checkpoint polling never reclaims");
     }
     // Every identity stays in the inventory, so the authority digest does not move, and
     // the graph is the same.
@@ -916,6 +922,7 @@ fn participants_trim_the_stable_checkpoint_and_keep_every_identity() {
 #[test]
 fn a_trim_that_stops_anywhere_finishes_the_same_after_a_restart() {
     for fault in [
+        TrimFault::AfterTombstoneChunk(1),
         TrimFault::AfterTombstones,
         TrimFault::AfterChunk(1),
         TrimFault::AfterChunk(2),
@@ -929,13 +936,32 @@ fn a_trim_that_stops_anywhere_finishes_the_same_after_a_restart() {
         stable_pair(&alder, &birch, &context);
         assert_eq!(kinds(&step(&birch, &context)), ["trimmed"]);
         alder.set_trim_chunk_envelopes(2);
+        if fault == TrimFault::AfterTombstoneChunk(1) {
+            // Slow enough that recording takes several chunks, so the crash leaves some
+            // tombstones recorded and others not.
+            alder.set_trim_row_cost(std::time::Duration::from_millis(12));
+        }
         alder.set_trim_fault(Some(fault));
+        let reclaim_before = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
         assert!(alder.checkpoint_step(&context).is_err(), "{fault:?}");
+        if fault == TrimFault::AfterTombstoneChunk(1) {
+            let count = |sql: &str| -> u64 { alder.readers.get().query_row(sql, [], |row| row.get(0)).unwrap() };
+            let recorded = count("SELECT (SELECT COUNT(*) FROM checkpoint_envelopes) + (SELECT COUNT(*) FROM checkpoint_claims)");
+            let deleted = count("SELECT COUNT(*) FROM checkpoint_envelopes AS tombstone WHERE NOT EXISTS (
+                SELECT 1 FROM replica_envelopes AS held WHERE held.writer=tombstone.writer
+                  AND held.sequence=tombstone.sequence AND held.envelope_hash=tombstone.envelope_hash)");
+            assert!(recorded > 0 && deleted == 0, "some tombstones are recorded and nothing is deleted");
+            let manifest = birch.checkpoint_manifest(&checkpoint_name(newest_due_cut(context.now_unix_ms)), newest_due_cut(context.now_unix_ms)).unwrap();
+            assert!((recorded as usize) < manifest.claims.len() + manifest.envelopes.len(), "the crash came part way through");
+        }
+        assert_eq!(smallclaims::store::checkpoint::allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1);
         drop(alder);
 
         let alder = Store::open(&path, "alder").unwrap();
+        let reclaim_before = smallclaims::store::checkpoint::allocator_reclaim_stats_for_test();
         let actions = step(&alder, &context);
         assert_eq!(kinds(&actions), ["trimmed"], "{fault:?}");
+        assert_eq!(smallclaims::store::checkpoint::allocator_reclaim_stats_for_test().0 - reclaim_before.0, 1);
         assert!(step(&alder, &context).is_empty());
         assert_eq!(claim_ids(&alder), claim_ids(&birch), "{fault:?}");
         assert_eq!(authority(&alder), authority(&birch), "{fault:?}");
@@ -1218,4 +1244,50 @@ fn stale_rule_seals_do_not_end_excusal_until_normal_matching_runtime_reentry() {
     let status = alder.checkpoint_status(next.now_unix_ms, &[]).unwrap();
     assert!(status.excused.is_empty());
     assert_eq!(status.participants, names(&["alder", "birch"]));
+}
+
+#[test]
+fn the_agent_card_fold_matches_per_subject_reductions_after_a_trim() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let [alder, birch] = ["alder", "birch"].map(|name| Store::open_memory(name).unwrap());
+    for (store, seat) in [(&alder, "agent/alder.keeper"), (&birch, "agent/birch.keeper")] {
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status": "running", "runtime_id": seat,
+                "incarnation_id": "keeper-1"})),
+            ("harness.observed", json!({"state": "working", "driver": "omp",
+                "incarnation_id": "keeper-1"})),
+            ("harness.observed", json!({"state": "idle", "driver": "omp",
+                "incarnation_id": "keeper-1"})),
+            ("runtime.observed", json!({"status": "stopped", "runtime_id": seat,
+                "incarnation_id": "keeper-1"})),
+            ("runtime.observed", json!({"status": "running", "runtime_id": seat,
+                "incarnation_id": "keeper-2"})),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+    }
+    sync(&[&alder, &birch]);
+    let mut trimmed = false;
+    for _ in 0..4 {
+        for node in [&alder, &birch] {
+            trimmed |= kinds(&step(node, &context)).contains(&"trimmed");
+        }
+        sync(&[&alder, &birch]);
+    }
+    assert!(trimmed, "the fixture reached a trim");
+    for node in [&alder, &birch] {
+        let indexes = (0..=node.index().unwrap()).collect::<Vec<_>>();
+        super::card_fold_tests::assert_card_fold_parity(node, &indexes);
+    }
 }

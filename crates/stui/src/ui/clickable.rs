@@ -24,7 +24,7 @@ impl Ui {
         let footer = Rect::new(area.x, area.bottom() - 1, area.width, 1);
         // Text to read stays quiet: moving over messages leaves the normal keys in the footer
         // (Nathan, 2026-10-07).
-        if matches!(hit, Hit::Message | Hit::Subject) {
+        if matches!(hit, Hit::Message | Hit::Subject | Hit::InlineImage(_)) {
             return;
         }
         if rect.intersects(footer)
@@ -39,14 +39,18 @@ impl Ui {
         let label = text::sanitize(&text::truncate(&self.target_label(buf, rect), 48));
         let mut left = match hit {
             Hit::Answer(_) => "choose answer; Enter sends".into(),
+            Hit::Alert(_, AlertTap::Answer(_)) => "answer this alert".into(),
+            Hit::Alert(_, AlertTap::Open) => "open this alert in Now".into(),
             Hit::Voice => "start voice input".into(),
             Hit::NewTerminal => "new terminal".into(),
+            Hit::ResourceRow(_) => "open resource or toggle group".into(),
+            Hit::ResourceFilter => "filter sidebar".into(),
             Hit::SidebarRow(_) => "open item in tab".into(),
             Hit::SidebarSection(_) | Hit::Tab(_) => format!("show {label}"),
             Hit::Usage => "show/hide Usage".into(),
             Hit::Connection => "connection details".into(),
             Hit::Row(_) => "select row".into(),
-            Hit::Message | Hit::Subject => String::new(),
+            Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
             Hit::Key('s') if self.glasses.is_none() && self.popover.is_none() => {
                 "show/hide list [s]".into()
@@ -55,6 +59,8 @@ impl Ui {
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
+            Hit::ContentImage(_) => "load image".into(),
+            Hit::ContentOutput(_) => "load full output".into(),
             Hit::Pane(PaneIntent::Send(_)) => "send message".into(),
             Hit::Pane(PaneIntent::LoadOlder) => "load older messages".into(),
             Hit::JumpLatest => "jump to latest [End]".into(),
@@ -67,6 +73,7 @@ impl Ui {
             Hit::Actions(_) => "agent actions".into(),
             Hit::Field(_) => "focus field [Tab]".into(),
             Hit::Revoke(_) => "ask to revoke; y confirms".into(),
+            Hit::Attach => "attach terminal [Ctrl+]]".into(),
             Hit::Detach => "leave terminal [Ctrl+\\ or Ctrl+T twice]".into(),
             Hit::GlassMenu => "spaces [Ctrl+G]".into(),
             Hit::PaletteSection(1) => "agents [Ctrl+2]".into(),
@@ -77,7 +84,7 @@ impl Ui {
             Hit::Link(_) => "copy link".into(),
             Hit::Split(true) => "split right [Ctrl+V]".into(),
             Hit::Split(false) => "split below [Ctrl+X]".into(),
-            Hit::GlassTab(..) => "show tab; drag to move/split".into(),
+            Hit::GlassTab(..) => "show tab; drag to move/split; middle-click closes".into(),
             Hit::GlassAdd(_) => "new tab [Ctrl+T]".into(),
             Hit::PaletteChoice(_) => format!("open {label}"),
         };
@@ -275,6 +282,65 @@ mod tests {
                 assert!(ui.flash.as_ref().unwrap().0.contains("Start"));
             }
         }
+    }
+
+    #[test]
+    fn unattached_terminal_button_hovers_and_runs_the_keyboard_attach_action() {
+        for shell in [false, true] {
+            let mut ui = Ui::new(demo::world());
+            ui.glasses = Some(glass::Glasses::open(None, None));
+            let id = if shell {
+                "terminal/example-shell".to_owned()
+            } else {
+                ui.world.agents.items()[0].id.clone()
+            };
+            ui.open_in_glass(Pane::Terminal(id.clone()), glass::Open::Tab);
+            let before = draw(&ui);
+            assert!(ui.terminal.is_none());
+            assert!((0..48).any(|row| line(&before, row).contains("Not attached. Ctrl+] attaches")));
+            let button = target(&ui, |hit| matches!(hit, Hit::Attach));
+            assert!(line(&before, button.y).contains("Attach"));
+            pointer(&mut ui, MouseEventKind::Moved, button.x, button.y);
+            let hovered = draw(&ui);
+            assert_eq!(
+                hovered[(button.x, button.y)].bg,
+                theme::hover_background(before[(button.x, button.y)].bg)
+            );
+            assert!(line(&hovered, 47).contains("Click: attach terminal"));
+            ui.live = true;
+            ui.key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+            let keyboard = ui.effects.drain(..).collect::<Vec<_>>();
+            pointer(&mut ui, MouseEventKind::Down(MouseButton::Left), button.x, button.y);
+            assert!(matches!(keyboard.as_slice(), [Effect::OpenTerminal { agent }] if agent == &id));
+            assert!(matches!(ui.effects.as_slice(), [Effect::OpenTerminal { agent }] if agent == &id));
+        }
+    }
+
+    #[test]
+    fn middle_click_closes_only_on_release_over_the_pressed_tab() {
+        let mut ui = Ui::new(demo::world());
+        ui.glasses = Some(glass::Glasses::open(None, None));
+        let agent = ui.world.agents.items()[0].id.clone();
+        ui.open(&agent);
+        let other = ui.world.agents.items()[1].id.clone();
+        ui.open(&other);
+        draw(&ui);
+        let tab = target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 1)));
+        let home = target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 0)));
+        pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), tab.x, tab.y);
+        draw(&ui);
+        assert_eq!(target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 1))), tab);
+        pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), home.x, home.y);
+        draw(&ui);
+        assert_eq!(target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 1))), tab);
+        pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), tab.x, tab.y);
+        draw(&ui);
+        assert_eq!(target(&ui, |hit| matches!(hit, Hit::GlassTab(0, 1))), tab);
+        pointer(&mut ui, MouseEventKind::Down(MouseButton::Middle), tab.x, tab.y);
+        pointer(&mut ui, MouseEventKind::Up(MouseButton::Middle), tab.x, tab.y);
+        draw(&ui);
+        assert!(!ui.frame.borrow().hits.iter()
+            .any(|(_, hit)| matches!(hit, Hit::GlassTab(0, 1))));
     }
 
     #[test]
