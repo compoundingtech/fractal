@@ -1146,6 +1146,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_task_call_keeps_named_tasks_and_owner_fetches_full_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let task = "Review the synthetic change.\n".repeat(420);
+        let arguments = json!({
+            "context":"Review the change using the supplied contract.",
+            "tasks":[{"name":"reviewer","agent":"scout","task":task}]
+        });
+        let bytes = serde_json::to_vec(&arguments).unwrap().len();
+        assert!((11 * 1024..13 * 1024).contains(&bytes));
+        let native = fixture(
+            root.path(),
+            json!([{"type":"toolCall","id":"large-task","name":"task","arguments":arguments}]),
+        );
+        let originals = crate::external_sessions::normalized_timeline(&native).unwrap();
+        let mut state = super::super::tests::test_state_named(root.path(), "operator");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let prepared = prepare(&native, &session, &native.id, originals.clone()).unwrap();
+        let item = prepared
+            .iter()
+            .find(|item| item["body"]["blocks"][0]["view"]["type"] == "task")
+            .unwrap();
+        let block = &item["body"]["blocks"][0];
+        let tasks = block["view"]["tasks"].as_array().expect("task view survives preparation");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["name"], "reviewer");
+        assert_eq!(tasks[0]["agent"], "scout");
+        assert!(tasks[0]["task"].as_str().unwrap().contains("[st truncated this native timeline value:"));
+        assert_eq!(block["continuation"]["reason"], "size-limit");
+        let token = block["continuation"]["ref"].as_str().unwrap();
+        let pointer = locator(token, &native.id).unwrap().pointer;
+        assert_eq!(pointer, "/body");
+        let original = originals.iter().find(|entry| entry["id"] == item["id"]).unwrap();
+        let fetched = fetch_json_chunks(&state, &native, token).await;
+        assert_eq!(fetched, *original.pointer(&pointer).unwrap());
+        assert_eq!(fetched["arguments"], arguments);
+        assert_eq!(fetched["blocks"][0]["view"]["tasks"][0]["task"], task);
+    }
+
+    #[tokio::test]
     async fn truncated_tool_output_http_chunks_return_complete_native_body_without_writes() {
         let root = tempfile::tempdir().unwrap();
         // More than two owner chunks, including UTF-8 split across byte boundaries.
