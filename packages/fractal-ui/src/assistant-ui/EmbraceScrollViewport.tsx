@@ -25,11 +25,13 @@ export interface ViewportState {
   readonly following: boolean
   readonly unread: boolean
   /** The reader's line by row identity: `top` alone drifts when a remount backfills rows above it. */
-  readonly anchor?: { readonly id: string; readonly offset: number }
+  readonly anchor?: { readonly id: string; readonly offset: number; readonly memberId?: string }
 }
 
 const keyedRowSelector = '[data-scroll-anchor-id], [data-item-id], [data-embrace-entry-id]'
 const rowKey = (row: HTMLElement): string | undefined => row.dataset.scrollAnchorId ?? row.dataset.itemId ?? row.dataset.embraceEntryId
+/** A summary owns source leaves even when they are folded; any captured leaf can reconcile its changing turn id. */
+const rowMembers = (row: HTMLElement): readonly string[] => JSON.parse(row.dataset.scrollAnchorMembers ?? '[]')
 
 /** Complete source membership is independent of which rows the runtime or backfill has mounted. */
 export type ViewportAnchorHistory =
@@ -113,7 +115,7 @@ class ViewportController {
   /** A missing DOM row may still be awaiting adoption/backfill; only complete source absence retires it. */
   readonly updateHistory = (history: ViewportAnchorHistory) => {
     const saved = this.pendingAnchor ?? this.snapshotAnchor
-    if (saved === undefined || history._tag !== 'Complete' || history.ids.includes(saved.id)) return
+    if (saved === undefined || history._tag !== 'Complete' || history.ids.includes(saved.memberId ?? saved.id)) return
     this.pendingAnchor = undefined
     this.snapshotAnchor = undefined
     this.anchor = undefined
@@ -127,10 +129,15 @@ class ViewportController {
     if (element === null || saved === undefined) return false
     let row: HTMLElement | undefined
     for (const candidate of element.querySelectorAll<HTMLElement>(keyedRowSelector)) if (candidate.dataset.testid !== 'transcript-turn' && rowKey(candidate) === saved.id) { row = candidate; break }
+    if (row === undefined && saved.memberId !== undefined) {
+      for (const candidate of element.querySelectorAll<HTMLElement>('[data-scroll-anchor-members]')) {
+        if (rowMembers(candidate).includes(saved.memberId)) { row = candidate; break }
+      }
+    }
     if (row === undefined) return false
     this.writeTop(element.scrollTop + row.getBoundingClientRect().top - element.getBoundingClientRect().top - saved.offset)
     this.anchor = { element: row, offset: saved.offset }
-    this.snapshotAnchor = saved
+    this.snapshotAnchor = { ...saved, id: rowKey(row)! }
     this.pendingAnchor = undefined
     this.pendingTop = undefined
     return true
@@ -187,7 +194,11 @@ class ViewportController {
     this.anchor = { element: row, offset }
     const id = rowKey(row)
     if (id === undefined) this.snapshotAnchor = undefined
-    else if (this.snapshotAnchor?.id !== id || this.snapshotAnchor.offset !== offset) this.snapshotAnchor = { id, offset }
+    else {
+      const members = rowMembers(row)
+      const memberId = this.snapshotAnchor?.memberId !== undefined && members.includes(this.snapshotAnchor.memberId) ? this.snapshotAnchor.memberId : members[0]
+      this.snapshotAnchor = memberId === undefined ? { id, offset } : { id, offset, memberId }
+    }
   }
   private scheduleCapture() {
     // A switch can commit before the next frame. Serialize the old conversation at scroll delivery.

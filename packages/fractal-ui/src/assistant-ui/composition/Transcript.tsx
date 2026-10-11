@@ -31,7 +31,7 @@ export interface TranscriptTurn {
 }
 /** `Unavailable` is the whole status: one host reason line and no sync line. `detail` may be diagnostic, so it stays behind "Show details". `action` is the host's recovery, e.g. `{ label: 'Try again', onPress }`. */
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
-export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void }
+export type TranscriptHistory = { readonly _tag: 'Unobserved' } | { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void }
 export interface TranscriptProps {
   readonly turns: readonly TranscriptTurn[]
   readonly title: string
@@ -205,7 +205,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, stranded, onOpenTo
   const reasoning = turn.items.filter(item => item._tag === 'Reasoning')
   return <section ref={React.useContext(TurnProximityRef)} data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn, styles.turnSkip)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={JSON.stringify(['work-summary', turn.id])} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} itemId={item.id} text={item.text} streaming={item.streaming} />)} />}
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={JSON.stringify(['work-summary', turn.id])} summaryMemberIds={turn.items.filter(item => item._tag === 'ToolCall' || item._tag === 'Reasoning').map(item => item.id)} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} itemId={item.id} text={item.text} streaming={item.streaming} />)} />}
     {turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning').map(item => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></SenderCaption.Provider>)}
     {turn.work.running && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.liveActivity)}><span aria-hidden="true">◌</span></div>}
   </section>

@@ -18,6 +18,7 @@ import type * as KitRuntime from '../../../../packages/fractal-ui/src/assistant-
 import type * as KitTranscript from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type * as KitComposer from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
 import type * as KitViewport from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
+import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import type { ConversationRuntimeOptions, TranscriptTurn } from '@smalltalk/fractal-ui/assistant-ui'
 import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
@@ -37,6 +38,7 @@ const source = vi.hoisted(() => ({
   now: 1000,
   staticWorkLog: false,
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
+  transcriptHistories: [] as React.ComponentProps<typeof Kit.Transcript>['history'][],
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
   composerProps: [] as React.ComponentProps<typeof Kit.EmbraceComposer>[],
@@ -77,6 +79,7 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript
   return {
     ...kit,
     Transcript: (props: React.ComponentProps<typeof Kit.Transcript>) => {
+      source.transcriptHistories.push(props.history)
       source.transcriptTurns.push(props.turns)
       source.scrollToBottomKeys.push(props.scrollToBottomKey)
       // Exercise the kit's read-only presentation without weakening the host's required navigation API.
@@ -135,6 +138,7 @@ beforeEach(() => {
   source.staticWorkLog = false
   source.runtimeItems = []
   source.transcriptTurns = []
+  source.transcriptHistories = []
   source.scrollToBottomKeys = []
   source.composerProps = []
   source.viewportCommits = []
@@ -227,6 +231,66 @@ describe('ConversationPane composition activation', () => {
       client.mockRestore()
       if (elementFromPoint === undefined) Reflect.deleteProperty(document, 'elementFromPoint')
       else Object.defineProperty(document, 'elementFromPoint', elementFromPoint)
+    }
+  })
+  it.each([true, false])('restores a leading partial work summary after prefix and prompt backfill (hasOlder=%s)', async hasOlder => {
+    const store = new ViewportStore()
+    let summaryTop = 925
+    const height = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(3000)
+    const client = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
+    const bounds = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      const lane = this.closest<HTMLElement>('[data-testid="transcript-scroll"]')
+      const top = this.hasAttribute('data-scroll-anchor-id') ? summaryTop - (lane?.scrollTop ?? 0) : 0
+      return { top, bottom: top + 200, left: 0, right: 800, width: 800, height: 200, x: 0, y: top, toJSON: () => ({}) }
+    })
+    const point = Object.getOwnPropertyDescriptor(document, 'elementFromPoint')
+    Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => container.querySelector('[data-scroll-anchor-id]') })
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 0
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++nextFrame, callback); return nextFrame })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
+    const flush = async () => {
+      await act(async () => {
+        const pending = [...frames.values()]
+        frames.clear()
+        pending.forEach(callback => callback(0))
+      })
+    }
+    const show = async (key: string, items: readonly ConversationItem[], older: boolean) => {
+      source.feed = { _tag: 'Observed', freshness: 'live', value: { items, hasOlder: older, observation: { empty: false } } }
+      source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+      await act(async () => root!.render(<ViewportStoreContext.Provider value={store}><ConversationPane agentRef={key} agentName="Example Agent" onOpenTool={call => opened.push(call)} /></ViewportStoreContext.Provider>))
+      await flush()
+      return container.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
+    }
+    const earlier: ConversationItem = { ...scenario[1]!, id: 'earlier-tool', _tag: 'ToolCall', callId: 'earlier-call', name: 'read', input: {}, status: 'success', callSeen: true, at: at(0) }
+    try {
+      const lane = await show('a', scenario.slice(1, 5), true)
+      await act(async () => {
+        lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -900 }))
+        lane.scrollTop = 901
+        lane.dispatchEvent(new Event('scroll'))
+      })
+      await flush()
+      await show('b', scenario.slice(0, 5), false)
+      expect(store.get('a')?.anchor).toMatchObject({ id: '["work-summary","read"]', offset: 24 })
+      if (hasOlder) {
+        summaryTop += 300
+        const prefixed = await show('a', [earlier, ...scenario.slice(1, 5)], true)
+        expect(prefixed.querySelector('[data-scroll-anchor-id]')?.getBoundingClientRect().top).toBe(24)
+        await show('b', scenario.slice(0, 5), false)
+      }
+      summaryTop += 300
+      const completed = await show('a', [scenario[0]!, earlier, ...scenario.slice(1, 5)], hasOlder)
+      expect(completed.querySelector('[data-scroll-anchor-id]')?.getAttribute('data-scroll-anchor-id')).toBe('["work-summary","p1"]')
+      expect(completed.querySelector('[data-scroll-anchor-id]')?.getBoundingClientRect().top).toBe(24)
+      expect(completed.scrollTop).toBe(hasOlder ? 1501 : 1201)
+    } finally {
+      height.mockRestore()
+      client.mockRestore()
+      bounds.mockRestore()
+      if (point === undefined) Reflect.deleteProperty(document, 'elementFromPoint')
+      else Object.defineProperty(document, 'elementFromPoint', point)
     }
   })
   it('restores a detached conversation across switches and eviction, but reload follows the end', async () => {
@@ -568,6 +632,22 @@ describe('ConversationPane composition activation', () => {
     expect(container.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(12)
     expect(container.querySelector('[data-testid="user-message"][data-item-id="turn/0/p1"]')).not.toBeNull()
     expect(source.viewportCommits.at(-1)?.anchorHistory).toBe(bounded.anchorHistory)
+  })
+  it('keeps Waiting and Unavailable history partial despite retained Live sync until an Observed page arrives', async () => {
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    source.feed = { _tag: 'Waiting' }
+    await mount()
+    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Partial' })
+    source.feed = { _tag: 'Unavailable', reason: 'failed', detail: 'Synthetic unavailable page' }
+    await mount()
+    expect(source.transcriptHistories.at(-1)).toEqual({ _tag: 'Unobserved' })
+    expect(container.querySelector('[data-testid="transcript-scroll"]')).toBeNull()
+    source.feed = { _tag: 'Waiting' }
+    await mount()
+    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Partial' })
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [], hasOlder: false, observation: { empty: true } } }
+    await mount()
+    expect(source.viewportCommits.at(-1)?.anchorHistory).toEqual({ _tag: 'Complete', ids: [] })
   })
 
   it('distinguishes partial or unobserved history from complete source membership and authoritative empty history', async () => {

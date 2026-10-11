@@ -131,7 +131,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
         // Preserve the follow-retry policy; the unavailable body owns its single recovery action.
         ...(retryConversation === undefined ? {} : { action: { label: 'Try again', onPress: () => retryConversation(agentRef) } }),
       } } : {})}
-      {...(state._tag === 'Observed' && state.history._tag === 'HasOlder' ? { history: state.history } : {})}
+      history={state._tag === 'Observed' ? state.history : { _tag: 'Unobserved' }}
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />
     </div>

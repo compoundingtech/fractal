@@ -558,7 +558,7 @@ test('switching back restores the reader row although rows were backfilled above
 const renderConversation = async (store, key, page, sourceIds = page.rows.map(row => row.id), anchorHistory) => {
   const rows = page.rows.map(row => {
     const attributes = row.kind === 'work summary'
-      ? { 'data-work-log-summary': '', 'data-scroll-anchor-id': row.id }
+      ? { 'data-work-log-summary': '', 'data-scroll-anchor-id': row.id, ...(row.members === undefined ? {} : { 'data-scroll-anchor-members': JSON.stringify(row.members) }) }
       : { 'data-item-id': row.id, ...(row.kind === 'tool' ? { 'data-tool-status': 'success' } : row.kind === 'thinking' ? { 'data-testid': 'thinking-entry' } : {}) }
     const leaf = React.createElement('div', {
       key: row.id, ...attributes,
@@ -667,4 +667,31 @@ for (const kind of ['tool', 'thinking', 'work summary']) test(`nested ${kind} sw
   const leaf = [...lane.querySelectorAll('[data-item-id], [data-scroll-anchor-id]')].find(row => (row.dataset.scrollAnchorId ?? row.dataset.itemId) === id)
   assert.equal(leaf.getBoundingClientRect().top, 24)
   assert.equal(lane.scrollTop, 1501)
+})
+
+test('a renamed summary keeps its member anchor through partial and complete unmounted history, then retires only missing membership', async () => {
+  const store = new ViewportStore()
+  const oldId = JSON.stringify(['work-summary', 'tool-x'])
+  const newId = JSON.stringify(['work-summary', 'prompt-p'])
+  const saved = { id: oldId, offset: 24, memberId: 'tool-x' }
+  store.save('a', { top: 901, following: false, unread: false, anchor: saved })
+  const a = { height: 3000, rows: [{ id: 'a/fallback', top: 925 }, { id: 'a/reply', top: 2800 }] }
+  const b = { height: 3000, rows: [{ id: 'b/reply', top: 2800 }] }
+  for (const history of [{ _tag: 'Partial' }, { _tag: 'Complete', ids: ['prompt-p', 'tool-x', newId, 'a/fallback', 'a/reply'] }]) {
+    await renderConversation(store, 'a', a, undefined, history)
+    await flush()
+    await renderConversation(store, 'b', b)
+    assert.deepEqual(store.get('a').anchor, saved)
+  }
+  const restored = { height: 3000, rows: [{ id: newId, top: 1525, kind: 'work summary', turnId: 'prompt-p', turnTop: 0, members: ['earlier-tool', 'tool-x'] }, { id: 'a/reply', top: 2800 }] }
+  const lane = await renderConversation(store, 'a', restored, undefined, { _tag: 'Complete', ids: ['prompt-p', 'earlier-tool', 'tool-x', newId, 'a/reply'] })
+  await flush()
+  assert.equal(lane.scrollTop, 1501)
+  await renderConversation(store, 'b', b)
+  assert.deepEqual(store.get('a').anchor, { ...saved, id: newId })
+  a.rows[0].top = 1800
+  await renderConversation(store, 'a', a, undefined, { _tag: 'Complete', ids: [newId, 'a/fallback', 'a/reply'] })
+  await flush()
+  await renderConversation(store, 'b', b)
+  assert.deepEqual(store.get('a').anchor, { id: 'a/fallback', offset: 299 })
 })
