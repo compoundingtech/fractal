@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, Heading, Popover, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
-import { syncLine } from './sync-line'
+import { syncLine, canRetrySyncFailure, syncFailureRecovery } from './sync-line'
 import type { SyncStatus } from './sync-status'
 import { SyncFailureDetails } from './SyncLine'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
@@ -22,7 +22,8 @@ export const PaneSyncStatus = React.memo(function PaneSyncStatus({ status: obser
   const phase = phaseOf(observation)
   const line = syncLine({ status: observation, label, now, observedAt, gateway })
   const failure = observation._tag === 'Failed' ? observation.cause : undefined
-  const recovery = failure === undefined ? undefined : 'Retry to load details.'
+  const retryable = failure !== undefined && canRetrySyncFailure(failure)
+  const recovery = failure === undefined ? undefined : syncFailureRecovery(failure)
   const failureText = failure === undefined || failure._tag === 'Unknown' ? undefined : line?.text ?? `Couldn't load ${label}`
   const [glyphShown, setGlyphShown] = React.useState(false)
   React.useEffect(() => {
@@ -52,7 +53,7 @@ export const PaneSyncStatus = React.memo(function PaneSyncStatus({ status: obser
     {phase === 'loading' && <span data-pane-sync-glyph={glyphShown ? 'shown' : 'pending'} role="img" aria-label={line?.text ?? `Loading ${label}`} aria-hidden={!glyphShown || undefined} {...stylex.props(styles.glyphBox, !glyphShown && styles.pending)}><span {...stylex.props(styles.dot)} /></span>}
     <span data-pane-sync-controls={reserved ? 'reserved' : 'shown'} aria-hidden={reserved || undefined} inert={reserved} {...stylex.props(styles.controls, reserved && styles.pending)}>
       {reserved ? <span {...stylex.props(styles.word, styles.wordStatic)}><span {...stylex.props(styles.dot)} />Load failed</span> : <span data-pane-sync-word {...stylex.props(styles.word, styles.wordStatic)}><span {...stylex.props(styles.dot, styles.dangerDot)} />Load failed</span>}
-      {reserved ? <span {...stylex.props(styles.word, styles.wordTrigger)}><span {...stylex.props(styles.dot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></span> : <TooltipTrigger delay={150}><Button ref={wordTrigger} data-pane-sync-word-trigger aria-label="Load failed. Open details to retry." aria-haspopup="dialog" aria-expanded={detailsOpen && anchor === 'word'} onPress={() => openDetails('word')} {...stylex.props(styles.word, styles.wordTrigger)}><span {...stylex.props(styles.dot, styles.dangerDot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></Button><Tooltip {...stylex.props(styles.tooltip)}>Load failed</Tooltip></TooltipTrigger>}
+      {reserved ? <span {...stylex.props(styles.word, styles.wordTrigger)}><span {...stylex.props(styles.dot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></span> : <TooltipTrigger delay={150}><Button ref={wordTrigger} data-pane-sync-word-trigger aria-label={retryable ? 'Load failed. Open details to retry.' : 'Load failed. Open details for recovery information.'} aria-haspopup="dialog" aria-expanded={detailsOpen && anchor === 'word'} onPress={() => openDetails('word')} {...stylex.props(styles.word, styles.wordTrigger)}><span {...stylex.props(styles.dot, styles.dangerDot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></Button><Tooltip {...stylex.props(styles.tooltip)}>Load failed</Tooltip></TooltipTrigger>}
       {reserved ? <span {...stylex.props(styles.action, styles.detailsAction)}><span {...stylex.props(styles.actionIcon)}>⋯</span><span {...stylex.props(styles.actionLabel)}>Details</span></span> : <Button ref={detailsTrigger} data-pane-sync-details-trigger aria-label={`Details for ${label}`} aria-expanded={detailsOpen} onPress={() => openDetails('details')} {...stylex.props(styles.action, styles.detailsAction)}><span aria-hidden="true" {...stylex.props(styles.actionIcon)}>⋯</span><span aria-hidden="true" {...stylex.props(styles.actionLabel)}>Details</span></Button>}
     </span>
     {failure !== undefined && <>
@@ -61,7 +62,7 @@ export const PaneSyncStatus = React.memo(function PaneSyncStatus({ status: obser
           <Heading slot="title" id={headingId} {...stylex.props(styles.heading)}>Load failed</Heading>
           {failureText !== undefined && <><div id={textId}><p {...stylex.props(styles.paragraph, styles.failureText)}>{failureText}.</p><p {...stylex.props(styles.paragraph)}>{recovery}</p></div>
           <div {...stylex.props(styles.cause)}><SyncFailureDetails cause={failure} />{gateway !== undefined && <p {...stylex.props(styles.paragraph)}>Gateway: {gateway}</p>}</div></>}
-          <div {...stylex.props(styles.dialogActions)}><Button data-command-id="sync.retry.details" onPress={() => { setDetailsOpen(false); onRetry() }} {...stylex.props(styles.primary)}>Retry</Button></div>
+          {retryable && <div {...stylex.props(styles.dialogActions)}><Button data-command-id="sync.retry.details" onPress={() => { setDetailsOpen(false); onRetry() }} {...stylex.props(styles.primary)}>Retry</Button></div>}
         </Dialog>
       </Popover>
     </>}

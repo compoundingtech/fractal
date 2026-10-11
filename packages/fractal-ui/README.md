@@ -38,7 +38,11 @@ Stories:
 
 `DetailsPane` exports its variant, layout-intent, pending-shape and trace contracts through `./assistant-ui`. It preserves independent content and transport observations: `syncStatus` and `hasPriorContent` do not replace a host's retained trace. The current overview/resource states use deterministic kit fixtures; the web client does not consume this pane. Live overview/resource provider integration is not implied by the trace API. `onIntentChange`, `onOpen` and `onRetry` remain host-owned actions.
 
+Permission-denied and unsupported-resource failures do not offer Retry in either the first-load body or the header Details popover. Both use the same retry eligibility as `SyncLine` and offer the matching administrator/unavailable guidance. `NonRetryableFailures` covers initial and retained paths at narrow and wide widths, with controls that reproduce the rejected unconditional action in each surface.
+
 The Workbench mounts `TabStrip` inside its React Aria `Tabs` provider and keeps selection and resource panels host-owned. Resource kind determines the icon and the full accessible label is preserved in either representation. The measured strip collapses labels below its content budget (at least 360px), and restores them with 16px of headroom. Overflow reveals the selected resource whole; the fractional clipping calculation uses the actual painted intersection, including ancestor clips. A group-owned fixed header reserves Details status/actions even when another resource is selected, so recovery never repacks the tab strip. Existing Workbench props and thread-resource contracts remain unchanged.
+
+`TabStrip` observes the relevant clipping ancestors as well as its own geometry: ancestor-only resize and scroll changes refresh whole/absent cells without moving the strip’s native scroll position. `Tab Strip Ancestors/AncestorResize` and `AncestorScroll` independently measure clipping, prove stale-paint controls fail, and check expansion/reverse scrolling restores cells. Observer/listener cleanup follows the mounted strip.
 
 Pure policy tests are part of web CI:
 

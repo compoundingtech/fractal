@@ -36,7 +36,7 @@ const paintedIds = [
 const rawIds = ['raw-stability', 'raw-stability-159', 'raw-stability-160'].map(storyId)
 const preservedIds = mode === 'canonical' && requestedIds.length === 0
   ? Object.values((await (await fetch(`${base}/index.json`)).json()).entries)
-    .filter(entry => entry.type === 'story' && /^fractal-ui-details-(recovery|resources)--/.test(entry.id))
+    .filter(entry => entry.type === 'story' && /^(fractal-ui-details-(recovery|resources)|fractal-ui-tab-strip-ancestors)--/.test(entry.id))
     .map(entry => entry.id)
   : []
 const ids = requestedIds.length ? requestedIds : mode === 'painted' ? paintedIds : mode === 'raw0' ? rawIds : [...canonicalIds, ...preservedIds]

@@ -112,6 +112,8 @@ export function TabStrip({ items, selectedKey, label = 'Open panes' }: { items: 
     const revealSelected = () => refresh(selectedRef.current)
     const resize = new ResizeObserver(revealSelected)
     const scroll = () => refresh()
+    const ancestorResize = new ResizeObserver(scroll)
+    let clippingAncestors: HTMLElement[] = []
     const observe = () => {
       // RAC mounts its DOM TabList after the virtual collection pass.
       const nextList = root.querySelector<HTMLElement>('[data-tab-strip]')
@@ -121,6 +123,18 @@ export function TabStrip({ items, selectedKey, label = 'Open panes' }: { items: 
         list?.addEventListener('scroll', scroll, { passive: true })
       }
       resize.disconnect()
+      ancestorResize.disconnect()
+      for (const ancestor of clippingAncestors) ancestor.removeEventListener('scroll', scroll)
+      clippingAncestors = []
+      // Ancestor-only resize/scroll changes the paint viewport without changing
+      // either the strip's dimensions or its own scroll offset.
+      for (let ancestor = list?.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        const css = getComputedStyle(ancestor)
+        if (!/^(auto|scroll|hidden|clip)$/.test(css.overflowX) && !/^(auto|scroll|hidden|clip)$/.test(css.overflowY)) continue
+        clippingAncestors.push(ancestor)
+        ancestorResize.observe(ancestor)
+        ancestor.addEventListener('scroll', scroll, { passive: true })
+      }
       resize.observe(root)
       if (list) resize.observe(list)
       resize.observe(iconMetric)
@@ -137,6 +151,8 @@ export function TabStrip({ items, selectedKey, label = 'Open panes' }: { items: 
     return () => {
       disposed = true
       resize.disconnect()
+      ancestorResize.disconnect()
+      for (const ancestor of clippingAncestors) ancestor.removeEventListener('scroll', scroll)
       mutations.disconnect()
       list?.removeEventListener('scroll', scroll)
       document.fonts?.removeEventListener('loadingdone', revealSelected)

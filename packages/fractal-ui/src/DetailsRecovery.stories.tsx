@@ -51,6 +51,7 @@ const meta = {
       <div {...stylex.props(styles.controls)}>{[118, 159, 160, 240, 320, 400, 520].map(value => <Button key={value} size="sm" variant="quiet" data-recovery-width={value} onPress={() => setWidth(value)}>{value}px</Button>)}{states.map(state => <Button key={state} size="sm" variant="quiet" data-recovery-reset={state} onPress={() => reset(state)}>Start {state}</Button>)}</div>
       <div {...stylex.props(styles.controls)}>{variants.map((value, index) => <Button key={index} size="sm" variant="quiet" data-recovery-variant={index} onPress={() => setVariant(index)}>{value.overview}{value.context}{value.spend}</Button>)}</div>
       <div {...stylex.props(styles.controls)}><Button size="sm" variant="quiet" data-recovery-action="loading" onPress={() => setObservation(observationFor('loading'))}>Loading</Button><Button size="sm" variant="quiet" data-recovery-action="failed" onPress={() => setObservation(current => ({ ...current, sync: failed }))}>Fail details</Button><Button size="sm" variant="quiet" data-recovery-action="busy" onPress={recover}>Busy</Button></div>
+      <div {...stylex.props(styles.controls)}>{(['forbidden', 'unsupported'] as const).flatMap(code => [false, true].map(retained => <Button key={`${code}-${retained}`} size="sm" variant="quiet" data-recovery-failure-code={code} data-recovery-prior={String(retained)} onPress={() => setObservation({ content: retained ? 'busy' : 'loading', sync: { _tag: 'Failed', cause: { _tag: 'Server', code, message: code === 'forbidden' ? 'Access to this agent was denied.' : 'This gateway does not provide agent details.' } } })}>{code} · {retained ? 'retained' : 'first load'}</Button>))}</div>
       <section aria-label="Mounted Details recovery" data-recovery-stage style={{ width }} {...stylex.props(styles.stage)}><ThemePortal><Workbench {...args} key={generation} workspaceId={`${args.workspaceId}-${generation}`} focusedPaneKey={paneKey(details)} renderPane={pane => pane.view === 'details' ? <DetailsPane variants={variants[variant]!} state={observation.content} syncStatus={observation.sync} hasPriorContent={observation.content !== 'loading' && observation.content !== 'error' && observation.content !== 'new'} intent={intent} onIntentChange={setIntent} onOpen={() => { throw new Error('Recovery gate unexpectedly opened a resource') }} onRetry={recover} /> : args.renderPane?.(pane)} /></ThemePortal></section>
     </div>
   },
@@ -454,9 +455,51 @@ async function identityPlay({ canvasElement: canvas }: Play) {
   record(canvas, 'identity', measurements)
 }
 
+function assertNoRetry(surface: HTMLElement, reason: string) {
+  requireContract(![...surface.querySelectorAll<HTMLButtonElement>('button')].some(button => button.textContent?.trim() === 'Retry'), reason)
+}
+async function nonRetryablePlay({ canvasElement: canvas }: Play) {
+  // The control is cloned from the real retryable body, reproducing the rejected unconditional action.
+  const initial = await start(canvas, 320, variants[defaultVariant]!, 'error')
+  const retryTemplate = element<HTMLButtonElement>(initial, '[data-command-id="sync.retry.body"]').cloneNode(true) as HTMLButtonElement
+  const measurements = []
+  for (const width of [159, 320]) for (const code of ['forbidden', 'unsupported'] as const) for (const retained of [false, true]) {
+    click(canvas, `[data-recovery-width="${width}"]`)
+    click(canvas, `[data-recovery-failure-code="${code}"][data-recovery-prior="${retained}"]`)
+    await waitFor(() => expect(paneFor(canvas)).toHaveAttribute('data-details-has-prior-content', String(retained)))
+    await frames()
+    const pane = paneFor(canvas), guidance = code === 'forbidden' ? 'Ask an administrator.' : 'These details are not available here.'
+    assertNoRetry(pane, 'Non-retryable first-load failure offers Retry')
+    if (!retained) {
+      const body = element(pane, '[data-details-error]')
+      requireContract(element(body, '[data-details-error-recovery]').textContent === guidance, 'Non-retryable body omits actionable recovery guidance')
+      const badRetry = retryTemplate.cloneNode(true) as HTMLButtonElement
+      body.appendChild(badRetry)
+      try { await rejectsControl('Non-retryable first-load failure offers Retry', () => assertNoRetry(pane, 'Non-retryable first-load failure offers Retry')) } finally { badRetry.remove() }
+      assertNoRetry(pane, 'Non-retryable first-load failure offers Retry')
+    }
+    const head = headFor(pane)
+    const trigger = [...head.querySelectorAll<HTMLButtonElement>('[data-pane-sync-word-trigger],[data-pane-sync-details-trigger]')].find(shown)!
+    requireContract(trigger !== undefined && !/\bretry\b/i.test(trigger.getAttribute('aria-label') ?? ''), 'Non-retryable header promises Retry')
+    await userEvent.click(trigger)
+    const dialog = await within(canvas.ownerDocument.body).findByRole('dialog', { name: 'Load failed' })
+    requireContract(dialog.textContent?.includes(guidance) === true, 'Non-retryable popover omits actionable recovery guidance')
+    assertNoRetry(dialog, 'Non-retryable popover offers Retry')
+    const badRetry = retryTemplate.cloneNode(true) as HTMLButtonElement
+    dialog.appendChild(badRetry)
+    try { await rejectsControl('Non-retryable popover offers Retry', () => assertNoRetry(dialog, 'Non-retryable popover offers Retry')) } finally { badRetry.remove() }
+    assertNoRetry(dialog, 'Non-retryable popover offers Retry')
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(dialog).not.toBeInTheDocument())
+    measurements.push({ width, code, retained, guidance, bodyRetry: false, popoverRetry: false })
+  }
+  record(canvas, 'non-retryable', measurements)
+}
+
 export const AllStates: Story = { play: anchorPlay }
 export const PendingFootprints: Story = { args: { initialState: 'loading' }, play: pendingPlay }
 export const FailureTransitions: Story = { play: failurePlay }
 export const KeyboardRecovery: Story = { args: { initialState: 'error' }, play: keyboardPlay }
 export const HeaderFeedback: Story = { play: feedbackPlay }
 export const KnownLoadingIdentity: Story = { args: { initialState: 'loading' }, play: identityPlay }
+export const NonRetryableFailures: Story = { args: { initialState: 'error' }, play: nonRetryablePlay }

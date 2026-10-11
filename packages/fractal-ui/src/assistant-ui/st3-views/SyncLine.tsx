@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, DialogTrigger, Popover, Tooltip, TooltipTrigger } from 'react-aria-components'
-import { syncLine, type SyncLineInput } from './sync-line'
+import { syncLine, canRetrySyncFailure, type SyncLineInput } from './sync-line'
 import type { SyncFailureCause } from './sync-status'
 import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 
@@ -19,7 +19,7 @@ export const SyncFailureDetails = ({ cause }: { readonly cause: SyncFailureCause
 export const SyncLine = React.memo(function SyncLine({ status: observation, label, now, observedAt, gateway, socket, onRetry, compact = false, pill = false }: SyncLineProps) {
   const line = syncLine({ status: observation, label, now, observedAt, gateway, socket })
   const failed = observation._tag === 'Failed' && line !== undefined
-  const retryable = failed && !(observation.cause._tag === 'Server' && (observation.cause.code === 'unsupported' || observation.cause.code === 'forbidden'))
+  const retryable = failed && canRetrySyncFailure(observation.cause)
   return <div data-testid="sync-line" data-sync-state={observation._tag} data-sync-visible={line !== undefined} aria-busy={observation._tag !== 'Live' && observation._tag !== 'Failed'} {...stylex.props(styles.root, compact && styles.compact, pill && styles.fitContent, pill && line !== undefined && styles.pill)}>
     <TooltipTrigger delay={150}><Button aria-label={line?.text ?? `${label} sync status not shown`} isDisabled={line === undefined} {...stylex.props(styles.textButton, pill && styles.fitText)}>
       <span role="status" aria-live="polite" aria-label={line?.announce ?? ''} {...stylex.props(styles.status, pill && styles.fitStatus)}><span aria-hidden="true" {...stylex.props(styles.dot, line?.tone === 'warning' && styles.warningDot, line?.tone === 'error' && styles.errorDot, line?.animate && styles.pulsing, line === undefined && styles.hidden)} /><span aria-hidden="true" {...stylex.props(styles.text, line?.tone === 'warning' && styles.warning, line?.tone === 'error' && styles.error)}>{line?.text ?? ''}</span></span>

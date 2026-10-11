@@ -9,6 +9,7 @@ import { traceForDetailsState } from './session-trace-provider'
 import { PaneSyncStatus } from '../st3-views/PaneSyncStatus'
 import { PaneHeaderAccessory } from '../workbench/PaneLayer'
 import type { SyncStatus } from '../st3-views/sync-status'
+import { canRetrySyncFailure, syncFailureRecovery } from '../st3-views/sync-line'
 import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
 import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g } from '../composition-tokens.stylex'
@@ -44,6 +45,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   // Only the host's decoded message is a cause; the kit never substitutes diagnostic copy.
   const failureCause=syncStatus._tag==='Failed'?syncStatus.cause:undefined
   const failureMessage=failureCause?._tag==='Server'?failureCause.message:failureCause?._tag==='Local'?failureCause.detail?.message:undefined
+  const retryable=failureCause!==undefined&&canRetrySyncFailure(failureCause)
   const [detailsOpen,setDetailsOpen]=React.useState(false)
   const paneRef=React.useRef<HTMLDivElement>(null)
   const retry=()=>{
@@ -131,7 +133,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
       {[overview.machine,overview.harness,overview.model].some(value=>value!==undefined)&&<p {...stylex.props(styles.errorText)}>{[overview.machine,overview.harness,overview.model].filter(Boolean).join(' · ')}</p>}
       <Heading level={2} data-details-error-reason {...stylex.props(styles.errorHeading)}>Couldn't load agent details</Heading>
       {failureMessage&&<p data-details-error-cause title={failureMessage} {...stylex.props(styles.errorText,styles.errorCause)}>{failureMessage}</p>}
-      <div aria-hidden={detailsOpen||undefined} inert={detailsOpen} {...stylex.props(styles.retrySlot,detailsOpen&&styles.hiddenPending)}><Button data-command-id="sync.retry.body" onPress={retry} {...stylex.props(styles.retryButton)}>Retry</Button></div>
+      {retryable?<div aria-hidden={detailsOpen||undefined} inert={detailsOpen} {...stylex.props(styles.retrySlot,detailsOpen&&styles.hiddenPending)}><Button data-command-id="sync.retry.body" onPress={retry} {...stylex.props(styles.retryButton)}>Retry</Button></div>:<p data-details-error-recovery {...stylex.props(styles.errorText)}>{syncFailureRecovery(syncStatus.cause)}</p>}
     </div>}
     </div>
   </div>
