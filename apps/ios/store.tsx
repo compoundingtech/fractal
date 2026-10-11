@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, outcomeUnknown, plainError, retryTransient, type Arrangement, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
+import { API_VERSION, ClientError, St3Client, isTransient, notApplied, outcomeUnknown, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
@@ -25,6 +25,7 @@ import { gatewayFetch } from './gatewayFetch';
 import { normalizeGatewayUrl } from './gatewayUrl';
 import { tabOrder, type Tab } from './tabs';
 import type { SidebarResource } from './sidebarView';
+import { sidebarArrangement, uuid7 } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
 
@@ -36,7 +37,7 @@ export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 
-const URL_KEY = 'st3.gateway.url', ORDER_KEY = 'st3.tabs.order', CREDENTIAL_KEY = 'st3.device.credential';
+const URL_KEY = 'st3.gateway.url', ORDER_KEY = 'st3.tabs.order.resources-v1', CREDENTIAL_KEY = 'st3.device.credential';
 // The enrolled signing key's public half, the person it signs as and its grant chain (the private
 // half stays in the native module).
 const SIGNING_KEY = 'st3.device.signing';
@@ -45,8 +46,6 @@ const SIGNING_KEY = 'st3.device.signing';
 const PROFILE_KEY = 'st3.device.profile';
 type PhoneSigning = DeviceKey & { handle?: string };
 type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string };
-// Glasses are an experiment (mission fleet/stui/glass): off unless the person turns them on here.
-const GLASSES_KEY = 'st3.experiments.glasses';
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
 // The carrier: the saved gateway (default) or fabric, an opt-in; the saved fabric target; and whether
@@ -124,13 +123,15 @@ function useAppStore(proof?: FabricProfile) {
   // The Agents tab shows a list or a tree, as stui's `t` toggles. Debug links can set it, and ask
   // the visible screen to scroll for screenshots.
   const [treeView, setTreeView] = useState(false);
-  // Spaces are how stui works, so the tab is on unless this phone turned it off.
-  const [glassesOn, setGlassesOn] = useState(true);
+  // Spaces is one of the four phone tabs.
+  const glassesOn = true;
   const [simpleOn, setSimpleOn] = useState(true);
   const [arrangements, setArrangements] = useState<Arrangement[]>([]), [arrangementsIssue, setArrangementsIssue] = useState('');
   const [sidebarTerminals, setSidebarTerminals] = useState<Runtime[]>([]), [sidebarTerminalsIssue, setSidebarTerminalsIssue] = useState('');
   const [glasses, setGlasses] = useState<Glass[]>([]), [glassesIssue, setGlassesIssue] = useState('');
   const [scrollRequest, setScrollRequest] = useState<{ y: number; at: number } | null>(null);
+  const sidebarCreation = useRef<{ subject: string; created: boolean } | null>(null);
+  const sidebarWriting = useRef(false);
   const sidebarSeen = useRef(new Map<string, SidebarResource>());
   const cachedActor = useRef(''), cacheSavedAt = useRef(0), cacheGeneration = useRef(0);
   const conversationCache = useRef(new Map<string, Conversation<TimelineEntry>>()), draftCache = useRef(new Map<string, string>());
@@ -244,7 +245,7 @@ function useAppStore(proof?: FabricProfile) {
     const gateway = paired?.url ?? (u.status === 'fulfilled' ? u.value : null);
     const bearer = paired?.credential ?? (c.status === 'fulfilled' ? c.value : null);
     if (gateway) { setUrl(gateway); setUrlDraft(gateway); }
-    // A stored order may use earlier tab names; they still count.
+    // Only the current four-tab order is read; old phone preferences are retired.
     if (o.status === 'fulfilled' && o.value) { try { setOrder(tabOrder(JSON.parse(o.value))); } catch { /* use default */ } }
     if (bearer) {
       if (gateway && p.status === 'fulfilled') {
@@ -263,7 +264,7 @@ function useAppStore(proof?: FabricProfile) {
   }, [proof?.url, proof?.credential]);
 
   function clearCaches() {
-    sidebarSeen.current.clear();
+    sidebarSeen.current.clear(); sidebarCreation.current = null;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
     setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]);
@@ -356,8 +357,7 @@ function useAppStore(proof?: FabricProfile) {
     return () => subscription.remove();
   }, []);
 
-  // Glasses: followed on the feed's socket while the experiment is on and the gateway grants them.
-  useEffect(() => { void AsyncStorage.getItem(GLASSES_KEY).then(value => setGlassesOn(value !== '0')).catch(() => {}); }, []);
+  // Spaces: followed on the feed's socket when the gateway grants them.
   useEffect(() => { void AsyncStorage.getItem(SIMPLE_KEY).then(value => setSimpleOn(value !== '0')).catch(() => {}); }, []);
   const arrangementPerson = caps?.session_actor.match(/^person\/[^/]+/)?.[0];
   const arrangementsGranted = caps?.capabilities.some(capability => capability.id === 'arrangements' && capability.version >= 1 && capability.state === 'granted') ?? false;
@@ -544,6 +544,21 @@ function useAppStore(proof?: FabricProfile) {
       setCredential(null); setCaps(null); setPairDraft(null); setPairingIssue(profile?.personRootFingerprint ? '' : REPAIR_WARNING); setHistoricalSessions([]); setStatus('setup');
     },
     /** Complete a person step; `answer` is a structured request's named answer, by id. */
+    async editSidebar(operations: ArrangementOperation[]): Promise<boolean> {
+      if (!client || status !== 'online' || !arrangementPerson || !arrangementsGranted || sidebarWriting.current) return false;
+      const existing = sidebarArrangement(arrangements);
+      const draft = sidebarCreation.current ?? { subject: `arrangement/${arrangementPerson}/${uuid7(Date.now(), Crypto.getRandomBytes(10))}`, created: false };
+      if (!existing) sidebarCreation.current = draft;
+      const creating = !existing && !draft.created;
+      const parameters = { subject: existing?.id ?? draft.subject, owner: arrangementPerson, operations: creating ? [{ op: 'create' as const, name: 'Sidebar' }, ...operations] : operations };
+      const id = actionId();
+      sidebarWriting.current = true;
+      try {
+        const done = await runAction(async () => client.arrangementEdit({ id, idempotency_key: id, fence: await fence(), parameters }));
+        if (done && creating) draft.created = true;
+        return done;
+      } finally { sidebarWriting.current = false; }
+    },
     async done(item: Attention, summary: string, answer?: string) {
       if (!client) return false;
       acted.current.add(item.id);
@@ -757,10 +772,7 @@ function useAppStore(proof?: FabricProfile) {
       setSimpleOn(on);
       if (!proof) void AsyncStorage.setItem(SIMPLE_KEY, on ? '1' : '0').catch(() => {});
     },
-    setGlassesOn(on: boolean) {
-      setGlassesOn(on);
-      if (!proof) void AsyncStorage.setItem(GLASSES_KEY, on ? '1' : '0').catch(() => {});
-    },
+
   };
 
   const knownHostId = snapshot?.host_id ?? cachedHostId;

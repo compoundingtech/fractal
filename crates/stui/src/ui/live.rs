@@ -242,6 +242,7 @@ enum Fetched {
         reason: String,
     },
     /// st answered a glass write: the glass, the write's key, and the revision it accepted.
+    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), String> },
     GlassSaved {
         id: String,
         key: String,
@@ -452,6 +453,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
+                    ui.resource_sidebar.writable = true;
                     ui.resource_sidebar.arrangements = items.into_iter().filter_map(|item| match item {
                         Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted => Some(arrangement),
                         _ => None,
@@ -716,6 +718,10 @@ pub fn run(context: Context) -> Result<()> {
                             failed.insert(id, message);
                         }
                     }
+                }
+                Fetched::SidebarSaved { write, outcome } => {
+                    ui.resource_sidebar.saved(&write, outcome.is_ok());
+                    if let Err(error) = outcome { ui.flash(format!("Sidebar edit not done: {error}")); }
                 }
                 Fetched::Machines(machines) => {
                     machines_reading = false;
@@ -1138,6 +1144,20 @@ pub fn run(context: Context) -> Result<()> {
             if let Effect::SaveGlass(write) = effect {
                 if extras.live {
                     save_glass(&runtime, &client, &fetched_tx, write);
+                }
+                continue;
+            }
+            if let Effect::EditArrangement(write) = &effect {
+                let write = write.clone();
+                if !extras.live {
+                    ui.resource_sidebar.saved(&write, false);
+                    ui.flash("Offline · reconnect before editing the sidebar.");
+                } else {
+                    let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone(); let model = model.clone();
+                    runtime.spawn(async move {
+                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| plain(&error));
+                        let _ = tx.send(Fetched::SidebarSaved { write, outcome });
+                    });
                 }
                 continue;
             }
@@ -2009,6 +2029,18 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
     Ok(())
 }
 
+/// Submit a register edit with one stable action identity; the stream remains authoritative.
+async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -> Result<()> {
+    let snapshot = client.capabilities().await?.snapshot;
+    let reply = client.arrangement_edit(
+        format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
+        Fence { snapshot_id: snapshot.id, ..Default::default() },
+        st3_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
+    ).await?;
+    anyhow::ensure!(matches!(reply.value.status, st3_client::ActionStatus::Completed), "Sidebar edit is not completed.");
+    Ok(())
+}
+
 async fn perform(
     client: &Client,
     person: &str,
@@ -2020,6 +2052,10 @@ async fn perform(
         // Glass writes and retries never reach here: the loop handles them itself.
         Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::Forget { .. } | Effect::LoadContent(_) => {
             Ok((String::new(), None))
+        }
+        Effect::EditArrangement(write) => {
+            save_sidebar(client, &write).await?;
+            Ok(("Sidebar edit saved".into(), None))
         }
         Effect::AgentControl { agent, control } => {
             agent_control(client, &agent, control).await?;
@@ -2668,6 +2704,54 @@ mod tests {
             .expect("the message went after a fresh snapshot");
         assert_ne!(Some(second.as_str()), first.as_deref(), "a new message, once");
         assert_eq!(store.message(&second).unwrap().unwrap().content, "two");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sidebar_register_edits_merge_and_survive_daemon_restart() {
+        use std::sync::Arc;
+        use st3_client::ArrangementOperation as Op;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("sidebar.sock");
+        async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
+            let store = Arc::new(st3::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
+            let state = st3::api::AppState {
+                store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
+            };
+            let path = socket.to_owned();
+            let server = tokio::spawn(async move { st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap(); });
+            for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
+            (store, server)
+        }
+        let (store, server) = serve(root.path(), &socket).await;
+        let client = Client::unix_as(&socket, "person/avery");
+        let other_device = Client::unix_as(&socket, "person/avery");
+        let subject = format!("arrangement/person/avery/{}", uuid::Uuid::now_v7());
+        let first = uuid::Uuid::now_v7().to_string(); let second = uuid::Uuid::now_v7().to_string();
+        let write = |operations| super::super::resource_sidebar::Write { subject: subject.clone(), owner: "person/avery".into(), operations, key: uuid::Uuid::now_v7().to_string(), creating: false };
+        let creation = write(vec![Op::Create { name: "Sidebar".into() }, Op::FolderCreate { id: first.clone(), name: "First".into(), parent: None, key: "a0".into() }, Op::FolderCreate { id: second.clone(), name: "Second".into(), parent: None, key: "a1".into() }, Op::SubjectPlace { subject: "agent/example/atlas".into(), folder: Some(first.clone()), key: "a0".into() }]);
+        save_sidebar(&client, &creation).await.unwrap();
+        // Distinct registers edited by two devices combine instead of replacing a layout.
+        save_sidebar(&other_device, &write(vec![Op::FolderRename { id: first.clone(), name: "Renamed".into() }])).await.unwrap();
+        save_sidebar(&client, &write(vec![Op::FolderMove { id: second.clone(), parent: None, key: "Zz".into() }, Op::SubjectPlace { subject: "agent/example/atlas".into(), folder: Some(second.clone()), key: "a1".into() }])).await.unwrap();
+        // Exact retry of the accepted create does not replace later register winners.
+        save_sidebar(&client, &creation).await.unwrap();
+        let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
+        assert_eq!(found.body.folders[&first].name.value, "Renamed");
+        assert!(found.body.folders[&second].position.value.key < found.body.folders[&first].position.value.key);
+        assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], Some(second.clone()));
+        save_sidebar(&client, &write(vec![Op::FolderDelete { id: second.clone() }])).await.unwrap();
+        server.abort(); let _ = server.await; drop(store);
+        let _ = std::fs::remove_file(&socket);
+        let (_store, server) = serve(root.path(), &socket).await;
+        let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
+        assert_eq!(found.body.folders[&first].name.value, "Renamed");
+        assert!(found.body.folders[&second].tombstone.is_some());
+        assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
+        // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
+        assert!(found.body.placements.contains_key("agent/example/atlas"));
         server.abort();
     }
 

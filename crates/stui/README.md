@@ -103,7 +103,8 @@ In spaces, Ctrl+S shows the resource sidebar beside the panes. It follows the pe
 shared Sidebar arrangement: folders in register order, then Everything else grouped
 into Agents, Missions, Terminals and Machines. The view flattens nested folders to one
 level without changing their registers. Click or Enter opens a resource; dragging a
-row out still opens its tab in a pane or split. This version reads arrangements only.
+row out still opens its tab in a pane or split. Folders can be made, renamed and deleted through `arrangement.edit`; the stream
+supplies the winning registers after each edit.
 
 Click the filter row or press `/` while the sidebar has focus to narrow it; Esc clears
 it. Arrows move through rows and Enter opens a resource or toggles a group. Folder
@@ -118,3 +119,12 @@ existing device's explicit sidebar visibility choice is kept. Older daemons lack
 sixteen-subscription capacity keep the three live conversations and terminal; their
 sidebar shows grouped resources until the daemon supports the optional window.
 The classic layout keeps its existing tabbed lists.
+
+With the sidebar focused, `n` names a new folder, `m` on a resource chooses its folder,
+`r` renames the selected folder, `d` asks to delete it, and `+` on a folder opens the
+same Ctrl+T finder narrowed to resources outside that folder. Selecting a destination
+previews the move; `m` commits it. Deletion requires `y`; Enter keeps the folder.
+Folder grips reorder folders, and dragging rows moves or reorders resources. Dragging
+a space tab onto a folder files its resource while keeping the tab open. Clicks and
+Enter still open resources or toggle groups. Position edits include dormant placement
+keys, and colliding concurrent keys are rekeyed atomically rather than dropping rows.
