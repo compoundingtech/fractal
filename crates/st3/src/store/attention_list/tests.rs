@@ -285,7 +285,9 @@ fn a_checkpoint_forgets_the_list_and_a_refresh_from_before_it_cannot_publish() {
             ))
             .unwrap();
     }
+    assert!(store.attention_list_starting(), "the first fold is due");
     let before = refresh_and_check(&store);
+    assert!(!store.attention_list_starting());
     let (generation, _) = store.newest_attention_list();
     let plan = checkpoint_rules::plan_drops(&store.checkpoint_sealed_set(now_ms() + 1000).unwrap());
     assert!(!plan.claims.is_empty());
@@ -293,6 +295,10 @@ fn a_checkpoint_forgets_the_list_and_a_refresh_from_before_it_cannot_publish() {
         .apply_checkpoint_drop("checkpoint/garden-attention", &plan.envelopes, &plan.claims)
         .unwrap();
     assert!(store.newest_attention_list().1.is_none(), "the checkpoint forgot the list");
+    assert!(
+        !store.attention_list_starting(),
+        "after a forget only a window's read folds again"
+    );
     // A refresh that read its previous publication before the checkpoint publishes nothing.
     store.publish_attention_list(
         generation,

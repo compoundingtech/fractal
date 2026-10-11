@@ -23,7 +23,7 @@ const ATTENTION_LIST_IDLE: Duration = Duration::from_secs(600);
 
 /// Keep attention, every person's glasses and arrangements, and the summary rows windows read
 /// published off the request path. As the daemon starts it folds them once; after that it
-/// refreshes, at most once a second, when a commit lands, a roster is published, the clock
+/// refreshes, at most once a second and attention only while windows read it, when a commit lands, a roster is published, the clock
 /// passes attention's period, or a window asks. A refresh folds attention again only when
 /// something attention reads changed (see `Store::attention_list_delta`) and reads again only
 /// the people whose glasses or arrangements changed; otherwise each view keeps its rows.
@@ -53,9 +53,11 @@ pub fn start_attention_list(state: &AppState) {
             let started = tokio::time::Instant::now();
             let reader = store.clone();
             let summary_state = state.clone();
-            // Attention folds only while windows read it; the first fold always runs.
-            let attention = store.attention_list_read_within(idle)
-                || store.newest_attention_list().1.is_none();
+            // Attention folds only while windows read it (they reread it every clock period),
+            // apart from the first fold as the daemon starts. Once views are forgotten (a
+            // checkpoint, each chunk of a long catch-up) a node nobody reads does not fold it
+            // again; the next window to read it wakes this task.
+            let attention = store.attention_list_read_within(idle) || store.attention_list_starting();
             // One view at a time: attention, every person's glasses and arrangements, then the
             // summary rows windows read. One view's failure leaves the others refreshing. A
             // summary selection a window waits for is computed before each view, so the window

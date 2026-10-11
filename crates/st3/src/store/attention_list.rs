@@ -251,6 +251,11 @@ impl Store {
         (list.forgotten.load(AtomicOrdering::Acquire), published.clone())
     }
 
+    /// Whether nothing was ever published or forgotten: the refresher's first fold is due.
+    pub(crate) fn attention_list_starting(&self) -> bool {
+        matches!(self.newest_attention_list(), (0, None))
+    }
+
     /// Note that a window read one of the refresher's views: it follows commits only while
     /// windows read them.
     pub(crate) fn note_published_view_read(&self) {
