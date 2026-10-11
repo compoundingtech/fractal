@@ -16,6 +16,8 @@ test('published path/host/private-policy mutations fail without hash or binary e
     await writeFile(file, 'input.password = "password"; ReactPropTypesSecret = "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED"; Mbp')
     assert.equal((await scanBooks([root])).findings.length, 0, 'library credential-shape strings are not private locations or identities')
     assert.equal((await scanBooks([root], [{ token: 'Mbp' }])).findings.length, 1, 'an explicit private identity still applies')
+    await writeFile(file, 'packages/api/src/users/index.ts packages/api/src/home/index.ts')
+    assert.equal((await scanBooks([root])).findings.length, 0, 'relative public module names are not absolute roots')
     for (const value of ['/ho' + 'me/operator/checkout/main.ts', '/Us' + 'ers/operator/project', '~/' + '.megarepo/project', '/workspace/checkouts/project', 'de' + 'v3', 'host.tail' + '123.ts.net', String.raw`\u002fho` + 'me/operator', 'Actual Operator', Buffer.from([0, ...Buffer.from('/ho' + 'me/operator'), 255])]) {
       await writeFile(file, value)
       assert.equal((await scanBooks([root], ['Actual Operator'])).findings.length, 1)
