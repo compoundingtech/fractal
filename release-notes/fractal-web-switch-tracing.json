@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "The existing subscribe trace field is unchanged. The daemon tolerates but does not extract it; daemon subscription spans still inherit the WebSocket upgrade context."
+    "detail": "The existing subscribe trace field is unchanged. The daemon tolerates but does not extract it; daemon first-frame spans remain independent roots linked to the WebSocket upgrade context."
   },
   "downtime": {
     "status": "none",
