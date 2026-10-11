@@ -12,15 +12,25 @@ const MAX_SOURCE_BYTES: i64 = 16 * 1024;
 // Returning no parent for a wide or unsupported body is only safe when the future installer
 // marks that source cut incomplete in the same transaction. These statements alone do not do so.
 const CLAIM_PARENT: &str = r#"
-SELECT CASE WHEN length(CAST(?1 AS BLOB))<=?2 THEN json_valid(?1) ELSE 0 END,
+SELECT CASE WHEN length(CAST(?1 AS BLOB))<=?2 THEN
+         CASE WHEN json_valid(?1) THEN
+           NOT EXISTS(SELECT 1 FROM json_tree(?1) AS member
+             WHERE typeof(member.key)='text' GROUP BY member.parent,member.key
+             HAVING count(*)>1)
+         ELSE 0 END
+       ELSE 0 END,
        CASE WHEN length(CAST(?1 AS BLOB))<=?2 THEN
          CASE WHEN json_valid(?1) THEN
-           CASE WHEN json_type(?1,'$.fields') IS NOT NULL THEN
-             CASE WHEN json_type(?1,'$.fields.in_reply_to')='text'
-                  THEN json_extract(?1,'$.fields.in_reply_to') END
-           ELSE
-             CASE WHEN json_type(?1,'$.in_reply_to')='text'
-                  THEN json_extract(?1,'$.in_reply_to') END
+           CASE WHEN NOT EXISTS(SELECT 1 FROM json_tree(?1) AS member
+             WHERE typeof(member.key)='text' GROUP BY member.parent,member.key
+             HAVING count(*)>1) THEN
+             CASE WHEN json_type(?1,'$.fields') IS NOT NULL THEN
+               CASE WHEN json_type(?1,'$.fields.in_reply_to')='text'
+                    THEN json_extract(?1,'$.fields.in_reply_to') END
+             ELSE
+               CASE WHEN json_type(?1,'$.in_reply_to')='text'
+                    THEN json_extract(?1,'$.in_reply_to') END
+             END
            END
          END
        END
@@ -29,17 +39,27 @@ SELECT CASE WHEN length(CAST(?1 AS BLOB))<=?2 THEN json_valid(?1) ELSE 0 END,
 // Match canonical_child_string: the FIRST named child wins even when its first argument is
 // absent or not a string. A later valid child must not replace that first child's null result.
 const DESIRED_PARENT: &str = r#"
-SELECT CASE WHEN length(CAST(?1 AS BLOB))<=?2 THEN json_valid(?1) ELSE 0 END,
+SELECT CASE WHEN length(CAST(?1 AS BLOB))<=?2 THEN
+         CASE WHEN json_valid(?1) THEN
+           NOT EXISTS(SELECT 1 FROM json_tree(?1) AS member
+             WHERE typeof(member.key)='text' GROUP BY member.parent,member.key
+             HAVING count(*)>1)
+         ELSE 0 END
+       ELSE 0 END,
        CASE WHEN length(CAST(?1 AS BLOB))<=?2 THEN
          CASE WHEN json_valid(?1) THEN
-           CASE WHEN json_type(?1,'$.children')='array' THEN
-             (SELECT CASE WHEN json_type(child.value,'$.arguments[0]')='text'
-                          THEN json_extract(child.value,'$.arguments[0]') END
-              FROM json_each(?1,'$.children') AS child
-              WHERE CASE WHEN child.type='object'
-                         THEN json_extract(child.value,'$.name')='in-reply-to'
-                         ELSE 0 END
-              ORDER BY CAST(child.key AS INTEGER) LIMIT 1)
+           CASE WHEN NOT EXISTS(SELECT 1 FROM json_tree(?1) AS member
+             WHERE typeof(member.key)='text' GROUP BY member.parent,member.key
+             HAVING count(*)>1) THEN
+             CASE WHEN json_type(?1,'$.children')='array' THEN
+               (SELECT CASE WHEN json_type(child.value,'$.arguments[0]')='text'
+                            THEN json_extract(child.value,'$.arguments[0]') END
+                FROM json_each(?1,'$.children') AS child
+                WHERE CASE WHEN child.type='object'
+                           THEN json_extract(child.value,'$.name')='in-reply-to'
+                           ELSE 0 END
+                ORDER BY CAST(child.key AS INTEGER) LIMIT 1)
+             END
            END
          END
        END
@@ -151,4 +171,33 @@ fn oversized_source_requires_an_incomplete_cut_before_any_parent_is_used() {
         );
         assert_eq!(raw_source_parent(&connection, sql, "{"), (false, None));
     }
+}
+
+#[test]
+fn duplicate_raw_json_keys_require_an_incomplete_candidate_cut() {
+    let connection = Connection::open_in_memory().unwrap();
+    // serde_json keeps the last duplicate object member, while SQLite does not
+    // guarantee the same selection. A raw candidate extractor must reject these
+    // sources before relying on path expressions for canonical coverage.
+    let claim = r#"{"fields":{"in_reply_to":"message/first","in_reply_to":"message/last"}}"#;
+    let parsed: Value = serde_json::from_str(claim).unwrap();
+    let canonical = fold_latest_values([("message.sent".into(), parsed)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(canonical["in_reply_to"], "message/last");
+    assert_eq!(
+        raw_source_parent(&connection, CLAIM_PARENT, claim),
+        (false, None)
+    );
+
+    let desired = r#"{"children":[{"name":"in-reply-to","arguments":["message/first"]}],"children":[{"name":"in-reply-to","arguments":["message/last"]}]}"#;
+    let parsed: Value = serde_json::from_str(desired).unwrap();
+    assert_eq!(
+        canonical_child_string(&parsed, "in-reply-to"),
+        Some("message/last".into())
+    );
+    assert_eq!(
+        raw_source_parent(&connection, DESIRED_PARENT, desired),
+        (false, None)
+    );
 }
