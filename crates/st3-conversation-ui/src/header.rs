@@ -196,6 +196,12 @@ fn age(as_of: &str, now: &str) -> String {
     format!("{count}{unit}")
 }
 
+/// `line` padded by one column each side within `width` columns; a line that does not fit
+/// ends in `…`, so a clipped header never reads as complete.
+pub fn row(line: &str, width: usize) -> String {
+    format!(" {} ", crate::text::truncate(line, width.saturating_sub(2)))
+}
+
 /// The session a subagent card's `open <session>` row opens, when it has one.
 pub fn open_session(output: &[String]) -> Option<&str> {
     let line = output.iter().find(|line| line.starts_with("open "))?;
@@ -258,6 +264,15 @@ mod tests {
             "model m · idle · register · 1h ago"
         );
         assert_eq!(age("2026-10-05T12:00:00Z", "2026-10-06T12:00:00Z"), "1d");
+    }
+
+    #[test]
+    fn a_header_wider_than_its_row_ends_in_an_ellipsis() {
+        let line = "model synthetic/model · context 50 tokens · transcript · 0s ago";
+        assert_eq!(row(line, 80), format!(" {line} "));
+        let fitted = row(line, 24);
+        assert_eq!(crate::text::width(&fitted), 24, "{fitted:?}");
+        assert!(fitted.trim_end().ends_with('…'), "{fitted:?}");
     }
 
     #[test]

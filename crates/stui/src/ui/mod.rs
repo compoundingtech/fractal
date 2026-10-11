@@ -2489,7 +2489,7 @@ impl Ui {
                     );
                     if !line.is_empty() {
                         doc.line(Line::from(Span::styled(
-                            format!(" {line} "),
+                            st3_conversation_ui::header::row(&line, width),
                             theme::dim(),
                         )));
                     }
