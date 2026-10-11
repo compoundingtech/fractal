@@ -5,6 +5,7 @@ import { HarnessDeliveryGroup } from './assistant-ui/composition/HarnessDelivery
 import { deliveryFixture, resultFixture, jobFixture } from './delivery-fixtures'
 import { deliveryStoryMatrix } from './delivery-story-frame'
 import type { HarnessDeliveryData } from './assistant-ui/composition/delivery-model'
+import { deliveryWeightExamples } from './delivery-weight-examples'
 const allOk: HarnessDeliveryData = { id: 'delivery-eight', time: '15:15', children: Array.from({ length: 8 }, (_, index) => ({ _tag: 'Agent', result: { ...resultFixture, id: `agent-${index}`, name: `Review ${index + 1}` } })) }
 const meta = { title: 'Fractal UI/Harness Delivery Group', component: HarnessDeliveryGroup, args: { delivery: deliveryFixture }, render: args => deliveryStoryMatrix(() => <HarnessDeliveryGroup {...args} />), parameters: { layout: 'fullscreen' } } satisfies Meta<typeof HarnessDeliveryGroup>
 export default meta
@@ -36,3 +37,4 @@ export const SingleJobNegativeControl: Story = { args: { delivery: { id: 'delive
 } }
 export const SingleCommand: Story = { args: { delivery: { id: 'delivery-command', children: [{ _tag: 'Job', job: jobFixture }] } } }
 export const AllStates: Story = { render: () => deliveryStoryMatrix(() => <>{[FiveJobMixed, AllOkEightCollapsed, CancelledFailedAborted, AllFailed, PreviewTruncatedChild, SingleJobNegativeControl, SingleCommand].map((story, index) => <HarnessDeliveryGroup key={index} delivery={story.args?.delivery ?? deliveryFixture} />)}</>) }
+export const WeightSpecimens: Story = { render: () => deliveryStoryMatrix(() => <>{deliveryWeightExamples.map(example => <section key={example.name} data-weight-class={example.weight}><h3>{example.name} · {example.weight}</h3>{example.render()}</section>)}</>) }
