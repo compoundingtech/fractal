@@ -45,7 +45,7 @@ export function QuotaStoryHarness(args: QuotaStoryArgs) {
         : sourceStatus
   const usage = state.view === 'usage'
   return <div {...stylex.props(styles.frame, ...baselineTheme, args.scheme === 'light' && lightTheme, !usage && (args.width === 240 ? styles.small : args.width === 420 ? styles.large : styles.medium), usage && (args.pageWidth === 900 ? styles.pageNarrow : styles.pageWide))}
-    data-quota-story data-sort-key={state.sort.key} data-sort-direction={state.sort.direction} data-unit={state.unit} data-range={`${state.range[0]}:${state.range[1]}`} data-selected-day={state.selectedDay ?? ''} data-selected-account={state.selectedAccount ?? ''} data-view={state.view} data-collapsed={String(state.collapsed)} data-escaped={state.escaped} data-refreshed={String(state.refreshed)}>
+    data-quota-story data-quota-account-count={accounts.length} data-sort-key={state.sort.key} data-sort-direction={state.sort.direction} data-unit={state.unit} data-range={`${state.range[0]}:${state.range[1]}`} data-selected-day={state.selectedDay ?? ''} data-selected-account={state.selectedAccount ?? ''} data-view={state.view} data-collapsed={String(state.collapsed)} data-escaped={state.escaped} data-refreshed={String(state.refreshed)}>
     <ThemePortal>
       <div {...stylex.props(styles.proofToolbar)}>
         <Button {...stylex.props(styles.button)} onPress={() => update({ refreshed: !state.refreshed, statusOverride: 'current' })}>Refresh snapshot</Button>
@@ -70,7 +70,9 @@ const ids = (canvas: HTMLElement) => [...canvas.querySelectorAll('[data-quota-ro
 const defaultOrder = ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'spruce', 'cove', 'willow', 'unknown']
 export const quotaDensityPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
  for (const drawer of canvasElement.querySelectorAll<HTMLElement>('[data-quota-drawer]')) {
-  if (drawer.querySelector('[data-quota-row]') !== null) await waitFor(() => assertQuotaDrawerDensity(drawer))
+  // React Aria's collection can populate after the first static render. Wait
+  // for supplied inventory, not for the presence of already-rendered rows.
+  if (Number(drawer.closest<HTMLElement>('[data-quota-story]')?.dataset.quotaAccountCount) > 0) await waitFor(() => assertQuotaDrawerDensity(drawer))
  }
 }
 export const quotaSortPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {

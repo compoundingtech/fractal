@@ -13,13 +13,20 @@ const index = await (await fetch(new URL('index.json', `${base.replace(/\/$/, ''
 const stories = Object.values(index.entries).filter(entry => entry.type === 'story' && entry.title.startsWith('Fractal/App/Quota/'))
 assert(stories.length >= 30, 'Complete redesign story matrix is indexed')
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH, headless: true })
-const report = { base, stories: stories.map(entry => entry.id), plays: [], checks: [], controls: [], screenshots: [], density: [] }
+const report = { base, stories: stories.map(entry => entry.id), plays: [], checks: [], controls: [], screenshots: [], density: [], resources: [] }
 const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } })
 page.setDefaultTimeout(90000)
 const errors = []
 page.on('pageerror', error => errors.push(error.message))
+page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
+const cdp = await page.context().newCDPSession(page)
+await cdp.send('Network.enable')
+cdp.on('Network.responseReceived', ({ response, type }) => {
+  if (response.status >= 400) report.resources.push({ story: page.url(), url: response.url, status: response.status, type })
+})
 const load = async id => {
   errors.length = 0
+  const resourcesBefore = report.resources.length
   await page.goto(new URL(`iframe.html?id=${id}&viewMode=story`, `${base.replace(/\/$/, '')}/`).href, { waitUntil: 'domcontentloaded', timeout: 90000 })
   await page.locator('[data-quota-story]').first().waitFor()
   await page.waitForFunction(storyId => window.__STORYBOOK_ADDONS_CHANNEL__?.last('storyFinished')?.[0]?.storyId === storyId, id, { timeout: 90000 })
@@ -28,6 +35,7 @@ const load = async id => {
   assert(!playError, `${id} authored play failed: ${playError?.split('\n')[0]}`)
   assert.equal(result.status, 'success', `${id} play status: ${JSON.stringify(result)}; ${errors.join('; ')}`)
   assert.equal(errors.length, 0, `${id} browser errors: ${errors.join('; ')}`)
+  assert.equal(report.resources.length, resourcesBefore, `${id} HTTP errors: ${JSON.stringify(report.resources.slice(resourcesBefore))}`)
   return result
 }
 const order = () => page.locator('[data-quota-row]').evaluateAll(rows => rows.map(row => row.getAttribute('data-quota-row')))

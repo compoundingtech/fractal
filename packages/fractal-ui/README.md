@@ -216,6 +216,14 @@ measure rows, status, charts and breakdowns; the browser gate also records
 layout-shift entries on refresh. Components never erase supplied last-good data
 when a status changes. Network retention and fencing remain the host's job.
 
+Run the same gate against a fresh static Storybook build, not just HMR. React
+Aria's collection can populate after the initial static render, so populated
+story geometry waits for the supplied account count before taking its baseline;
+intentionally empty stories remain empty. The browser runner rejects console
+errors and captures HTTP error URLs through CDP. The preview declares Storybook's
+bundled SVG favicon explicitly so direct iframe navigation does not request a
+missing `/favicon.ico`.
+
 ## Clean-room note
 
 The original kit's behavior references are listed below. The gated workbench/composer additions reuse our independently authored internal review route at `98a270d4e58a44e4c4625cf1956ad09dbabfc1a7`, with the reviewed tint cutover from `35b6922a1559b4b3bcd78b672cb6b707c5d1e108`; their host/runtime boundaries are adapted to this kit as described above. This provenance is not a claim that the later additions were authored without consulting our own source.
