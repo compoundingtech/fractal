@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Paint oversized native transcript records from a bounded preview",
+  "summary": "Bound normalized strings in oversized native records for first paint",
   "replay": {
     "status": "none",
     "detail": "No replay cursor or spool format changes."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "A native transcript record larger than 256 KiB, such as a large tool output, enters the conversation timeline as a preview whose long strings keep only their first 8 KiB. The timeline no longer holds or copies the full body. Every block of such an entry carries a continuation, and opening it reads the complete record from the owner. The continuation omits its size because the preview never measured the complete value; the content chunks report the exact size."
+    "detail": "For a native JSONL record larger than 256 KiB, such as a large tool output, normalized preview strings retain at most an 8 KiB minus 128-byte head plus a size-limit marker. First paint serializes these shortened strings rather than the complete long strings in typed bodies and source-record payloads, subject to the existing wire-response bounds. The fold still reads, scans and retains the complete raw record bytes, and preview parsing retains all object keys and array elements; this is not a total-memory or total-parsing bound. Continuations normalize the complete record on demand. Preview JSON continuations omit their unmeasured size; content chunks report the exact size."
   },
   "downtime": {
     "status": "none",

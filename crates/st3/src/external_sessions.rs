@@ -2053,16 +2053,16 @@ fn recover_trailing_record(line: &str, preview: bool) -> Option<Value> {
     None
 }
 
-/// Native records above this size paint from a bounded preview. The complete record is read
-/// only when a continuation asks the owner for it (`normalized_record`).
+/// Native records above this size paint with bounded normalized strings. The fold still reads
+/// and retains the source bytes; a continuation normalizes their complete strings on demand.
 const PREVIEW_RECORD_BYTES: usize = 256 * 1024;
 /// The longest head a preview keeps of a string. With its marker it stays within the client
 /// display window (8 KiB), so the marker reports the size of the complete native string.
 const PREVIEW_STRING_BYTES: usize = 8 * 1024 - 128;
 
-/// Parse one native record. A preview of an oversized record keeps every key, element and
-/// scalar, so it normalizes to the same entries and blocks as the complete record, but each
-/// long string keeps only its head: the timeline never holds or copies the full body.
+/// Parse one native record. A preview of an oversized record retains all keys and elements,
+/// but bounds each normalized string. This avoids full long-string copies in typed bodies and
+/// source-record payloads; it does not bound total record memory or avoid scanning source bytes.
 fn parse_native_record(bytes: &[u8], preview: bool) -> serde_json::Result<Value> {
     if preview && bytes.len() > PREVIEW_RECORD_BYTES {
         serde_json::from_slice::<PreviewValue>(bytes).map(|PreviewValue(value)| value)

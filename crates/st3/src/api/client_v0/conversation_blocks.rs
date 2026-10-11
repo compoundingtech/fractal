@@ -351,6 +351,16 @@ pub(crate) fn bound_open_value(value: &mut Value) -> bool {
     }
 }
 
+/// Preview parsing already clips long strings before wire preparation sees them.
+fn has_preview_marker(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains("[st truncated this native timeline value: size limit;"),
+        Value::Array(values) => values.iter().any(has_preview_marker),
+        Value::Object(values) => values.values().any(has_preview_marker),
+        _ => false,
+    }
+}
+
 fn image(value: &Value) -> bool {
     (value.get("type").and_then(Value::as_str) == Some("file")
         && value
@@ -648,21 +658,23 @@ pub(super) fn prepare_one(
             }
         }
     }
-    // Keep open display objects (including assistant text/reasoning metadata)
-    // bounded on both full reads and keyset pages. If another subtree already
-    // needs a ref, fetch the whole original body so neither remainder is lost.
+    // Keep open display objects (including assistant text/reasoning metadata) bounded.
+    // JSON continuations can cover the whole body, but an image's continuation must keep
+    // pointing to its pixels. Its clipped display objects get their own references.
     if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
         for (index, block) in blocks.iter_mut().enumerate() {
+            let pixels = block["kind"] == "image" && block.get("continuation").is_some();
             for key in ["metadata", "view"] {
                 if let Some(value) = block.get_mut(key)
-                    && (bound_open_value(value) || preview)
+                    && (bound_open_value(value)
+                        || (preview && (!pixels || has_preview_marker(value))))
                 {
-                    let pointer = if block.get("continuation").is_some() {
+                    let pointer = if !pixels && block.get("continuation").is_some() {
                         "/body".to_owned()
                     } else {
                         format!("/body/blocks/{index}/{key}")
                     };
-                    block["continuation"] = continuation(
+                    let more = continuation(
                         reference(source, basis, session_id, &original, &pointer),
                         "application/json",
                         if preview {
@@ -678,6 +690,11 @@ pub(super) fn prepare_one(
                         },
                         "size-limit",
                     );
+                    if pixels {
+                        block[key]["continuation"] = more;
+                    } else {
+                        block["continuation"] = more;
+                    }
                 }
             }
         }
@@ -1320,6 +1337,63 @@ mod tests {
         let token = block["continuation"]["ref"].as_str().unwrap();
         let fetched = fetch_json_chunks(&state, &native, token).await;
         assert_eq!(fetched["content"], output);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_assistant_image_keeps_its_pixel_continuation_with_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let pixels = b"\x89PNG\r\n\x1a\nsynthetic pixels";
+        let native = fixture(root.path(), json!([]));
+        let mut state = super::super::tests::test_state_named(root.path(), "image-preview-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        for model in ["synthetic-model".to_owned(), "m".repeat(300 * 1024)] {
+            let header = json!({"type":"session","id":"native-test","cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"});
+            let message = json!({
+                "type":"message","id":"image-metadata","timestamp":"2026-10-06T12:00:01Z",
+                "message":{
+                    "role":"assistant","model":model,
+                    "usage":{"input":10,"output":20},
+                    "content":[
+                        {"type":"text","text":"x".repeat(300 * 1024)},
+                        {"type":"image","mimeType":"image/png","data":STANDARD.encode(pixels)}
+                    ]
+                }
+            });
+            std::fs::write(&native.transcript, format!("{header}\n{message}\n")).unwrap();
+            let page = read(&native, &session, &native.id).unwrap();
+            let image = page
+                .iter()
+                .filter_map(|item| item["body"]["blocks"].as_array())
+                .flatten()
+                .find(|block| block["kind"] == "image")
+                .unwrap();
+            let reference = &image["continuation"];
+            assert_eq!(reference["media_type"], "image/png");
+            assert_eq!(reference["reason"], "on-demand");
+            let token = reference["ref"].as_str().unwrap();
+            assert!(locator(token, &native.id).unwrap().image);
+            let chunk = chunk_local(&state, &session, &native.id, token, 0)
+                .await
+                .unwrap();
+            assert_eq!(chunk["media_type"], "image/png");
+            assert_eq!(STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap(), pixels);
+            assert!(chunk["next_offset"].is_null());
+            if model.len() > VALUE_BYTES {
+                let metadata = &image["metadata"];
+                assert!(metadata["model"].as_str().unwrap().contains("size limit"));
+                let reference = &metadata["continuation"];
+                assert_eq!(reference["media_type"], "application/json");
+                let location = locator(reference["ref"].as_str().unwrap(), &native.id).unwrap();
+                assert!(location.pointer.ends_with("/metadata"));
+                assert!(!location.image);
+                assert_eq!(located_value(&native, &location).unwrap()["model"], model);
+            } else {
+                assert_eq!(image["metadata"]["model"], model);
+                assert!(image["metadata"].get("continuation").is_none());
+            }
+        }
     }
 
     fn assert_native_keyset_pages_match_full_read(
