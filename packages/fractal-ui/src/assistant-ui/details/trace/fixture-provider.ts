@@ -44,6 +44,7 @@ export const fullTraceFixture: TraceSeries = {
   agentId: 'agent/worker-1', nativeSessionId: known(main.session.id),
   coverage:{_tag:'Partial',attributedFraction:sessionTraceFixture.coverage.includedRequests/sessionTraceFixture.coverage.totalRequests},
   subagentCount:known(children.length),
+  subagentsWindow:retainedWindow,
   meters: {
     context: stContextMeter,
     spend: { usdScope:{_tag:'IncludingSubagents'}, tokensScope:{_tag:'IncludingSubagents'}, usdWindow:retainedWindow,totalUsdCoverage:attributedCoverage,mainUsdScope:{_tag:'Self'},mainUsdWindow:retainedWindow,mainUsdCoverage:{_tag:'Complete'},subagentUsdScope:{_tag:'IncludingSubagents'},subagentUsdWindow:retainedWindow,subagentUsdCoverage:attributedCoverage, totalUsd: known(scene.totals.usd), mainUsd: known(main.totalUsd), subagentUsd: known(children.reduce((sum, lane) => sum + lane.totalUsd, 0)), tokens: known(scene.lanes.reduce((sum, lane) => sum + lane.tokens.total, 0)), tokensWindow: retainedWindow, split: known(split) },
@@ -59,6 +60,7 @@ export const partialTraceFixture: TraceSeries = {
   agentId: 'agent/worker-1', nativeSessionId: known('native-session-example', 'st'),
   coverage:{_tag:'Unavailable',reason:'no-provider'},
   subagentCount:unknown,
+  subagentsWindow:unknown,
   meters: {
     context: stContextMeter,
     spend: { ...unavailableUsdMetadata,usdScope:unattributedScope, tokensScope:unattributedScope, usdWindow:unknown, totalUsd: unknown, mainUsd: unknown, subagentUsd: unknown, tokens: known(480035214, 'st'), tokensWindow:unknown, split: unknown },
@@ -71,6 +73,7 @@ export const unknownTraceFixture: TraceSeries = {
   agentId: 'agent/worker-1', nativeSessionId: unknown,
   coverage:{_tag:'Unavailable',reason:'no-provider'},
   subagentCount:unknown,
+  subagentsWindow:unknown,
   meters: {
     context: { reportedPercent:unknown, usedTokens: unknown, windowTokens: unknown, compactions: unknown, lastCompactionMs: unknown },
     spend: { ...unavailableUsdMetadata,usdScope:unattributedScope, tokensScope:unattributedScope, usdWindow:unknown, totalUsd: unknown, mainUsd: unknown, subagentUsd: unknown, tokens: unknown, tokensWindow:unknown, split: unknown },

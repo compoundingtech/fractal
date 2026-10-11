@@ -18,6 +18,7 @@ export const TraceSeriesSchema=Schema.Struct({
  meters:Schema.Struct({context:Schema.Struct({reportedPercent:fact(amount.check(Schema.isLessThanOrEqualTo(100))),usedTokens:fact(count),windowTokens:fact(count),compactions:fact(count),lastCompactionMs:fact(timestamp)}),spend:Schema.Struct({usdScope:spendScope,usdWindow:fact(accumulationWindow),totalUsdCoverage:coverage,mainUsdScope:spendScope,mainUsdWindow:fact(accumulationWindow),mainUsdCoverage:coverage,subagentUsdScope:spendScope,subagentUsdWindow:fact(accumulationWindow),subagentUsdCoverage:coverage,tokensScope:spendScope,totalUsd:fact(amount),mainUsd:fact(amount),subagentUsd:fact(amount),tokens:fact(count),tokensWindow:fact(accumulationWindow),split:fact(cost)})}),
  coverage,
  subagentCount:fact(count),
+ subagentsWindow:fact(accumulationWindow),
  series:fact(buckets),turns:fact(turns),subagents:fact(Schema.Array(subagent)),history:fact(Schema.Array(Schema.Struct({nativeSessionId:Schema.String,startedMs:timestamp,endedMs:Schema.NullOr(timestamp),usd:amount,compactions:count}))),
 })
 type Equal<A,B>=(<T>()=>T extends A?1:2) extends (<T>()=>T extends B?1:2)?true:false

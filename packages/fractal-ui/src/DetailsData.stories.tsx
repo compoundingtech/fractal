@@ -32,7 +32,7 @@ const native: TraceSeries = {
       tokens: known(480035214), split: unavailable,
     },
   },
-  series: unavailable, turns: unavailable, subagents: unavailable, subagentCount: unavailable,
+  series: unavailable, turns: unavailable, subagents: unavailable, subagentsWindow: unavailable, subagentCount: unavailable,
 }
 const inclusive: TraceSeries = {
   ...native,
@@ -42,17 +42,19 @@ const inclusive: TraceSeries = {
     tokensScope: { _tag: 'Self' }, tokensWindow: window, tokens: known(120000),
   } },
   subagentCount: known(1),
+  subagentsWindow:window,
   subagents: known([{ sessionId: 'native-child', parentSessionId: known('native-session'), label: known('Research delegate'), model: known('gpt-5.4'), usd: 3.21, requests: 4, firstMs: known(now - 1_800_000), lastMs: known(now - 60_000) }]),
 }
 const partial: TraceSeries = { ...inclusive, coverage: { _tag: 'Partial', attributedFraction: 0.62 }, subagentCount: known(4),
   meters:{...inclusive.meters,spend:{...inclusive.meters.spend,totalUsdCoverage:{_tag:'Partial',attributedFraction:0.62},subagentUsdCoverage:{_tag:'Partial',attributedFraction:0.62}}},
 }
-const boundary: TraceSeries = { ...partial, coverage: { _tag: 'Partial', attributedFraction: 0.9949 },
-  meters:{...partial.meters,spend:{...partial.meters.spend,totalUsdCoverage:{_tag:'Partial',attributedFraction:0.9949},subagentUsdCoverage:{_tag:'Partial',attributedFraction:0.9949}}},
-}
-const boundary100:TraceSeries={...partial,coverage:{_tag:'Partial',attributedFraction:0.995},
- meters:{...partial.meters,spend:{...partial.meters.spend,totalUsdCoverage:{_tag:'Partial',attributedFraction:0.995},subagentUsdCoverage:{_tag:'Partial',attributedFraction:0.995}}},
-}
+const withAttributionFraction=(fraction:number):TraceSeries=>({...partial,coverage:{_tag:'Partial',attributedFraction:fraction},
+  meters:{...partial.meters,spend:{...partial.meters.spend,totalUsdCoverage:{_tag:'Partial',attributedFraction:fraction},subagentUsdCoverage:{_tag:'Partial',attributedFraction:fraction}}},
+})
+const boundary=withAttributionFraction(0.9949)
+const boundary995=withAttributionFraction(0.995)
+const zeroCoverage=withAttributionFraction(0)
+const fullPartial=withAttributionFraction(1)
 const notCovered: TraceSeries = { ...native, coverage: { _tag: 'NotCovered', harnessName: 'Claude Code' } }
 const percentOnly: TraceSeries = { ...native, meters: { ...native.meters, context: {
   reportedPercent: known(37.4), usedTokens: unavailable, windowTokens: unavailable,
@@ -67,13 +69,13 @@ const percentSamples: TraceSeries = { ...percentOnly, turns: known({
     { turnIndex: 2, tMs: now - 60_000, contextTokens: null, contextPercent: 37.4, estimated: false },
   ], compactions: [],
 }) }
-const mixedWindows:TraceSeries={...partial,meters:{...partial.meters,spend:{...partial.meters.spend,
+const mixedWindows:TraceSeries={...partial,subagentsWindow:known({_tag:'Reported',label:'7d'}),meters:{...partial.meters,spend:{...partial.meters.spend,
  totalUsd:{_tag:'Known',value:100,source:'series'},usdWindow:known({_tag:'Reported',label:'7d'}),usdScope:{_tag:'IncludingSubagents'},
  mainUsd:known(12.34),mainUsdScope:{_tag:'Self'},mainUsdWindow:window,mainUsdCoverage:{_tag:'Complete'},
  subagentUsd:known(22),subagentUsdWindow:known({_tag:'Reported',label:'7d'}),
 }}}
 const unknownTotalScope:TraceSeries={...mixedWindows,meters:{...mixedWindows.meters,spend:{...mixedWindows.meters.spend,usdScope:{_tag:'Unknown',reason:'not-attributed'}}}}
-const scenarios = { partial, boundary, boundary100, notCovered, independent: native, session: inclusive, partialFacts, percentOnly, percentSamples, mixedWindows, unknownTotalScope } as const
+const scenarios = { partial, boundary, boundary995, zeroCoverage, fullPartial, notCovered, independent: native, session: inclusive, partialFacts, percentOnly, percentSamples, mixedWindows, unknownTotalScope } as const
 interface Args extends DetailsPaneProps { scenario: keyof typeof scenarios; scheme: 'dark' | 'light'; width: 320 | 400 | 520 }
 const styles = stylex.create({
   frame: { height: 720, minHeight: 0, overflow: 'hidden', backgroundColor: surface.canvas },
@@ -184,12 +186,46 @@ export const NotCovered: Story = {
   },
 }
 export const PartialRoundingUpperBoundary:Story={
- args:{scenario:'boundary100'},
+ args:{scenario:'boundary995'},
  play:async({canvasElement})=>{
   const root=pane(canvasElement)
-  assertPartial(root,'Partial · 100% attributed')
-  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Complete'),'Partial · 100% attributed'))
-  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 99% attributed'),'Partial · 100% attributed'))
+  assertPartial(root,'Partial · 99% attributed')
+  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Complete'),'Partial · 99% attributed'))
+  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 100% attributed'),'Partial · 99% attributed'))
+ },
+}
+export const PartialZeroCoverage:Story={
+ args:{scenario:'zeroCoverage'},
+ play:async({canvasElement})=>{
+  const root=pane(canvasElement)
+  assertPartial(root,'Partial · 0% attributed')
+  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 1% attributed'),'Partial · 0% attributed'))
+ },
+}
+export const PartialCappedCoverage:Story={
+ args:{scenario:'fullPartial'},
+ play:async({canvasElement})=>{
+  const root=pane(canvasElement)
+  assertPartial(root,'Partial · 99% attributed')
+  await rejectsControl('Coverage rounding or attribution copy differs',()=>assertPartial(falsifyText(root,'[data-details-coverage]','Partial · 100% attributed'),'Partial · 99% attributed'))
+ },
+}
+function assertDescendantListWindow(root:HTMLElement) {
+ const label=root.querySelector('[data-details-subagent-window]')?.textContent
+ requireContract(label==='Traced sessions · reported window · 7d','Descendant list inherited the native session window')
+ const spendLabel=root.querySelector('[data-details-subagent-spend-window]')?.textContent
+ requireContract(spendLabel===label,'Descendant spend breakdown lost its list window')
+ requireContract(root.querySelector('[data-details-metric="main-usd"]')?.textContent?.includes('UTC'),'Native session lost its independent exact window')
+}
+export const DescendantListWindow:Story={
+ args:{scenario:'mixedWindows'},
+ play:async({canvasElement})=>{
+  const root=pane(canvasElement)
+  assertDescendantListWindow(root)
+  const nativePeriod=root.querySelector('[data-details-metric="main-usd"] [data-details-metric-period]')?.textContent
+  requireContract(nativePeriod,'Missing native-window negative control')
+  const wrong=falsifyText(root,'[data-details-subagent-window]',nativePeriod)
+  await rejectsControl('Descendant list inherited the native session window',()=>assertDescendantListWindow(wrong))
  },
 }
 export const IndependentMetricScopes: Story = {

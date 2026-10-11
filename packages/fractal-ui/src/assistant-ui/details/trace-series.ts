@@ -38,6 +38,7 @@ export interface TraceSeries {
  readonly series:TraceFact<TraceBuckets>
  readonly turns:TraceFact<TraceTurns>
  readonly subagents:TraceFact<readonly TraceSubagent[]>
+ readonly subagentsWindow:TraceFact<TraceAccumulationWindow>
  readonly subagentCount:TraceFact<number>
  readonly history:TraceFact<readonly TraceIncarnation[]>
 }

@@ -51,7 +51,7 @@ const ContextMeterPending = ({ footprint, showUnavailableReasons }: { readonly f
 
 const scopeLabel = (scope:TraceSpendScope):string => scope._tag==='Self'?' · self':scope._tag==='IncludingSubagents'?' · including subagents':scope._tag==='AgentIncarnations'?' · agent incarnations':''
 const spendScopeLabel = (trace:TraceSeries):string => scopeLabel(trace.meters.spend.usdScope)
-const accumulationParts = (fact:TraceFact<TraceAccumulationWindow>):readonly string[]|undefined => {
+export const accumulationParts = (fact:TraceFact<TraceAccumulationWindow>):readonly string[]|undefined => {
   if(fact._tag==='Unknown')return undefined
   const window=fact.value
   if(window._tag==='AllTime')return ['all time']
@@ -67,7 +67,12 @@ const tokenScopeLabel = (trace:TraceSeries):{readonly label:string;readonly wind
  window:accumulationParts(trace.meters.spend.tokensWindow),
 })
 const totalLabel=(trace:TraceSeries):string=>`${trace.meters.spend.totalUsdCoverage._tag==='Complete'?'Total':'Recorded spend'}${spendScopeLabel(trace)}`
-const coverageLabel=(coverage:TraceCoverage):string|undefined=>coverage._tag==='Complete'?undefined:coverage._tag==='Partial'?`Partial · ${Math.round(coverage.attributedFraction*100)}% attributed`:coverage._tag==='NotCovered'?`Not tracked for ${coverage.harnessName}`:'Attribution coverage unavailable'
+/** A partial attribution is never rounded into a claim of complete coverage. */
+const partialPercent=(fraction:number):number=>{
+ if(!Number.isFinite(fraction)||fraction<0||fraction>1)throw new RangeError('Attribution fraction must be finite and between 0 and 1')
+ return Math.min(99,Math.floor(fraction*100))
+}
+const coverageLabel=(coverage:TraceCoverage):string|undefined=>coverage._tag==='Complete'?undefined:coverage._tag==='Partial'?`Partial · ${partialPercent(coverage.attributedFraction)}% attributed`:coverage._tag==='NotCovered'?`Not tracked for ${coverage.harnessName}`:'Attribution coverage unavailable'
 export const TraceCoverageNote = ({trace,coverage=trace.coverage}:{readonly trace:TraceSeries;readonly coverage?:TraceCoverage}):ReactNode => {
  if(coverage._tag==='Complete')return null
  if(coverage._tag==='NotCovered')return <TooltipTrigger delay={0}><Button data-details-coverage {...stylex.props(styles.coverageTrigger)}>{coverageLabel(coverage)}</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>Spend is recorded only for OMP sessions today.</Tooltip></TooltipTrigger>
@@ -94,6 +99,7 @@ const SpendMeter = ({ trace, showUnavailableReasons }: { readonly trace: TraceSe
   </dl>
   {showUnavailableReasons&&spend.tokensScope._tag==='Unknown'&&spend.tokens._tag==='Known'&&<p data-details-scope-note {...stylex.props(styles.scopeNote)}>Scope of this total isn't reported by this source.</p>}
   <TraceCoverageNote trace={trace}/>
+  {trace.subagents._tag==='Known'&&trace.subagents.value.length>0&&<p data-details-subagent-spend-window {...stylex.props(styles.scopeNote)}>Traced sessions · {accumulationParts(trace.subagentsWindow)?.join('')??'Accumulation window is unreported.'}</p>}
   {showUnavailableReasons&&[spend.totalUsd,spend.mainUsd,spend.subagentUsd,spend.tokens].some(fact=>fact._tag==='Unknown')&&<UnknownSeries reason="Unreported spend metrics are omitted" />}{trace.subagents._tag === 'Known' && trace.subagents.value.length > 0 && <dl {...stylex.props(styles.spendSnapshot)} aria-label="Subagent spend breakdown">{trace.subagents.value.map((child) => <div key={child.sessionId} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}>{child.label._tag==='Known'?child.label.value:child.sessionId}</dt><dd {...stylex.props(styles.amount)}>{money.format(child.usd)}</dd></div>)}</dl>}</div>
 }
 
@@ -103,6 +109,7 @@ const SpendMeterPending = ({ footprint }: { readonly footprint: DetailsPendingSh
     {footprint.rows.map(row=><div key={row.label} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>{row.label}</span>{row.window!==undefined&&<MetricWindow parts={row.window} pending tokens={row.tokens}/>} {row.coverage!==undefined&&<p {...stylex.props(styles.scopeNote)}><span {...stylex.props(styles.pendingText)}>{row.coverage}</span></p>}</dt><dd {...stylex.props(row.tokens?styles.tokens:styles.amount)}><span {...stylex.props(styles.pendingText)}>{row.value}</span></dd></div>)}
   </dl>
   {footprint.coverage!==undefined&&<p {...stylex.props(styles.scopeNote)}><span {...stylex.props(styles.pendingText)}>{footprint.coverage}</span></p>}
+  {footprint.subagents.length>0&&footprint.subagentWindow!==undefined&&<p {...stylex.props(styles.scopeNote)}><span {...stylex.props(styles.pendingText)}>{footprint.subagentWindow}</span></p>}
   {footprint.subagents.length>0&&<dl {...stylex.props(styles.spendSnapshot)}>{footprint.subagents.map((row,index)=><div key={index} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>{row.label}</span></dt><dd {...stylex.props(styles.amount)}><span {...stylex.props(styles.pendingText)}>{row.value}</span></dd></div>)}</dl>}
 </div>
 
@@ -218,6 +225,7 @@ export interface DetailsPendingShape {
   readonly spend: {
     readonly rows: readonly { readonly label: string; readonly window?: readonly string[]|undefined; readonly coverage?:string|undefined; readonly value: string; readonly tokens: boolean }[]
     readonly subagents: readonly { readonly label: string; readonly value: string }[]
+    readonly subagentWindow?:string|undefined
     readonly partialNote?: string | undefined
     readonly coverage?: string | undefined
   }
@@ -245,6 +253,7 @@ export const pendingShapeFromTrace = (trace: TraceSeries): DetailsPendingShape =
         ...(trace.meters.spend.tokens._tag==='Known'?[{...tokenScopeLabel(trace),value:compactNumber.format(trace.meters.spend.tokens.value),tokens:true}]:[]),
       ],
       subagents: trace.subagents._tag==='Known'?trace.subagents.value.map(child=>({label:child.label._tag==='Known'?child.label.value:child.sessionId,value:money.format(child.usd)})):[],
+      subagentWindow:`Traced sessions · ${accumulationParts(trace.subagentsWindow)?.join('')??'Accumulation window is unreported.'}`,
       partialNote: tokenScopeReason(trace),
       coverage: coverageLabel(trace.coverage),
     },

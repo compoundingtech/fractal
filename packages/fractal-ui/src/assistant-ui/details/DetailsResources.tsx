@@ -11,7 +11,7 @@ import { AGENT_DRAG_MIME, agentPaneKey } from '../workbench/agent-drag'
 import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from './model'
 import type { TraceSeries, TraceSubagent, TraceUnknownReason } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
-import { TraceCoverageNote } from './DetailsCharts'
+import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
 
 export type DetailsResourceForm = 'R1' | 'R2' | 'R3'
 export type DetailsEmptyRule = 'E1' | 'E2' | 'E3'
@@ -158,6 +158,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
 }) {
   const hasObserved = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
   const showBreakdown = section.title !== 'Subagents' || visible(section.items, empty)
+  const subagentWindow=section.title==='Subagents'?accumulationParts(trace.subagentsWindow):undefined
   const hasUnavailableNote = showBreakdown && section.items._tag === 'Unknown'
   const missingStatus = section.title === 'Subagents' && observedSubagents?.items._tag === 'Known'
     && observedSubagents.items.value.some(resource => resource.agent?.status === 'unobserved')
@@ -172,6 +173,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
       </>}
       {showBreakdown && <>
         {section.title === 'Subagents' && <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>Traced-session breakdown</p></SkeletonLine>}
+        {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>{subagentWindow===undefined?'Traced-session accumulation window is unreported.':`Traced sessions · ${subagentWindow.join('')}`}</p></SkeletonLine>}
         {section.title === 'Subagents' && trace.subagents._tag === 'Known' && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>{trace.subagentCount._tag === 'Known' ? `Showing ${trace.subagents.value.length} of ${trace.subagentCount.value} traced sessions` : `Showing ${trace.subagents.value.length} traced sessions · Total count is unreported`}</p></SkeletonLine>}
         {section.items._tag === 'Unknown'
           ? <SkeletonLine pending={pending}><p data-details-reason={section.title} {...stylex.props(styles.metaLine, styles.reason)}>{unavailableReason(section, trace, empty)}</p></SkeletonLine>
