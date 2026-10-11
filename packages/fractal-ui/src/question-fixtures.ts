@@ -15,7 +15,7 @@ export const questionStates: readonly QuestionState[] = [
   { _tag: 'pending', expiresAt: '15:42 UTC' },
   { _tag: 'submitting' },
   { _tag: 'failed', error: 'The answer service disconnected' },
-  { _tag: 'answered', answers: { single: { selected: ['thread'], note: 'Keep it discoverable' }, multi: { selected: [] } }, by: 'Johannes', where: 'web', at: '15:41 UTC' },
+  { _tag: 'answered', answers: { single: { selected: ['thread'], note: 'Keep it discoverable' }, multi: { selected: [] } }, by: 'Reviewer', where: 'web', at: '15:41 UTC' },
   { _tag: 'answered-elsewhere', answers: { single: { selected: ['inbox'] } }, where: 'terminal', at: '15:41 UTC', draftDiscarded: true },
   { _tag: 'expired', at: '15:42 UTC', autoAnswer: { single: { selected: ['thread'], autoSelected: true } } },
   { _tag: 'expired', at: '15:42 UTC' },
