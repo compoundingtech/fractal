@@ -46,7 +46,7 @@ use st3_client::{
     API_VERSION as CLIENT_V0_API_VERSION, Client as GeneratedClient,
     ClientError as GeneratedClientError, Envelope as ClientEnvelope, ErrorCode as ClientErrorCode,
     EventPage as ClientEventPage, EventType as ClientEventType, Fence as ClientFence,
-    Page as ClientPage, PairingBegin, PersonPairingBegin, AssistantGrantPolicy,
+    Page as ClientPage, PairingBegin, PersonPairingBegin, AssistantGrantPolicy, AssistantReadTrustRequest,
     AssistantMinimalReadMode, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
     Resource as ClientResource,
     TargetParameters as ClientTargetParameters, TerminalInputMode as ClientTerminalInputMode,
@@ -2706,6 +2706,22 @@ enum AssistantGrantCommand {
         disclose_to_openai: bool,
         #[arg(long)]
         consent_evidence: Option<String>,
+    },
+    /// Pin an approval attestor independently from the shim signing key.
+    ReadTrust {
+        grant: String,
+        #[arg(long)]
+        issuer: String,
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        attestor_public_key: String,
+        #[arg(long)]
+        shim_public_key: String,
+        #[arg(long, default_value_t = 4096)]
+        default_response_bytes: u32,
+        #[arg(long, default_value_t = 16384)]
+        max_response_bytes: u32,
     },
 }
 
@@ -9493,6 +9509,13 @@ async fn run_devices(
                     client
                         .assistant_grant_policy(&grant, &terms.into_policy())
                         .await?
+                }
+                AssistantGrantCommand::ReadTrust { grant, issuer, key_id, attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes } => {
+                    client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
+                        api_version: CLIENT_V0_API_VERSION.into(), issuer, key_id,
+                        attestor_public_key, shim_public_key,
+                        default_response_bytes, max_response_bytes,
+                    }).await?
                 }
             };
             print_client_value(&response, json_output)
