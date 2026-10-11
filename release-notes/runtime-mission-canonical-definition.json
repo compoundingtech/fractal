@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "summary": "A runtime-created mission's definition follows its canonically first claim's revision, so independent updates with different reasons converge however they arrive.",
+  "summary": "A runtime-created mission's definition follows its canonically first claim's revision, and yields to a publication of the same mission id, so independent updates converge however they arrive.",
   "replay": {
     "status": "changed",
-    "detail": "Incremental person-work projection now gives the definition the revision and source a full replay already gives: the canonically first claim's. A definition projected earlier from a later claim is corrected the next time that run tree is rebuilt or the graph is fully replayed; no new replay trigger is added."
+    "detail": "Incremental person-work projection now gives the definition the revision and source a full replay gives: the canonically first runtime claim's. A publication of the same mission id replaces a runtime-created definition whichever arrives first, and a runtime claim never replaces a published one, so a full replay and every arrival order agree. A definition projected earlier from a later claim is corrected the next time that run tree is rebuilt or the graph is fully replayed; no new replay trigger is added."
   },
   "schema": {
     "status": "none",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "No client schema or API change. A published mission's definition is never replaced by this path; only a definition of the same revision, or one another runtime-created run wrote, is."
+    "detail": "No client schema or API change. Runtime-created mission ids are hash-named, so a publication shares one only when deliberately named; such a published definition is kept, with its revision, state and body."
   },
   "downtime": {
     "status": "none",
