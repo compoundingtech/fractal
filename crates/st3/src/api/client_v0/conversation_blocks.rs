@@ -1370,7 +1370,8 @@ mod tests {
                 .find(|block| block["kind"] == "image")
                 .unwrap();
             let reference = &image["continuation"];
-            assert_eq!(reference["media_type"], "image/png");
+            // Inline data is not decoded until fetch; the chunk reports the detected MIME.
+            assert_eq!(reference["media_type"], "application/octet-stream");
             assert_eq!(reference["reason"], "on-demand");
             let token = reference["ref"].as_str().unwrap();
             assert!(locator(token, &native.id).unwrap().image);

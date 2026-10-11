@@ -297,6 +297,15 @@ impl Content {
                         refs.push(reference.clone());
                     }
                     image_refs(&block.payload, &mut refs);
+                    // An image keeps its pixel continuation at block level. Clipped
+                    // metadata and views carry independent JSON disclosure references.
+                    for value in block.metadata.iter().chain(block.view.iter()) {
+                        if let Some(value) = value.get("continuation")
+                            && let Ok(reference) = serde_json::from_value(value.clone())
+                        {
+                            refs.push(reference);
+                        }
+                    }
                     let mut references = Vec::new();
                     for reference in refs {
                         let key = Key {
@@ -1262,6 +1271,54 @@ mod tests {
                 .iter()
                 .any(|target| matches!(target.hit, Hit::InlineImage(_)))
         );
+    }
+
+    #[test]
+    fn image_metadata_and_view_refs_are_indexed_as_json_disclosures_beside_pixels() {
+        let (mut content, mut timelines, entries) = fixture(true);
+        let timeline = timelines.get_mut("agent/example").unwrap();
+        let TimelineBody::Content(body) = &mut timeline.items[0].body else {
+            panic!("expected image content");
+        };
+        let block = &mut body.blocks[0];
+        block.metadata = Some(serde_json::json!({
+            "model":"[st truncated this native timeline value]",
+            "continuation":{"ref":"metadata-ref","media_type":"application/json","reason":"size-limit"}
+        }));
+        block.view = Some(serde_json::json!({
+            "detail":"[st truncated this native timeline value]",
+            "continuation":{"ref":"view-ref","media_type":"application/json","reason":"size-limit"}
+        }));
+        content.index(&timelines);
+        let image_keys = content.tool_images("agent/example", &entries[0].id);
+        assert_eq!(image_keys.len(), 1);
+        let pixel = &image_keys[0];
+        assert_eq!(pixel.reference, "image-ref");
+        let json = content.request_tool("agent/example", &entries[0].id);
+        assert_eq!(
+            json.iter().map(|key| key.reference.as_str()).collect::<Vec<_>>(),
+            ["metadata-ref", "view-ref"]
+        );
+        assert!(!content.is_loading(pixel));
+        for key in json {
+            let full = if key.reference == "metadata-ref" {
+                serde_json::json!({"model":"complete synthetic model"})
+            } else {
+                serde_json::json!({"detail":"complete synthetic view"})
+            };
+            content.complete(
+                key,
+                Ok(("application/json".into(), serde_json::to_vec(&full).unwrap())),
+            );
+        }
+        let shown = words(&render(&content, &entries, true));
+        assert!(shown.contains("complete synthetic model"));
+        assert!(shown.contains("complete synthetic view"));
+        assert!(shown.contains("Full referenced content"));
+        assert!(shown.contains("[image application/octet-stream, size unknown]"));
+        assert_eq!(content.tool_images("agent/example", &entries[0].id), image_keys);
+        assert!(content.toggle_image(pixel));
+        assert!(content.is_loading(pixel));
     }
 
     #[test]
