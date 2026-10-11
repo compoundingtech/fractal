@@ -5,7 +5,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button } from './kit'
 import { Workbench, type WorkbenchProps } from './assistant-ui/workbench/Workbench'
 import { group, paneKey, type WorkbenchPane } from './assistant-ui/workbench/workbench-model'
-import { workbenchResources } from './assistant-ui/workbench/workbench-fixtures'
+import { detailsWorkbenchResources as workbenchResources } from './assistant-ui/details/story-fixtures'
 import { DetailsPane, type DetailsLayoutIntent, type DetailsVariants } from './assistant-ui/details/DetailsPane'
 import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
@@ -62,7 +62,7 @@ export default meta
 type Story = StoryObj<typeof meta>
 type Play = { canvasElement: HTMLElement }
 
-function requireContract(condition: boolean, reason: string): asserts condition { if (!condition) throw new Error(reason) }
+function requireContract(condition: unknown, reason: string): asserts condition { if (!condition) throw new Error(reason) }
 async function rejectsControl(reason: string, assertion: () => void | Promise<void>) {
   let rejected = false
   try { await assertion() } catch (error) { requireContract(error instanceof Error && error.message === reason, `Unexpected control failure: ${String(error)}`); rejected = true }
@@ -332,7 +332,7 @@ async function keyboardPlay({ canvasElement: canvas }: Play) {
     tab.focus(); await userEvent.tab(); await tabUntil(doc, detailsTrigger, 8)
     const trigger = doc.activeElement as HTMLElement
     await userEvent.keyboard('{Enter}')
-    const dialog = await within(doc.body).findByRole('dialog', { name: 'Load failed', exact: true })
+    const dialog = await within(doc.body).findByRole('dialog', { name: 'Load failed' })
     assertDialog(dialog); assertRecovery(doc)
     const description = dialog.getAttribute('aria-describedby')!
     dialog.removeAttribute('aria-describedby')
@@ -345,7 +345,7 @@ async function keyboardPlay({ canvasElement: canvas }: Play) {
     await tabUntil(doc, node => node?.getAttribute('data-command-id') === 'sync.retry.details', 4)
     await userEvent.keyboard('{Escape}')
     await waitFor(() => requireContract(!doc.querySelector('[data-pane-sync-details]') && doc.activeElement === trigger, 'Escape did not restore the Details trigger'))
-    if (retained) { await userEvent.keyboard('{Enter}'); await within(doc.body).findByRole('dialog', { name: 'Load failed', exact: true }) }
+    if (retained) { await userEvent.keyboard('{Enter}'); await within(doc.body).findByRole('dialog', { name: 'Load failed' }) }
     await tabUntil(doc, node => node?.getAttribute('data-command-id') === (retained ? 'sync.retry.details' : 'sync.retry.body'), 12)
     assertRecovery(doc); await userEvent.keyboard('{Enter}')
     await waitFor(() => { expect(pane).toHaveAttribute('data-details-sync-state', 'Live'); assertRestored(pane, tab) })

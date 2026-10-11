@@ -33,6 +33,7 @@ Stories:
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
 - **Fractal UI / Details Tab Strip**: the production Workbench, Details pane and resource tabs. `Wide`, `Threshold`, `ManyTabs`, mounted 159/160px first/last selection cases and `AllStates` cover real resource identities, measured label/icon hysteresis, whole painted representations, keyboard selection, tooltips and focus recovery. `RawStability`, `RawStability159` and `RawStability160` assert raw layout-shift zero across Details loading/failure/recovery; each play includes a failing control.
 - **Fractal UI / Details Recovery** and **Details Resources**: canonical production-mounted plays preserve Details-specific loading footprints, first-load and retained-content failure recovery, keyboard focus, polite announcements, delayed loading glyphs, accessibility of known identity, resource containment/fit, chart scope, section visibility and open intents. Workbench/sidebar host wiring is not reimplemented in these stories.
+- Details stories supply only their own pane observations and explicit empty Workbench resource maps. Their chart assertions consume the production percentage projection, including a missing-percentage control, rather than relying on removed token-count chart fields.
 
 ## Details and TabStrip
 

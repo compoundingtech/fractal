@@ -7,7 +7,7 @@ import { fullTraceFixture } from './assistant-ui/details/trace/fixture-provider'
 import type { TraceFact, TraceSeries } from './assistant-ui/details/trace-series'
 import { Workbench } from './assistant-ui/workbench/Workbench'
 import { group } from './assistant-ui/workbench/workbench-model'
-import { workbenchResources } from './assistant-ui/workbench/workbench-fixtures'
+import { detailsWorkbenchResources as workbenchResources } from './assistant-ui/details/story-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -138,8 +138,9 @@ function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens ·
   requireContract(tokenRow?.querySelector('[data-details-token-label]')?.textContent === tokenLabel, 'Token scope inherited monetary scope')
   requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&section.querySelector('[data-details-partial-note]')?.textContent==="Accumulation window isn't reported by this source.", 'Token accumulation window was fabricated')
   const monetaryRow = Array.from(section.querySelectorAll('dt')).find(item => item.textContent?.startsWith('Total · self'))?.closest('div')
-  requireContract(monetaryRow?.textContent?.includes('UTC') && !monetaryRow.textContent.includes('all time'), 'Monetary accumulation window inherited token window')
-  requireContract(monetaryRow.textContent.includes('$12.34') && tokenRow?.textContent?.includes('480'), 'Native metrics disappeared without descendants')
+  const monetaryText = monetaryRow?.textContent
+  requireContract(monetaryText?.includes('UTC') && !monetaryText.includes('all time'), 'Monetary accumulation window inherited token window')
+  requireContract(monetaryText.includes('$12.34') && tokenRow?.textContent?.includes('480'), 'Native metrics disappeared without descendants')
 }
 function assertPercentOnly(root: HTMLElement) {
   const section = root.querySelector('[data-details-chart^="C"]')
@@ -177,7 +178,7 @@ export const NotCovered: Story = {
   args: { scenario: 'notCovered' },
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
-    const trigger = within(spend(root)).getByRole('button', { name: 'Not tracked for Claude Code', exact: true })
+    const trigger = within(spend(root)).getByRole('button', { name: 'Not tracked for Claude Code' })
     trigger.focus()
     requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Coverage explanation is not keyboard reachable')
     await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
@@ -254,11 +255,11 @@ export const IndependentMetricScopes: Story = {
 }
 function assertNativeWindow(root:HTMLElement) {
  const section=spend(root)
- const main=section.querySelector('[data-details-metric="main-usd"]')
- requireContract(main?.textContent?.includes('Main session · self')&&main.textContent.includes('UTC')&&!main.textContent.includes('reported window')&&!main.textContent.includes('Partial'), 'Native monetary metadata inherited inclusive metadata')
- const total=section.querySelector('[data-details-metric="total-usd"]')
- requireContract(total?.textContent?.includes('reported window · 7d')&&!total.textContent.includes('UTC'), 'Producer window fabricated exact boundaries')
- requireContract(main.textContent.includes('$12.34')&&total.textContent.includes('$100.00'), 'Independent monetary amounts were derived from one another')
+ const mainText=section.querySelector('[data-details-metric="main-usd"]')?.textContent
+ requireContract(mainText?.includes('Main session · self')&&!mainText.includes('reported window')&&mainText.includes('UTC')&&!mainText.includes('Partial'), 'Native monetary metadata inherited inclusive metadata')
+ const totalText=section.querySelector('[data-details-metric="total-usd"]')?.textContent
+ requireContract(totalText?.includes('reported window · 7d')&&!totalText.includes('UTC'), 'Producer window fabricated exact boundaries')
+ requireContract(mainText.includes('$12.34')&&totalText.includes('$100.00'), 'Independent monetary amounts were derived from one another')
 }
 export const NativeAndInclusiveWindows:Story={
  args:{scenario:'mixedWindows'},
