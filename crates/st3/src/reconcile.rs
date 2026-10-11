@@ -19901,7 +19901,11 @@ mission "feedback-review" state="ready" {
         // A person's global gitignore commonly ignores this file; the fixture ignores it too
         // and tracks it anyway, as a repository that commits it does.
         fs::create_dir_all(workspace.path().join(".git/info")).unwrap();
-        fs::write(workspace.path().join(".git/info/exclude"), "settings.local.json\n").unwrap();
+        fs::write(
+            workspace.path().join(".git/info/exclude"),
+            "settings.local.json\n",
+        )
+        .unwrap();
         assert!(
             crate::test_support::git()
                 .args(["add", "-f", ".claude/settings.local.json"])
@@ -19987,7 +19991,11 @@ agent "bad" {{ workspace {:?}; command "true" }}
         fs::create_dir(workspace.path().join(".claude")).unwrap();
         fs::write(workspace.path().join(".claude/settings.local.json"), "{}\n").unwrap();
         fs::create_dir_all(workspace.path().join(".git/info")).unwrap();
-        fs::write(workspace.path().join(".git/info/exclude"), "settings.local.json\n").unwrap();
+        fs::write(
+            workspace.path().join(".git/info/exclude"),
+            "settings.local.json\n",
+        )
+        .unwrap();
         assert!(
             crate::test_support::git()
                 .args(["add", "-f", ".claude/settings.local.json"])

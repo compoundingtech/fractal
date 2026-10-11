@@ -2007,7 +2007,9 @@ fn tool_output(content: &Value, full: bool) -> (Vec<String>, bool) {
     if !full && lines.len() > PREVIEW_LINES {
         let hidden = lines.len() - PREVIEW_LINES;
         lines.truncate(PREVIEW_LINES);
-        lines.push(format!("… {hidden} more lines not shown in the timeline preview"));
+        lines.push(format!(
+            "… {hidden} more lines not shown in the timeline preview"
+        ));
     }
     if cut {
         lines.push("… st kept only the start of this output".into());

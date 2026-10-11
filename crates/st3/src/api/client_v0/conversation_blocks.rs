@@ -20,9 +20,8 @@ fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore 
 
 #[cfg(test)]
 fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
-    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<
-        tokio::sync::Semaphore,
-    > = LazyLock::new(Default::default);
+    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<tokio::sync::Semaphore> =
+        LazyLock::new(Default::default);
     crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
         tokio::sync::Semaphore::new(4)
     })
@@ -354,7 +353,9 @@ pub(crate) fn bound_open_value(value: &mut Value) -> bool {
 /// Preview parsing already clips long strings before wire preparation sees them.
 fn has_preview_marker(value: &Value) -> bool {
     match value {
-        Value::String(text) => text.contains("[st truncated this native timeline value: size limit;"),
+        Value::String(text) => {
+            text.contains("[st truncated this native timeline value: size limit;")
+        }
         Value::Array(values) => values.iter().any(has_preview_marker),
         Value::Object(values) => values.values().any(has_preview_marker),
         _ => false,
@@ -585,13 +586,14 @@ pub(super) fn prepare_one(
                 let encoded = serde_json::to_vec(&block["payload"]).map_err(ApiError::internal)?;
                 // A preview may have clipped a value to within the display window, so every
                 // block of one keeps a way back to the complete native value.
-                if encoded.len() > VALUE_BYTES || original["_oversized_bytes"].is_number() || preview
+                if encoded.len() > VALUE_BYTES
+                    || original["_oversized_bytes"].is_number()
+                    || preview
                 {
                     block["continuation"] = continuation(
                         reference(source, basis, session_id, &original, &pointer),
                         "application/json",
-                        if let Some(size) = original["_oversized_payload_bytes"][index].as_u64()
-                        {
+                        if let Some(size) = original["_oversized_payload_bytes"][index].as_u64() {
                             Some(size as usize)
                         } else if preview {
                             // A preview never held the complete value, so it cannot size it.
@@ -1420,7 +1422,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(chunk["media_type"], "image/png");
-            assert_eq!(STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap(), pixels);
+            assert_eq!(
+                STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap(),
+                pixels
+            );
             assert!(chunk["next_offset"].is_null());
             if model.len() > VALUE_BYTES {
                 let metadata = &image["metadata"];

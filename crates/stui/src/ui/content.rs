@@ -1296,7 +1296,9 @@ mod tests {
         assert_eq!(pixel.reference, "image-ref");
         let json = content.request_tool("agent/example", &entries[0].id);
         assert_eq!(
-            json.iter().map(|key| key.reference.as_str()).collect::<Vec<_>>(),
+            json.iter()
+                .map(|key| key.reference.as_str())
+                .collect::<Vec<_>>(),
             ["metadata-ref", "view-ref"]
         );
         assert!(!content.is_loading(pixel));
@@ -1308,7 +1310,10 @@ mod tests {
             };
             content.complete(
                 key,
-                Ok(("application/json".into(), serde_json::to_vec(&full).unwrap())),
+                Ok((
+                    "application/json".into(),
+                    serde_json::to_vec(&full).unwrap(),
+                )),
             );
         }
         let shown = words(&render(&content, &entries, true));
@@ -1316,7 +1321,10 @@ mod tests {
         assert!(shown.contains("complete synthetic view"));
         assert!(shown.contains("Full referenced content"));
         assert!(shown.contains("[image application/octet-stream, size unknown]"));
-        assert_eq!(content.tool_images("agent/example", &entries[0].id), image_keys);
+        assert_eq!(
+            content.tool_images("agent/example", &entries[0].id),
+            image_keys
+        );
         assert!(content.toggle_image(pixel));
         assert!(content.is_loading(pixel));
     }

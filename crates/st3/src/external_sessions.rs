@@ -1240,13 +1240,13 @@ pub(crate) mod timeline_test_support {
 
     /// The instance of a process-wide budget or cache for `path`'s scope, so each test owns
     /// its own and parallel tests cannot affect each other through global state.
-    pub(crate) fn scoped<T>(
-        scopes: &Scopes<T>,
-        path: &Path,
-        create: impl FnOnce() -> T,
-    ) -> Arc<T> {
+    pub(crate) fn scoped<T>(scopes: &Scopes<T>, path: &Path, create: impl FnOnce() -> T) -> Arc<T> {
         let mut scopes = scopes.lock().unwrap_or_else(|error| error.into_inner());
-        Arc::clone(scopes.entry(scope(path)).or_insert_with(|| Arc::new(create())))
+        Arc::clone(
+            scopes
+                .entry(scope(path))
+                .or_insert_with(|| Arc::new(create())),
+        )
     }
 
     static FOLD_WAITERS: AtomicUsize = AtomicUsize::new(0);
@@ -4918,7 +4918,10 @@ mod tests {
             let header = crate::conversation_header::derive(head, true);
             assert_eq!(header["cost"]["value"], json!({"usd": 0.5, "window": true}));
             assert_eq!(header["model"]["value"], "latest-model");
-            assert_eq!(header["context"]["value"], json!({"tokens": 23, "window": null}));
+            assert_eq!(
+                header["context"]["value"],
+                json!({"tokens": 23, "window": null})
+            );
             for field in ["cost", "model", "context"] {
                 assert_eq!(header[field]["as_of"], "2026-10-06T00:00:01Z");
             }
@@ -7742,8 +7745,13 @@ mod tests {
         for index in 0..MAX_FOLDED_TRANSCRIPTS {
             let other = root.path().join(format!("other-{index}.jsonl"));
             fs::write(&other, codex_record("other", "other")).unwrap();
-            timeline_slice(&transcript_session(ExternalDriver::Codex, &other), order, None, 10)
-                .unwrap();
+            timeline_slice(
+                &transcript_session(ExternalDriver::Codex, &other),
+                order,
+                None,
+                10,
+            )
+            .unwrap();
         }
         assert!(with_line_folds(&path, |folds| {
             !folds.iter().any(|entry| entry.0 == path)

@@ -3293,10 +3293,22 @@ mod tests {
     #[test]
     fn a_session_that_failed_to_open_says_why_and_is_asked_again_when_reopened() {
         let session = "session/example-child".to_owned();
-        let failed = BTreeMap::from([(session.clone(), "not found · open it again to retry".to_owned())]);
-        let shown = conversations(&Model::default(), "person/avery", &BTreeMap::new(), &failed, &[session.clone()]);
+        let failed = BTreeMap::from([(
+            session.clone(),
+            "not found · open it again to retry".to_owned(),
+        )]);
+        let shown = conversations(
+            &Model::default(),
+            "person/avery",
+            &BTreeMap::new(),
+            &failed,
+            &[session.clone()],
+        );
         match &shown[&session] {
-            Load::Failed(reason) => assert!(reason.contains("not found") && reason.contains("retry"), "{reason}"),
+            Load::Failed(reason) => assert!(
+                reason.contains("not found") && reason.contains("retry"),
+                "{reason}"
+            ),
             other => panic!("a failed open is an error, not loading: {other:?}"),
         }
         let mut requested = HashSet::from([session.clone(), "session/example-open".to_owned()]);

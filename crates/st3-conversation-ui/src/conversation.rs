@@ -235,7 +235,10 @@ fn mail_lines(entry: &Entry, width: usize, theme: &Theme) -> Doc {
     let mut spans = vec![bar(), Span::styled(head, from_style)];
     if !subject.is_empty() && room > 1 {
         spans.push(Span::styled(
-            format!("  {}", crate::pane::truncate(&text::sanitize(subject), room)),
+            format!(
+                "  {}",
+                crate::pane::truncate(&text::sanitize(subject), room)
+            ),
             fg(look.text, theme),
         ));
     }

@@ -51,9 +51,12 @@ fn fields(out: &mut Value, source: &Value, names: &[(&str, &str)]) {
 fn timestamp(value: &Value) -> Option<String> {
     let instant = match value {
         Value::Number(number) => {
-            let millis = number
-                .as_i64()
-                .or_else(|| number.as_f64().filter(|ms| ms.is_finite() && ms.fract() == 0.0).map(|ms| ms as i64))?;
+            let millis = number.as_i64().or_else(|| {
+                number
+                    .as_f64()
+                    .filter(|ms| ms.is_finite() && ms.fract() == 0.0)
+                    .map(|ms| ms as i64)
+            })?;
             chrono::DateTime::from_timestamp_millis(millis)?
         }
         Value::String(text) => chrono::DateTime::parse_from_rfc3339(text).ok()?.to_utc(),
@@ -765,7 +768,11 @@ mod tests {
         assert_eq!(jobs[0]["ended_at"], "2026-10-07T21:28:10.000Z");
         assert_eq!(jobs[1]["started_at"], "2026-10-07T21:28:09.860Z");
         for (job, field) in [(1, "ended_at"), (2, "started_at"), (2, "ended_at")] {
-            assert!(jobs[job].get(field).is_none(), "{job} {field}: {}", jobs[job]);
+            assert!(
+                jobs[job].get(field).is_none(),
+                "{job} {field}: {}",
+                jobs[job]
+            );
         }
         let (_, start, _) = omp_record_view(
             &json!({"type":"custom","customType":"tool_execution_start","data":{"toolCallId":"c","toolName":"bash","startedAt":1791408489859_u64}}),
