@@ -203,3 +203,73 @@ fn accountable_root_grammar_rejects_nonpersons_duplicates_and_nested_values() {
         .is_err()
     );
 }
+
+#[test]
+fn accountable_absent_preserves_previous_cbor_bytes_and_desired_revisions() {
+    // The pre-accountable derived serializer is the compatibility oracle, including
+    // its definite CBOR map and the field order used by desired_revision.
+    #[derive(serde::Serialize)]
+    struct PreviousDesiredSubject {
+        subject: String,
+        kind: String,
+        desired: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        member: Option<crate::model::MemberSpec>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_run: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_generation: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_step: Option<String>,
+    }
+    fn previous(desired: &DesiredSubject) -> PreviousDesiredSubject {
+        PreviousDesiredSubject {
+            subject: desired.subject.clone(),
+            kind: desired.kind.clone(),
+            desired: canonical_json_value(&desired.desired),
+            member: desired.member.clone(),
+            owner_run: desired.owner_run.clone(),
+            owner_generation: desired.owner_generation.clone(),
+            owner_step: desired.owner_step.clone(),
+        }
+    }
+    fn bytes(value: &impl serde::Serialize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes).unwrap();
+        bytes
+    }
+
+    let minimal = DesiredSubject {
+        accountable: None,
+        subject: ROOT.into(),
+        kind: "stop".into(),
+        desired: Value::Null,
+        member: None,
+        owner_run: None,
+        owner_generation: None,
+        owner_step: None,
+    };
+    let exact = hex::decode("a3677375626a656374726167656e742f6578616d706c652f726f6f74646b696e646473746f706764657369726564f6").unwrap();
+    assert_eq!(bytes(&previous(&minimal)), exact);
+    assert_eq!(bytes(&minimal), exact);
+    assert_eq!(desired_revision(&minimal), "e9fcc02577cf489c512b41ff9998ade7db1e9c12a66d8269fe13e379757da944");
+    assert_eq!(canonical_hash(&previous(&minimal)).unwrap(), desired_revision(&minimal));
+
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/harness-access-previous-build.json"
+    )).unwrap();
+    for body in fixture["desired_subjects"].as_array().unwrap() {
+        let mut desired: DesiredSubject = serde_json::from_value(body.clone()).unwrap();
+        desired.desired = canonical_json_value(&desired.desired);
+        assert_eq!(bytes(&desired), bytes(&previous(&desired)), "{}", desired.subject);
+        assert_eq!(desired_revision(&desired), fixture["revisions"][&desired.subject].as_str().unwrap());
+        // Every combination of optional owner fields keeps the old encoding too.
+        for present in 0..8 {
+            desired.owner_run = (present & 1 != 0).then(|| "mission-run/example/run".into());
+            desired.owner_generation = (present & 2 != 0).then(|| "run-generation/example".into());
+            desired.owner_step = (present & 4 != 0).then(|| "work".into());
+            assert_eq!(bytes(&desired), bytes(&previous(&desired)), "{} owners={present}", desired.subject);
+            assert_eq!(desired_revision(&desired), canonical_hash(&previous(&desired)).unwrap());
+        }
+    }
+}
