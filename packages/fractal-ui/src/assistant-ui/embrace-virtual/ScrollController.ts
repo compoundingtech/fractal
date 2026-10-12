@@ -387,7 +387,10 @@ export class ScrollController {
         }
         if (after === undefined && before !== undefined) { element.scrollTop += before.bottom - viewport.top; return }
         if (before === undefined && after !== undefined) { element.scrollTop -= viewport.bottom - after.top; return }
-        // Nothing visible to walk from: fall back to the layout position.
+        // RAC has not rendered rows at the new position yet; its mutation re-enters.
+        if (before === undefined && targetIndex !== undefined) return
+        // Visible rows on both sides without the anchor, or the leading history
+        // marker: fall back to the layout position.
         this.prependBottom = undefined
       } else this.prependBottom = undefined
     }
