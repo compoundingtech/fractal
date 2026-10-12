@@ -6388,6 +6388,15 @@ impl Store {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
     }
 
+    /// An opaque process/Store-lifetime observation token plus its deferred flag, sampled
+    /// together. A changed token can invalidate cached consumers even if they missed the
+    /// pending interval. This is not a persisted cut or a certificate for replay/heal,
+    /// physical removal, OLD images or every projection path. Its existing generation wraps.
+    pub fn replication_projection_observation(&self) -> (u64, bool) {
+        let state = self.replication_projection_state.load(Ordering::Acquire);
+        (state, state & 1 != 0)
+    }
+
     pub fn projection_contention_generation(&self) -> u64 {
         self.projection_contention_generation.load(Ordering::Acquire)
     }

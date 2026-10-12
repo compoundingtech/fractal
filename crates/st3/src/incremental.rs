@@ -28,6 +28,9 @@ pub struct Incremental {
 struct State {
     /// The change feed's watermark; `None` until the first pass, which evaluates every item.
     watermark: Option<(u64, i64)>,
+    /// Existing replicated-projection token, bound to this Incremental's Store lifetime.
+    /// It is independent of claim frontiers and does not certify a complete mutation cut.
+    projection_token: Option<u64>,
     /// Constant-time conservative invalidation when discovery or fanout exceeds its budget.
     generation: u64,
     items: HashMap<String, Item>,
@@ -197,11 +200,22 @@ fn visit_change_keys(
         "subscription.mission-started" => &[("mission_run", "subscription-run:")],
         _ => &[],
     };
-    if change.kind == "intent.desired"
-        && let Some((_, agent)) = crate::github_watch::watch_parts(&change.subject)
-        && !emit("watches:", agent)
-    {
-        return false;
+    if change.kind == "intent.desired" {
+        // Same subject grammar as watch_parts, borrowing the suffix so admission precedes
+        // constructing the watches:agent/... key and its intermediate agent String.
+        let watch_agent = (|| {
+            let rest = change.subject.strip_prefix("subscription/watch/")?;
+            let mut parts = rest.splitn(4, '/');
+            parts.next()?;
+            parts.next()?;
+            parts.next()?.parse::<u64>().ok()?;
+            parts.next()
+        })();
+        if let Some(agent) = watch_agent
+            && !emit("watches:agent/", agent)
+        {
+            return false;
+        }
     }
     for (name, prefix) in fields {
         if let Some(value) = field(name)
@@ -235,10 +249,26 @@ fn visit_change_keys(
 impl Incremental {
     /// Read what changed since the last pass and mark the items that read it.
     pub fn observe(&self, store: &Store) -> Result<()> {
+        self.observe_after_feed(store, || {})
+    }
+
+    // The production instantiation has no hook. Tests use the released feed-read boundary to
+    // complete a real projection, without substituting the hint reader or projection policy.
+    fn observe_after_feed(&self, store: &Store, after_feed: impl FnOnce()) -> Result<()> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (projection_token, deferred) = store.replication_projection_observation();
+        if state
+            .projection_token
+            .is_some_and(|old| old != projection_token)
+            || deferred
+        {
+            // A consumed append hint cannot certify projection data while it is pending, nor
+            // after same-frontier completion. Pending work stays conservative until cleared.
+            Self::invalidate_locked(&mut state);
+        }
         let Some((index, local)) = state.watermark else {
             let feed = match store.reconcile_changes_since(i64::MAX as u64, i64::MAX) {
                 Ok(observed) => observed.feed,
@@ -247,7 +277,10 @@ impl Incremental {
                     return Err(error);
                 }
             };
+            state.projection_token = Some(projection_token);
             state.watermark = Some((feed.index, feed.local));
+            after_feed();
+            Self::observe_projection_after_feed(&mut state, store, projection_token);
             return Ok(());
         };
         let observed = match store.reconcile_changes_since(index, local) {
@@ -257,6 +290,11 @@ impl Incremental {
                 return Err(error);
             }
         };
+        // Commit the sampled token only after a successful feed read. A read error must not
+        // consume the only completion mark before a later successful pass can use it.
+        state.projection_token = Some(projection_token);
+        after_feed();
+        Self::observe_projection_after_feed(&mut state, store, projection_token);
         let feed = observed.feed;
         state.watermark = Some((feed.index, feed.local));
         if observed.invalidate_all {
@@ -314,6 +352,15 @@ impl Incremental {
             }
         }
         Ok(())
+    }
+
+    fn observe_projection_after_feed(state: &mut State, store: &Store, before: u64) {
+        let (after, _) = store.replication_projection_observation();
+        if after != before {
+            Self::invalidate_locked(state);
+            // Retain BEFORE, not AFTER: an evaluation can still consume old supplied data.
+            // The next observe must select again after this racing projection transition.
+        }
     }
 
     fn invalidate_locked(state: &mut State) {
@@ -1540,6 +1587,272 @@ mod tests {
             actor: actor.map(Into::into),
             body: body.into(),
         }
+    }
+
+    #[test]
+    fn bounded_keys_preserve_main_report_recipients_and_watch_subjects() {
+        for hint in [
+            change(
+                "mission-run/a",
+                "mission-run.report-to",
+                None,
+                r#"{"fields":{"report_to":"agent/receiver"}}"#,
+            ),
+            change(
+                "mission-run/a",
+                "mission-run.created",
+                None,
+                r#"{"fields":{"report_to":"agent/receiver","root_mission_run":"mission-run/root","parent_step_run":"step-run/parent"}}"#,
+            ),
+            change(
+                "subscription/watch/example/repo/7/receiver",
+                "intent.desired",
+                None,
+                "{}",
+            ),
+        ] {
+            let keys = change_keys(&hint);
+            assert_eq!(
+                bounded_change_keys(&hint, &mut budget(keys.len(), CHANGE_KEY_BYTES)).unwrap(),
+                (keys.clone(), true)
+            );
+            assert!(
+                !bounded_change_keys(&hint, &mut budget(2, CHANGE_KEY_BYTES))
+                    .unwrap()
+                    .1
+            );
+            if hint.kind == "intent.desired" {
+                let (_, agent) = crate::github_watch::watch_parts(&hint.subject).unwrap();
+                assert_eq!(
+                    keys,
+                    [
+                        hint.subject.clone(),
+                        "kind:intent.desired".into(),
+                        format!("watches:{agent}")
+                    ]
+                );
+            } else {
+                assert_eq!(keys[2], "reports-to:agent/receiver");
+            }
+        }
+        let created = change(
+            "mission-run/a",
+            "mission-run.created",
+            None,
+            r#"{"fields":{"report_to":"agent/receiver","root_mission_run":"mission-run/root","parent_step_run":"step-run/parent"}}"#,
+        );
+        assert_eq!(
+            &change_keys(&created)[3..],
+            [
+                "children:mission-run/root",
+                "children-of-step:step-run/parent"
+            ]
+        );
+        for subject in [
+            "subscription/watch/example/repo/no-number/receiver",
+            "subscription/watch/example/repo/7",
+        ] {
+            assert!(crate::github_watch::watch_parts(subject).is_none());
+            assert!(
+                !change_keys(&change(subject, "intent.desired", None, "{}"))
+                    .iter()
+                    .any(|key| key.starts_with("watches:"))
+            );
+        }
+    }
+
+    const PROJECTION_TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+
+    fn projection_test_stores() -> (Store, Store, Incremental) {
+        let source = Store::open_memory("source").unwrap();
+        source.bind_fleet(PROJECTION_TEST_FLEET).unwrap();
+        let target = Store::open_memory("target").unwrap();
+        target.bind_fleet(PROJECTION_TEST_FLEET).unwrap();
+        assert!(target.project_replication_backlog().unwrap());
+        let incremental = Incremental::default();
+        incremental.observe(&target).unwrap();
+        clean_projection_test_items(&incremental);
+        (source, target, incremental)
+    }
+
+    fn clean_projection_test_items(incremental: &Incremental) {
+        incremental.evaluated(
+            "observer:foreign",
+            BTreeSet::from(["resource/foreign".into()]),
+            None,
+        );
+        incremental.evaluated("observer:unrelated", BTreeSet::new(), None);
+    }
+
+    fn admit_projection_test_claims(source: &Store, target: &Store) {
+        let inventory = target
+            .export_replication_summary(PROJECTION_TEST_FLEET)
+            .unwrap()
+            .inventory;
+        let exchange = source
+            .export_replication_exchange(PROJECTION_TEST_FLEET, &inventory)
+            .unwrap();
+        target
+            .receive_replication_exchange("source", PROJECTION_TEST_FLEET, &exchange)
+            .unwrap();
+        assert!(target.validate_replication_backlog().unwrap().changed);
+        assert!(target.replication_projection_observation().1);
+    }
+
+    fn projected_resource_count(target: &Store, subject: &str) -> u64 {
+        target
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM resource_observations WHERE subject=?1",
+                [subject],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn consumed_hint_reselects_after_same_frontier_projection_and_stays_pending() {
+        let (source, target, incremental) = projection_test_stores();
+        observe(&source, "foreign");
+        admit_projection_test_claims(&source, &target);
+        assert_eq!(projected_resource_count(&target, "resource/foreign"), 0);
+        incremental.observe(&target).unwrap();
+        let consumed = incremental.state.lock().unwrap().watermark.unwrap();
+        clean_projection_test_items(&incremental); // Successful evaluation of the old projection.
+        assert!(!incremental.needs("observer:foreign", 0));
+        incremental.observe(&target).unwrap();
+        assert!(
+            incremental.needs("observer:foreign", 0),
+            "pending projection cannot stay certified clean"
+        );
+        clean_projection_test_items(&incremental);
+        let pending = target.replication_projection_observation();
+        assert!(target.project_replication_backlog().unwrap());
+        let completed = target.replication_projection_observation();
+        assert!(!completed.1 && completed.0 != pending.0);
+        assert_eq!(target.index().unwrap(), consumed.0);
+        incremental.observe(&target).unwrap();
+        assert_eq!(
+            incremental.state.lock().unwrap().watermark.unwrap(),
+            consumed
+        );
+        assert_eq!(projected_resource_count(&target, "resource/foreign"), 1);
+        assert!(incremental.needs("observer:foreign", 0));
+        assert!(
+            incremental.needs("observer:unrelated", 0),
+            "completion fallback is deliberately global"
+        );
+        clean_projection_test_items(&incremental);
+        incremental.observe(&target).unwrap();
+        assert!(!incremental.needs("observer:foreign", 0));
+        assert!(!incremental.needs("observer:unrelated", 0));
+    }
+
+    #[test]
+    fn projection_completion_during_feed_capture_survives_old_evaluation_recording() {
+        let (source, target, incremental) = projection_test_stores();
+        observe(&source, "foreign");
+        admit_projection_test_claims(&source, &target);
+        incremental
+            .observe_after_feed(&target, || {
+                // The actual feed snapshot has returned. Complete before its token recheck.
+                assert!(target.project_replication_backlog().unwrap());
+            })
+            .unwrap();
+        let consumed = incremental.state.lock().unwrap().watermark.unwrap();
+        clean_projection_test_items(&incremental); // A previously captured stale input finishes.
+        assert!(!incremental.needs("observer:foreign", 0));
+        incremental.observe(&target).unwrap();
+        assert_eq!(
+            incremental.state.lock().unwrap().watermark.unwrap(),
+            consumed
+        );
+        assert!(incremental.needs("observer:foreign", 0));
+        assert_eq!(projected_resource_count(&target, "resource/foreign"), 1);
+        clean_projection_test_items(&incremental);
+        incremental.observe(&target).unwrap();
+        assert!(!incremental.needs("observer:foreign", 0));
+    }
+
+    #[test]
+    fn failed_feed_read_does_not_consume_projection_completion() {
+        let (source, target, incremental) = projection_test_stores();
+        observe(&source, "foreign");
+        admit_projection_test_claims(&source, &target);
+        incremental.observe(&target).unwrap();
+        clean_projection_test_items(&incremental);
+        let retained = incremental.state.lock().unwrap().projection_token;
+        assert!(target.project_replication_backlog().unwrap());
+        target
+            .connection
+            .write()
+            .execute(
+                "ALTER TABLE local_observations RENAME TO unavailable_local",
+                [],
+            )
+            .unwrap();
+        assert!(incremental.observe(&target).is_err());
+        assert_eq!(incremental.state.lock().unwrap().projection_token, retained);
+        clean_projection_test_items(&incremental); // Another full evaluation may still finish.
+        target
+            .connection
+            .write()
+            .execute(
+                "ALTER TABLE unavailable_local RENAME TO local_observations",
+                [],
+            )
+            .unwrap();
+        incremental.observe(&target).unwrap();
+        assert!(
+            incremental.needs("observer:unrelated", 0),
+            "completion must survive the failed feed read"
+        );
+        clean_projection_test_items(&incremental);
+        incremental.observe(&target).unwrap();
+        assert!(!incremental.needs("observer:unrelated", 0));
+    }
+
+    #[test]
+    fn unseen_pending_interval_and_newer_deferral_cannot_certify_clean_projection() {
+        let (source, target, incremental) = projection_test_stores();
+        let original = target.replication_projection_observation();
+        observe(&source, "foreign");
+        admit_projection_test_claims(&source, &target);
+        assert!(target.project_replication_backlog().unwrap());
+        assert!(!target.replication_projection_observation().1);
+        assert_ne!(target.replication_projection_observation().0, original.0);
+        // No consumer observed the pending interval, but the full token retains its change.
+        incremental.observe(&target).unwrap();
+        assert!(incremental.needs("observer:unrelated", 0));
+        clean_projection_test_items(&incremental);
+        observe(&source, "newer");
+        assert!(
+            target
+                .project_replication_backlog_before_clear(|| {
+                    admit_projection_test_claims(&source, &target);
+                })
+                .unwrap()
+        );
+        assert!(
+            target.replication_projection_observation().1,
+            "older completion must not clear newer admission"
+        );
+        assert_eq!(projected_resource_count(&target, "resource/newer"), 0);
+        incremental.observe(&target).unwrap();
+        clean_projection_test_items(&incremental);
+        incremental.observe(&target).unwrap();
+        assert!(incremental.needs("observer:foreign", 0));
+        assert!(target.project_replication_backlog().unwrap());
+        assert_eq!(projected_resource_count(&target, "resource/newer"), 1);
+        incremental.observe(&target).unwrap();
+        assert!(incremental.needs("observer:foreign", 0));
+        clean_projection_test_items(&incremental);
+        incremental.observe(&target).unwrap();
+        assert!(!incremental.needs("observer:foreign", 0));
+        let restarted = Incremental::default();
+        restarted.observe(&target).unwrap();
+        assert!(restarted.needs("observer:foreign", 0));
     }
 
     fn observe(store: &Store, resource: &str) {
