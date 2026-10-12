@@ -580,7 +580,8 @@ function StrandedItemStory({ scheme = 'dark' }: { scheme?: Scheme }) {
 const itemOrder = (turn: Element) => Array.from(turn.querySelectorAll('[data-item-id]'), element => element.getAttribute('data-item-id'))
 export const StrandedItem: Story = { render: args => <StrandedItemStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  const lost = await canvas.findByText('This answer never reached the runtime.')
+  // The virtualized transcript's first paint can exceed findBy's 1s default on a saturated strict host.
+  const lost = await canvas.findByText('This answer never reached the runtime.', undefined, { timeout: 10_000 })
   const lostRow = lost.closest('[data-testid="transcript-stranded"]')
   await expect(lostRow).toHaveAttribute('data-item-id', 'stranded/lost-answer')
   const eventRow = canvasElement.querySelector('[data-testid="transcript-stranded"][data-item-id="stranded/lost-event"]')
