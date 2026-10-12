@@ -31,6 +31,8 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Explore/SubagentSwitching**: explore-only composer rail (A), top tabs (B), and breadcrumb with a thread drawer (C), reusing the kit transcript, composer, and sidebar rows. `Exploration` has no play; `SubagentSwitchingProbe` exercises cycling, overflow, nested ancestry, and sending a reply. `AllStates` compares running, finished, failed, fourteen-child overflow, nested delegation, and unread/needs-you, in dark/light at 1440/900. Deep link: `/iframe.html?id=fractal-ui-explore-subagentswitching--exploration&args=variant:C;state:nested;compare:!false;allLanes:!false;scheme:light;width:900`. Ctrl+Left/Right cycles every thread, including overflow; selecting a thread clears its unread cue. Composer drafts and sent messages are scoped to the selected thread.
+- Static Storybook uses a single preview-head stylesheet (`cssCodeSplit: false`) so StyleX rules are loaded independently of the first story visited.
 
 ## Families
 
