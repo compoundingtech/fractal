@@ -548,7 +548,10 @@ class Probe:
                 "title": f"Delivery probe {self.source} → {route['target']} has no read receipt",
                 "content": (f"Route {self.actor} → {route['to']}; nonce {route['nonce']}. "
                             f"{route['message']} was not read within {self.deadline // 1000}s. "
-                            "Inspect the node's probe seat, replication and daemon with st doctor --json. "
+                            "Report this route, nonce, message, missed deadline and any observed recovery to the alert owner. "
+                            "Reporting does not require st doctor --json to return. "
+                            "If Doctor timed out, report that timeout; do not repeat the call. "
+                            "A Doctor timeout does not establish that the daemon stopped. "
                             "Fresh probes continue; a real recipient read sends a recovery note."),
                 "idempotency_key": f"delivery-probe-overdue:{route['message']}:{route['started_at_unix_ms']}",
                 "tags": ["delivery-probe-alert"],

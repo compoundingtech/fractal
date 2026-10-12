@@ -828,6 +828,9 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
     if let Some(incarnation) = &step.claim_incarnation {
         let _ = writeln!(output, "  Incarnation  {incarnation}");
     }
+    if let Some(incarnation) = &step.submitted_incarnation {
+        let _ = writeln!(output, "  Submitted incarnation  {incarnation}");
+    }
     if let Some(expires) = step.claim_expires_at_unix_ms {
         let _ = writeln!(
             output,
@@ -1462,6 +1465,7 @@ mod tests {
             worker_reported: false,
             claimant: None,
             claim_incarnation: None,
+            submitted_incarnation: None,
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,

@@ -79,6 +79,7 @@ mod mailbox;
 mod mail_backlog;
 mod read_deadline;
 mod owned_sets;
+mod directive_notes;
 mod request_latency;
 mod client_observations;
 mod terminal_view;
@@ -497,6 +498,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/client/capabilities", get(client_capabilities))
+        .route("/v1/client/notes", get(directive_notes::read))
+        .route("/v1/notes", axum::routing::put(directive_notes::write))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/arrangements", get(client_v0::arrangements::list))
@@ -2459,6 +2462,7 @@ fn client_work_values(
                 "readiness_epoch": work.readiness_epoch,
                 "claimant": work.claimant,
                 "claim_incarnation": work.claim_incarnation,
+                "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
@@ -3357,7 +3361,7 @@ fn managed_session_owner_for_subject_at(
     })
 }
 
-/// How many of a subject's claims, oldest first, date its session in the session list.
+/// Bound the legacy runtime-only scan; incarnation dating uses two index seeks instead.
 const SESSION_CLAIMS: usize = 10_000;
 
 fn client_session_resources(
@@ -3526,12 +3530,12 @@ fn managed_session_resources(
             "stopped" | "exited" | "absent" => "completed",
             _ => "waiting",
         };
-        // A session is dated by the subject's first SESSION_CLAIMS claims, the page this list
-        // once read whole and filtered, so a subject with more keeps the dates it had.
+        // Keep the old page bound only for runtime-only identities, which scan subject history.
+        // Incarnation spans are index-bounded and must include incarnations after that page.
         let through_claim = subject
             .claims
             .get(SESSION_CLAIMS - 1)
-            .filter(|_| subject.claims.len() > SESSION_CLAIMS);
+            .filter(|_| incarnation.is_none() && subject.claims.len() > SESSION_CLAIMS);
         let mut accepted_times = store
             .runtime_claim_span_at(
                 &subject.subject,
@@ -3551,9 +3555,23 @@ fn managed_session_resources(
         let started = fields
             .and_then(|fields| fields.get("started_at_unix_ms"))
             .and_then(|value| value.as_u64().map(u128::from))
-            .map(client_timestamp)
-            .or_else(|| accepted_times.iter().min().copied().map(client_timestamp))
-            .unwrap_or_else(|| at.to_owned());
+            .or_else(|| accepted_times.iter().min().copied());
+        // Client v0 requires a timestamp. Without session evidence, the actual observation's
+        // acceptance time is the closest durable date, not the time someone reads the session.
+        let started = match started {
+            Some(started) => client_timestamp(started),
+            None => subject
+                .actual_claim
+                .as_deref()
+                .or_else(|| subject.claims.first().map(String::as_str))
+                .map(|id| store.claim_by_id(id))
+                .transpose()?
+                .flatten()
+                .map_or_else(
+                    || client_timestamp(0),
+                    |claim| client_timestamp(claim.accepted_at_unix_ms),
+                ),
+        };
         let updated = accepted_times
             .iter()
             .max()
@@ -6753,7 +6771,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(st_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
     })))
 }
 
@@ -7492,6 +7510,15 @@ fn doctor_report_with_operation_drift(
     drift: &anyhow::Result<Vec<String>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
     let mut checks = Vec::new();
+    let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
+        .map_err(ApiError::internal)?
+        .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
+    let access_mode = if auto { "auto" } else { "bypass" };
+    checks.push(DoctorCheck {
+        name: "harness-access-mode".into(), status: "pass".into(),
+        message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+    });
+
     match state.store.index() {
         Ok(index) => checks.push(DoctorCheck {
             name: "claim-store".into(),
@@ -9247,14 +9274,6 @@ async fn start_planning_session(
         "You are the durable {} planner for launch {id}. Use `st documents get` for each immutable document reference below. Write one Markdown mission and one complete version 2 KDL mission. The KDL mission ID must be `{mission_id}` and its state must be ready. You can submit named variants with `st launch submit {id} --variant NAME --markdown FILE --kdl KDL_FILE`. Use temporary files outside the workspace, and remove them after submission. Do not change the workspace. Do not publish or run the mission. Stay available for revision messages until approval or cancellation.\n\n{references}",
         planner_config.provider
     );
-    let arguments = match planner_config.provider.as_str() {
-        "codex" => vec![
-            "--dangerously-bypass-approvals-and-sandbox".into(),
-            "--dangerously-bypass-hook-trust".into(),
-        ],
-        "claude" => vec!["--permission-mode".into(), "bypassPermissions".into()],
-        _ => Vec::new(),
-    };
     let planner = quick_agent(
         &state,
         QuickAgentRequest {
@@ -9262,7 +9281,7 @@ async fn start_planning_session(
             worktree: request.workspace.clone(),
             model: planner_config.model.clone(),
             effort: planner_config.effort.clone(),
-            arguments,
+            arguments: Vec::new(),
             expected_subject,
             idempotency_key: format!("{}:planner", request.idempotency_key),
         },
@@ -11998,9 +12017,24 @@ async fn get_usage(
         .await
         .ok()
         .flatten();
-    if let Some(Ok(config)) = reloaded
-        && let Some(policy) = crate::store::LimitsPolicy::from_config(&config)
+    let policy = reloaded
+        .as_ref()
+        .and_then(|reloaded| reloaded.as_ref().ok())
+        .and_then(|config| crate::store::LimitsPolicy::from_config(config).map(|policy| (config, policy)));
+    // A reading older than the limits cadence is the last known one, not the current one.
+    let fresh_ms = policy
+        .as_ref()
+        .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |(_, policy)| policy.fresh_ms);
+    let now = client_now_ms() as u64;
+    for (row, limit) in report["limits"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .zip(&limits)
     {
+        row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
+    }
+    if let Some((config, policy)) = policy {
         for (row, limit) in report["limits"]
             .as_array_mut()
             .into_iter()
@@ -14676,6 +14710,7 @@ async fn set_mission_run_report(
             &actor,
             request.report_to.as_deref(),
             request.stalled_after_ms,
+            request.report_stalls,
             request.report_completed,
             &request.idempotency_key,
         )
@@ -17874,6 +17909,41 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
     }
 
     #[tokio::test]
+    async fn the_usage_report_marks_only_old_limits_readings_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let now = client_now_ms() as u64;
+        for (seat, account, measured) in [
+            ("agent/example.old", "ada/claude-1", now - 60 * 3_600_000),
+            ("agent/example.live", "ada/claude-2", now - 10_000),
+        ] {
+            let (status, body) = json_request(
+                app.clone(),
+                "/v1/claims",
+                json!({"subject": seat, "kind": "harness.limits", "actor": seat,
+                    "fields": {"driver": "claude", "account_ref": account, "weekly_percent": 84.0,
+                        "measured_at_unix_ms": measured},
+                    "evidence": [], "idempotency_key": format!("limits-{seat}")}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (_, report) = get_request(app, "/v1/usage").await;
+        let stale = |name: &str| {
+            report["limits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|limit| limit["account_ref"] == name)
+                .unwrap_or_else(|| panic!("{name} missing in {report}"))["stale"]
+                .clone()
+        };
+        assert_eq!(stale("ada/claude-1"), true);
+        assert_eq!(stale("ada/claude-2"), false);
+    }
+
+    #[tokio::test]
     async fn isolated_daemon_exposes_only_rollups_in_the_fleet_usage_endpoint() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
@@ -18775,6 +18845,91 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             .unwrap();
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0]["revision"], incarnation);
+        }
+    }
+
+    #[test]
+    fn managed_session_dates_incarnation_after_claim_cap_without_local_timeline() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let subject = "agent/ada";
+        // Build both subjects' old history in one transaction, without projection rebuilds.
+        {
+            let mut connection = state.store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            for _ in 0..=SESSION_CLAIMS {
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    subject,
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle", "incarnation_id": "first"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    "agent/reviewer",
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let first = state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-ada")),
+                ("incarnation_id".into(), json!("second")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(
+            state.store.latest_local_timeline_at(subject, "second", first.store_index).unwrap(),
+            None
+        );
+        for at in ["2026-10-11T10:00:00.000Z", "2026-10-11T10:01:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, first.store_index,
+            ).unwrap().0;
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0]["started_at"], client_timestamp(first.accepted_at_unix_ms));
+            assert_eq!(sessions[0]["updated_at"], client_timestamp(first.accepted_at_unix_ms));
+        }
+        // The unindexed legacy path stays capped, but its required start date is durable too.
+        let legacy = state.store.append_claim(&ClaimInput {
+            subject: "agent/reviewer".into(),
+            kind: "runtime.observed".into(),
+            actor: Some("agent/reviewer".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-reviewer")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        for at in ["2026-10-11T10:02:00.000Z", "2026-10-11T10:03:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, legacy.store_index,
+            ).unwrap().0;
+            let legacy_session = sessions.iter().find(|session| {
+                session["owner_id"] == "agent/reviewer"
+            }).unwrap();
+            assert!(legacy_session["runtime_incarnation"].is_null());
+            assert_eq!(legacy_session["started_at"], client_timestamp(legacy.accepted_at_unix_ms));
         }
     }
 
@@ -21316,8 +21471,8 @@ mission "unrequested/work" state="ready" { goal "Do unrelated work." }
         assert!(matches!(
             &planner_launch,
             crate::model::LaunchSpec::Argv(arguments)
-                if arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
-                    && arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
+                if !arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
+                    && !arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
         ));
         assert!(store.mission_spec("planned/work", None).unwrap().is_none());
         assert!(store.active_mission_runs().unwrap().is_empty());

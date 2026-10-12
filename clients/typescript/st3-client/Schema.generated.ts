@@ -1883,7 +1883,7 @@ export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
-  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read"]),
+  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read","dismissed"]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])
 }).annotate({ identifier: "PersonAnswer" }))()
@@ -1937,6 +1937,8 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "revision": Revision,
   "state": WorkState,
+  /** Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match. */
+  "submitted_incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match." }),
   "timeout_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1))), NULL_NONE),
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "updated_at": Timestamp,
@@ -2692,6 +2694,25 @@ export const ConversationSearch = /*#__PURE__*/ (() => Schema.Struct({
 export type ConversationSearch = typeof ConversationSearch.Type
 export type ConversationSearchEncoded = typeof ConversationSearch.Encoded
 
+/** A person's current advisory note. It never assigns work, grants authority or satisfies a gate. */
+export const DirectiveNote = /*#__PURE__*/ (() => Schema.Struct({
+  "author": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "revision": Schema.String,
+  /** At most 4096 UTF-8 bytes; whitespace-only text is refused. */
+  "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(4096)).annotate({ description: "At most 4096 UTF-8 bytes; whitespace-only text is refused." }),
+  "time": Timestamp
+}).annotate({ identifier: "DirectiveNote", description: "A person's current advisory note. It never assigns work, grants authority or satisfies a gate." }))()
+export type DirectiveNote = typeof DirectiveNote.Type
+export type DirectiveNoteEncoded = typeof DirectiveNote.Encoded
+
+export const DirectiveNotes = /*#__PURE__*/ (() => Schema.Struct({
+  "notes": Schema.Array(DirectiveNote)
+}).annotate({ identifier: "DirectiveNotes" }))()
+export type DirectiveNotes = typeof DirectiveNotes.Type
+export type DirectiveNotesEncoded = typeof DirectiveNotes.Encoded
+
 export const DocumentContent = /*#__PURE__*/ (() => Schema.Struct({
   "bytes": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255))),
   "reference": Schema.String
@@ -2941,7 +2962,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
