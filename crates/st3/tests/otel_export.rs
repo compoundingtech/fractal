@@ -1,4 +1,4 @@
-//! Real CLI OTLP/HTTP-JSON export into the effect-utils otelite receiver.
+//! Real process OTLP/HTTP-JSON export into the effect-utils otelite receiver.
 //!
 //! `ST3_OTELITE_BIN` supplies the collector; `ST3_OTEL_REQUIRE=1` forbids a local skip.
 //! Like the st2 export test, `otelite run` owns the ephemeral receiver and flushes its
@@ -284,6 +284,22 @@ fn cli_success_exports_root_span() {
         Some(2),
         "successful command must not carry ERROR status: {span}"
     );
+    let metrics = std::fs::read_to_string(root.path().join("capture/metrics.ndjson"))
+        .unwrap_or_default();
+    for line in metrics.lines() {
+        let request: Value = serde_json::from_str(line).expect("valid OTLP metric request");
+        for batch in request["resourceMetrics"].as_array().into_iter().flatten() {
+            for scope in batch["scopeMetrics"].as_array().into_iter().flatten() {
+                for metric in scope["metrics"].as_array().into_iter().flatten() {
+                    let name = metric["name"].as_str().unwrap_or_default();
+                    assert!(
+                        !name.starts_with("st.allocator.") && name != "st.process.memory.rss",
+                        "CLI must not register daemon memory metrics: {metric}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -302,6 +318,126 @@ fn cli_without_endpoint_succeeds_without_export() {
             Err(error) => panic!("read {}: {error}", path.display()),
         }
     }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn daemon_memory_exported(metrics: &str) -> bool {
+    let states = ["allocated", "free", "mmapped", "arena", "releasable"];
+    let mut heap_snapshot = false;
+    let mut rss = false;
+    for line in metrics.split_inclusive('\n').filter(|line| line.ends_with('\n')) {
+        let request: Value = serde_json::from_str(line).expect("valid OTLP metric request");
+        for batch in request["resourceMetrics"].as_array().into_iter().flatten() {
+            if string_attribute(&batch["resource"], "service.name") != Some("st-daemon") {
+                continue;
+            }
+            for scope in batch["scopeMetrics"].as_array().into_iter().flatten() {
+                for metric in scope["metrics"].as_array().into_iter().flatten() {
+                    if metric["name"] == "st.allocator.heap" && metric["unit"] == "By" {
+                        let points = metric["gauge"]["dataPoints"].as_array()
+                            .expect("heap gauge points");
+                        assert_eq!(points.len(), states.len(), "exactly five heap states");
+                        let timestamp = &points[0]["timeUnixNano"];
+                        assert!(!timestamp.is_null(), "heap sample has a timestamp");
+                        for state in states {
+                            let matching: Vec<_> = points.iter()
+                                .filter(|point| string_attribute(point, "state") == Some(state))
+                                .collect();
+                            assert_eq!(matching.len(), 1, "one point per heap state: {state}");
+                            let point = matching[0];
+                            assert_eq!(&point["timeUnixNano"], timestamp,
+                                "all states belong to the same collection");
+                            assert_eq!(point["attributes"].as_array().unwrap().len(), 1,
+                                "state is the only heap attribute");
+                            let bytes = point["asInt"].as_u64().or_else(|| {
+                                point["asInt"].as_str().and_then(|value| value.parse().ok())
+                            }).expect("heap bytes are an unsigned integer");
+                            if state == "allocated" {
+                                heap_snapshot |= bytes > 0;
+                            }
+                        }
+                    }
+                    for point in metric["gauge"]["dataPoints"].as_array().into_iter().flatten() {
+                        let positive = point["asInt"].as_u64().or_else(|| {
+                            point["asInt"].as_str().and_then(|value| value.parse().ok())
+                        }).is_some_and(|value| value > 0);
+                        if metric["name"] == "st.process.memory.rss" && metric["unit"] == "By" {
+                            rss |= positive;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    heap_snapshot && rss
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn daemon_exports_allocator_heap_and_resident_memory() {
+    let Some(collector) = otelite("daemon_exports_allocator_heap_and_resident_memory") else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    let pid_path = root.path().join("daemon.pid");
+    let metrics_path = root.path().join("capture/metrics.ndjson");
+    let mut command = isolated_command(&collector, root.path());
+    command
+        // The SDK supports this standard override; no product-only timer is needed.
+        .env("OTEL_METRIC_EXPORT_INTERVAL", "100")
+        .env("OTEL_TRACES_EXPORTER", "none")
+        .env("OTEL_LOGS_EXPORTER", "none")
+        .env("SHELL", std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
+        .args(["run", "--out"])
+        .arg(root.path().join("capture"))
+        .args(["--protocol", "http/json", "--", "sh", "-c",
+            "echo $$ > \"$1\"; shift; exec \"$@\"", "sh"])
+        .arg(&pid_path)
+        .arg(st3())
+        .args(["up", "--node", "memory-test", "--state-dir"])
+        .arg(root.path().join("daemon-state"))
+        .arg("--socket")
+        .arg(root.path().join("daemon.sock"))
+        .arg("--pty-binary")
+        // This empty daemon never starts seats; no PTY server is exercised here.
+        .arg("/bin/false")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut capture = command.spawn().expect("start isolated daemon under otelite");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut observed = false;
+    while Instant::now() < deadline {
+        let metrics = std::fs::read_to_string(&metrics_path).unwrap_or_default();
+        if root.path().join("daemon.sock").exists() && daemon_memory_exported(&metrics) {
+            observed = true;
+            break;
+        }
+        if capture.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // Stop only the child recorded by our wrapper, never a discovered/live daemon.
+    if capture.try_wait().unwrap().is_none()
+        && let Ok(pid) = std::fs::read_to_string(&pid_path)
+    {
+        let _ = Command::new("kill").args(["-TERM", pid.trim()]).status();
+        // otelite run waits for its daemon child, so its exit also confirms
+        // the recorded child exited. Bound that wait before escalating.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while capture.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if capture.try_wait().unwrap().is_none() {
+            let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
+        }
+    }
+    // Always reap the collector too, including a stuck receiver or missing PID file.
+    let _ = capture.kill();
+    let output = capture.wait_with_output().expect("finish otelite capture");
+    let metrics = std::fs::read_to_string(&metrics_path).unwrap_or_default();
+    assert!(observed && daemon_memory_exported(&metrics),
+        "daemon must export all heap states and positive allocated heap and RSS:\n{metrics}\n{output:?}");
 }
 
 fn timed_cli(root: &Path, endpoint: &str, success: bool) -> Duration {

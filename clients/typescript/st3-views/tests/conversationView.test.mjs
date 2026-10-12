@@ -66,6 +66,21 @@ assert.equal(shownToolLines(tool, false).lines.at(-1), 'line 19');
 assert.equal(shownToolLines(tool, true).lines.length, 20);
 assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'failed calls fold too, as in stui');
 
+// Timeline previews name the lines beyond the shared 400-line budget; full output stays intact.
+{
+  const lines = Array.from({ length: 407 }, (_, n) => `synthetic line ${n}`);
+  const result = e('tool_result', 'tool', { call_id: 'preview-call', status: 'success', content: `\n${lines.join('\n')}\n\n` });
+  const preview = conversationEntries([result], names, DEFAULT_FILTERS, false)[0].body;
+  assert.equal(preview.kind, 'tool');
+  assert.deepEqual(preview.output.slice(0, 400), lines.slice(0, 400));
+  assert.equal(preview.output.length, 401);
+  assert.equal(preview.output.at(-1), '… 7 more lines not shown in the timeline preview');
+  const full = conversationEntries([result], names, DEFAULT_FILTERS, true)[0].body;
+  assert.deepEqual(full.output, lines);
+  const withinBudget = e('tool_result', 'tool', { call_id: 'within-budget', status: 'success', content: lines.slice(0, 400).join('\n') });
+  assert.deepEqual(conversationEntries([withinBudget], names)[0].body.output, lines.slice(0, 400));
+}
+
 // Half a conversation is not shown: st's notice that it could not read the transcript becomes
 // one reason, with the transcript's path.
 {
@@ -171,6 +186,16 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.equal(staleLine('the list changed while it was being read', false, null, 0), 'Not loaded yet: the list changed while it was being read. Trying again.');
   assert.equal(staleLine('willow cannot be reached right now', true, 1_000, 76_000), 'willow cannot be reached right now · shown as of 1m ago · trying again');
   assert.equal(staleLine('st asked to slow down for a moment', true, 10_000, 22_000), 'st asked to slow down for a moment · shown as of 12s ago · trying again');
+}
+
+// A conversation st refused for good never claims to be loading or retrying: it says why and offers a retry.
+{
+  const { staleLine } = await import('@smalltalk/st3-views/conversationView');
+  for (const loaded of [false, true]) {
+    const line = staleLine('session/example-child was not found', loaded, null, 0, true);
+    assert.equal(line, 'Could not load this conversation: session/example-child was not found · tap to try again');
+    assert.doesNotMatch(line, /Loading|Trying again|trying again/);
+  }
 }
 
 // A compacted conversation's summary is one folded tool-like line, never a giant message with tags.
