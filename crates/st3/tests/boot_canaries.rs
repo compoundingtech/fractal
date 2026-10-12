@@ -156,7 +156,7 @@ fn canary(harness: &str, scenario: &str) {
     if !passed {
         eprintln!("boot canary evidence: {}", evidence.display());
         let _ = evidence_root.keep();
-    } else if keep && scenario.starts_with("access-") {
+    } else if keep && (scenario.starts_with("access-") || scenario == "claim-socket-denied") {
         let _ = evidence_root.keep();
     } else if keep {
         // Passing runs are not worth uploading.
@@ -169,6 +169,13 @@ fn canary(harness: &str, scenario: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn first_claim_socket_denial_names_cause_and_recovers_on_an_isolated_daemon() {
+    if st3::test_support::supervise_test() { return; }
+    canary("codex", "claim-socket-denied");
 }
 
 /// The canary's private root is redrawn until its name avoids "st2": the fresh-seat boundary check
