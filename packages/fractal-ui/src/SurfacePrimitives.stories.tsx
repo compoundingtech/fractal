@@ -177,6 +177,8 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())
 
   const search = canvas.getByRole('button', { name: 'Search' })
+  // Focus opens the tooltip only while focus is visible, so return to keyboard modality first.
+  await userEvent.keyboard('{Shift}')
   search.focus()
   const tooltip = await canvas.findByRole('tooltip')
   await expect(tooltip).toHaveTextContent('Search this thread')
