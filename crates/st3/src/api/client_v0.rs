@@ -5532,8 +5532,12 @@ fn native_slice_page_at_generation(
             messages.next().expect("peeked message entry")
         });
     }
-    let has_more = items.len() > limit || native.has_more;
+    let mut has_more = items.len() > limit || native.has_more;
     items.truncate(limit);
+    // A page never outgrows what a paired reader can take from a remote owner (its reads are
+    // capped at 1 MiB): a seat with very large entries gets a shorter newest page and a cursor
+    // for the rest, not a refusal that leaves its conversation unreadable.
+    has_more |= bound_page_bytes(&mut items, TIMELINE_PAGE_BYTE_BUDGET);
     let next_cursor = if has_more {
         let boundary = items.last()
             .ok_or_else(|| ApiError::internal("native page has no boundary"))?.1.clone();
@@ -5566,6 +5570,24 @@ fn native_slice_page_at_generation(
         page_value["header"] = header;
     }
     Ok((Json(page_value), native.generation))
+}
+
+/// The most a timeline page's entries may serialize to, leaving room under a peer's 1 MiB cap on
+/// a remote client read for the envelope and the page header.
+const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
+
+/// Keep the newest entries (first in `items`) whose serialized size fits `budget`, but always
+/// at least one. True when any were dropped, so the page continues from its new last entry.
+fn bound_page_bytes<K>(items: &mut Vec<(Value, K)>, budget: usize) -> bool {
+    let mut bytes = 0usize;
+    for index in 0..items.len() {
+        bytes = bytes.saturating_add(serde_json::to_vec(&items[index].0).map_or(0, |encoded| encoded.len()));
+        if bytes > budget && index > 0 {
+            items.truncate(index);
+            return true;
+        }
+    }
+    false
 }
 
 /// What st3 established about a managed seat's native transcript.
@@ -14078,6 +14100,23 @@ mission "queue-parity" state="ready" {
 
     fn test_state(root: &Path) -> AppState {
         test_state_named(root, "terminal-test")
+    }
+
+    #[test]
+    fn a_timeline_page_stays_under_its_byte_budget_and_keeps_the_newest_entries() {
+        let entry = |size: usize| (json!({"body": "x".repeat(size)}), ());
+        // Newest first: 300 KB, 300 KB, 300 KB, 10 bytes. Three would not fit in 768 KiB.
+        let mut items = vec![entry(300_000), entry(300_000), entry(300_000), entry(10)];
+        assert!(bound_page_bytes(&mut items, 768 * 1024));
+        assert_eq!(items.len(), 2, "the two newest fit, the page continues from the second");
+        // Everything fits: nothing is dropped.
+        let mut small = vec![entry(10), entry(10)];
+        assert!(!bound_page_bytes(&mut small, 768 * 1024));
+        assert_eq!(small.len(), 2);
+        // One entry larger than the whole budget is still served, alone.
+        let mut huge = vec![entry(2_000_000), entry(10)];
+        assert!(bound_page_bytes(&mut huge, 768 * 1024));
+        assert_eq!(huge.len(), 1);
     }
 
     #[test]
