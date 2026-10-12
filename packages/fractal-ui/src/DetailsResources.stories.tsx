@@ -1,13 +1,15 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { userEvent, waitFor, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button } from './kit'
 import { Workbench, type WorkbenchProps } from './assistant-ui/workbench/Workbench'
 import { group } from './assistant-ui/workbench/workbench-model'
 import { detailsWorkbenchResources as workbenchResources } from './assistant-ui/details/story-fixtures'
 import { DetailsPane, type DetailsVariants, type DetailsLayoutIntent } from './assistant-ui/details/DetailsPane'
 import { traceHistorySection } from './assistant-ui/details/DetailsResources'
+import { ResourceCardV1, ResourceChipV1 } from './assistant-ui/resources/ResourceCardV1'
+import { resources as sharedResources } from './assistant-ui/details/resource-fixtures'
 import { hasDetailsChartData } from './assistant-ui/details/DetailsCharts'
 import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
@@ -150,7 +152,7 @@ function assertCraft(pane: HTMLElement, item: Case) {
   }
   if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label="${name}"] [data-details-missing-value]`), 'Unknown source omits a field-specific explanation')
   const history = pane.querySelector('section[aria-label="History"]')
-  if (item.state === 'busy' || item.state === 'idle') requireContract(history?.querySelector('button[aria-label^="Open Incarnation"]'), 'Known trace history is absent')
+  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:name=>/^Open Incarnation|^Incarnation/.test(name)}).length>0, 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
   if (changes) requireContract(/897\.2K → 133K/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')
   if (item.state === 'busy' && item.variants.empty === 'E3' && item.variants.spend !== 'S1') {
@@ -254,7 +256,8 @@ function assertBranch(pane: HTMLElement) {
   const titles = [...pane.querySelectorAll<HTMLElement>('[data-resource-title-lines]:not([data-resource-title-lines="1"])')]
   requireContract(titles.some(title => title.closest('[data-details-resource-row]')?.querySelector('[data-resource-meta]')?.textContent?.includes('Declared branch')), 'Declared branch row is missing')
   for (const title of titles) {
-    requireContract(title.closest('[data-details-resource-row]')?.getAttribute('aria-label')?.includes(title.textContent!), 'Wrapped identity lacks its full accessible name')
+    const row=title.closest<HTMLElement>('[data-details-resource-row]'),label=title.textContent?.replace(/\s+/g,' ').trim();requireContract(row&&label, 'Wrapped identity lacks its full accessible name')
+    requireContract(within(pane).queryAllByRole('button',{name:name=>name.includes(label)}).includes(row), 'Wrapped identity lacks its full accessible name')
     const lines = textLines(title)
     requireContract(lines.length < 2 || lines.at(-1)!.trim().split(/[\s/_-]+/).filter(Boolean).length >= 2, 'Wrapped identity leaves an orphaned final word')
   }
@@ -439,11 +442,11 @@ export const MissionTitleFit: Story = { args: { cases: [example('missions/320/R1
 } }
 export const BranchOrphan: Story = { args: { cases: widths.map(width => example(`branch/${width}`, width, 'partial')) }, play: async ({ canvasElement, args }) => {
   await eachCase(canvasElement, args.cases, assertBranch)
-  const pane = paneFor(canvasElement), title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, row = title.closest('[data-details-resource-row]')!, original = row.getAttribute('aria-label')!, originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace
+  const pane = paneFor(canvasElement), title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, row = title.closest('[data-details-resource-row]')!, original = row.getAttribute('aria-label'), originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace
   try {
     title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'; row.setAttribute('aria-label', `Open ${title.textContent}`)
     await rejectsControl('Wrapped identity leaves an orphaned final word', () => assertBranch(pane))
-  } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace; row.setAttribute('aria-label', original) }
+  } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace; if(original===null)row.removeAttribute('aria-label');else row.setAttribute('aria-label', original) }
   assertBranch(pane)
 } }
 export const IdentityClamp: Story = { args: { cases: resourceCases(['R1', 'R2'], ['busy', 'partial'], [240, 320, 400, 520]) }, play: async ({ canvasElement, args }) => {
@@ -482,3 +485,38 @@ export const E3ChartMatrix: Story = { args: { cases: e3Cases }, play: async ({ c
   })
   await humanControl(paneFor(canvasElement))
 } }
+
+export const SharedResourceActionNames:Story={
+  render:function Render({scheme}){
+    const resource=sharedResources[1];requireContract(resource,'Missing shared resource fixture')
+    const file=resource.files[0];requireContract(file,'Missing shared file fixture')
+    const [opened,setOpened]=React.useState<string>()
+    return <main aria-label="Shared resource actions" {...stylex.props(styles.root,...baselineTheme,...(scheme==='light'?lightTheme:[]))} data-shared-opened={opened}><ThemePortal>{(['RC-1','RC-2','RC-3'] as const).map(variant=><section key={variant} aria-label={`Resource ${variant}`}><ResourceCardV1 resource={resource} variant={variant} onOpen={(_,selected)=>setOpened(selected?.path??resource.label)}/></section>)}<section aria-label="Inline resource chip"><ResourceChipV1 resource={resource} file={file} onOpen={(_,selected)=>setOpened(selected?.path)}/></section></ThemePortal></main>
+  },
+  play:async({canvasElement})=>{
+    const root=within(canvasElement).getByRole('main',{name:'Shared resource actions'})
+    for(const variant of ['RC-1','RC-2']){
+      const section=within(root).getByRole('region',{name:`Resource ${variant}`})
+      const action=within(section).getByRole('button',{name:name=>name.startsWith('PR #42 · Keep selection stable')&&name.endsWith('Open')})
+      const assertName=()=>requireContract(within(section).queryByRole('button',{name:name=>name.startsWith('PR #42 · Keep selection stable')&&name.includes('+10')&&name.includes('−2')&&name.endsWith('Open')})===action,'Resource card name omits visible text or changes its order')
+      assertName()
+      action.setAttribute('aria-label','Open PR #42 · Keep selection stable')
+      try{await rejectsControl('Resource card name omits visible text or changes its order',assertName)}finally{action.removeAttribute('aria-label')}
+      assertName()
+    }
+    for(const name of ['Resource RC-3','Inline resource chip']){
+      const section=within(root).getByRole('region',{name})
+      const chip=within(section).getByRole('button',{name:label=>label.startsWith('rows.ts')&&label.includes('+1')&&label.includes('−1')})
+      const assertChip=()=>requireContract(within(section).queryByRole('button',{name:label=>label.startsWith('rows.ts')&&!label.includes('src/')&&label.includes('+1')&&label.includes('−1')})===chip&&chip.getAttribute('aria-description')==='src/rows.ts','File chip name or full-path description differs from painted basename')
+      assertChip();expect(chip).toHaveAccessibleDescription('src/rows.ts')
+      chip.setAttribute('aria-label','Open src/rows.ts')
+      try{await rejectsControl('File chip name or full-path description differs from painted basename',assertChip)}finally{chip.removeAttribute('aria-label')}
+      assertChip()
+      chip.removeAttribute('aria-description')
+      try{await rejectsControl('File chip name or full-path description differs from painted basename',assertChip)}finally{chip.setAttribute('aria-description','src/rows.ts')}
+      assertChip()
+      await userEvent.click(chip);await waitFor(()=>requireContract(root.dataset.sharedOpened==='src/rows.ts','Shared chip open callback lost full file identity'))
+      await userEvent.unhover(chip);chip.blur()
+    }
+  },
+}
