@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "New offline st evidence put, show and verify commands and a v1 in-toto statement in SSH-signed Git notes commits. No client protocol or existing command changes. Gate enforcement and signer adapters are not activated. Records report full, degraded, or test trust; daemon policy permits only full. Re-attestation requires a separate full-trust rerun record."
+    "detail": "New offline st evidence put, show and verify commands and a v1 in-toto statement in SSH-signed Git notes commits. No client protocol or existing command changes. Gate enforcement and signer adapters are not activated. Records report full, degraded, or test trust; daemon policy permits only full. Re-attestation requires a separate full-trust rerun record. Stage policy is loaded from the accepted base commit, so a target cannot lower its own requirements. Schema version and opaque test inputs reserve affected-set extensions."
   },
   "downtime": {
     "status": "none",

@@ -65,8 +65,6 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
     let root = tempfile::tempdir().unwrap();
     let repo = root.path();
     git(repo, &["init", "-q"], b"");
-    let empty = git(repo, &["mktree"], b"");
-    let base = git(repo, &["commit-tree", &empty], b"base\n");
     let policy = Policy {
         version: 1,
         risk_class: "daemon".into(),
@@ -90,6 +88,7 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
         &["mktree"],
         format!("040000 tree {config}\t.st\n").as_bytes(),
     );
+    let base = git(repo, &["commit-tree", &tree], b"base\n");
     let head = git(repo, &["commit-tree", &tree, "-p", &base], b"head\n");
     let key = repo.join("throwaway-key");
     let generated = Command::new("ssh-keygen")
@@ -113,9 +112,10 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
         predicate_type: evidence::PREDICATE_TYPE.into(),
         subject: vec![Subject {
             name: head.clone(),
-            digest: BTreeMap::from([("gitTree".into(), tree)]),
+            digest: BTreeMap::from([("gitTree".into(), tree.clone())]),
         }],
         predicate: Observation {
+            schema_version: 1,
             change_id: "fixture-change".into(),
             signer: Some("fleet/fixture-observer".into()),
             tier: TrustTier::Full,
@@ -123,6 +123,7 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
             producer_sha256: "a".repeat(64),
             observed_at: chrono::Utc::now().to_rfc3339(),
             fact: Fact::Tests {
+                inputs: BTreeMap::new(),
                 runner: "fixture-runner".into(),
                 checks: BTreeMap::from([(
                     "unit-tests".into(),
@@ -159,7 +160,7 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
         verdict: Verdict::GO,
         base_commit: base.clone(),
         files: evidence::changed_files(repo, &base, &head).unwrap(),
-        tests: vec![tests],
+        tests: vec![tests.clone()],
     };
     let review = evidence::sign_observation(repo, &statement, &key).unwrap();
     success(cli(
@@ -186,6 +187,71 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
     ));
     assert_eq!(gate["review"], review);
     assert_eq!(gate["tier"], "full");
+    // The target cannot lower requirements: policy comes from the accepted base.
+    let mut stricter = policy;
+    stricter.required_checks.insert("security-tests".into());
+    let strict_blob = git(
+        repo,
+        &["hash-object", "-w", "--stdin"],
+        &serde_json::to_vec(&stricter).unwrap(),
+    );
+    let strict_config = git(
+        repo,
+        &["mktree"],
+        format!("100644 blob {strict_blob}\tevidence-policy.json\n").as_bytes(),
+    );
+    let strict_tree = git(
+        repo,
+        &["mktree"],
+        format!("040000 tree {strict_config}\t.st\n").as_bytes(),
+    );
+    let strict_base = git(
+        repo,
+        &["commit-tree", &strict_tree, "-p", &head],
+        b"accepted strict policy\n",
+    );
+    let weakened_head = git(
+        repo,
+        &["commit-tree", &tree, "-p", &strict_base],
+        b"weaken policy\n",
+    );
+    let mut weakened = statement.clone();
+    weakened.subject[0].name = weakened_head.clone();
+    weakened.predicate.observed_at = chrono::Utc::now().to_rfc3339();
+    weakened.predicate.fact = Fact::Review {
+        reviewer: "agent/fixture-reviewer".into(),
+        verdict: Verdict::GO,
+        base_commit: strict_base.clone(),
+        files: evidence::changed_files(repo, &strict_base, &weakened_head).unwrap(),
+        tests: vec![tests],
+    };
+    let weakened_go = evidence::sign_observation(repo, &weakened, &key).unwrap();
+    success(cli(
+        repo,
+        &[
+            "put",
+            "--record",
+            &weakened_go,
+            "--trusted-signers",
+            trusted,
+        ],
+    ));
+    let rejected = cli(
+        repo,
+        &[
+            "verify",
+            "--revision",
+            &weakened_head,
+            "--base",
+            &strict_base,
+            "--change-id",
+            "fixture-change",
+            "--trusted-signers",
+            trusted,
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("required checks missing"));
     statement.predicate.signer = None;
     statement.predicate.tier = TrustTier::Degraded;
     let degraded = evidence::record_degraded(repo, &statement).unwrap();

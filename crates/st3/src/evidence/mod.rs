@@ -41,6 +41,7 @@ pub struct Subject {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Observation {
+    pub schema_version: u32,
     pub change_id: String,
     pub signer: Option<String>,
     pub tier: TrustTier,
@@ -60,6 +61,9 @@ pub enum Fact {
         runner: String,
         /// The observer records each required check, including failures, from its own run.
         checks: BTreeMap<String, Check>,
+        /// Opaque future per-target input keys. v1 still requires exact-tree applicability.
+        #[serde(default)]
+        inputs: BTreeMap<String, String>,
     },
     Review {
         reviewer: String,
@@ -319,6 +323,10 @@ impl Statement {
         );
         let observation = &self.predicate;
         ensure!(
+            observation.schema_version == 1,
+            "unsupported observation schema version"
+        );
+        ensure!(
             !observation.change_id.trim().is_empty(),
             "missing change ID"
         );
@@ -346,10 +354,20 @@ impl Statement {
         chrono::DateTime::parse_from_rfc3339(&observation.observed_at)
             .context("invalid observation timestamp")?;
         match &observation.fact {
-            Fact::Tests { runner, checks } => {
+            Fact::Tests {
+                runner,
+                checks,
+                inputs,
+            } => {
                 ensure!(
                     !runner.trim().is_empty() && !checks.is_empty(),
                     "missing runner or checks"
+                );
+                ensure!(
+                    inputs
+                        .iter()
+                        .all(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty()),
+                    "empty test input key or digest"
                 );
                 for (name, check) in checks {
                     ensure!(
@@ -562,8 +580,18 @@ pub fn verify_record(repo: &Path, id: &str, trusted_signers: &Path) -> Result<St
                 && prior.subject[0].digest == statement.subject[0].digest,
             "re-attestation changed its keyed subject"
         );
-        let (Fact::Tests { checks: old, .. }, Fact::Tests { checks: new, .. }) =
-            (&prior.predicate.fact, &statement.predicate.fact)
+        let (
+            Fact::Tests {
+                checks: old,
+                inputs: old_inputs,
+                ..
+            },
+            Fact::Tests {
+                checks: new,
+                inputs: new_inputs,
+                ..
+            },
+        ) = (&prior.predicate.fact, &statement.predicate.fact)
         else {
             bail!("re-attestation must rerun tests")
         };
@@ -574,7 +602,7 @@ pub fn verify_record(repo: &Path, id: &str, trusted_signers: &Path) -> Result<St
                 .collect::<BTreeMap<_, _>>()
         };
         ensure!(
-            inputs(old) == inputs(new),
+            old_inputs == new_inputs && inputs(old) == inputs(new),
             "re-attestation changed its keyed checks"
         );
         let before = chrono::DateTime::parse_from_rfc3339(&prior.predicate.observed_at)?;
@@ -744,7 +772,8 @@ pub fn verify(
     )
 }
 
-/// Read policy from the exact target tree, not a dirty checkout. Caller trust remains external.
+/// Read policy from an accepted base commit, never the change being judged. The caller
+/// pins its accepted base; trust roots remain external to repository policy.
 pub fn load_policy(repo: &Path, revision: &str) -> Result<Policy> {
     let revision = commit(repo, revision)?;
     let policy = serde_json::from_slice(&git(

@@ -120,6 +120,7 @@ impl Fixture {
             }],
             predicate_type: PREDICATE_TYPE.into(),
             predicate: Observation {
+                schema_version: 1,
                 change_id: "fixture-change".into(),
                 signer: Some("fleet/fixture-observer".into()),
                 tier: TrustTier::Full,
@@ -133,6 +134,7 @@ impl Fixture {
 
     fn tests(&self, runner: &str, exit_code: i32) -> Statement {
         self.statement(Fact::Tests {
+            inputs: BTreeMap::new(),
             runner: runner.into(),
             checks: BTreeMap::from([(
                 "unit-tests".into(),
@@ -545,4 +547,23 @@ fn fresh_full_rerun_re_attests_without_promoting_degraded_record() {
     }
     let forged_rerun = sign_observation(f.repo(), &rerun, &f.key).unwrap();
     assert!(put(f.repo(), &forged_rerun, &f.trusted).is_err());
+}
+
+#[test]
+fn open_test_inputs_round_trip_but_do_not_authorize_scoped_reuse() {
+    let f = Fixture::new();
+    let mut tests = f.tests("fixture-runner", 0);
+    if let Fact::Tests { inputs, .. } = &mut tests.predicate.fact {
+        inputs.insert("crate/fixture".into(), "sha256:opaque-input-key".into());
+    }
+    let id = f.put(&tests);
+    assert!(
+        matches!(show(f.repo(), &id).unwrap().predicate.fact, Fact::Tests { inputs, .. } if inputs["crate/fixture"] == "sha256:opaque-input-key")
+    );
+    f.put(&f.review(vec![id], Verdict::GO));
+    let changed = f.revision("changed source", Some(&f.head));
+    assert!(f.verify(&changed, &f.base).is_err());
+    let mut unknown = tests;
+    unknown.predicate.schema_version = 2;
+    assert!(sign_observation(f.repo(), &unknown, &f.key).is_err());
 }

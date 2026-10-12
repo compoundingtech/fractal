@@ -16,6 +16,7 @@ is `https://smalltalk.dev/evidence/gate/v1`. Its fields are:
 
 | Field | Meaning |
 | --- | --- |
+| `schema_version` | Predicate schema version, initially `1`; unknown versions fail closed. |
 | `change_id` | Nonempty stable identifier; currently supplied by the workflow pending the change format. |
 | `signer` | Exact SSH principal in the caller's allowed-signers file, or null for degraded records. |
 | `tier` | `full`, `degraded`, or `test`; a signature alone never promotes a tier. |
@@ -26,7 +27,9 @@ is `https://smalltalk.dev/evidence/gate/v1`. Its fields are:
 
 A `tests` observation names its `runner` and maps check names to `command`
 (argument vector), `exit_code`, and `output_sha256` (exact captured output
-bytes). The observer must construct these from its run, including failed checks.
+bytes). Its open `inputs` map carries opaque target/input keys and digest strings
+for future affected-set observers, and defaults to empty. v1 preserves those keys
+but still requires the whole exact tree; it does not infer scoped equivalence. The observer must construct these from its run, including failed checks.
 
 A `review` observation names its `reviewer`, `verdict` (`GO` or `STOP`), and
 `base_commit`, an ancestor of the observed commit. Its `files` map covers the complete changed-path set from base to
@@ -100,8 +103,11 @@ or reimplement that separate receipt protocol.
 
 ## Gate policy and reuse
 
-`.st/evidence-policy.json` in the exact target commit declares the initial
+`.st/evidence-policy.json` in the accepted base commit declares the initial
 `daemon` risk class, required `linux-gate` check, allowed `full` tier, and CI/review principal roles.
+The workflow must supply an accepted, immutable base: the proposed target cannot
+weaken its own required checks or signer roles. A policy change is judged under
+the old accepted policy. Missing base policy fails closed.
 These generic principals are provisioning targets; no key is trusted merely
 because repository policy names it. The caller must separately supply its
 operator-controlled trust list. Other risk classes require a later policy
@@ -132,7 +138,7 @@ measured facts in a separate explicitly degraded record; production verification
 remains fail-closed under the selected policy. Low-risk policy allowances and
 re-attestation deadlines require the gate step and its policy decision. A fresh
 full-trust rerun may cite the original with `re_attests`; the verifier checks its
-subject, change ID, check names/commands, and time against that degraded record.
+subject, change ID, check names/commands, opaque input keys, and time against that degraded record.
 It never changes the original tier. Observing the same old bytes without running
 the check again cannot qualify as a re-attestation.
 

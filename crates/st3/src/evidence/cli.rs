@@ -77,10 +77,11 @@ pub fn run(args: EvidenceArgs) -> Result<()> {
         } => {
             let revision = revision.context("--revision required for stage verification")?;
             let base = base.context("--base required for stage verification")?;
+            let base = commit(&repo, &base)?;
             let change_id = change_id.context("--change-id required for stage verification")?;
-            // Pin aliases such as HEAD once: policy and facts must use the same target.
+            // Pin aliases such as HEAD once: each source must stay fixed throughout verification.
             let revision = commit(&repo, &revision)?;
-            let policy = load_policy(&repo, &revision)?;
+            let policy = load_policy(&repo, &base)?;
             serde_json::to_value(verify(
                 &repo,
                 &revision,
