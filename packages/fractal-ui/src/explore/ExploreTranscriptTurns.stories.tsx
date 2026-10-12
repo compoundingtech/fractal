@@ -5,10 +5,11 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button, Disclosure, DisclosurePanel, Tooltip, TooltipTrigger } from 'react-aria-components'
-import { ThreadPrimitive } from '@assistant-ui/react'
+import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { AgentMessage } from '../assistant-ui/AgentMessage'
 import { AgentMessage as TranscriptAnswer } from '../assistant-ui/composition/Transcript'
 import { EmbraceRuntimeProvider } from '../assistant-ui/EmbraceRuntime'
+import type { TextItem } from '../assistant-ui/embrace-data/model'
 import { WorkLogV1 } from '../assistant-ui/taste/WorkLogV1'
 import { baselineTheme } from '../assistant-ui/neutral-theme'
 import { lightTheme } from '../assistant-ui/composition-theme'
@@ -27,6 +28,23 @@ const glyphs = { Person: '○', Agent: '◇', Relay: '↪', System: '·', Seat: 
 const clock = (at: string) => new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', hour: 'numeric', minute: '2-digit' }).format(new Date(at))
 const exact = (at: string) => `${at.slice(0, 10)} · ${clock(at)} UTC`
 const isDivider = (block: TurnBlock, previous?: TurnBlock) => block.kind !== 'Seat' && (previous === undefined || Date.parse(block.at) - Date.parse(previous.at) >= 300000 || block.at.slice(0, 10) !== previous.at.slice(0, 10))
+
+function ExploreAnswer({ showMeta = false }: { readonly showMeta?: boolean }) {
+  const item = useAuiState(state => state.message.metadata.custom.item) as TextItem | undefined
+  if (item === undefined || item.role !== 'assistant') return null
+  return <TranscriptAnswer item={item as TextItem & { role: 'assistant' }} showMeta={showMeta} />
+}
+// A new component closure per Block render remounted the prose after setTail, leaving
+// its timestamp portal attached to a detached paragraph and dropping descendant focus.
+const answerComponents = { Message: ExploreAnswer }
+const metaControlComponents = { Message: () => <ExploreAnswer showMeta /> }
+
+function FocusRemountControl() {
+  const [generation, setGeneration] = React.useState(0)
+  // Deliberate control: changing the component identity drops its focused node.
+  const UnstableCopy = () => <Button {...stylex.props(styles.control)}>Remounting Copy control</Button>
+  return <div data-control-remount data-generation={generation} onPointerDown={() => setGeneration(value => value + 1)}><UnstableCopy /></div>
+}
 
 /** Variant-only projection of production rows. No change to runtime facts or message bodies. */
 function Block({ block, previous, turn, kind, meta }: Pick<ExploreArgs, 'turn' | 'kind' | 'meta'> & { block: TurnBlock; previous?: TurnBlock }) {
@@ -53,9 +71,8 @@ function Block({ block, previous, turn, kind, meta }: Pick<ExploreArgs, 'turn' |
     return () => observer.disconnect()
   }, [expanded, meta, block.id])
   const time = <time data-turn-time dateTime={block.at} title={exact(block.at)} {...stylex.props(styles.time)}>{clock(block.at)}</time>
-  const item = replyItems.find(item => item.id === block.id)
-  const content = seat && item !== undefined
-    ? <ThreadPrimitive.Unstable_MessageById messageId={item.id} components={{ Message: () => <TranscriptAnswer item={item} showMeta={false} /> }} />
+  const content = seat
+    ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
     : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human' } : { _tag: 'Incoming' }} />
   const header = (!seat || turn === `T${3}`) && (turn !== `T${3}` || previous?.sender !== block.sender)
     ? <header data-turn-header {...stylex.props(styles.header)}><strong>{block.sender}</strong>{kind === 'K1' && !seat ? <span>{block.kind} · {block.verified ? 'Verified' : 'Unverified'}</span> : null}</header> : null
@@ -95,8 +112,10 @@ function Explorer(args: ExploreArgs) {
       <div data-control-focus {...stylex.props(styles.block)}><span data-affordance="reveal" {...stylex.props(styles.hoverOnly)}>Hover-only time</span><Button {...stylex.props(styles.control)}>Control copy</Button></div>
       <div data-control-style>Unstyled token probe</div>
       <div data-control-transition data-turn-variant="T1" data-kind-variant="K1" data-meta-variant="M1" data-scheme="dark" data-width="1440" data-lane-count="1"><Button {...stylex.props(styles.control)}>Inert transition control</Button><Button aria-expanded={false} {...stylex.props(styles.control)}>Inert disclosure control</Button></div>
-      <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root data-control-production-meta><ThreadPrimitive.Unstable_MessageById messageId={replyItems[0]!.id} components={{ Message: () => <TranscriptAnswer item={replyItems[0]!} showMeta /> }} /></ThreadPrimitive.Root></EmbraceRuntimeProvider>
+      <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root data-control-production-meta><ThreadPrimitive.Unstable_MessageById messageId={replyItems[0]!.id} components={metaControlComponents} /></ThreadPrimitive.Root></EmbraceRuntimeProvider>
       <div data-control-k3 {...stylex.props(styles.quietInputControl)}><span data-input-title>Quiet summary with no sender or kind cue</span></div>
+      <FocusRemountControl />
+      <div data-control-missing-time>Reply without its own timestamp.</div>
     </section>
   </main>
 }
@@ -187,11 +206,13 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
     for (const [index, block] of blocks.entries()) {
       await expect(reservedMetaHeight(block)).toBe(0)
+      if (lane.getAttribute('data-meta-variant') === 'M4') await expect(block.querySelectorAll('time[data-turn-time]')).toHaveLength(1)
       const next = blocks[index + 1]
       if (next === undefined) continue
       for (const label of block.querySelectorAll('time[data-turn-time]')) await expect(distance(label.getBoundingClientRect(), block.getBoundingClientRect())).toBeLessThanOrEqual(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
     }
   }
+  await expect(canvasElement.querySelector('[data-control-missing-time]')!.querySelectorAll('time')).toHaveLength(0)
   await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-height]')!)).toBeGreaterThan(0)
   const owner = canvasElement.querySelector('[data-control-owner]')!, next = canvasElement.querySelector('[data-control-next]')!, label = owner.querySelector('time')!
   await expect(distance(label.getBoundingClientRect(), owner.getBoundingClientRect())).toBeGreaterThan(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
@@ -205,11 +226,19 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await userEvent.unhover(block)
     await expect(getComputedStyle(copy).opacity).toBe('0')
     copy.focus()
-    await expect(getComputedStyle(copy).opacity).toBe('1')
+    await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
+    const answer = block.querySelector('[data-testid="agent-message"]')
+    block.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
+    await waitFor(() => expect(block).toHaveAttribute('data-tapped', 'true'))
+    await expect(block.querySelector('[data-testid="agent-message"]')).toBe(answer)
+    await expect(copy).toHaveFocus()
+    block.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
+    await waitFor(() => expect(block).not.toHaveAttribute('data-tapped'))
+    await expect(copy).toHaveFocus()
     const focusOpacity = Array.from(block.querySelectorAll('[data-affordance="reveal"]')).map(element => getComputedStyle(element).opacity)
     copy.blur()
     await userEvent.hover(block)
-    await expect(Array.from(block.querySelectorAll('[data-affordance="reveal"]')).map(element => getComputedStyle(element).opacity)).toEqual(focusOpacity)
+    await waitFor(() => expect(Array.from(block.querySelectorAll('[data-affordance="reveal"]')).map(element => getComputedStyle(element).opacity)).toEqual(focusOpacity))
     await userEvent.unhover(block)
     block.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
     await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
@@ -221,6 +250,12 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   const focusControl = canvasElement.querySelector<HTMLElement>('[data-control-focus]')!
   focusControl.querySelector<HTMLElement>('button')!.focus()
   await expect(getComputedStyle(focusControl.querySelector('[data-affordance]')!).opacity).toBe('0')
+  const remountControl = canvasElement.querySelector<HTMLElement>('[data-control-remount]')!
+  const detachedCopy = remountControl.querySelector<HTMLElement>('button')!
+  detachedCopy.focus()
+  remountControl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
+  await waitFor(() => expect(detachedCopy.isConnected).toBe(false))
+  await expect(canvasElement.ownerDocument.activeElement).not.toBe(detachedCopy)
 }
 const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
   const canvas = within(canvasElement)
