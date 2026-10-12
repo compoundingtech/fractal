@@ -65,7 +65,7 @@ export const typeVars = stylex.defineVars({
   uiSize: '14px', uiLeading: '20px',
   metaSize: '12px', metaLeading: '16px',
   denseSize: '11px',
-  codeSize: '13px',
+  codeSize: '13px', codeLeading: '18px',
   bodySize: '14px', bodyLeading: '22.75px',
   weightMedium: '500',
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
@@ -104,6 +104,8 @@ export const geometryVars = stylex.defineVars({
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
   toolIndent: '28px', gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
+  textColumn: '22px',
   sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',

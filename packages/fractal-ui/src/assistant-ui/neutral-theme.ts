@@ -63,7 +63,7 @@ const typeVarsTheme = stylex.createTheme(typeVars, {
   uiSize: '14px', uiLeading: '20px',
   metaSize: '12px', metaLeading: '16px',
   denseSize: '11px',
-  codeSize: '13px',
+  codeSize: '13px', codeLeading: '18px',
   bodySize: '14px', bodyLeading: '22.75px',
   weightMedium: '500',
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
