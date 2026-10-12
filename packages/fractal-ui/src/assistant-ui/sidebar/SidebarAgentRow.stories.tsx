@@ -59,6 +59,10 @@ async function assertRowNames(canvasElement: HTMLElement) {
     const title = row.querySelector('[data-row-column="title-text"]')!.textContent!
     await expect(title).toBe(fixture.title)
     await expect(button).toHaveAccessibleName(fixture.title)
+    // Label-in-name: the Button's exposed visible text is exactly its name; the subtitle facts are aria-hidden and live in the description.
+    const exposed = button.cloneNode(true) as HTMLElement
+    for (const hidden of exposed.querySelectorAll('[aria-hidden="true"]')) hidden.remove()
+    await expect(exposed.textContent!.trim()).toBe(fixture.title)
     await expect(button).toHaveAccessibleDescription(sidebarRowDescription(fixture))
     await expect(button).toHaveAccessibleDescription(/Status: /)
     if (fixture.needsMe === true) await expect(button).toHaveAccessibleDescription(/Needs your attention/)
