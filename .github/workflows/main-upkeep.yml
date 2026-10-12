@@ -928,7 +928,7 @@ jobs:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
         run: |
           corepack enable
-          pnpm fetch --frozen-lockfile
+          pnpm fetch
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -968,7 +968,7 @@ jobs:
         if: steps.pnpm-store.outputs.cache-hit != 'true'
       - name: Fetch the locked packages
         shell: bash
-        run: "nix develop '.#web' -c pnpm fetch --frozen-lockfile"
+        run: "nix develop '.#web' -c pnpm fetch"
         env:
           pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
         if: steps.pnpm-store.outputs.cache-hit != 'true'
