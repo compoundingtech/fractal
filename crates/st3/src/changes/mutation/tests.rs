@@ -92,7 +92,7 @@ mission "fixture-stage" state="ready" {
 
 #[test]
 fn work_authority_sql_is_history_independent() {
-    use smallclaims::sqlite::work;
+    use smallclaims::sqlite::work::SqliteWorkScope;
     let (store, binding) = work_fixture();
     let mut samples = Vec::new();
     for ceiling in [100, 1000] {
@@ -109,12 +109,21 @@ fn work_authority_sql_is_history_independent() {
                 evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
+        if ceiling == 1000 {
+            for n in 0..32 {
+                store.work_action(&binding.step, "progress", &WorkRequest {
+                    actor: Some(ACTOR.into()), incarnation: Some(INCARNATION.into()),
+                    summary: Some(format!("Bound attempt progress {n}")), reason: None,
+                    evidence: vec![], idempotency_key: format!("authority-progress-{n}"),
+                }).unwrap();
+            }
+        }
         store.git_change_work_binding(ACTOR, &binding.step, INCARNATION).unwrap();
-        let before = work::total();
+        let scope = SqliteWorkScope::start();
         let selected = store.git_change_work_binding(ACTOR, &binding.step, INCARNATION).unwrap();
         store.validate_git_change_work(ACTOR, &selected).unwrap();
         assert_eq!(selected.claim_id, binding.claim_id);
-        samples.push(work::total() - before);
+        samples.push(scope.finish());
     }
     eprintln!("authority SQL: {:?} -> {:?}", samples[0], samples[1]);
     assert_eq!(samples[0].vm_steps, samples[1].vm_steps);
