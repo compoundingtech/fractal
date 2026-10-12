@@ -5,6 +5,7 @@ import type { Meta, StoryObj } from '@storybook/react'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { SidebarAgentRow, ThreadHeader, assistantDarkTheme, type SidebarAgentRowData } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { lightTheme, type Scheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
 import { ResponsiveAgentSidebar, sidebarDrawerBreakpoint, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
@@ -17,7 +18,7 @@ const rows: readonly SidebarAgentRowData[] = ['Builder', 'Reviewer'].map(title =
 const tree: readonly SidebarNode[] = [{ _tag: 'Folder', id: 'product', label: 'Product', collapsed: false, children: rows.map(row => ({ _tag: 'Agent', id: row.ref, subject: row.ref, label: row.title })) }]
 
 /** Fixture data surrounds the same sidebar frame, tree, row and thread header as live. */
-const ResponsiveSidebarSurface = ({ viewport, shortcut = true }: { readonly viewport: number; readonly shortcut?: boolean }) => {
+const ResponsiveSidebarSurface = ({ viewport, shortcut = true, scheme = 'dark' }: { readonly viewport: number; readonly shortcut?: boolean; readonly scheme?: Scheme }) => {
   const [collapsed, setCollapsed] = React.useState(false)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   const [selected, setSelected] = React.useState(rows[0]!.ref)
@@ -31,7 +32,7 @@ const ResponsiveSidebarSurface = ({ viewport, shortcut = true }: { readonly view
   }, [narrow])
   useSidebarShortcut(shortcut ? toggle : undefined)
   const select = (ref: string) => { setSelected(ref); setDrawerOpen(false) }
-  return <main data-sidebar-layout-story="" data-viewport={viewport} style={{ width: viewport }} {...stylex.props(styles.root, assistantDarkTheme)}>
+  return <main data-sidebar-layout-story="" data-viewport={viewport} data-scheme={scheme} style={{ width: viewport }} {...stylex.props(styles.root, assistantDarkTheme, scheme === 'light' && lightTheme)}>
     <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxWidth} collapsed={collapsed} drawerOpen={drawerOpen} onDrawerOpenChange={setDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setWidth} onWidthCommit={setWidth} onWidthReset={() => setWidth(Math.min(maxWidth, 256))}>
       <Aria.SearchField aria-label="Search agents" {...stylex.props(styles.search)}><Aria.Input placeholder="Search agents" {...stylex.props(styles.input)} /></Aria.SearchField>
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>
@@ -56,6 +57,8 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   const root = canvasElement.querySelector<HTMLElement>('[data-sidebar-layout-story]')!
   const thread = root.querySelector<HTMLElement>('[data-sidebar-thread]')!
   const viewport = Number(root.dataset.viewport)
+  await expect(getComputedStyle(root).backgroundColor).toBe(root.dataset.scheme === 'light' ? 'rgb(252, 252, 252)' : 'rgb(10, 10, 10)')
+  await expect(getComputedStyle(root).color).toBe(root.dataset.scheme === 'light' ? 'rgb(39, 39, 42)' : 'rgb(245, 245, 245)')
   const canvas = within(root)
   const rect = () => { const value = thread.getBoundingClientRect(); return { x: value.x, y: value.y, width: value.width, height: value.height } }
   if (viewport >= sidebarDrawerBreakpoint) {
@@ -131,14 +134,16 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   } finally { observer.disconnect() }
 }
 
-const meta = { title: 'wf/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440 }, parameters: { layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Play tests reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
+const meta = { title: 'wf/Sidebar/Responsive navigation', component: ResponsiveSidebarSurface, args: { viewport: 440, scheme: 'dark' }, argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } }, parameters: { layout: 'fullscreen', docs: { description: { component: 'Navigation has a 240px floor. Below 900px it is a closed-by-default React Aria modal drawer: aria-modal=true and the background workspace is inert or hidden from assistive technology until dismissal. The thread keeps its full width. Escape or selection closes it and restores opener focus. Cmd/Ctrl+B opens navigation outside editable/terminal input. Opening the drawer must produce zero raw thread layout shift, including input-associated entries. Dark and light plays assert the surface colours and reject injected non-modal and unmasked-background regressions.' } } } } satisfies Meta<typeof ResponsiveSidebarSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 export const At440: Story = { args: { viewport: 440 }, play: drawerPlay }
 export const At700: Story = { args: { viewport: 700 }, play: drawerPlay }
 export const At900: Story = { args: { viewport: 900 }, play: drawerPlay }
 export const At1440: Story = { args: { viewport: 1440 }, play: drawerPlay }
-export const AllStates: Story = { render: () => <div {...stylex.props(styles.matrix)}>{[440, 700, 900, 1440].map(viewport => <section key={viewport}><h2>{viewport}px</h2><ResponsiveSidebarSurface viewport={viewport} shortcut={false} /></section>)}</div> }
+export const LightAt440: Story = { args: { viewport: 440, scheme: 'light' }, play: drawerPlay }
+export const LightAt1440: Story = { args: { viewport: 1440, scheme: 'light' }, play: drawerPlay }
+export const AllStates: Story = { render: args => <div {...stylex.props(styles.matrix)}>{[440, 700, 900, 1440].map(viewport => <section key={viewport}><h2>{viewport}px</h2><ResponsiveSidebarSurface viewport={viewport} scheme={args.scheme} shortcut={false} /></section>)}</div> }
 
 const styles = stylex.create({
   root: { display: 'flex', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', maxWidth: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },

@@ -15,6 +15,7 @@ import { SidebarAgentRow, SidebarTreeLevel } from '@smalltalk/fractal-ui/assista
 import { within } from 'storybook/test'
 import { sidebarRow } from './sidebarRow.ts'
 import { fleetFromAgents } from '../data/projections.ts'
+import { spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: (...styles: unknown[]) => ({ 'data-style-contract': JSON.stringify(Object.assign({}, ...styles.filter(style => typeof style === 'object' && style !== null))) }) }))
 
@@ -185,7 +186,7 @@ describe('kit sidebar time placement', () => {
     for (const level of [1, 2, 3, 4, 5, 6]) {
       const nested = await mountRow('subtitle', level)
       const geometry = JSON.parse(nested.getAttribute('data-style-contract')!)
-      expect(geometry.paddingInlineStart).toBe(`calc(${geometry.paddingInline} + ${level - 1} * var(--sidebar-tree-step, 16px))`)
+      expect(geometry.paddingInlineStart).toBe(`calc(${geometry.paddingInline} + ${level - 1} * var(--sidebar-tree-step, ${s.xl}))`)
     }
     expect(subtitle.querySelector('[data-row-column="time"]')).toBeNull()
     expect(subtitle.querySelector('[data-row-column="subtitle"] [data-row-field="last-turn"]')).not.toBeNull()

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Derive agent-tree indentation from hierarchy levels and use an isolated minimum-width navigation drawer on narrow screens.",
+  "summary": "Derive agent-tree indentation from hierarchy levels and spacing tokens, use an isolated minimum-width navigation drawer on narrow screens, and expose the navigation shortcut with an accessible tooltip in dark and light schemes.",
   "replay": { "status": "none", "detail": "Web presentation only." },
   "schema": { "status": "none", "detail": "No schema changes." },
   "rules": { "status": "none", "detail": "No policy changes." },
