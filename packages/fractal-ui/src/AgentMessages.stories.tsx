@@ -440,7 +440,7 @@ export const BroadcastWithoutRecipientFacts: Story = { render: () => <OutgoingMe
 export const BroadcastWithoutRecipientFactsLight440: Story = { ...BroadcastWithoutRecipientFacts, parameters: { scheme: 'light', width: 440 } }
 export const BroadcastWithoutRecipientFactsDark1440: Story = { ...BroadcastWithoutRecipientFacts, parameters: { scheme: 'dark', width: 1440 } }
 export const BroadcastWithoutRecipientFactsLight1440: Story = { ...BroadcastWithoutRecipientFacts, parameters: { scheme: 'light', width: 1440 } }
-const shellSend: ToolCallItem = { _tag: 'ToolCall', id: 'shell-send', callId: 'shell-send', name: 'bash', input: { command: 'message.send --to Review --body release-report' }, callSeen: true, status: 'success', at: '2026-10-11T15:40:00Z', result: { content: 'Delivered', at: '2026-10-11T15:40:01Z' } }
+const shellSend: ToolCallItem = { _tag: 'ToolCall', id: 'shell-send', callId: 'shell-send', name: 'bash', input: { command: 'message.send --to Review --body release-report' }, callSeen: true, status: 'success', at: '2026-10-11T15:40:00Z', result: { content: 'Delivered', at: '2026-10-11T15:40:01Z', isError: false } }
 const shellWork = workLogTurnFromItems([shellSend], { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })
 export const ShellSendInTranscript: Story = { render: () => <EmbraceRuntimeProvider options={{ messages: [quotedPrompt, shellSend], isRunning: false, onNew: fn() }}>
   <Transcript title="Release review" turns={[{ id: 'send-turn', prompt: quotedPrompt, items: [shellSend], work: shellWork, outgoingMessages: { 'shell-send': outgoingMessage } }]} sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} onOpenTool={fn()} />
@@ -463,7 +463,7 @@ export const ShellSendInTranscript: Story = { render: () => <EmbraceRuntimeProvi
 export const ShellSendInTranscriptLight440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'light', width: 440 } }
 export const ShellSendInTranscriptDark1440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'dark', width: 1440 } }
 export const ShellSendInTranscriptLight1440: Story = { ...ShellSendInTranscript, parameters: { scheme: 'light', width: 1440 } }
-const observedCommand: ToolCallItem = { ...shellSend, id: 'observed-command', callId: 'observed-command', input: { command: 'print-report' }, result: { content: 'Report printed', at: '2026-10-11T15:40:01Z' } }
+const observedCommand: ToolCallItem = { ...shellSend, id: 'observed-command', callId: 'observed-command', input: { command: 'print-report' }, result: { content: 'Report printed', at: '2026-10-11T15:40:01Z', isError: false } }
 const orphanSend: ToolCallItem = { ...shellSend, id: 'orphan-send', callId: 'orphan-send', callSeen: false }
 const mixedWork = workLogTurnFromItems([observedCommand, orphanSend], { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })
 export const ObservedCommandAndOrphanSend: Story = { render: () => <EmbraceRuntimeProvider options={{ messages: [quotedPrompt, observedCommand, orphanSend], isRunning: false, onNew: fn() }}>
@@ -682,7 +682,7 @@ export const CompositionFrames: Story = {
     }
     await assertFrames()
     const card = canvasElement.querySelector<HTMLElement>('[data-fractal-card]')!
-    const nested = card.cloneNode(false)
+    const nested = card.cloneNode(false) as HTMLElement
     card.append(nested)
     try { await expect(assertFrames()).rejects.toThrow() } finally { nested.remove() }
     await assertFrames()

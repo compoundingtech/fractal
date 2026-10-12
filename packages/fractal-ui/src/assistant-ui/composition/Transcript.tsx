@@ -63,8 +63,8 @@ function TranscriptMessage() {
   const summary = useAuiState(state => state.message.content.find(part => part.type === 'text')?.text ?? '')
   const caption = React.useContext(SenderCaption)
   if (item === undefined || item._tag === 'ToolCall' || item._tag === 'Reasoning') return null
-  if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <AgentMessage item={{ ...item, role: 'assistant' }} senderLine={caption} />
-  if (item._tag === 'Message') return <AgentMessage item={item} senderLine={caption ?? item.sender?.label ?? item.from} />
+  if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <SeatProse item={{ ...item, role: 'assistant' }} senderLine={caption} />
+  if (item._tag === 'Message') return <SeatProse item={item} senderLine={caption ?? item.sender?.label ?? item.from} />
   return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
 }
 const messageComponents = { Message: TranscriptMessage }
@@ -73,7 +73,7 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
   return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span {...stylex.props(styles.userText)}>{item.text}</span>{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 /** Settled metadata remains below the prose; unknown time is omitted rather than invented. */
-export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string }) {
+export function SeatProse({ item, senderLine }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string }) {
   const streaming = item._tag === 'Text' && item.streaming
   const completed = streaming ? NaN : Date.parse(item.at)
   return <MessagePrimitive.Root data-testid="agent-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.answer)}>
