@@ -107,6 +107,10 @@ export const geometryVars = stylex.defineVars({
   /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
   workRowColumns: '16px minmax(0, 1fr) auto 16px 80px',
   durationColumn: '80px', statusWordMax: '20ch',
+  /** Work block table: name (indent + glyph + intent) · detail · status word · disclosure · time; one track set per block. */
+  workTableColumns: '[name] 256px [detail] minmax(0, 1fr) [status] max-content [disclosure] 16px [time] 80px [end]',
+  /** Below the lane minimum the detail column folds into the opened body, so the name keeps its width. */
+  workTableNarrowColumns: '[name detail] minmax(0, 1fr) [status] max-content [disclosure] 16px [time] 80px [end]',
   /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
   textColumn: '22px', railInset: '7.5px',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',

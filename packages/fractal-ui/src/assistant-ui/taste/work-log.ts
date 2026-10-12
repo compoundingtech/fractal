@@ -1,7 +1,25 @@
 /** Controlled presentation types for the work log. */
-import type { ConversationItem } from '../embrace-data/model'
-import { toolHumanSummary, toolOutput } from '../embrace-tool-preview'
-export type WorkKind = 'read' | 'run' | 'edit'
+import type { ConversationItem, ToolCallItem, ToolCallStatus } from '../embrace-data/model'
+import { toolHumanSummary, toolOutput, toolString } from '../embrace-tool-preview'
+export type WorkKind = 'read' | 'run' | 'edit' | 'eval' | 'agent'
+/** A named child of a delegation, as the harness reports it. */
+export interface WorkAgent {
+  readonly id: string
+  readonly name: string
+  /** The assignment the seat wrote for the child. */
+  readonly task?: string
+  readonly status: ToolCallStatus
+  /** Observed run time; a running child without it shows no time. */
+  readonly durationMs?: number
+}
+/** Harness facts about one call that the conversation item itself does not carry. */
+export interface WorkCallFacts {
+  /** The plan item that was active when the call ran. Never generated. */
+  readonly phase?: string
+  /** The process exit code, only when the harness reported one. */
+  readonly exitCode?: number
+  readonly agents?: readonly WorkAgent[]
+}
 export interface WorkLogCall {
   readonly id: string
   readonly kind: WorkKind
@@ -19,6 +37,11 @@ export interface WorkLogCall {
   readonly changedPath?: string
   /** A run's own command or script source; display it only as code inside the raw disclosure. */
   readonly command?: string
+  /** The intent the seat wrote for this call (`i`, `description` or `summary`), never the tool name. */
+  readonly intent?: string
+  readonly phase?: string
+  readonly exitCode?: number
+  readonly agents?: readonly WorkAgent[]
 }
 export interface WorkLogTurn {
   readonly calls: readonly WorkLogCall[]
@@ -136,6 +159,8 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
   readonly failureNote?: string
   readonly startedAt?: string
   readonly completeHistory?: boolean
+  /** Per-call harness facts: plan phase, exit code and delegated children. */
+  readonly callFacts?: (call: ToolCallItem) => WorkCallFacts | undefined
 }): WorkLogTurn {
   const calls: WorkLogCall[] = items.flatMap(call => {
     if (call._tag !== 'ToolCall') return []
@@ -146,15 +171,18 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
     const filename = path?.split('/').at(-1) ?? ''
     const dot = filename.lastIndexOf('.')
     const extension = dot > 0 ? filename.slice(dot + 1).toLowerCase() : undefined
+    const known = facts.callFacts?.(call)
     return [{
       id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input),
+      intent: toolString(call.input, ['i', 'description', 'summary']).trim() || undefined,
+      phase: known?.phase, exitCode: known?.exitCode, agents: known?.agents,
       // Empty input carries nothing to inspect, so it does not make a row expandable.
       rawInput: typeof call.input === 'string' ? call.input || undefined : call.input === undefined || call.input === null || typeof call.input === 'object' && Object.keys(call.input).length === 0 ? undefined : JSON.stringify(call.input, null, 2),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,
       detail: toolOutput(call.result?.content) || undefined,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
       changedPath: kind === 'edit' && call.callSeen && call.status === 'success' ? path : undefined,
-      command: kind === 'run' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
+      command: kind === 'run' || kind === 'eval' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
     }]
   })
   const complete = facts.completeHistory === true

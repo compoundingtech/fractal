@@ -2,11 +2,19 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel, Tooltip, TooltipTrigger } from 'react-aria-components'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
-import { Icon } from '../composition/Icons'
+import { Icon, type IconName } from '../composition/Icons'
 import { ErrorOverlay } from '../composition/ErrorOverlay'
 import { HighlightedSource } from '../composition/Markdown'
-import type { WorkLogCall, WorkLogTurn } from './work-log'
+import type { WorkKind, WorkLogCall, WorkLogTurn } from './work-log'
 import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, workLogOutputLanguage } from './work-log'
+
+/** One glyph per kind; the status shows through the same slot (running spinner, failure mark), never a second icon. */
+export const workKindGlyph: Readonly<Record<WorkKind, IconName>> = { read: 'search', run: 'drawer', edit: 'pencil', eval: 'code', agent: 'agents' }
+export const workCallGlyph = (call: Pick<WorkLogCall, 'kind' | 'status'>): IconName =>
+  call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : workKindGlyph[call.kind]
+/** Non-success outcomes only, from harness facts: success stays silent and an exit code shows only when reported. */
+export const workCallWord = (call: Pick<WorkLogCall, 'status' | 'exitCode'>): string | undefined =>
+  call.status === 'error' ? call.exitCode === undefined ? 'Failed' : `Failed · exit ${call.exitCode}` : call.status === 'interrupted' ? 'Interrupted' : undefined
 
 export type WorkLogCallDetailRenderer = (call: WorkLogCall) => React.ReactNode
 const CallDetailRenderer = React.createContext<WorkLogCallDetailRenderer | undefined>(undefined)
@@ -57,8 +65,8 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // A non-success outcome stays visible as a word beside the pinned disclosure; running rows say so in the duration column until they end.
-  const word = call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : undefined
-  const row = <><span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : call.kind === 'read' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} spinning={call.status === 'running'} size={14} /></span><span data-call-title {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-word {...stylex.props(styles.callWord)}>{word}</span><span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span></>
+  const word = workCallWord(call)
+  const row = <><span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={workCallGlyph(call)} spinning={call.status === 'running'} size={14} /></span><span data-call-title {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-word {...stylex.props(styles.callWord)}>{word}</span><span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span></>
   return <div data-tool-status={call.status}>{expandable && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call))}</div>
 }
 function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
@@ -75,6 +83,8 @@ function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
     </Disclosure>
   </>
 }
+/** Shared with the work block table, so the fold list and the table keep one row grammar. */
+export { styles as workRowStyles }
 const styles = stylex.create({
   summary: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.toolRow, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.uiSize, padding: 0, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   summaryLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

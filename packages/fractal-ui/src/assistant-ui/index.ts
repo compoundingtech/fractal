@@ -44,6 +44,7 @@ export type { ResourceData, ResourceFile, ResourceMetadata } from './resources/r
 /** Required controlled WF-1; fixture/demo actions are excluded. */
 export { WorkLogV1 } from './taste/WorkLogV1.tsx'
 export type { WorkLogCallDetailRenderer } from './taste/WorkLogV1.tsx'
+export { WorkBlock, workKindCounts, workPhases, type WorkPhase } from './taste/WorkBlock.tsx'
 export * from './taste/work-log.ts'
 
 /** Host-controlled workspace and composer; fixtures and performance instrumentation stay internal. */
