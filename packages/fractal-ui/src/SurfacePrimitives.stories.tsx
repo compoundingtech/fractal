@@ -162,6 +162,8 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(checkbox).toBeChecked()
 
   // Hover runs before any other tooltip opens, so React Aria's warm-up cannot skip the 500ms delay.
+  // The menu steps leave React Aria in keyboard modality, where hover never opens a tooltip; a pointer press restores pointer modality.
+  await userEvent.click(canvas.getByRole('heading', { name: 'Surface primitives' }))
   const copy = canvas.getByRole('button', { name: 'Copy link' })
   const hoverStart = performance.now()
   await userEvent.hover(copy)
