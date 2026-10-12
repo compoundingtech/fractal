@@ -162,6 +162,14 @@ export const AllStates: Story = { render: () => <>
   await expect(canvasElement.querySelectorAll('[data-harness-weight="row"]')).toHaveLength(3)
   await expect(canvas.queryByText('End of the full release review.')).toBeNull()
   await expect(canvas.getByRole('alert')).toHaveTextContent('the preview is kept')
+  const subject = canvasElement.querySelector<HTMLElement>('[data-message-subject]')!
+  const assertHeading = async () => { await expect(canvas.getByRole('heading', { name: 'Release review', level: 2 })).toBeVisible() }
+  await assertHeading()
+  const skippedHeading = document.createElement('h3')
+  skippedHeading.textContent = subject.textContent
+  subject.replaceWith(skippedHeading)
+  try { await expect(assertHeading()).rejects.toThrow() } finally { skippedHeading.replaceWith(subject) }
+  await assertHeading()
 } }
 export const OutgoingSingle: Story = { render: () => <OutgoingMessageRow {...outgoingMessage} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -209,9 +217,9 @@ export const OutgoingFailed: Story = { render: () => <OutgoingMessageRow {...out
 } }
 const quotedPrompt: TextItem & { role: 'user' } = { _tag: 'Text', role: 'user', id: 'quoted-message', text: 'Explain this example: <smalltalk-message from="Review">Ready for review.</smalltalk-message>', attachments: [], streaming: false, at: '2026-10-11T15:40:00Z' }
 const quotedWork = workLogTurnFromItems([quotedPrompt], { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
-export const NegativeControls: Story = { render: (_args, context) => <>
+export const NegativeControls: Story = { render: (args, context) => <>
   <EmbraceRuntimeProvider options={{ messages: [quotedPrompt], isRunning: false, onNew: fn() }}><Transcript title="Quoted example" turns={[{ id: 'quote-turn', prompt: quotedPrompt, items: [], work: quotedWork }]} sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} /></EmbraceRuntimeProvider>
-  <div data-testid="legacy-file-control" {...stylex.props(context.parameters.scheme !== 'light' && legacyToolDarkTheme)}><EmbraceToolItem item={{ _tag: 'ToolCall', id: 'file-write', callId: 'file-write', name: 'write', input: { path: 'notes/agent-plan.md', content: 'Keep the release plan beside the report.' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} variant="cards" /></div>
+  <div data-testid="legacy-file-control" {...stylex.props((args.scheme ?? context.parameters.scheme) !== 'light' && legacyToolDarkTheme)}><EmbraceToolItem item={{ _tag: 'ToolCall', id: 'file-write', callId: 'file-write', name: 'write', input: { path: 'notes/agent-plan.md', content: 'Keep the release plan beside the report.' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} variant="cards" /></div>
 </>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(await canvas.findByTestId('user-message')).toHaveTextContent('<smalltalk-message')
