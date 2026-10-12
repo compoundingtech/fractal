@@ -4596,7 +4596,6 @@ async fn note_cli_harness_cannot_write_or_borrow_configured_person() {
         assert!(!refusal.contains("daemon"), "{refusal}");
     }
 }
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mission_and_work_detail_reads_ignore_script_actor_with_one_notice() {
     let root = tempfile::tempdir().unwrap();
@@ -4676,6 +4675,24 @@ mission "orchid-actor" state="ready" {
                     assert_eq!(output.stdout, plain_human.stdout);
                 }
             }
+        }
+        let seat_read = run_cli_with_agent_env(
+            &socket,
+            "agent/example/seat",
+            &[command, "show", subject, "--as", "person/avery"],
+        )
+        .await;
+        let returned = value(&seat_read);
+        assert_eq!(
+            String::from_utf8_lossy(&seat_read.stderr)
+                .lines()
+                .collect::<Vec<_>>(),
+            ["st: --as is ignored for this read; no actor is required"]
+        );
+        if command == "work" {
+            assert_eq!(returned["value"], plain_json["value"]);
+        } else {
+            assert_eq!(returned, plain_json);
         }
         let help = run_cli_human(&socket, &[command, "show", "--help"]).await;
         assert!(help.status.success());
