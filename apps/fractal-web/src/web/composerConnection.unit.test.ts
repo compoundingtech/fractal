@@ -11,7 +11,7 @@ describe('composer connection props', () => {
   it('reports browser offline immediately without claiming the host is offline', () => {
     const reconnect = vi.fn()
     const props = composerConnectionProps({ network: { _tag: 'Offline' }, observation: reconnecting, now: 1000, gateway: 'alpha.example', reconnect })
-    expect(props.connectionNotice).toMatchObject({ tone: 'offline', text: 'You are offline', action: { label: 'Reconnect now' } })
+    expect(props.connectionNotice).toMatchObject({ tone: 'offline', text: 'You are offline', action: { label: 'Reconnect' } })
     expect(props.connectionNotice?.text).not.toContain('alpha.example is offline')
     props.connectionNotice?.action?.onPress()
     expect(reconnect).toHaveBeenCalledTimes(1)
