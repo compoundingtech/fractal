@@ -292,3 +292,380 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
         .success()
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn protected_ci_cli_fetches_selectors_and_exports_verified_objects_without_a_key() {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let caller = root.path().join("caller");
+    let private = root.path().join("profile");
+    let fixtures = root.path().join("api");
+    let tools = root.path().join("installed-tools");
+    for directory in [&caller, &private, &fixtures, &tools] {
+        std::fs::create_dir(directory).unwrap();
+    }
+    git(&caller, &["init", "-q"], b"");
+    let blob = git(
+        &caller,
+        &["hash-object", "-w", "--stdin"],
+        b"checked source",
+    );
+    let recipe = b"fixture-ci-source-recipe";
+    let recipe_digest = hex::encode(Sha256::digest(recipe));
+    let recipe_blob = git(&caller, &["hash-object", "-w", "--stdin"], recipe);
+    let scripts = git(
+        &caller,
+        &["mktree"],
+        format!("100644 blob {recipe_blob}\tci-evidence-source\n").as_bytes(),
+    );
+    let workflow = b"fixture-workflow";
+    let workflow_digest = hex::encode(Sha256::digest(workflow));
+    let workflow_blob = git(&caller, &["hash-object", "-w", "--stdin"], workflow);
+    let workflows = git(
+        &caller,
+        &["mktree"],
+        format!("100644 blob {workflow_blob}\tfleet.yml\n").as_bytes(),
+    );
+    let github = git(
+        &caller,
+        &["mktree"],
+        format!("040000 tree {workflows}\tworkflows\n").as_bytes(),
+    );
+    let tree = git(
+        &caller,
+        &["mktree"],
+        format!("040000 tree {github}\t.github\n100644 blob {blob}\tcheck.rs\n040000 tree {scripts}\tscripts\n").as_bytes(),
+    );
+    let source = git(&caller, &["commit-tree", &tree], b"synthetic checkout");
+    git(&caller, &["update-ref", "refs/heads/main", &source], b"");
+    let scratch = private.join("observer.git");
+    git(
+        &private,
+        &["init", "-q", "--bare", scratch.to_str().unwrap()],
+        b"",
+    );
+    let key = private.join("throwaway-key");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    let allowed = root.path().join("allowed-signers");
+    std::fs::write(
+        &allowed,
+        format!("fleet/fixture-observer namespaces=\"git\" {public}"),
+    )
+    .unwrap();
+    let object_list = format!(
+        "{source}\n{tree}\n{blob}\n{scripts}\n{recipe_blob}\n{github}\n{workflows}\n{workflow_blob}\n"
+    );
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(&caller)
+        .args(["pack-objects", "--stdout"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(object_list.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let pack = output.stdout;
+    std::fs::write(fixtures.join("source.pack"), &pack).unwrap();
+    let receipt = serde_json::json!({
+        "version":1, "repository":"example/project", "event":"merge_group",
+        "run_id":"123", "run_attempt":"2", "source":source, "tree":tree,
+        "object_format":"sha1", "change_id":"github:example/project#7",
+        "producer_sha256":recipe_digest, "pack_sha256":hex::encode(Sha256::digest(&pack)),
+        "pack_bytes":pack.len()
+    });
+    std::fs::write(
+        fixtures.join("receipt.json"),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    assert!(Command::new("python3").args(["-c",
+        "import pathlib,sys,zipfile; p=pathlib.Path(sys.argv[1]); z=zipfile.ZipFile(p/'artifact.zip','w'); [z.write(p/n,n) for n in ('receipt.json','source.pack')]; z.close()"])
+        .arg(&fixtures).status().unwrap().success());
+    let zip = std::fs::read(fixtures.join("artifact.zip")).unwrap();
+    let metadata = serde_json::json!({
+        "id":456,"expired":false,"name":"ci-evidence-source-2","workflow_run":{"id":123},
+        "size_in_bytes":zip.len(),"digest":format!("sha256:{}",hex::encode(Sha256::digest(&zip)))
+    });
+    let run = serde_json::json!({
+        "id":123,"run_attempt":2,"repository":{"full_name":"example/project"},
+        "name":"Workspace CI","path":".github/workflows/fleet.yml","status":"completed",
+        "event":"merge_group","head_sha":source,"pull_requests":[{"number":7}],
+        "head_branch":format!("gh-readonly-queue/main/pr-7-{source}")
+    });
+    let jobs = serde_json::json!({"jobs":[
+        {"id":10,"run_id":123,"run_attempt":2,"name":"evidence-source","status":"completed",
+            "conclusion":"success","steps":[
+                {"name":"Retain effective tested source","status":"completed","conclusion":"success"},
+                {"name":"Upload effective tested source","status":"completed","conclusion":"success"}]},
+        {"id":11,"run_id":123,"run_attempt":2,"name":"unit-tests","status":"completed",
+            "conclusion":"success","completed_at":"2026-10-12T12:00:00Z"}]});
+    for (name, value) in [
+        ("run.json", run),
+        ("jobs.json", jobs),
+        ("metadata.json", metadata),
+    ] {
+        std::fs::write(fixtures.join(name), serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+    std::fs::create_dir_all(private.join(".config/st")).unwrap();
+    std::fs::write(
+        private.join(".config/st/evidence-ci.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "repository":"example/project","scratch_repo":scratch,
+            "recipe_sha256":recipe_digest,"required_checks":["unit-tests"],
+            "accepted_base":source,"workflow_sha256":workflow_digest,
+            "tier":"full",
+            "signer":"fleet/fixture-observer","ssh_key":key
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let gh = tools.join("gh");
+    std::fs::write(
+        &gh,
+        r#"#!/usr/bin/env python3
+import os, pathlib, sys
+assert sys.argv[1:4] == ['api', '--hostname', 'github.com']
+suffix = sys.argv[4].removeprefix('repos/example/project/')
+files = {'actions/runs/123/attempts/2':'run.json',
+         'actions/runs/123/attempts/2/jobs?per_page=100&page=1':'jobs.json',
+         'actions/artifacts/456':'metadata.json',
+         'actions/artifacts/456/zip':'artifact.zip'}
+sys.stdout.buffer.write((pathlib.Path(os.environ['FIXTURE_API']) / files[suffix]).read_bytes())
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let installed_git = tools.join("git");
+    std::fs::write(
+        &installed_git,
+        r#"#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if 'fetch' in args:
+    expected = 'https://github.com/example/project.git'
+    assert expected in args and 'transfer.fsckObjects=true' in args
+    args[args.index(expected)] = os.environ['FIXTURE_SOURCE']
+os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&installed_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let observer = |extra: &[&str]| {
+        let mut paths = vec![tools.clone()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        Command::new(test_bin!("st3"))
+            .args([
+                "--endpoint",
+                "unix:/absent.sock",
+                "--daemon-wait",
+                "0",
+                "evidence",
+                "observe-ci",
+                "--run",
+                "123",
+                "--attempt",
+                "2",
+                "--artifact",
+                "456",
+            ])
+            .args(extra)
+            .current_dir(&caller)
+            .env("HOME", &private)
+            .env("FIXTURE_API", &fixtures)
+            .env("FIXTURE_SOURCE", &caller)
+            .env("FIXTURE_REAL_GIT", &real_git)
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .unwrap()
+    };
+    assert!(!observer(&["--statement", "forged.json"]).status.success());
+    assert!(
+        !observer(&["--ssh-key", key.to_str().unwrap()])
+            .status
+            .success()
+    );
+    let result = success(observer(&[]));
+    assert_eq!(result["source"], source);
+    assert_eq!(result["records"][0]["tier"], "full");
+    assert!(result["records"][0]["newly_recorded"].as_bool().unwrap());
+    let exported = base64::engine::general_purpose::STANDARD
+        .decode(result["object_pack_base64"].as_str().unwrap())
+        .unwrap();
+    assert!(
+        !exported
+            .windows(b"OPENSSH PRIVATE KEY".len())
+            .any(|bytes| bytes == b"OPENSSH PRIVATE KEY")
+    );
+    let mut importer = Command::new("git")
+        .arg("-C")
+        .arg(&caller)
+        .args(["index-pack", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    importer.stdin.take().unwrap().write_all(&exported).unwrap();
+    assert!(importer.wait().unwrap().success());
+    let export_check = root.path().join("export-check");
+    std::fs::create_dir(&export_check).unwrap();
+    git(&export_check, &["init", "-q"], b"");
+    let mut import = Command::new("git")
+        .arg("-C")
+        .arg(&export_check)
+        .args(["index-pack", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    import.stdin.take().unwrap().write_all(&exported).unwrap();
+    assert!(import.wait().unwrap().success());
+    let private_oid = git(
+        &caller,
+        &["hash-object", "--stdin"],
+        &std::fs::read(&key).unwrap(),
+    );
+    assert!(
+        !Command::new("git")
+            .arg("-C")
+            .arg(&export_check)
+            .args(["cat-file", "-e", &private_oid])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let record = result["records"][0]["record"].as_str().unwrap();
+    let verified = evidence::verify_record(&caller, record, &allowed).unwrap();
+    assert_eq!(verified.subject[0].name, source);
+    evidence::put(&caller, record, &allowed).unwrap();
+    assert!(
+        !success(observer(&[]))["records"][0]["newly_recorded"]
+            .as_bool()
+            .unwrap()
+    );
+    let mut next_job: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures.join("jobs.json")).unwrap()).unwrap();
+    next_job["jobs"][1]["id"] = serde_json::json!(12);
+    std::fs::write(
+        fixtures.join("jobs.json"),
+        serde_json::to_vec(&next_job).unwrap(),
+    )
+    .unwrap();
+    let moved_key = private.join("offline-throwaway-key");
+    std::fs::rename(&key, &moved_key).unwrap();
+    let degraded = success(observer(&[]));
+    assert_eq!(degraded["records"][0]["tier"], "degraded");
+    assert_eq!(degraded["metrics"]["fresh_records"], 1);
+    assert_eq!(degraded["metrics"]["full_records"], 0);
+    assert_eq!(degraded["metrics"]["full_trust_share"], 0.0);
+    std::fs::rename(&moved_key, &key).unwrap();
+    let replay = success(observer(&[]));
+    assert_eq!(
+        replay["records"][0]["record"],
+        degraded["records"][0]["record"]
+    );
+    assert_eq!(replay["records"][0]["tier"], "degraded");
+    assert_eq!(replay["metrics"]["fresh_records"], 0);
+    assert!(replay["metrics"]["full_trust_share"].is_null());
+    let refresh_artifact = || {
+        assert!(Command::new("python3").args(["-c",
+            "import pathlib,sys,zipfile; p=pathlib.Path(sys.argv[1]); z=zipfile.ZipFile(p/'artifact.zip','w'); [z.write(p/n,n) for n in ('receipt.json','source.pack')]; z.close()"])
+            .arg(&fixtures).status().unwrap().success());
+        let zip = std::fs::read(fixtures.join("artifact.zip")).unwrap();
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixtures.join("metadata.json")).unwrap())
+                .unwrap();
+        metadata["size_in_bytes"] = serde_json::json!(zip.len());
+        metadata["digest"] = format!("sha256:{}", hex::encode(Sha256::digest(&zip))).into();
+        std::fs::write(
+            fixtures.join("metadata.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+    };
+    let mut pr_run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures.join("run.json")).unwrap()).unwrap();
+    pr_run["event"] = "pull_request".into();
+    std::fs::write(
+        fixtures.join("run.json"),
+        serde_json::to_vec(&pr_run).unwrap(),
+    )
+    .unwrap();
+    next_job["jobs"][1]["id"] = serde_json::json!(13);
+    std::fs::write(
+        fixtures.join("jobs.json"),
+        serde_json::to_vec(&next_job).unwrap(),
+    )
+    .unwrap();
+    let mut updated_receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures.join("receipt.json")).unwrap()).unwrap();
+    updated_receipt["event"] = "pull_request".into();
+    std::fs::write(
+        fixtures.join("receipt.json"),
+        serde_json::to_vec(&updated_receipt).unwrap(),
+    )
+    .unwrap();
+    refresh_artifact();
+    let pr_result = success(observer(&[]));
+    assert_eq!(pr_result["full_trust_eligible"], false);
+    assert_eq!(pr_result["records"][0]["tier"], "degraded");
+    assert!(pr_result["trust_limitation"].is_string());
+    // Authenticated artifact bytes can still contain malformed objects. Strict import
+    // refuses an extra unreachable bad commit, even though the source itself is valid.
+    let bad = git(
+        &caller,
+        &[
+            "hash-object",
+            "-w",
+            "--literally",
+            "-t",
+            "commit",
+            "--stdin",
+        ],
+        b"not a valid commit\n",
+    );
+    let prefix = fixtures.join("malformed");
+    let packed = git(
+        &caller,
+        &["pack-objects", prefix.to_str().unwrap()],
+        format!("{object_list}{bad}\n").as_bytes(),
+    );
+    let malformed = std::fs::read(fixtures.join(format!("malformed-{packed}.pack"))).unwrap();
+    std::fs::write(fixtures.join("source.pack"), &malformed).unwrap();
+    updated_receipt["pack_bytes"] = serde_json::json!(malformed.len());
+    updated_receipt["pack_sha256"] = hex::encode(Sha256::digest(&malformed)).into();
+    std::fs::write(
+        fixtures.join("receipt.json"),
+        serde_json::to_vec(&updated_receipt).unwrap(),
+    )
+    .unwrap();
+    refresh_artifact();
+    assert!(!observer(&[]).status.success());
+    // A source ZIP with a changed byte is refused before an observation is produced.
+    let mut damaged = std::fs::read(fixtures.join("artifact.zip")).unwrap();
+    damaged[10] ^= 1;
+    std::fs::write(fixtures.join("artifact.zip"), damaged).unwrap();
+    assert!(!observer(&[]).status.success());
+}
