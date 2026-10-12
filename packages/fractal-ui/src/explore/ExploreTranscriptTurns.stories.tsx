@@ -82,7 +82,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
   const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time>{time}</span></> : null}</span>
   const content = seat
     ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
-    : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human', frame: { _tag: 'Card' } } : { _tag: 'Incoming' }} headerMeta={inputMeta} headerGlyph={turn === `T${3}` ? { _tag: 'Hidden' } : { _tag: 'Icon', name: glyphs[block.kind] }} frameStyles={[...(block.kind === 'Person' ? [styles.humanRail] : []), ...(turn === 'T2' ? [styles.bubbleFrame] : []), ...(kind === 'K2' && block.kind !== 'Person' ? [block.kind === 'Agent' ? styles.agentRail : styles.quietRail] : [])]} />
+    : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} bodyStyles={[styles.unclampedBody]} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human', frame: { _tag: 'Card' } } : { _tag: 'Incoming' }} headerMeta={inputMeta} headerGlyph={turn === `T${3}` ? { _tag: 'Hidden' } : { _tag: 'Icon', name: glyphs[block.kind] }} frameStyles={[...(block.kind === 'Person' ? [styles.humanRail] : []), ...(turn === 'T2' ? [styles.bubbleFrame] : []), ...(kind === 'K2' && block.kind !== 'Person' ? [block.kind === 'Agent' ? styles.agentRail : styles.quietRail] : [])]} />
   const header = seat && turn === `T${3}` && previous?.sender !== block.sender
     ? <header data-turn-header {...stylex.props(styles.header)}><strong>{block.sender}</strong></header> : null
   const body = <div data-turn-content {...stylex.props(styles.content)}>{content}</div>
@@ -146,7 +146,6 @@ function Explorer(initialArgs: ExploreArgs) {
 // Scoped variant projections keep the production message / Markdown / work-log renderers.
 // Every geometry value comes from composition tokens (including the locked hierarchy step).
 const projectionCss = `
-[data-turns-explorer] [data-turn-content] [role="region"] { max-height: none; overflow: visible; }
 [data-turns-explorer] [data-turn-content] p:last-child { margin-bottom: 0; }
 [data-turns-explorer] [data-meta="M4"] [data-turn-content] p:last-child { padding-inline-end: ${geometry.trailingWidth}; }
 [data-turns-explorer] [data-turn-block] [data-affordance="reveal"] { opacity: 0; }
@@ -171,6 +170,7 @@ const styles = stylex.create({
   bubble: { alignSelf: 'end', maxWidth: '75%' }, senderGutter: { marginLeft: g.textColumn }, glyph: { position: 'absolute', right: '100%', top: s.md, width: g.icon, color: ink.fgMuted, textAlign: 'center' },
   bubbleFrame: { borderRadius: r.lg },
   humanRail: { borderLeftWidth: g.focusRing, borderLeftColor: accent.primary }, agentRail: { borderLeftWidth: g.focusRing, borderLeftColor: ink.fgMuted }, quietRail: { borderLeftWidth: g.focusRing, borderLeftColor: ink.fgMuted, borderLeftStyle: 'dashed' },
+  unclampedBody: { maxHeight: 'none', overflowY: 'visible' },
   quiet: { paddingBlock: 0, borderWidth: 0, backgroundColor: surface.transparent },
   header: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: t.metaLeading, paddingRight: geometry.metaRoom, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, marginBottom: s.xs2 },
   content: { minWidth: 0 },
@@ -344,6 +344,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   }
   await expect(canvasElement.querySelector('[data-control-missing-time]')!.querySelectorAll('time')).toHaveLength(0)
   await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-height]')!)).toBeGreaterThan(0)
+  await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-missing-time]')!)).not.toBe(24)
   const owner = canvasElement.querySelector('[data-control-owner]')!, next = canvasElement.querySelector('[data-control-next]')!, label = owner.querySelector('time')!
   await expect(distance(label.getBoundingClientRect(), owner.getBoundingClientRect())).toBeGreaterThan(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
   const samples: HTMLElement[] = []

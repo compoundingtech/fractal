@@ -5,6 +5,8 @@ import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import { Icon, type IconName } from './composition/Icons'
 import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 
+const emptyStyles: ReadonlyArray<stylex.StyleXStyles> = []
+
 export type AgentMessageVia =
   | { readonly _tag: 'Irc' }
   | { readonly _tag: 'SmallTalk' }
@@ -25,6 +27,7 @@ export interface AgentMessageProps {
   readonly headerMeta?: React.ReactNode
   readonly headerGlyph?: { readonly _tag: 'Hidden' } | { readonly _tag: 'Icon'; readonly name: IconName }
   readonly frameStyles?: ReadonlyArray<stylex.StyleXStyles>
+  readonly bodyStyles?: ReadonlyArray<stylex.StyleXStyles>
   readonly id?: string
   readonly from: string
   readonly to?: string
@@ -81,7 +84,7 @@ const MessageFrame = ({ variant, header, subject, children, label, outgoing = fa
 </article>
 
 /** Transport and full-body loading belong to the host, not the message presentation. */
-export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, headerGlyph, frameStyles, id, from, to, via, body, subject, replyTo, at, arrivedWhileWorking, delivery, onLoadFull, onCopyId, onCopy, onOpenReply, fullMessageUnavailableReason }: AgentMessageProps) => {
+export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, headerGlyph, frameStyles, bodyStyles = emptyStyles, id, from, to, via, body, subject, replyTo, at, arrivedWhileWorking, delivery, onLoadFull, onCopyId, onCopy, onOpenReply, fullMessageUnavailableReason }: AgentMessageProps) => {
   const [loadRequested, setLoadRequested] = React.useState(false)
   const reasonId = React.useId()
   const loaded = loadRequested && body._tag === 'Full'
@@ -99,10 +102,10 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
     {body._tag === 'Full' && body.markdown.length > 4000 ? <Disclosure defaultExpanded={loaded}>
       {({ isExpanded }) => <>
         <Button slot="trigger" {...stylex.props(styles.button)}>{isExpanded ? 'Hide full message' : 'Show full message'}</Button>
-        {!isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="group" aria-label="Message excerpt"><MessageBody text={preview} foreground={variant._tag !== 'Outgoing'} /></div> : null}
-        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Full message"><MessageBody text={body.markdown} foreground={variant._tag !== 'Outgoing'} /></div> : null}</DisclosurePanel>
+        {!isExpanded ? <div {...stylex.props(styles.messageBody, ...bodyStyles)} tabIndex={0} role="group" aria-label="Message excerpt"><MessageBody text={preview} foreground={variant._tag !== 'Outgoing'} /></div> : null}
+        <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.messageBody, ...bodyStyles)} tabIndex={0} role="region" aria-label="Full message"><MessageBody text={body.markdown} foreground={variant._tag !== 'Outgoing'} /></div> : null}</DisclosurePanel>
       </>}
-    </Disclosure> : <div {...stylex.props(styles.messageBody)} tabIndex={body.markdown.length > 4000 ? 0 : undefined} role={body.markdown.length > 4000 ? 'region' : 'group'} aria-label={body._tag === 'Full' ? 'Message body' : 'Message excerpt'}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} foreground={variant._tag !== 'Outgoing'} /></div>}
+    </Disclosure> : <div {...stylex.props(styles.messageBody, ...bodyStyles)} tabIndex={body.markdown.length > 4000 ? 0 : undefined} role={body.markdown.length > 4000 ? 'region' : 'group'} aria-label={body._tag === 'Full' ? 'Message body' : 'Message excerpt'}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} foreground={variant._tag !== 'Outgoing'} /></div>}
     {body._tag !== 'Full' || loaded ? <div {...stylex.props(styles.controls)}>
       {!loaded ? <span {...stylex.props(styles.meta)}>Message preview</span> : null}
       <Button {...stylex.props(styles.button)} isPending={body._tag === 'Loading'} isDisabled={!loaded && onLoadFull === undefined} aria-disabled={loaded || undefined} aria-describedby={reasonId} onPress={loaded ? undefined : () => { setLoadRequested(true); onLoadFull?.() }}>{loaded ? 'Full message loaded' : body._tag === 'Loading' ? 'Loading full message…' : body._tag === 'Failed' ? 'Retry full message' : 'Show full message'}</Button>
