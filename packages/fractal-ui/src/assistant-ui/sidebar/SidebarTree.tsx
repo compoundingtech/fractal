@@ -1,8 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useLocale } from 'react-aria'
-import { Button, Collection, ListLayout, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type TreeItemRenderProps } from 'react-aria-components'
-import { borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
+import { Button, Collection, DragAndDropContext, ListLayout, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
+import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { measuredListLayoutOptions, scrollToLayoutKey } from '../composition/virtual-layout'
 
 export interface SidebarTreeItem<T> {
@@ -19,6 +19,7 @@ export interface SidebarTreeProps<T extends SidebarTreeItem<T>> {
   readonly expandedKeys: ReadonlySet<Key>
   readonly onExpandedChange: (keys: Set<Key>) => void
   readonly onAction?: (key: Key) => void
+  readonly dragAndDropHooks?: TreeProps<T>['dragAndDropHooks']
   readonly 'aria-label': string
   readonly ref?: React.Ref<SidebarTreeHandle>
   readonly style?: stylex.StyleXStyles
@@ -27,12 +28,32 @@ export interface SidebarTreeProps<T extends SidebarTreeItem<T>> {
   readonly stickyAncestors?: boolean
 }
 type Pin<T> = { item: T; height: number; offset: number; breadcrumb?: readonly T[] }
-type Snapshot<T> = { pins: readonly Pin<T>[]; height: number; width: number; top?: Key; measurements: readonly T[] }
+type ItemDrop = { key: Key; top: number; height: number }
+type Snapshot<T> = { pins: readonly Pin<T>[]; height: number; width: number; top?: Key; measurements: readonly T[]; drop?: ItemDrop }
+type DropTarget = NonNullable<React.ContextType<typeof DragAndDropContext>['dropState']>['target']
+
+/** Keep RAC's own virtualized insertion indicators above the visual ancestor band. */
+class SidebarTreeLayout extends ListLayout<unknown> {
+  override getDropTargetLayoutInfo(target: Parameters<ListLayout<unknown>['getDropTargetLayoutInfo']>[0]) {
+    const info = super.getDropTargetLayoutInfo(target)
+    info.zIndex = 2
+    return info
+  }
+}
+
+/** Public RAC context supplies keyboard and pointer sessions without wrapping host hooks. */
+function DragSessionObserver({ onChange }: { readonly onChange: (dragging: boolean, target: DropTarget) => void }) {
+  const { dragState, dropState } = React.useContext(DragAndDropContext)
+  const dragging = (dragState?.draggingKeys.size ?? 0) > 0
+  const target = dropState?.target ?? null
+  React.useLayoutEffect(() => onChange(dragging, target), [dragging, target, onChange])
+  return null
+}
 
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
 export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProps<T>) {
   const { direction } = useLocale()
-  const layout = React.useMemo(() => new ListLayout<unknown>(measuredListLayoutOptions), [])
+  const layout = React.useMemo(() => new SidebarTreeLayout(measuredListLayoutOptions), [])
   const tree = React.useRef<HTMLDivElement>(null)
   const navigation = React.useRef<TreeItemRenderProps['state'] | undefined>(undefined)
   const frame = React.useRef<number | undefined>(undefined)
@@ -42,6 +63,9 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const awaitingExpansion = React.useRef(false)
   const settlingAttempts = React.useRef(0)
   const measurementBank = React.useRef<HTMLDivElement>(null)
+  const nativeDrag = React.useRef(false)
+  const dropTarget = React.useRef<DropTarget>(null)
+  const [dragging, setDragging] = React.useState(false)
   const [snapshot, setSnapshot] = React.useState<Snapshot<T>>({ pins: [], height: 0, width: 0, measurements: [] })
   const model = React.useMemo(() => {
     const all = new Map<Key, T>()
@@ -132,9 +156,12 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       return result
     })
     const measurements = [...measurementCandidates.values()]
-    const next = { pins, height: pins.reduce((sum, pin) => sum + pin.height, 0), width, top: top?.item.id, measurements }
+    const target = dropTarget.current
+    const targetInfo = target?.type === 'item' && target.dropPosition === 'on' ? layout.getLayoutInfo(target.key) : undefined
+    const drop = target?.type === 'item' && targetInfo != null ? { key: target.key, top: targetInfo.rect.y - scroll, height: targetInfo.rect.height } : undefined
+    const next = { pins, height: pins.reduce((sum, pin) => sum + pin.height, 0), width, top: top?.item.id, measurements, drop }
     stickyInset.current = next.height
-    setSnapshot(previous => previous.top === next.top && previous.height === next.height && previous.width === width && previous.measurements.length === measurements.length && previous.measurements.every((item, index) => item === measurements[index]) && previous.pins.length === pins.length && previous.pins.every((pin, index) => pin.item === pins[index]!.item && pin.height === pins[index]!.height && pin.offset === pins[index]!.offset && pin.breadcrumb?.map(item => item.id).join(',') === pins[index]!.breadcrumb?.map(item => item.id).join(',')) ? previous : next)
+    setSnapshot(previous => previous.top === next.top && previous.height === next.height && previous.width === width && previous.drop?.key === drop?.key && previous.drop?.top === drop?.top && previous.drop?.height === drop?.height && previous.measurements.length === measurements.length && previous.measurements.every((item, index) => item === measurements[index]) && previous.pins.length === pins.length && previous.pins.every((pin, index) => pin.item === pins[index]!.item && pin.height === pins[index]!.height && pin.offset === pins[index]!.offset && pin.breadcrumb?.map(item => item.id).join(',') === pins[index]!.breadcrumb?.map(item => item.id).join(',')) ? previous : next)
     const key = pending.current
     if (key !== undefined && model.all.has(key)) {
       // Retry while ancestors/data/observed sizes settle, including late ResizeObserver deliveries.
@@ -163,6 +190,22 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     if (frame.current !== undefined) return
     frame.current = requestAnimationFrame(() => { frame.current = undefined; measure() })
   }, [])
+  const observeDrag = React.useEffectEvent((active: boolean, target: DropTarget) => {
+    dropTarget.current = target
+    if (active || target !== null) pending.current = undefined
+    setDragging(nativeDrag.current || active || target !== null)
+    schedule()
+  })
+  const dragObserver = React.useCallback((active: boolean, target: DropTarget) => observeDrag(active, target), [])
+  React.useLayoutEffect(() => {
+    if (props.dragAndDropHooks === undefined) return
+    const start = () => { nativeDrag.current = true; pending.current = undefined; setDragging(true) }
+    const end = () => { nativeDrag.current = false; dropTarget.current = null; setDragging(false); schedule() }
+    document.addEventListener('dragstart', start, true)
+    document.addEventListener('dragend', end, true)
+    document.addEventListener('drop', end)
+    return () => { document.removeEventListener('dragstart', start, true); document.removeEventListener('dragend', end, true); document.removeEventListener('drop', end) }
+  }, [props.dragAndDropHooks, schedule])
   const reveal = React.useEffectEvent((key: Key, options?: { readonly anchor: false }) => {
     pending.current = key
     anchorMode.current = options?.anchor === false ? 'once' : 'reveal'
@@ -247,12 +290,13 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${s.lg} * ${depth} + ${s.sm})` }} />)}
     {item.children?.length ? pinned ? <span data-pinned-chevron {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</span> : <Button slot="chevron" {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</Button> : null}
     <div {...stylex.props(styles.content)}>{props.renderRow(item, { depth: item.depth, expanded, pinned })}</div>
+    {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
   </div>
   const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
-    <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu]}>{renderItem}</Collection>
+    <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]}>{renderItem}</Collection>
   </TreeItem>
-  return <div {...stylex.props(styles.root, props.style)} onKeyDownCapture={event => { pending.current = undefined; keyboard(event) }} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
+  return <div {...stylex.props(styles.root, props.style)} data-sidebar-drag-active={dragging || undefined} onKeyDownCapture={event => { pending.current = undefined; keyboard(event) }} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
     const target = (event.target as HTMLElement).closest('[data-sidebar-tree-key]')
     const key = target?.getAttribute('data-sidebar-tree-key')
     const item = model.visible.find(item => String(item.id) === key)
@@ -263,17 +307,18 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       schedule()
     }
   }}>
-    <Virtualizer layout={layout} shouldObserveItemSize><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
+    <Virtualizer layout={layout} shouldObserveItemSize><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} dragAndDropHooks={props.dragAndDropHooks} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
     <div aria-hidden="true" data-sidebar-pinned-stack data-top-key={snapshot.top} {...stylex.props(styles.stack)} style={{ height: snapshot.height }}>
-      {snapshot.pins.map(pin => <div key={pin.item.id} {...stylex.props(styles.pinSlot)} style={{ height: pin.height }}><div data-pinned-key={String(pin.item.id)} data-pinned-ancestors={(pin.breadcrumb ?? [pin.item]).map(item => item.id).join(',')} {...stylex.props(styles.pin)} style={{ height: pin.height, transform: `translateY(calc(${pin.offset} * ${g.hairline}))` }} onClick={event => {
+      {snapshot.pins.map(pin => <div key={pin.item.id} {...stylex.props(styles.pinSlot)} style={{ height: pin.height }}><div draggable={false} data-pinned-key={String(pin.item.id)} data-pinned-ancestors={(pin.breadcrumb ?? [pin.item]).map(item => item.id).join(',')} {...stylex.props(styles.pin, dragging && styles.dragPassthrough)} style={{ height: pin.height, transform: `translateY(calc(${pin.offset} * ${g.hairline}))` }} onClick={event => {
         const target = event.target as HTMLElement
         if (target.closest('[data-pinned-toggle]')) { const keys = new Set(props.expandedKeys); keys.has(pin.item.id) ? keys.delete(pin.item.id) : keys.add(pin.item.id); props.onExpandedChange(keys) }
         else focusReal(pin.item.id)
       }} onContextMenu={event => props.onRowContextMenu?.(pin.item, event)}>
         <div inert {...stylex.props(styles.copy)}>{pin.breadcrumb ? <div data-sidebar-breadcrumb {...stylex.props(styles.breadcrumb)}>{pin.breadcrumb.map(item => item.textValue).join(' / ')}</div> : row(pin.item, props.expandedKeys.has(pin.item.id), true)}</div>
-        {pin.item.children?.length && !pin.breadcrumb ? <span data-pinned-toggle {...stylex.props(styles.toggleProxy)} style={{ insetInlineStart: `calc(${s.lg} * ${pin.item.depth})` }} /> : null}
+        {pin.item.children?.length && !pin.breadcrumb ? <span data-pinned-toggle {...stylex.props(styles.toggleProxy, dragging && styles.dragPassthrough)} style={{ insetInlineStart: `calc(${s.lg} * ${pin.item.depth})` }} /> : null}
       </div></div>)}
     </div>
+    {snapshot.drop !== undefined && <div aria-hidden data-sidebar-drop-indicator data-drop-key={String(snapshot.drop.key)} {...stylex.props(styles.dropIndicator)} style={{ top: snapshot.drop.top, height: snapshot.drop.height, width: snapshot.width }} />}
     <div ref={measurementBank} aria-hidden inert {...stylex.props(styles.measurementBank)} style={{ width: snapshot.width }}>{snapshot.measurements.map(item => <div key={item.id} data-measure-key={String(item.id)}>{row(item, props.expandedKeys.has(item.id), true)}</div>)}</div>
   </div>
 }
@@ -290,6 +335,8 @@ const styles = stylex.create({
   pinSlot: { position: 'relative', overflow: 'hidden', pointerEvents: 'none' },
   measurementBank: { position: 'absolute', top: 0, insetInlineStart: 0, visibility: 'hidden', pointerEvents: 'none' },
   pin: { position: 'relative', overflow: 'hidden', backgroundColor: { default: surface.sidebar, ':hover': surface.rowHover }, pointerEvents: 'auto', cursor: 'pointer' },
+  dragPassthrough: { pointerEvents: 'none' },
+  dropIndicator: { position: 'absolute', insetInlineStart: 0, boxSizing: 'border-box', zIndex: 3, pointerEvents: 'none', borderStyle: 'solid', borderWidth: g.focusRing, borderColor: accent.primary },
   copy: { height: '100%', pointerEvents: 'none' },
   toggleProxy: { position: 'absolute', top: 0, width: g.controlSm, height: '100%' },
   breadcrumb: { height: '100%', display: 'flex', alignItems: 'center', paddingInline: s.md, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', fontSize: 'inherit', color: ink.fgMuted },
