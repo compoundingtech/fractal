@@ -117,7 +117,12 @@ async function assertCompactCard(canvasElement: HTMLElement) {
   await expect(new Set(labels).size).toBe(labels.length)
   for (const label of ['Name', 'ID', 'Description', 'Last activity', 'Worktree', 'Lease expires']) await expect(labels).not.toContain(label)
   await expect(card.querySelectorAll('li').length).toBeLessThanOrEqual(3)
-  await expect(card.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/)
+  // Exact instants stay in the hidden description carriers only; the painted card text never shows ISO timestamps.
+  const painted = card.cloneNode(true) as HTMLElement
+  const carriers = [...card.querySelectorAll('[aria-describedby]')].flatMap(described => described.getAttribute('aria-describedby')!.split(' '))
+  await expect(carriers.length).toBeGreaterThan(0)
+  for (const id of carriers) painted.querySelector(`#${CSS.escape(id)}`)!.parentElement!.remove()
+  await expect(painted.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/)
 }
 function CohortList() {
   return <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.map((row, index) => <SidebarAgentRow key={row.ref} item={row} now={storyNow} active={index === 0} />)}</div>

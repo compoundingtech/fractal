@@ -1,4 +1,4 @@
-/** Resource card disclosure: the custom hover is the only hover disclosure (no native titles), and the modal keeps the full detail as its accessible description. */
+/** Resource card disclosure (keyboard path): the custom hover is the only hover disclosure (no native titles), and the modal keeps the full detail as its accessible description. */
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
@@ -28,15 +28,17 @@ export const HoverAndDialog: Story = { name: 'Hover and dialog · no native titl
   const canvas = within(canvasElement)
   await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
   const trigger = canvas.getByRole('button', { name: 'Open 2 changed files' })
-  await userEvent.hover(trigger)
+  // Keyboard focus opens the custom hover immediately (RAC tooltips open on focus-visible without the hover warmup).
+  await userEvent.tab()
+  await expect(trigger).toHaveFocus()
   const tooltip = await waitFor(() => { const found = document.querySelector<HTMLElement>('[role="tooltip"]'); expect(found).not.toBeNull(); return found! })
   await expect(tooltip.querySelector('[data-resource-detail]')!.textContent).toBe(resource.detail)
   await expect(tooltip.querySelectorAll('[title]')).toHaveLength(0)
   for (let node: HTMLElement | null = trigger; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
   await expect(document.querySelectorAll('[role="tooltip"]')).toHaveLength(1)
-  await userEvent.unhover(trigger)
+  await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(document.querySelector('[role="tooltip"]')).toBeNull())
-  await userEvent.click(trigger)
+  await userEvent.keyboard('{Enter}')
   const dialog = await waitFor(() => { const found = document.querySelector<HTMLElement>('[role="dialog"]'); expect(found).not.toBeNull(); return found! })
   await expect(dialog).toHaveAccessibleName('Resource 2 changed files')
   await expect(dialog).toHaveAccessibleDescription(resource.detail)
