@@ -9,6 +9,6 @@ openSubagentConversation(navigation, 'session/child', 'ParityChild');
 assert.deepEqual(routes, [{ name: 'ResourcesRoot' }, parent, {
   name: 'Conversation', params: { target: 'session/child', sessionId: 'session/child', title: 'ParityChild' },
 }]);
-// Native Back removes the pushed route, preserving the exact parent, not the Agents root.
+// Native Back removes the pushed route, preserving the exact parent, not the Resources root.
 routes.pop();
 assert.equal(routes.at(-1), parent);

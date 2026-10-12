@@ -3,7 +3,7 @@ import { ago } from './presentation';
 import { missionSteps } from './presentation';
 import { theme } from './theme';
 
-// The Missions tab, drawn the way stui draws it (crates/stui/src/ui/screens.rs missions_list,
+// The Missions list, drawn the way stui draws it (crates/stui/src/ui/screens.rs missions_list,
 // adapt.rs missions): one word per mission naming who has to move, in this order.
 export const WORDS = ['decision', 'stalled', 'unstaffed', 'unclaimed', 'queued', 'working', 'watching', 'held', 'idle', 'done', 'failed', 'cancelled'] as const;
 export type Word = typeof WORDS[number];
@@ -151,4 +151,13 @@ export function stepStyle(state: string, spinner = '⠿'): StepStyle {
   const style = stepStyles[stepState(state) as WorkState];
   if (!style) return { glyph: '▱', color: theme.surface2, word: 'later', rank: 5 };
   return activeStep(stepState(state)) ? { ...style, glyph: spinner } : style;
+}
+
+/** Match every search word against a mission's title, path, status and progress. */
+export function filterMissionRows(rows: MissionRow[], filter: string): MissionRow[] {
+  const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
+  return words.length ? rows.filter(row => {
+    const text = `${row.title} ${row.path} ${wordName(row.word)} ${row.progress ?? ''}`.toLowerCase();
+    return words.every(word => text.includes(word));
+  }) : rows;
 }
