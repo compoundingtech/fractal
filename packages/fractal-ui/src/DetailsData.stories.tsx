@@ -297,13 +297,15 @@ function assertSession(root:HTMLElement) {
  requireContract(section.querySelector('[data-details-token-label]')?.textContent === 'Cumulative tokens · this agent', 'Self tokens inherited inclusive monetary scope')
 }
 function assertPartialFacts(root:HTMLElement) {
- const card=Array.from(root.querySelectorAll('[data-resource-card]')).find(item=>item.textContent?.includes('native-child'))
+ const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('native-child'))
  requireContract(card, 'Unavailable label hid the known descendant identity')
- // Dense metadata is whole-or-absent on paint; the row's accessible name always carries the reported facts.
- const facts=`${card.textContent??''} ${card.querySelector('[data-details-resource-row]')?.getAttribute('aria-label')??''}`
- requireContract(!facts.includes('Invalid Date')&&!facts.includes('NaN')&&!facts.includes('First observed')&&!facts.includes('Parent ·')&&facts.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
+ // Hover is supplementary: the card paints the reported facts, and they describe its open action.
+ const facts=card.querySelector<HTMLElement>('[data-resource-detail]')
+ requireContract(facts&&facts.checkVisibility({opacityProperty:true,visibilityProperty:true})&&facts.getBoundingClientRect().height>0&&card.querySelector('[data-details-resource-row]')?.getAttribute('aria-describedby')===facts.id, 'Reported descendant facts are hidden behind hover')
+ const text=facts.textContent??''
+ requireContract(!text.includes('Invalid Date')&&!text.includes('NaN')&&!text.includes('First observed')&&!text.includes('Parent ·')&&text.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
  requireContract(root.textContent?.includes('Showing 1 of 4 traced sessions'), 'Missing descendant facts changed the reported descendant count')
- requireContract(!facts.includes('gpt-5.4'), 'Unavailable model was fabricated')
+ requireContract(!card.textContent?.includes('gpt-5.4'), 'Unavailable model was fabricated')
 }
 function assertContextSamples(root:HTMLElement) {
  assertPercentOnly(root)
@@ -334,16 +336,21 @@ export const PartialDescendantFacts: Story = {
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     assertPartialFacts(root)
-    const wrong=root.cloneNode(true) as HTMLElement
-    const card=Array.from(wrong.querySelectorAll('[data-resource-card]')).find(item=>item.textContent?.includes('native-child'))
-    requireContract(card,'Missing descendant-model negative control target')
-    const invented=wrong.ownerDocument.createElement('span')
+    const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('native-child')),facts=card?.querySelector<HTMLElement>('[data-resource-detail]')
+    requireContract(card&&facts,'Missing descendant facts negative control target')
+    const original=facts.textContent,invented=card.ownerDocument.createElement('span')
     invented.textContent='gpt-5.4'
-    card.append(invented)
-    await rejectsControl('Unavailable model was fabricated',()=>assertPartialFacts(wrong))
-    const row=card.querySelector('[data-details-resource-row]');requireContract(row,'Missing descendant lifecycle negative control target')
-    invented.remove();row.setAttribute('aria-label',(row.getAttribute('aria-label')??'').replace(/Last observed[^·]*/,''))
-    await rejectsControl('Unavailable timestamps or parent fabricated lifecycle facts',()=>assertPartialFacts(wrong))
+    try {
+      card.append(invented)
+      await rejectsControl('Unavailable model was fabricated',()=>assertPartialFacts(root))
+      invented.remove()
+      facts.textContent=(original??'').replace(/ · Last observed[^·]*/,'')
+      await rejectsControl('Unavailable timestamps or parent fabricated lifecycle facts',()=>assertPartialFacts(root))
+      facts.textContent=original
+      facts.style.setProperty('visibility','hidden')
+      await rejectsControl('Reported descendant facts are hidden behind hover',()=>assertPartialFacts(root))
+    } finally { invented.remove(); facts.textContent=original; facts.style.removeProperty('visibility') }
+    assertPartialFacts(root)
   },
 }
 export const ContextPercentOnly: Story = {

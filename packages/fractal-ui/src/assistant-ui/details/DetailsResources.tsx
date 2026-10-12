@@ -268,8 +268,9 @@ function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now
       <AriaButton aria-label={`Open in split: ${resource.card.label}`} onPress={() => open(paneKey, true)} {...stylex.props(styles.splitButton, styles.inlineSplit)}>Open in split</AriaButton>
     </div>
   }
+  // Traced sessions and incarnations carry their reported facts only in the detail, so the card paints it.
   return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.entry)}>
-    <ResourceCardV1 resource={resource.card} variant="RC-1" titlePriority titleLines={wrapsIdentity(resource) ? 'wrap' : 1} icon={resourceIcon(resource)} onOpen={() => open(paneKey, splitPress.current)} />
+    <ResourceCardV1 resource={resource.card} variant="RC-1" titlePriority titleLines={wrapsIdentity(resource) ? 'wrap' : 1} icon={resourceIcon(resource)} detailLine={resource.uri.startsWith('session:')} onOpen={() => open(paneKey, splitPress.current)} />
   </div>
 }
 
