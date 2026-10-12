@@ -48,7 +48,7 @@ windows produce no latency sample. Reconnects end when live state is presented.
 Direct attempts count only devices with a local daemon; ordinary paired-device
 gateway routes do not reduce the direct-route success percentage. Terminal opens
 end when an attached native screen is visibly presented. Dead tabs
-count stream loss or exit, once per transition. Alert landing requires a subsequent
+count stream loss or exit, once per transition. Alert landing requires successful action confirmation and a subsequent
 non-truncated attention window to show the answered card gone or resolved, followed
 by successful presentation; failed actions do not produce a success sample.
 

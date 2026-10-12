@@ -187,6 +187,23 @@ fn usage_error(error: &st3_client::ClientError) -> String {
     }
 }
 
+/// A disappearing card can race the action's reply (including a refusal). Count
+/// landing only when both the action succeeded and a fresh window showed it gone.
+struct AnswerTiming {
+    sent: Instant,
+    accepted: bool,
+    gone: bool,
+    seen: bool,
+}
+impl AnswerTiming {
+    fn new(sent: Instant) -> Self {
+        Self { sent, accepted: false, gone: false, seen: false }
+    }
+    fn landed(&self) -> Option<Instant> {
+        (self.accepted && self.gone).then_some(self.sent)
+    }
+}
+
 enum Fetched {
     Content(super::content::Key, Result<(String, Vec<u8>), String>),
     Read(String, ReceiptOutcome),
@@ -203,7 +220,7 @@ enum Fetched {
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
-    AlertFailed(String),
+    AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
     Sessions(Collection),
     Session(String, Result<Box<st3_client::Session>, String>),
@@ -326,7 +343,7 @@ pub fn run(context: Context) -> Result<()> {
     let mut conversing: Vec<String> = Vec::new();
     let mut opens: BTreeMap<String, Instant> = BTreeMap::new();
     let mut terminal_opens: BTreeMap<String, Instant> = BTreeMap::new();
-    let mut answers: BTreeMap<String, Instant> = BTreeMap::new();
+    let mut answers: BTreeMap<String, AnswerTiming> = BTreeMap::new();
     let mut landed_answers: Vec<Instant> = Vec::new();
     // The session each conversation was last subscribed again for, so it is asked once.
     let mut resubscribed: BTreeMap<String, String> = BTreeMap::new();
@@ -516,13 +533,24 @@ pub fn run(context: Context) -> Result<()> {
                         ui.quality
                             .frame(received, if window == Window::Attention { 1 } else { 2 });
                     }
-                    if window == Window::Attention {
-                        answers.retain(|id, started| {
-                            let still_asking = has_more || items.iter().any(|item| matches!(item, Resource::Attention(card) if &card.header.id == id && card.state != "resolved"));
-                            if !still_asking {
-                                landed_answers.push(*started);
+                    if window == Window::Attention && !has_more {
+                        // Reuse the pending-answer index: one lookup per card, rather
+                        // than scanning the whole window separately for every answer.
+                        for timing in answers.values_mut() { timing.seen = false; }
+                        for item in &items {
+                            if let Resource::Attention(card) = item
+                                && let Some(timing) = answers.get_mut(&card.header.id) {
+                                timing.seen = card.state != "resolved";
                             }
-                            still_asking
+                        }
+                        answers.retain(|_, timing| {
+                            if !timing.seen { timing.gone = true; }
+                            if let Some(at) = timing.landed() {
+                                landed_answers.push(at);
+                                false
+                            } else {
+                                true
+                            }
                         });
                     }
                     extras.window_errors.remove(&format!("{window:?}"));
@@ -782,8 +810,16 @@ pub fn run(context: Context) -> Result<()> {
                     extras.bodies.insert(id, (from, title, content));
                 }
                 Fetched::Notice(notice) => ui.flash(notice),
-                Fetched::AlertFailed(id) => {
-                    answers.remove(&id);
+                Fetched::AlertOutcome(id, accepted) => {
+                    if !accepted {
+                        answers.remove(&id);
+                    } else if let Some(timing) = answers.get_mut(&id) {
+                        timing.accepted = true;
+                        if let Some(at) = timing.landed() {
+                            landed_answers.push(at);
+                            answers.remove(&id);
+                        }
+                    }
                 }
                 Fetched::Sessions(native) => {
                     model.sessions = native;
@@ -1285,7 +1321,7 @@ pub fn run(context: Context) -> Result<()> {
             }
             if let Effect::Attention { id, .. } = &effect {
                 if answers.len() < 256 || answers.contains_key(id) {
-                    answers.insert(id.clone(), Instant::now());
+                    answers.insert(id.clone(), AnswerTiming::new(Instant::now()));
                 } else {
                     super::slo::METRICS.add("measurement_overflow", 1);
                 }
@@ -1542,10 +1578,8 @@ pub fn run(context: Context) -> Result<()> {
             runtime.spawn(async move {
                 let outcome =
                     perform_steadily(&client, &person, &model, effect, sent.as_deref()).await;
-                if outcome.is_err()
-                    && let Some(id) = alert
-                {
-                    let _ = tx.send(Fetched::AlertFailed(id));
+                if let Some(id) = alert {
+                    let _ = tx.send(Fetched::AlertOutcome(id, outcome.is_ok()));
                 }
                 if let Some(token) = token {
                     let _ = tx.send(Fetched::Sent(
@@ -2658,6 +2692,24 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_answer_landing_requires_action_confirmation_and_the_fresh_window_in_either_order() {
+        let at = Instant::now();
+        let mut window_first = AnswerTiming::new(at);
+        window_first.gone = true;
+        assert!(
+            window_first.landed().is_none(),
+            "a card closed by another device is not our successful answer"
+        );
+        window_first.accepted = true;
+        assert_eq!(window_first.landed(), Some(at));
+        let mut reply_first = AnswerTiming::new(at);
+        reply_first.accepted = true;
+        assert!(reply_first.landed().is_none());
+        reply_first.gone = true;
+        assert_eq!(reply_first.landed(), Some(at));
+    }
+
     #[test]
     fn a_send_st_may_have_taken_is_unconfirmed_and_one_it_never_queued_is_tried_afresh() {
         let answer = |applied: &str, code: st3_client::ErrorCode| -> anyhow::Error {
