@@ -16,7 +16,7 @@ import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@st3/sdk/effect'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { createConversationTranscript } from './conversationTranscript.ts'
-import appCss from './app.css?raw'
+import { readFileSync } from 'node:fs'
 
 vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, defineVars: (variables: unknown) => variables, createTheme: () => ({}), keyframes: () => 'animation', props: () => ({}) }))
 
@@ -60,7 +60,8 @@ afterEach(async () => { await act(async () => root.unmount()); registry.dispose(
 describe('live header parity', () => {
   it('keeps title and status flexible while native actions align to the trailing edge', () => {
     const style = document.createElement('style')
-    style.textContent = appCss
+    // Vitest disables CSS imports; load the production stylesheet rather than its empty module stub.
+    style.textContent = readFileSync(new URL('./app.css', import.meta.url), 'utf8')
     document.head.append(style)
     try {
       const titleStatus = host.querySelector<HTMLElement>("[data-workspace-header] [data-testid='thread-header'] > nav + div")!
