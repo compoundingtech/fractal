@@ -15,10 +15,12 @@ interface Args { scheme: 'light'|'dark'; width: 440|1440 }
 const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),pane:{height:660}})
 const meta={title:'Fractal UI/Details Presentation',component:DetailsPane,parameters:{layout:'fullscreen'},args:{scheme:'dark',width:440},render:function Render({scheme,width}:Args){
   const [open,setOpen]=React.useState(false)
+  const [showOpener,setShowOpener]=React.useState(true)
+  const returnRef=React.useRef<HTMLDivElement>(null)
   const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
   const inputs=detailsStoryInputs('partial',detailsTraceFixtures.unknown)
   const overview={...inputs.overview,title:'Observed agent',mission:'Review the retained session observations without inventing unavailable attribution or timing.',durations:[{label:'Managed-session elapsed (from session start to end or now; wall time, not active)',value:'Unreported'},{label:'Root-incarnation session age (from managed session start; native cut not reported)',value:'Unreported'}]}
-  return <div {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal><Button onPress={()=>setOpen(true)}>Open details</Button>{open&&<div {...stylex.props(styles.pane)}><DetailsPane {...inputs} overview={overview} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state="partial" intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} onClose={()=>setOpen(false)}/></div>}</ThemePortal></div>
+  return <div ref={returnRef} role="region" aria-label="Details host" tabIndex={-1} data-testid="details-return-region" {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{showOpener&&<Button onPress={()=>setOpen(true)}>Open details</Button>}<Button onPress={()=>setShowOpener(false)}>Remove opener</Button>{open&&<div {...stylex.props(styles.pane)}><DetailsPane {...inputs} overview={overview} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state="partial" intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} onClose={()=>setOpen(false)} closeFocusTarget={()=>returnRef.current}/></div>}</ThemePortal></div>
 }} satisfies Meta<Args>
 export default meta
 type Story=StoryObj<typeof meta>
@@ -33,6 +35,13 @@ function assertOverview(root:HTMLElement){
 async function play({canvasElement}:{canvasElement:HTMLElement}){
   const canvas=within(canvasElement),doc=canvasElement.ownerDocument,opener=canvas.getByRole('button',{name:'Open details'})
   opener.focus();await userEvent.click(opener)
+  const assertImmediateClose=()=>requireContract(!canvas.queryByTestId('details-pane')&&doc.activeElement===opener,'Immediate Escape did not close Details and restore opener focus')
+  const initialRoot=await canvas.findByTestId('details-pane')
+  const blockImmediateEscape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation()}}
+  initialRoot.addEventListener('keydown',blockImmediateEscape,{capture:true})
+  try{await userEvent.keyboard('{Escape}');await rejectsControl('Immediate Escape did not close Details and restore opener focus',assertImmediateClose)}finally{initialRoot.removeEventListener('keydown',blockImmediateEscape,{capture:true})}
+  await userEvent.keyboard('{Escape}');await waitFor(assertImmediateClose)
+  await userEvent.click(opener)
   const root=await canvas.findByTestId('details-pane'),band=root.querySelector<HTMLElement>('[data-details-tab-band]');requireContract(band,'Missing panel band')
   requireContract(band.getBoundingClientRect().height===52,'Details band differs from 52px')
   const close=within(band).getByRole('button',{name:'Close details'}),icon=close.querySelector('svg');requireContract(icon&&icon.getBoundingClientRect().width===16,'Close icon differs from 16px')
@@ -51,3 +60,17 @@ export const NarrowDark:Story={args:{width:440,scheme:'dark'},play}
 export const NarrowLight:Story={args:{width:440,scheme:'light'},play}
 export const WideDark:Story={args:{width:1440,scheme:'dark'},play}
 export const WideLight:Story={args:{width:1440,scheme:'light'},play}
+async function removedOpenerPlay({canvasElement}:{canvasElement:HTMLElement}){
+  const canvas=within(canvasElement),doc=canvasElement.ownerDocument,opener=canvas.getByRole('button',{name:'Open details'}),fallback=canvas.getByTestId('details-return-region')
+  await userEvent.click(opener);await canvas.findByTestId('details-pane')
+  await userEvent.click(canvas.getByRole('button',{name:'Remove opener'}));requireContract(!opener.isConnected,'Host failed to unmount opener')
+  await userEvent.click(canvas.getByRole('button',{name:'Close details'}))
+  const assertFallback=()=>requireContract(!canvas.queryByTestId('details-pane')&&doc.activeElement===fallback&&doc.activeElement!==doc.body,'Removed opener lost its stable focus fallback')
+  await waitFor(assertFallback)
+  await userEvent.click(canvas.getByRole('button',{name:'Remove opener'}));await rejectsControl('Removed opener lost its stable focus fallback',assertFallback)
+  fallback.focus();assertFallback()
+}
+export const NarrowRemovedOpenerDark:Story={args:{width:440,scheme:'dark'},play:removedOpenerPlay}
+export const NarrowRemovedOpenerLight:Story={args:{width:440,scheme:'light'},play:removedOpenerPlay}
+export const WideRemovedOpenerDark:Story={args:{width:1440,scheme:'dark'},play:removedOpenerPlay}
+export const WideRemovedOpenerLight:Story={args:{width:1440,scheme:'light'},play:removedOpenerPlay}
