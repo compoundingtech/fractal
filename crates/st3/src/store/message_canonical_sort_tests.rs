@@ -23,6 +23,16 @@ fn old_sort(connection: &Connection, messages: &mut [MessageView]) -> Result<()>
     Ok(())
 }
 
+// Exact immediate pre-batching sorter: one fused lookup per message.
+fn single_key_sort(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
+    let mut keys = BTreeMap::new();
+    for message in messages.iter() {
+        keys.insert(message.subject.clone(), message_canonical_key_tx(connection, &message.subject)?);
+    }
+    messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
+    Ok(())
+}
+
 fn schema(connection: &mut Connection) {
     smallclaims::sqlite::observe(connection);
     connection.execute_batch(
@@ -112,9 +122,12 @@ fn assert_keys(connection: &Connection, messages: &[MessageView]) {
 fn parity(connection: &Connection, messages: &[MessageView]) -> Vec<MessageView> {
     assert_keys(connection, messages);
     let mut old = messages.to_vec();
+    let mut single = messages.to_vec();
     let mut new = messages.to_vec();
     old_sort(connection, &mut old).unwrap();
+    single_key_sort(connection, &mut single).unwrap();
     sort_messages_canonically(connection, &mut new).unwrap();
+    assert_eq!(serde_json::to_value(&old).unwrap(), serde_json::to_value(&single).unwrap());
     assert_eq!(serde_json::to_value(&old).unwrap(), serde_json::to_value(&new).unwrap());
     new
 }
@@ -150,6 +163,10 @@ fn batched_message_sort_uses_one_statement_per_bounded_group_after_warmups() {
     let old_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     old_sort(&connection, &mut old).unwrap();
     let old_work = old_scope.finish();
+    let mut single = messages.clone();
+    let single_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    single_key_sort(&connection, &mut single).unwrap();
+    let single_work = single_scope.finish();
     let mut new = messages.clone();
     let new_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
     sort_messages_canonically(&connection, &mut new).unwrap();
@@ -157,6 +174,7 @@ fn batched_message_sort_uses_one_statement_per_bounded_group_after_warmups() {
     assert_eq!(serde_json::to_value(old).unwrap(), serde_json::to_value(new).unwrap());
     assert!(messages.len() >= 40 && new_work.statements > 0);
     assert_eq!(old_work.statements, 2 * messages.len() as u64);
+    assert_eq!(single_work.statements, messages.len() as u64);
     assert_eq!(new_work.statements, 1);
 }
 
