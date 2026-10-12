@@ -294,6 +294,10 @@ test('quota drawer exposes exact cost/token and reset values with a missing-disc
     const reset = drawer.querySelector('[data-quota-cell="reset"] > [title]')
     assert.ok(reset.title.includes('2030-05-03T12:00:00Z'))
     assert.ok(reset.title.includes('0 reported resets'))
+    const more = drawer.querySelector('[data-quota-more]')
+    assert.equal(more.getAttribute('aria-label'), null, 'Visible +N contributes directly to the accessible name')
+    assert.ok(more.textContent.includes('+0'))
+    assert.equal(more.querySelector('[data-quota-more-description]').textContent.trim(), more.title)
     const title = amount.title, full = amount.querySelector('[data-quota-full-value]')
     amount.title = ''; full.textContent = ''
     assert.throws(() => assertQuotaDrawerDisclosure(drawer), /full-value disclosure/)

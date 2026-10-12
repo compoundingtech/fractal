@@ -42,7 +42,7 @@ export const assertQuotaPriority = (drawer: HTMLElement): void => {
     const resetCell = row.querySelector<HTMLElement>('[data-quota-cell="reset"]')!
     if (reset === null || !visibleBox(reset, row) || reset.getBoundingClientRect().right > resetCell.getBoundingClientRect().right + 1) throw new Error('Governing reset is hidden or clipped')
     const more = row.querySelector<HTMLButtonElement>('[data-quota-more]')
-    if (more === null || !more.getAttribute('aria-label')?.includes('amount and reset evidence')) throw new Error('Secondary evidence has no accessible disclosure')
+    if (more === null || more.querySelector('[data-quota-more-description]')?.textContent?.trim() !== more.title || !more.title.includes('amount and reset evidence')) throw new Error('Secondary evidence has no accessible disclosure')
   }
 }
 

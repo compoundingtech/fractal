@@ -192,6 +192,7 @@ geometry shared with other meter tables; inset separators do not add row height.
 Account identity takes the remaining table width; governing usage and reset have
 protected character-unit tracks. Secondary windows fold first, then amount,
 into the accessible all-evidence action. Its +N counts secondary windows only.
+Its accessible name includes that visible count and the full evidence description.
 The governing reset never folds or ellipsizes. The `quotaOverflowPolicy` constant
 is the single swap point for collapse/hide/truncate pending the overflow decision.
 Variant meters stay inside the same row rather than growing an account into a card.

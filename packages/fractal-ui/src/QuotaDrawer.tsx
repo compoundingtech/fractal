@@ -192,9 +192,10 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
                 </Cell>)}
                 <Cell data-quota-cell="amount" textValue={amountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.amountColumn)}><span title={amountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.amount)}><span aria-hidden="true">{amountText(amount.value, amount.unit)}</span><VisuallyHidden><span data-quota-full-value>{amountEvidence}</span></VisuallyHidden></span></Cell>
                 <Cell data-quota-cell="more" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
-                  <Button aria-label={`Open all ${account.windows.length} windows, amount and reset evidence for ${account.label}`} onPress={() => props.onOpenUsage(account.id)} data-quota-more={omitted} {...stylex.props(styles.moreButton)}>
+                  <Button title={`Open all ${account.windows.length} windows, amount and reset evidence for ${account.label}`} onPress={() => props.onOpenUsage(account.id)} data-quota-more={omitted} {...stylex.props(styles.moreButton)}>
                     <span data-quota-more-count {...stylex.props(styles.fullCount)}>+{omitted}</span>
                     <span data-quota-more-count {...stylex.props(styles.foldedSecondaryCount)}>+{foldedCount}</span>
+                    <VisuallyHidden><span data-quota-more-description>{` Open all ${account.windows.length} windows, amount and reset evidence for ${account.label}`}</span></VisuallyHidden>
                   </Button>
                 </Cell>
               </Row>
