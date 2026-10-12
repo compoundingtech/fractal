@@ -3015,6 +3015,16 @@ export const HostRepositories = /*#__PURE__*/ (() => Schema.Struct({
 export type HostRepositories = typeof HostRepositories.Type
 export type HostRepositoriesEncoded = typeof HostRepositories.Encoded
 
+export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
+  "bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent. */
+  "complete": optionalKey(Schema.Boolean).annotate({ description: "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }),
+  "message": Schema.String,
+  "text": Schema.String
+}).annotate({ identifier: "MessageBody" }))()
+export type MessageBody = typeof MessageBody.Type
+export type MessageBodyEncoded = typeof MessageBody.Encoded
+
 export const ObservationAccepted = /*#__PURE__*/ (() => Schema.Struct({
   "accepted": Schema.Literal(true)
 }).annotate({ identifier: "ObservationAccepted" }))()
@@ -3070,15 +3080,6 @@ export const ObservationResponse = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ObservationResponse" }))()
 export type ObservationResponse = typeof ObservationResponse.Type
 export type ObservationResponseEncoded = typeof ObservationResponse.Encoded
-export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
-  "bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  /** False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent. */
-  "complete": optionalKey(Schema.Boolean).annotate({ description: "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }),
-  "message": Schema.String,
-  "text": Schema.String
-}).annotate({ identifier: "MessageBody" }))()
-export type MessageBody = typeof MessageBody.Type
-export type MessageBodyEncoded = typeof MessageBody.Encoded
 
 /** Static unauthenticated pairing preflight; no envelope, presence update or graph information. */
 export const PairingAdvertisement = /*#__PURE__*/ (() => Schema.Struct({
