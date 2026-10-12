@@ -5,6 +5,8 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { ResourceCardV1 } from './ResourceCardV1'
 import type { ResourceData } from './resource-model'
 import { spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g } from '../composition-tokens.stylex'
+import { baselineTheme } from '../neutral-theme'
+import { lightTheme } from '../composition-theme'
 
 /** Synthetic fully reported diff; every count and preview is known. */
 const resource: ResourceData = {
@@ -16,18 +18,22 @@ const resource: ResourceData = {
   ],
 }
 
+interface Args { scheme: 'dark' | 'light' }
 const meta = {
   title: 'Fractal UI/Resources/Resource Card',
   component: ResourceCardV1,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Resource card hover and standalone dialog: the hover card is the only hover disclosure and the dialog keeps the full detail as its description.' } } },
-} satisfies Meta
+  args: { scheme: 'dark' },
+  argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } },
+} satisfies Meta<Args>
 export default meta
-type Story = StoryObj
+type Story = StoryObj<Args>
 
-export const HoverAndDialog: Story = { name: 'Hover and dialog · no native titles', render: () => <main {...stylex.props(styles.root)}><div {...stylex.props(styles.frame)}><ResourceCardV1 resource={resource} variant="RC-2" /></div></main>, play: async ({ canvasElement }) => {
+export const HoverAndDialog: Story = { name: 'Hover and dialog · no native titles', render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}><div {...stylex.props(styles.frame)}><ResourceCardV1 resource={resource} variant="RC-2" /></div></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
-  const trigger = canvas.getByRole('button', { name: 'Open 2 changed files' })
+  // The summary is named by its painted content in order: label, counts, then the Open affordance.
+  const trigger = canvas.getByRole('button', { name: name => name.startsWith('2 changed files') && name.endsWith('Open') })
   await userEvent.hover(trigger)
   const tooltip = await waitFor(() => { const found = document.querySelector<HTMLElement>('[role="tooltip"]'); expect(found).not.toBeNull(); return found! })
   await expect(tooltip.querySelector('[data-resource-detail]')!.textContent).toBe(resource.detail)
