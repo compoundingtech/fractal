@@ -3230,7 +3230,7 @@ impl Store {
             graph.heal_replay_backoff_ms = 0;
         }
         publication_facts::create_schema(&graph.connection.write())?;
-        graph.install_transaction_finalizer(publication_facts::flush)?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         Ok(Self { graph, smalltalk })
     }
 
@@ -3244,7 +3244,7 @@ impl Store {
         let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, smalltalk.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
-        graph.install_transaction_finalizer(publication_facts::flush)?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         Ok(Self { graph, smalltalk })
     }
 
@@ -3261,7 +3261,7 @@ impl Store {
             graph.heal_replay_backoff_ms = 0;
         }
         publication_facts::create_schema(&graph.connection.write())?;
-        graph.install_transaction_finalizer(publication_facts::flush)?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         Ok(Self { graph, smalltalk })
     }
 
