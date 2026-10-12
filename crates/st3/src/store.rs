@@ -9693,7 +9693,15 @@ impl Store {
                 old_revision: current.as_ref().map(|row| row.revision.clone()),
                 new_revision: revision,
             });
-            if desired.kind == "stop" {
+            if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
+                Ok(current.as_ref().and_then(|row| row.member.as_deref())
+                    .map(serde_json::from_str::<crate::model::MemberSpec>)
+                    .transpose()?)
+            })
+                .map_err(internal)?
+            {
+                actions.push(action);
+            } else if desired.kind == "stop" {
                 actions.push(PlannedAction {
                     subject: subject.clone(),
                     action: "stop".into(),
@@ -14830,16 +14838,24 @@ impl Store {
     }
 
     /// The selected desired revision of `subject`, then each predecessor that differs from it
-    /// only in presentation. The last entry is the revision that still defines the launch, so
-    /// launch records, restart budgets, and crash-loop parking follow a rename.
+    /// only in presentation. Launch records, restart budgets and crash-loop parking follow
+    /// labels; environment edits still get a fresh launch token and restart budget.
     pub fn launch_lineage(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         launch_lineage_tx(&connection, subject)
     }
 
-    /// Presentation-only lineage of a recorded launch, even when it is no longer desired.
-    pub(crate) fn launch_lineage_from(&self, token: &str) -> Result<Vec<String>> {
-        launch_lineage_from_tx(&self.readers.get(), token.to_owned())
+    /// Suspension follows all non-launch edits, independently of process retry budgets.
+    pub(crate) fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
+        let connection = self.readers.get();
+        let Some(row) = current_desired_row(&connection, subject)? else {
+            return Ok(Vec::new());
+        };
+        desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
+    }
+
+    pub(crate) fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
+        desired_lineage_from_tx(&self.readers.get(), token.to_owned(), same_declared_launch)
     }
 
     /// Only seats whose durable resume requests name this host need transfer reconciliation.
@@ -21477,7 +21493,15 @@ fn launch_lineage_tx(connection: &Connection, subject: &str) -> Result<Vec<Strin
     launch_lineage_from_tx(connection, row.claim_id)
 }
 
-fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Result<Vec<String>> {
+fn launch_lineage_from_tx(connection: &Connection, current: String) -> Result<Vec<String>> {
+    desired_lineage_from_tx(connection, current, presentation_only_change)
+}
+
+fn desired_lineage_from_tx(
+    connection: &Connection,
+    mut current: String,
+    equivalent: fn(&Value, &Value) -> bool,
+) -> Result<Vec<String>> {
     let mut lineage = vec![current.clone()];
     while let Some(claim) = claim_by_id_tx(connection, &current)? {
         // A claim that merges concurrent revisions has one predecessor per fork; follow the
@@ -21490,7 +21514,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
             if let Some(previous) = claim_by_id_tx(connection, predecessor)?
                 && previous.kind == "intent.desired"
                 && previous.subject == claim.subject
-                && presentation_only_change(&previous.body, &claim.body)
+                && equivalent(&previous.body, &claim.body)
             {
                 next = Some(previous.id);
                 break;
@@ -21505,7 +21529,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
     Ok(lineage)
 }
 
-/// Two agent declarations that differ only in their human label share one launch.
+/// Preserve the existing launch-token boundary for restart budgets and crash-loop recovery.
 fn presentation_only_change(previous: &Value, next: &Value) -> bool {
     let parse = |body: &Value| {
         let mut desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
@@ -21514,6 +21538,18 @@ fn presentation_only_change(previous: &Value, next: &Value) -> bool {
         Some(desired)
     };
     matches!((parse(previous), parse(next)), (Some(previous), Some(next)) if previous == next)
+}
+
+/// Keep suspension under exactly the launch comparator used by preview and reconcile.
+/// Desired kind and subject are fences, even when their member launch happens to match.
+fn same_declared_launch(previous: &Value, next: &Value) -> bool {
+    let parse = |body: &Value| {
+        let desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
+        (desired.kind == "agent").then_some(())?;
+        Some((desired.subject, desired.member?))
+    };
+    matches!((parse(previous), parse(next)), (Some((previous_subject, previous)), Some((next_subject, next)))
+        if previous_subject == next_subject && next.launch_changes(&previous).is_empty())
 }
 
 /// The version of the rules that derive `operations` from claims. Every write and projection
@@ -34775,6 +34811,49 @@ agent "test/worker" { workspace "."; command "true"; name "Initial" }
         let cleared = store.desired_subject_with_writer("agent/test/worker").unwrap().unwrap().0;
         assert_eq!(crate::model::effective_agent_name("agent/test/worker", Some(&cleared.desired)), "test/worker");
         assert_eq!(cleared.member.unwrap().display_name, None);
+    }
+
+    #[test]
+    fn declared_launch_lineage_fences_subject_kind_and_launch_changes() {
+        let original = parse_intent(
+            r#"version 2
+    agent "garden/orchard" { command "true" }
+    "#,
+            "amber",
+        )
+        .unwrap()
+        .subjects
+        .remove("agent/garden/orchard")
+        .unwrap();
+        let previous = serde_json::to_value(&original).unwrap();
+        for edit in [r#"env { COLOR "blue"; }"#, r#"name "New label";"#] {
+            let next = parse_intent(
+                &format!("version 2\nagent \"garden/orchard\" {{ command \"true\"; {edit} }}"),
+                "amber",
+            )
+            .unwrap();
+            assert!(same_declared_launch(
+                &previous,
+                &serde_json::to_value(&next.subjects["agent/garden/orchard"]).unwrap()
+            ));
+        }
+        for field in ["subject", "kind", "launch"] {
+            let mut next = original.clone();
+            match field {
+                "subject" => next.subject = "agent/garden/meadow".into(),
+                "kind" => next.kind = "stop".into(),
+                "launch" => {
+                    next.member.as_mut().unwrap().launch =
+                        crate::model::LaunchSpec::Shell("false".into())
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !same_declared_launch(&previous, &serde_json::to_value(&next).unwrap()),
+                "{field}"
+            );
+        }
+        assert!(!same_declared_launch(&previous, &json!({"kind":"agent"})));
     }
 
     #[test]
