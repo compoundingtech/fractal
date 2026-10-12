@@ -249,6 +249,8 @@ enum Command {
         #[command(subcommand)]
         command: SchemaCommand,
     },
+    /// Import, inspect, and verify signed gate observations stored in git notes.
+    Evidence(st3::evidence::cli::EvidenceArgs),
     /// Store or read immutable documents.
     Documents {
         #[command(subcommand)]
@@ -5112,6 +5114,10 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Skill(args) = cli.command {
         return run_skill(args);
     }
+    // Evidence is portable: repository objects and a caller trust list suffice.
+    if let Command::Evidence(args) = cli.command {
+        return st3::evidence::cli::run(args);
+    }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
         let code = st3::sekrets::cli::run(args, cli.json).await?;
@@ -5172,6 +5178,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Up(_) => unreachable!(),
         Command::Skill(_) => unreachable!(),
+        Command::Evidence(_) => unreachable!(),
         Command::Sekrets(_) => unreachable!(),
         Command::Admission { .. } => unreachable!(),
         Command::ReplicationWorker(_) => unreachable!(),
