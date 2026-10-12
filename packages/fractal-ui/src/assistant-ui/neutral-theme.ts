@@ -67,11 +67,12 @@ const typeVarsTheme = stylex.createTheme(typeVars, {
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
   trackingWide: '0.1em', trackingEyebrow: '0.2em',
   headingSize: '16px', headingLeading: '24px',
+  inlineCodeSize: '0.9em',
 })
 
 const radiusVarsTheme = stylex.createTheme(radiusVars, {
   sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
-  keyboard: '4px',
+  keyboard: '4px', inlineCode: '4px',
   full: '9999px', none: '0',
 })
 

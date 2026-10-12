@@ -19,6 +19,7 @@ import markdown from 'refractor/markdown'
 import css from 'refractor/css'
 import remarkGfm from 'remark-gfm'
 import { surfaceVars as surface, textVars as textColor, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { InlineCode } from './InlineCode'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -29,11 +30,31 @@ export type MarkdownImageOpener = (src: string) => void
 export interface MarkdownImageOptions { readonly resolveImage?: MarkdownImageResolver; readonly onLoadImage?: MarkdownImageOpener }
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
-export interface MarkdownProps { text: string; streaming?: boolean; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
+/** `prose`: an answer's own typography. `compact`: a host row's type and ink (user prompt, delivered mail, typed event text, agent question), with typed line breaks kept. */
+export type MarkdownVariant = 'prose' | 'compact'
+export interface MarkdownProps { text: string; streaming?: boolean; variant?: MarkdownVariant; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
 const REMARK_PLUGINS = [remarkGfm]
+const COMPACT_REMARK_PLUGINS = [remarkGfm, keepTypedLineBreaks]
 const STREAMING_PLUGINS = [markStreamingTail]
-type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming'>
+const Compact = React.createContext(false)
+type MarkdownNode = { type: string; value?: string; children?: MarkdownNode[] }
+/** Typed text keeps its line breaks: a soft break inside prose becomes a hard break. Code spans and fences are other node types, so they are untouched. */
+function keepTypedLineBreaks() {
+  const visit = (node: MarkdownNode) => {
+    if (node.children === undefined) return
+    node.children = node.children.flatMap((child): MarkdownNode[] => {
+      const value = child.type === 'text' ? child.value ?? '' : ''
+      if (!value.includes('\n')) {
+        visit(child)
+        return [child]
+      }
+      return value.split('\n').flatMap((line, index): MarkdownNode[] => index === 0 ? [{ type: 'text', value: line }] : [{ type: 'break' }, { type: 'text', value: line }])
+    })
+  }
+  return (tree: MarkdownNode) => visit(tree)
+}
+type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'variant'>
 const EMPTY_REFERENCES: ReferenceOptions = {}
 const ReferenceContext = React.createContext<ReferenceOptions>(EMPTY_REFERENCES)
 /** Paragraphs keep the caret on their final line; every other terminal block gets an inline fallback. */
@@ -52,11 +73,12 @@ function markStreamingTail() {
   }
 }
 
-export const Markdown = React.memo(function Markdown({ text, streaming = false, resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
+export const Markdown = React.memo(function Markdown({ text, streaming = false, variant = 'prose', resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
   const inherited = React.useContext(MarkdownImagePolicy)
   const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
   const source = React.useMemo(() => streaming ? completeStreamingTail(text) : text, [text, streaming])
-  return <ReferenceContext.Provider value={references}><div data-testid="markdown" {...stylex.props(styles.markdown)}><ReactMarkdown skipHtml urlTransform={(url, key) => key === 'src' ? url : defaultUrlTransform(url)} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div></ReferenceContext.Provider>
+  const compact = variant === 'compact'
+  return <ReferenceContext.Provider value={references}><Compact.Provider value={compact}><div data-testid="markdown" data-variant={variant} {...stylex.props(styles.markdown)}><ReactMarkdown skipHtml urlTransform={(url, key) => key === 'src' ? url : defaultUrlTransform(url)} remarkPlugins={compact ? COMPACT_REMARK_PLUGINS : REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div></Compact.Provider></ReferenceContext.Provider>
 })
 
 function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
@@ -80,8 +102,9 @@ function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'>
 }
 
 function Paragraph({ children, node }: React.ComponentProps<'p'> & ExtraProps) {
+  const compact = React.useContext(Compact)
   const live = node?.properties['data-streaming-tail'] === true
-  return <p data-streaming-tail={live || undefined} {...stylex.props(styles.paragraph, styles.prose, live && styles.streamingTail)}><InlineText>{children}</InlineText></p>
+  return <p data-streaming-tail={live || undefined} {...stylex.props(styles.paragraph, styles.prose, compact && styles.compactText, compact && styles.compactBlock, live && styles.streamingTail)}><InlineText>{children}</InlineText></p>
 }
 
 function renderReference(path: string, options: ReferenceOptions): React.ReactNode | undefined {
@@ -103,11 +126,12 @@ function InlineText({ children }: { children: React.ReactNode }) {
   })
 }
 
-function InlineCode({ children }: React.ComponentProps<'code'>) {
+/** A known resource path stays a resource chip; every other code span is the shared inline-code style. */
+function CodeSpan({ children }: React.ComponentProps<'code'>) {
   const references = React.useContext(ReferenceContext)
   const path = String(children ?? '')
   const rendered = renderReference(path, references)
-  return rendered === undefined ? <code {...stylex.props(styles.inlineCode)}>{children}</code> : rendered
+  return rendered === undefined ? <InlineCode>{children}</InlineCode> : rendered
 }
 
 // Eager, fixed package grammars: authored fences never trigger a module request.
@@ -181,7 +205,24 @@ function CodeFence({ node }: React.ComponentProps<'pre'> & ExtraProps) {
 }
 
 const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => function Heading({ children }: React.ComponentProps<'h3'>) {
-  return <Tag {...stylex.props(styles.heading, styles.prose)}><InlineText>{children}</InlineText></Tag>
+  const compact = React.useContext(Compact)
+  return <Tag {...stylex.props(styles.heading, styles.prose, compact && styles.compactText, compact && styles.compactBlock)}><InlineText>{children}</InlineText></Tag>
+}
+function UnorderedList({ children }: React.ComponentProps<'ul'>) {
+  const compact = React.useContext(Compact)
+  return <ul {...stylex.props(styles.list, styles.prose, styles.unorderedList, compact && styles.compactText, compact && styles.compactBlock)}>{children}</ul>
+}
+function OrderedList({ children, start }: React.ComponentProps<'ol'>) {
+  const compact = React.useContext(Compact)
+  return <ol start={start} {...stylex.props(styles.list, styles.prose, styles.orderedList, compact && styles.compactText, compact && styles.compactBlock)}>{children}</ol>
+}
+function ListItem({ children }: React.ComponentProps<'li'>) {
+  const compact = React.useContext(Compact)
+  return <li {...stylex.props(styles.listItem, compact && styles.compactText)}><InlineText>{children}</InlineText></li>
+}
+function Table({ children }: React.ComponentProps<'table'>) {
+  const compact = React.useContext(Compact)
+  return <div role="region" aria-label="Markdown table" tabIndex={0} {...stylex.props(styles.tableScroll)}><table {...stylex.props(styles.table, compact && styles.compactText)}>{children}</table></div>
 }
 const MARKDOWN_COMPONENTS: Components = {
   h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
@@ -189,15 +230,15 @@ const MARKDOWN_COMPONENTS: Components = {
   span: ({ children, node }) => <span data-streaming-tail={node?.properties['data-streaming-tail'] || undefined} aria-hidden={node?.properties['aria-hidden'] === true || undefined} {...stylex.props(node?.properties['data-streaming-tail'] === true && styles.streamingTail)}>{children}</span>,
   strong: ({ children }) => <strong {...stylex.props(styles.strong)}><InlineText>{children}</InlineText></strong>,
   em: ({ children }) => <em {...stylex.props(styles.emphasis)}><InlineText>{children}</InlineText></em>,
-  ul: ({ children }) => <ul {...stylex.props(styles.list, styles.prose, styles.unorderedList)}>{children}</ul>,
-  ol: ({ children, start }) => <ol start={start} {...stylex.props(styles.list, styles.prose, styles.orderedList)}>{children}</ol>,
-  li: ({ children }) => <li {...stylex.props(styles.listItem)}><InlineText>{children}</InlineText></li>,
+  ul: UnorderedList,
+  ol: OrderedList,
+  li: ListItem,
   a: MarkdownLink,
-  code: InlineCode,
+  code: CodeSpan,
   img: DeferredImage,
   pre: CodeFence,
   blockquote: ({ children }) => <blockquote {...stylex.props(styles.blockquote)}>{children}</blockquote>,
-  table: ({ children }) => <div role="region" aria-label="Markdown table" tabIndex={0} {...stylex.props(styles.tableScroll)}><table {...stylex.props(styles.table)}>{children}</table></div>,
+  table: Table,
   th: ({ children, style }) => <th {...stylex.props(styles.cell, styles.tableHeading, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
   td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
 }
@@ -332,7 +373,9 @@ const styles = stylex.create({
   codeText: { fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, color: textColor.fgSoft },
   paragraph: { margin: 0, marginBlockEnd: s.proseGap, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft, overflowWrap: 'anywhere' },
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
-  inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
+  // Compact Markdown takes the host row's type and ink; blocks keep the prose gap between them, never after the last.
+  compactText: { fontSize: 'inherit', lineHeight: 'inherit', color: 'inherit' },
+  compactBlock: { marginBlockStart: s.zero, marginBlockEnd: { default: s.proseGap, ':last-child': s.zero } },
   link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
   resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
 })

@@ -6,6 +6,8 @@ import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import type { ConversationItem } from './embrace-converter'
 import { accentTokens, tokens, geometry, density } from './embrace-tokens.stylex'
 import { EmbraceDiffPreview, EmbraceMarkdownPreview } from './EmbraceToolPreview'
+import { Markdown } from './composition/Markdown'
+import { textVars } from './composition-tokens.stylex'
 import { embraceToolKind as toolKind, embraceToolNeedsAttention, type EmbraceToolKind as ToolKind } from './embrace-tool-attention'
 export { embraceToolNeedsAttention } from './embrace-tool-attention'
 import { toolDiffs, toolFields, toolHumanSummary, toolOutput, toolString } from './embrace-tool-preview'
@@ -161,7 +163,7 @@ const ToolDetails = ({ name, input, output, mediaType, status, variant }: {
   return <div {...stylex.props(styles.details)}>
     <p {...stylex.props(styles.caption)}>{toolHumanSummary(input, name)} · {status}</p>
     {kind === 'question' ? <section aria-label="Agent question">
-      <p {...stylex.props(styles.question)}>{question || 'Agent needs your answer'}</p>
+      {question ? <div data-testid="agent-question" {...stylex.props(styles.question)}><Markdown text={question} variant="compact" /></div> : <p {...stylex.props(styles.question)}>Agent needs your answer</p>}
       {Array.isArray(options) ? <ul {...stylex.props(styles.options)}>{options.map((option, index) => <li key={index}>
         {typeof option === 'string' ? option : toolString(option, ['label', 'title', 'value'])}
       </li>)}</ul> : null}
@@ -204,7 +206,7 @@ const styles = stylex.create({
   warning: { color: tokens.warning },
   details: { display: 'flex', flexDirection: 'column', gap: density.gap, padding: density.toolDetails, minWidth: 0 },
   output: { margin: 0, padding: 8, borderRadius: 4, backgroundColor: tokens.recess, color: tokens.ink, fontSize: 11, lineHeight: 1.55, fontFamily: 'monospace', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 280, overflowY: 'auto' },
-  question: { margin: 0, fontSize: 13, fontWeight: 600 },
+  question: { margin: 0, color: textVars.fg, fontSize: 13, fontWeight: 600 },
   options: { marginBlock: 5, paddingInlineStart: 20, fontSize: 12 },
   rawDetails: { color: tokens.muted, fontSize: 11 },
   rawSummary: { cursor: 'pointer', outlineColor: accentTokens.accent, outlineOffset: 3 },

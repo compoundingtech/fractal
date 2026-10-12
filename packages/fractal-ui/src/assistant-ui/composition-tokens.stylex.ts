@@ -67,12 +67,14 @@ export const typeVars = stylex.defineVars({
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
   trackingWide: '0.1em', trackingEyebrow: '0.2em',
   headingSize: '16px', headingLeading: '24px',
+  /** Markdown code spans scale with the prose around them. */
+  inlineCodeSize: '0.9em',
 })
 
 /** Radius scale; slab is the composer surface, control is buttons and inputs. */
 export const radiusVars = stylex.defineVars({
   sm: '6px', md: '8px', base: '10px', lg: '14px', xl: '18px', slab: '22px', control: '8px',
-  keyboard: '4px',
+  keyboard: '4px', inlineCode: '4px',
   full: '9999px', none: '0',
 })
 

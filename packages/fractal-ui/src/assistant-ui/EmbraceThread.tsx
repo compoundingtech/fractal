@@ -7,6 +7,7 @@ import {
 } from '@assistant-ui/react'
 import { readingColumnStyles } from './reading-column.stylex'
 import type { ConversationItem } from './embrace-data/model'
+import { carriesMarkdown } from './embrace-converter'
 import { accentTokens, tokens, geometry, density } from './embrace-tokens.stylex'
 import { EmbraceVirtualConversation } from './EmbraceVirtualConversation'
 import { WorkLogV1 } from './taste/WorkLogV1'
@@ -58,6 +59,7 @@ function Attachment() {
 }
 function TextPart({ text }: { text: string }) {
   const item = useAuiState(state => state.message.metadata.custom.item) as ConversationItem | undefined
+  if (item !== undefined && !carriesMarkdown(item)) return <p data-testid="plain-row-text" {...stylex.props(styles.plainText)}>{text}</p>
   return <Markdown text={text} streaming={item?._tag === 'Text' && item.streaming} />
 }
 function ReasoningPart({ text }: { text: string }) {
@@ -175,6 +177,7 @@ const styles = stylex.create({
   senderName: { fontWeight: geometry.senderWeight, letterSpacing: geometry.senderTracking, textTransform: geometry.senderTransform },
   avatar: { display: geometry.avatarDisplay, placeItems: 'center', width: density.avatarSize, height: density.avatarSize, backgroundColor: tokens.recess, borderRadius: geometry.avatarRadius, color: tokens.muted, fontSize: '10px' },
   muted: { color: tokens.muted },
+  plainText: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   actions: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px', marginTop: '6px', fontSize: '11px' },
   button: { backgroundColor: tokens.recess, color: tokens.ink, borderWidth: '1px', borderStyle: 'solid', borderColor: tokens.line, borderRadius: '4px', paddingBlock: '4px', paddingInline: '8px', fontSize: '11px', cursor: 'pointer', ':focus-visible': { outline: `2px solid ${accentTokens.accent}`, outlineOffset: '2px' }, ':disabled': { opacity: 0.45, cursor: 'not-allowed' } },
   attachment: { display: 'inline-flex', padding: '6px', borderWidth: '1px', borderStyle: 'solid', borderColor: tokens.line, borderRadius: '4px' },

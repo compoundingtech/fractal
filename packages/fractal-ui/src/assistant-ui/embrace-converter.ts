@@ -25,6 +25,19 @@ export const participantKeyForItem = (item: ConversationItem): string => {
   return item._tag === 'Text' ? `role:${item.role}` : 'system:transcript'
 }
 
+/**
+ * Whether an item's converted text is authored Markdown: prose, delivered mail, reasoning, and typed event text
+ * (harness messages, subagent results). Host-composed rows (status, usage, notices, unknown events, resource
+ * observations) stay plain text, so a stray backtick or asterisk there is never read as markup.
+ */
+export const carriesMarkdown = (item: ConversationItem): boolean => {
+  switch (item._tag) {
+    case 'Text': case 'Message': case 'Reasoning': return true
+    case 'Event': return item.kind !== 'resource-observed'
+    case 'ToolCall': case 'Status': case 'Usage': case 'Notice': case 'UnknownEvent': return false
+  }
+}
+
 const completed: MessageStatus = { type: 'complete', reason: 'stop' }
 const running: MessageStatus = { type: 'running' }
 const cancelled: MessageStatus = { type: 'incomplete', reason: 'cancelled' }

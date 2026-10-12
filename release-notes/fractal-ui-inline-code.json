@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "fractal-ui renders Markdown backtick spans as token-styled inline code on every transcript Markdown surface: answers, mail titles, prompts, delivered system text, typed events, thinking, Embrace agent questions and Markdown previews; notices, status and usage rows stay plain text",
+  "replay": {
+    "status": "none",
+    "detail": "Client-only rendering change; no runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Client-only change; conversation items and their text are unchanged, only their presentation."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption introduced."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No deployed installation action required; fractal-web picks the change up on its next build."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  }
+}

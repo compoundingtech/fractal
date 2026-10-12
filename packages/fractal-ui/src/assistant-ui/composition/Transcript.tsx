@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
+import { carriesMarkdown } from '../embrace-converter'
 import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
@@ -66,14 +67,14 @@ function TranscriptMessage() {
   if (item === undefined || item._tag === 'ToolCall' || item._tag === 'Reasoning') return null
   if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <AgentMessage item={{ ...item, role: 'assistant' }} senderLine={caption} />
   if (item._tag === 'Message') return <AgentMessage item={item} senderLine={caption ?? item.sender?.label ?? item.from} />
-  return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}><span {...stylex.props(styles.semanticText)}>{summary}</span></MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.semantic)}>{carriesMarkdown(item) ? <div {...stylex.props(styles.semanticMarkdown)}><Markdown text={summary} variant="compact" /></div> : <span {...stylex.props(styles.semanticText)}>{summary}</span>}</MessagePrimitive.Root>
 }
 const messageComponents = { Message: TranscriptMessage }
 export function UserMessage({ item }: { readonly item: TextItem & { readonly role: 'user' } }) {
   const onRetrySend = React.useContext(RetrySend)
   const [expanded, setExpanded] = React.useState(false)
   const [overflows, setOverflows] = React.useState(false)
-  const text = React.useRef<HTMLSpanElement>(null)
+  const text = React.useRef<HTMLDivElement>(null)
   const textId = React.useId()
   const long = item.text.length > 600 || item.text.split('\n').length > 8
   React.useLayoutEffect(() => {
@@ -85,7 +86,8 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
     measure()
     return () => observer.disconnect()
   }, [item.text, expanded])
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
+  // The collapsed preview parses the first 600 characters only: a span cut there shows its literal backtick until expanded, never invented code.
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={expanded ? item.text : item.text.slice(0, 600)} variant="compact" /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 /** Settled metadata remains below the prose; unknown time is omitted rather than invented. */
 export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string }) {
@@ -264,12 +266,13 @@ const styles = stylex.create({
   // The shared reading column keeps rows and a reading-column composer on the same bounds.
   content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
-  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
+  user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere' },
   userClamp: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 8, maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },
   userDisclosure: { paddingBlock: 0, lineHeight: t.metaLeading, alignSelf: 'flex-start' },
   answer: { display: 'flex', flexDirection: 'column', gap: s.xs2, paddingBlock: s.xs2, color: ink.fgSoft, flexShrink: 0 }, sender: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },
   semantic: { display: 'flex', minWidth: 0, paddingBlock: s.xs2, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   semanticText: { minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  semanticMarkdown: { flex: '1 1 0', minWidth: 0, overflowWrap: 'anywhere' },
   answerMeta: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.controlSm, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   copy: { width: g.controlSm, height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   progress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm }, track: { height: g.progressSm, backgroundColor: surface.rowActive, overflow: 'hidden' }, fill: (width: string) => ({ width, height: '100%', backgroundColor: accent.primary }),
