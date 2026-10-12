@@ -18,6 +18,7 @@ export const QuestionPreview = ({ preview }: { readonly preview: Preview }) => p
 
 export interface QuestionFormProps {
   readonly request: QuestionRequestView
+  readonly ariaLabel?: string
   readonly variant?: QuestionVariant
   readonly draft?: Answers
   readonly onDraftChange?: (answers: Answers) => void
@@ -103,10 +104,10 @@ export const QuestionForm = (props: QuestionFormProps) => {
     else if (event.key === 'Enter') { event.preventDefault(); event.stopPropagation(); if (question.kind === 'multi') advance(); else choose(question, choiceId, true) }
     else if (event.key === 'n' && question.allowNote) { event.preventDefault(); setNotesOpen({ ...notesOpen, [question.id]: true }); requestAnimationFrame(() => noteRef.current?.focus()) }
   }
-  if (!pending(request)) return <QuestionSummary request={request} now={props.now} locale={props.locale} timeZone={props.timeZone} />
+  if (!pending(request)) return <QuestionSummary request={request} ariaLabel={props.ariaLabel} now={props.now} locale={props.locale} timeZone={props.timeZone} />
   const initialChoice = question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.id ?? question?.options.find(option => option.recommended)?.id ?? question?.options[0]?.id
   const choices = question === undefined ? [] : [...question.options, ...(question.allowOther ? [{ id: OTHER, label: 'Other…' }] : [])]
-  return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-fractal-card={props.variant === 'pinned' ? undefined : ''} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
+  return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-fractal-card={props.variant === 'pinned' ? undefined : ''} data-question-variant={props.variant ?? 'transcript'} aria-label={props.ariaLabel ?? `${title(request)} from ${request.agentLabel}`}>
     <header data-question-header {...stylex.props(styles.header, styles.questionHeader)}><span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name="question" scale="status" /></span><strong {...stylex.props(styles.sender)}>{request.agentLabel}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span><span {...stylex.props(styles.meta)}>{[request.source, compactQuestionAge(Date.parse(request.askedAt), props.now, props.timeZone)].filter(Boolean).join(' · ')}</span></header>
     {props.onJump !== undefined ? <Button {...stylex.props(styles.button)} onPress={props.onJump}>Show in thread</Button> : null}
     <div ref={root} onKeyDownCapture={keys} {...stylex.props(styles.body)}>
@@ -158,10 +159,10 @@ const AnswerList = ({ request, answers }: { readonly request: QuestionRequestVie
 
 const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}<div role="list" aria-label={`Original choices: ${q.prompt}`} {...stylex.props(styles.body)}>{q.options.map((option, index) => <div role="listitem" data-original-choice key={option.id} {...stylex.props(styles.option, styles.originalChoice)}><span aria-hidden="true"><Icon name={q.kind === 'multi' ? 'checkbox' : 'radio'} scale="status" /> {index + 1}.</span><div><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div></div>)}</div></div>)}</>
 
-export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly request: QuestionRequestView; readonly now?: number; readonly locale?: string; readonly timeZone?: string }) => {
+export const QuestionSummary = ({ request, ariaLabel, now, locale, timeZone }: { readonly request: QuestionRequestView; readonly ariaLabel?: string; readonly now?: number; readonly locale?: string; readonly timeZone?: string }) => {
   const absoluteFormat = React.useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: 'full', timeStyle: 'long', timeZone }), [locale, timeZone])
   const state = request.state
-  if (state._tag === 'unrecorded') return <section {...stylex.props(styles.summary)} aria-label="Original question"><OriginalQuestions request={request} />{state.reason !== '' ? <p {...stylex.props(styles.meta)}>{state.reason}</p> : null}</section>
+  if (state._tag === 'unrecorded') return <section {...stylex.props(styles.summary)} aria-label={ariaLabel ?? 'Original question'}><OriginalQuestions request={request} />{state.reason !== '' ? <p {...stylex.props(styles.meta)}>{state.reason}</p> : null}</section>
   if (state._tag === 'answered') {
     const question = request.questions[0]
     const answer = question === undefined ? undefined : state.answers[question.id]
@@ -172,7 +173,7 @@ export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly r
     const answeredAt = Date.parse(state.at)
     const age = compactQuestionAge(answeredAt, now, timeZone)
     const absolute = Number.isFinite(answeredAt) ? absoluteFormat.format(answeredAt) : undefined
-    return <section {...stylex.props(styles.summary)} aria-label="Question outcome">
+    return <section {...stylex.props(styles.summary)} aria-label={ariaLabel ?? 'Question outcome'}>
       <Disclosure>{({ isExpanded }) => <>
         <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{age !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta, styles.summaryAge)}>{age}</time> : null}<span aria-hidden="true" {...stylex.props(styles.summaryChevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span></Button>
         <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<details><summary>Original questions</summary><OriginalQuestions request={request} /></details></> : null}</DisclosurePanel>
@@ -182,17 +183,17 @@ export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly r
   const answers = state._tag === 'answered-elsewhere' ? state.answers : state._tag === 'expired' ? state.autoAnswer : undefined
   const age = 'at' in state ? compactQuestionAge(Date.parse(state.at), now, timeZone) : undefined
   const footer = (state._tag === 'answered-elsewhere' ? [`Answered in ${state.where}`, age, state.draftDiscarded ? 'your unsent web draft was discarded' : undefined] : state._tag === 'expired' ? [age, state.autoAnswer !== undefined ? 'auto-selected (timeout)' : 'continued without an answer'] : state._tag === 'cancelled' ? [state.reason, age] : state._tag === 'chat-redirected' ? [state.message, age] : []).filter(Boolean).join(' · ')
-  return <section {...stylex.props(styles.summary)} aria-label="Question outcome"><strong {...stylex.props(styles.sender)}>{stateLabel(request)}</strong>{answers !== undefined ? <AnswerList request={request} answers={answers} /> : request.questions.map(q => <p key={q.id}>{q.prompt}</p>)}
+  return <section {...stylex.props(styles.summary)} aria-label={ariaLabel ?? 'Question outcome'}><strong {...stylex.props(styles.sender)}>{stateLabel(request)}</strong>{answers !== undefined ? <AnswerList request={request} answers={answers} /> : request.questions.map(q => <p key={q.id}>{q.prompt}</p>)}
     {footer !== '' ? <p {...stylex.props(styles.meta)}>{footer}</p> : null}
     <details><summary>Original questions</summary><OriginalQuestions request={request} /></details>
   </section>
 }
 
-export const NeedsYouBar = ({ requests, expanded, onToggle, transcriptVisibility = 0, children }: { readonly requests: readonly QuestionRequestView[]; readonly expanded: boolean; readonly onToggle: () => void; readonly transcriptVisibility?: number; readonly children?: React.ReactNode }) => {
+export const NeedsYouBar = ({ requests, ariaLabel = 'Needs you', expanded, onToggle, transcriptVisibility = 0, children }: { readonly requests: readonly QuestionRequestView[]; readonly ariaLabel?: string; readonly expanded: boolean; readonly onToggle: () => void; readonly transcriptVisibility?: number; readonly children?: React.ReactNode }) => {
   const waiting = requests.filter(pending)
   const first = waiting[0]
   if (first === undefined || transcriptVisibility >= 0.6) return null
-  return <aside data-fractal-card="" {...stylex.props(styles.card)} aria-label="Needs you"><Button {...stylex.props(styles.button, styles.dockButton)} aria-expanded={expanded} onPress={onToggle}><span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name="question" scale="status" /></span><span {...stylex.props(styles.dockLabel)}>{first.agentLabel} is waiting on you · {first.questions[0]?.prompt}{waiting.length > 1 ? ` · +${waiting.length - 1}` : ''}</span><span {...stylex.props(styles.dockAction)}>{expanded ? 'Hide' : 'Answer'}</span></Button>{expanded ? children : null}</aside>
+  return <aside data-fractal-card="" {...stylex.props(styles.card)} aria-label={ariaLabel}><Button {...stylex.props(styles.button, styles.dockButton)} aria-expanded={expanded} onPress={onToggle}><span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name="question" scale="status" /></span><span {...stylex.props(styles.dockLabel)}>{first.agentLabel} is waiting on you · {first.questions[0]?.prompt}{waiting.length > 1 ? ` · +${waiting.length - 1}` : ''}</span><span {...stylex.props(styles.dockAction)}>{expanded ? 'Hide' : 'Answer'}</span></Button>{expanded ? children : null}</aside>
 }
 export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <details data-fractal-card="" key={request.id} {...stylex.props(styles.card)}><summary {...stylex.props(styles.inboxSummary)}>{request.agentLabel} · {request.questions[0]?.prompt}</summary><QuestionForm {...formProps?.(request.id)} request={request} variant="pinned" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} /></details>)}</section>
 
