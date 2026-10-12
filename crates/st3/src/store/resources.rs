@@ -2,6 +2,7 @@
 use super::*;
 
 const VERSION: &str = "2";
+const PENDING_TRIGGER_VERSION: &str = "1";
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS resource_observations (
     subject TEXT PRIMARY KEY,
@@ -16,33 +17,80 @@ CREATE INDEX IF NOT EXISTS resource_observations_kind ON resource_observations(k
 CREATE INDEX IF NOT EXISTS resource_observations_agent_subject ON resource_observations(opened_by, subject);
 CREATE INDEX IF NOT EXISTS resource_observations_run_subject ON resource_observations(opened_by_run, subject);
 CREATE TABLE IF NOT EXISTS local_resource_projection_pending (subject TEXT PRIMARY KEY);
+"#;
+
+// The existence probes use the pending subject primary key. Avoiding the duplicate INSERT
+// entirely also works when the statement firing a trigger has its own conflict policy.
+const PENDING_TRIGGERS: &str = r#"
 CREATE TRIGGER IF NOT EXISTS resource_observations_insert AFTER INSERT ON claims
 WHEN NEW.kind='resource.observed' BEGIN
-    INSERT OR IGNORE INTO local_resource_projection_pending VALUES(NEW.subject);
+    INSERT INTO local_resource_projection_pending(subject)
+    SELECT NEW.subject WHERE NOT EXISTS (
+        SELECT 1 FROM local_resource_projection_pending WHERE subject=NEW.subject
+    );
 END;
 CREATE TRIGGER IF NOT EXISTS resource_observations_delete AFTER DELETE ON claims
 WHEN OLD.kind='resource.observed' BEGIN
-    INSERT OR IGNORE INTO local_resource_projection_pending VALUES(OLD.subject);
+    INSERT INTO local_resource_projection_pending(subject)
+    SELECT OLD.subject WHERE NOT EXISTS (
+        SELECT 1 FROM local_resource_projection_pending WHERE subject=OLD.subject
+    );
 END;
 CREATE TRIGGER IF NOT EXISTS resource_observations_record_insert AFTER INSERT ON replica_records
 WHEN NEW.claim_id IS NOT NULL BEGIN
-    INSERT OR IGNORE INTO local_resource_projection_pending
-    SELECT subject FROM claims WHERE id=NEW.claim_id AND kind='resource.observed';
+    INSERT INTO local_resource_projection_pending(subject)
+    SELECT claims.subject FROM claims WHERE claims.id=NEW.claim_id AND claims.kind='resource.observed'
+        AND NOT EXISTS (
+            SELECT 1 FROM local_resource_projection_pending WHERE subject=claims.subject
+        );
 END;
 CREATE TRIGGER IF NOT EXISTS resource_observations_record_update AFTER UPDATE ON replica_records
 WHEN NEW.claim_id IS NOT NULL BEGIN
-    INSERT OR IGNORE INTO local_resource_projection_pending
-    SELECT subject FROM claims WHERE id=NEW.claim_id AND kind='resource.observed';
+    INSERT INTO local_resource_projection_pending(subject)
+    SELECT claims.subject FROM claims WHERE claims.id=NEW.claim_id AND claims.kind='resource.observed'
+        AND NOT EXISTS (
+            SELECT 1 FROM local_resource_projection_pending WHERE subject=claims.subject
+        );
 END;
 "#;
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(SCHEMA)
-        .context("creating resource observation projection")
+        .context("creating resource observation projection")?;
+    connection
+        .execute_batch(PENDING_TRIGGERS)
+        .context("creating resource observation pending triggers")
+}
+
+fn replace_pending_triggers(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "DROP TRIGGER IF EXISTS resource_observations_insert;
+         DROP TRIGGER IF EXISTS resource_observations_delete;
+         DROP TRIGGER IF EXISTS resource_observations_record_insert;
+         DROP TRIGGER IF EXISTS resource_observations_record_update;",
+    )?;
+    transaction.execute_batch(PENDING_TRIGGERS)?;
+    Ok(())
 }
 
 pub(super) fn open(transaction: &Transaction<'_>) -> Result<()> {
+    let trigger_version: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM meta WHERE key='resource_pending_trigger_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if trigger_version.as_deref() != Some(PENDING_TRIGGER_VERSION) {
+        // CREATE TRIGGER IF NOT EXISTS in create_schema cannot upgrade a persisted trigger.
+        // Replace all four with their marker in the same opening transaction.
+        replace_pending_triggers(transaction)?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_pending_trigger_version',?1)",
+            [PENDING_TRIGGER_VERSION],
+        )?;
+    }
     let version: Option<String> = transaction
         .query_row(
             "SELECT value FROM meta WHERE key='resource_observations_version'",
@@ -583,5 +631,241 @@ mod replication_tests {
             projection_digest::tables(&target.readers.get()).unwrap(),
             projection_digest::oracle(&target.readers.get()).unwrap()
         );
+    }
+}
+
+#[cfg(test)]
+mod pending_trigger_tests {
+    use super::*;
+
+    const OLD_PENDING_TRIGGERS: &str = r#"
+CREATE TRIGGER resource_observations_insert AFTER INSERT ON claims
+WHEN NEW.kind='resource.observed' BEGIN
+    INSERT OR IGNORE INTO local_resource_projection_pending VALUES(NEW.subject);
+END;
+CREATE TRIGGER resource_observations_delete AFTER DELETE ON claims
+WHEN OLD.kind='resource.observed' BEGIN
+    INSERT OR IGNORE INTO local_resource_projection_pending VALUES(OLD.subject);
+END;
+CREATE TRIGGER resource_observations_record_insert AFTER INSERT ON replica_records
+WHEN NEW.claim_id IS NOT NULL BEGIN
+    INSERT OR IGNORE INTO local_resource_projection_pending
+    SELECT subject FROM claims WHERE id=NEW.claim_id AND kind='resource.observed';
+END;
+CREATE TRIGGER resource_observations_record_update AFTER UPDATE ON replica_records
+WHEN NEW.claim_id IS NOT NULL BEGIN
+    INSERT OR IGNORE INTO local_resource_projection_pending
+    SELECT subject FROM claims WHERE id=NEW.claim_id AND kind='resource.observed';
+END;
+"#;
+
+    fn resource_claim(store: &Store, subject: &str) -> ClaimRecord {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("kind".into(), json!("vcs.pull-request")),
+                ("facts".into(), json!({"state": "open"})),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap()
+    }
+
+    fn pending_count(connection: &Connection, subject: &str) -> i64 {
+        connection.query_row(
+            "SELECT COUNT(*) FROM local_resource_projection_pending WHERE subject=?1",
+            [subject], |row| row.get(0),
+        ).unwrap()
+    }
+
+    fn record_upsert(connection: &Connection, claim_id: &str) -> rusqlite::Result<usize> {
+        connection.execute(
+            "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,
+                 claim_id,updated_at_unix_ms)
+             VALUES('record/pending-control','writer',1,'hash',0,X'00','valid',?1,'1')
+             ON CONFLICT(record_ref) DO UPDATE SET claim_id=excluded.claim_id,
+                 state=excluded.state,updated_at_unix_ms=excluded.updated_at_unix_ms",
+            [claim_id],
+        )
+    }
+
+    #[test]
+    fn pending_subject_is_idempotent_across_claim_and_record_triggers() {
+        let store = Store::open_memory("pending-control").unwrap();
+        let subject = "resource/pending-control";
+        let first = resource_claim(&store, subject);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)", [subject],
+            ).unwrap();
+            // A physical claim deletion fires the OLD-subject trigger while the key is pending.
+            transaction.execute("DELETE FROM claims WHERE id=?1", [&first.id]).unwrap();
+            assert_eq!(pending_count(&transaction, subject), 1);
+            transaction.commit().unwrap();
+        }
+        let second = resource_claim(&store, subject);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)", [subject],
+            ).unwrap();
+            record_upsert(&transaction, &second.id).unwrap(); // AFTER INSERT
+            record_upsert(&transaction, &second.id).unwrap(); // AFTER UPDATE
+            assert_eq!(pending_count(&transaction, subject), 1);
+            transaction.rollback().unwrap();
+        }
+        assert_eq!(store.resource_collection_page(None, None, Some(subject), None, 10).unwrap().len(), 1);
+        assert_eq!(projection_digest::tables(&store.readers.get()).unwrap(),
+                   projection_digest::oracle(&store.readers.get()).unwrap());
+    }
+
+    #[test]
+    fn old_trigger_control_then_reopen_replaces_all_four_definitions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("resources.sqlite3");
+        let store = Store::open(&path, "old-pending-control").unwrap();
+        let subject = "resource/old-pending-control";
+        let claim = resource_claim(&store, subject);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute_batch(
+                "DROP TRIGGER resource_observations_insert;
+                 DROP TRIGGER resource_observations_delete;
+                 DROP TRIGGER resource_observations_record_insert;
+                 DROP TRIGGER resource_observations_record_update;
+                 DELETE FROM meta WHERE key='resource_pending_trigger_version';",
+            ).unwrap();
+            transaction.execute_batch(OLD_PENDING_TRIGGERS).unwrap();
+            transaction.execute("INSERT INTO local_resource_projection_pending(subject) VALUES(?1)", [subject]).unwrap();
+            // Preserve the deployed trigger body as the before-control. A success here rejects
+            // the proposed outer-UPSERT collision mechanism instead of proving that mechanism.
+            let before = record_upsert(&transaction, &claim.id);
+            assert!(before.as_ref().is_err_and(|error| error.to_string().contains(
+                "UNIQUE constraint failed: local_resource_projection_pending.subject")),
+                "old trigger did not reproduce the hypothesized pending conflict: {before:?}");
+            transaction.rollback().unwrap();
+        }
+        // Persist the old definitions and missing marker separately from the rolled-back probe.
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute_batch(
+                "DROP TRIGGER resource_observations_insert;
+                 DROP TRIGGER resource_observations_delete;
+                 DROP TRIGGER resource_observations_record_insert;
+                 DROP TRIGGER resource_observations_record_update;
+                 DELETE FROM meta WHERE key='resource_pending_trigger_version';",
+            ).unwrap();
+            transaction.execute_batch(OLD_PENDING_TRIGGERS).unwrap();
+            transaction.commit().unwrap();
+        }
+        drop(store);
+        let reopened = Store::open(&path, "old-pending-control").unwrap();
+        let connection = reopened.readers.get();
+        let version: String = connection.query_row(
+            "SELECT value FROM meta WHERE key='resource_pending_trigger_version'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, PENDING_TRIGGER_VERSION);
+        for name in ["resource_observations_insert", "resource_observations_delete",
+                     "resource_observations_record_insert", "resource_observations_record_update"] {
+            let sql: String = connection.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?1", [name], |row| row.get(0),
+            ).unwrap();
+            assert!(sql.contains("NOT EXISTS"), "{name}: {sql}");
+        }
+        assert_eq!(projection_digest::tables(&connection).unwrap(), projection_digest::oracle(&connection).unwrap());
+    }
+
+    #[test]
+    fn fresh_store_reopen_keeps_trigger_marker_and_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fresh-resources.sqlite3");
+        let first = Store::open(&path, "fresh-pending-control").unwrap();
+        resource_claim(&first, "resource/fresh-pending-control");
+        drop(first);
+        let reopened = Store::open(&path, "fresh-pending-control").unwrap();
+        let connection = reopened.readers.get();
+        let version: String = connection.query_row(
+            "SELECT value FROM meta WHERE key='resource_pending_trigger_version'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, PENDING_TRIGGER_VERSION);
+        assert_eq!(reopened.resource_collection_page(None, None, Some("resource/fresh-pending-control"), None, 10).unwrap().len(), 1);
+        assert_eq!(projection_digest::tables(&connection).unwrap(), projection_digest::oracle(&connection).unwrap());
+    }
+
+    #[test]
+    fn envelope_savepoint_rollback_discards_pending_and_record_before_position_zero_label() {
+        let store = Store::open_memory("pending-rollback-control").unwrap();
+        let claim = resource_claim(&store, "resource/pending-rollback-control");
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute_batch("SAVEPOINT envelope_control").unwrap();
+        record_upsert(&transaction, &claim.id).unwrap();
+        assert_eq!(pending_count(&transaction, &claim.subject), 1);
+        transaction.execute_batch("ROLLBACK TO envelope_control; RELEASE envelope_control").unwrap();
+        assert_eq!(pending_count(&transaction, &claim.subject), 0);
+        let retained: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM replica_records WHERE record_ref='record/pending-control'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retained, 0);
+
+        // This is the existing failure-label helper, not a signed receive or a claim attribution.
+        let envelope = ReplicaEnvelope {
+            writer: "writer".into(), sequence: 1, previous_hash: None,
+            hash: "hash".into(), accepted_at_unix_ms: 1,
+            payload: vec![1, 2, 3].into(), member_key: None, signature: None,
+        };
+        record_invalid_replica_envelope(
+            &transaction, &envelope,
+            &St3Error::new("internal", "pending control failure"),
+        ).unwrap();
+        let (position, claim_id, state): (i64, Option<String>, String) = transaction.query_row(
+            "SELECT position,claim_id,state FROM replica_records WHERE writer='writer' AND sequence=1 AND envelope_hash='hash'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((position, claim_id, state), (0, None, "invalid".into()));
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    #[ignore = "finite SQLite work cohort; source control only until governed execution"]
+    fn pending_trigger_work_stays_indexed_as_unrelated_subjects_grow() {
+        fn measured(unrelated: i64) -> smallclaims::sqlite::work::SqliteWork {
+            let store = Store::open_memory("pending-work-control").unwrap();
+            let claim = resource_claim(&store, "resource/pending-work-control");
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<?1)
+                 INSERT INTO local_resource_projection_pending(subject)
+                 SELECT printf('resource/unrelated/%08d',x) FROM n",
+                [unrelated],
+            ).unwrap();
+            transaction.execute(
+                "INSERT INTO local_resource_projection_pending(subject) VALUES(?1)",
+                [&claim.subject],
+            ).unwrap();
+            let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            record_upsert(&transaction, &claim.id).unwrap();
+            let work = scope.finish();
+            assert_eq!(pending_count(&transaction, &claim.subject), 1);
+            transaction.rollback().unwrap();
+            work
+        }
+        let small = measured(1_000);
+        let large = measured(10_000);
+        assert_eq!(small.statements, large.statements);
+        assert_eq!(small.fullscan_steps, 0);
+        assert_eq!(large.fullscan_steps, 0);
+        assert!(large.vm_steps <= small.vm_steps * 2,
+            "target answer is fixed; 1k={small:?}, 10k={large:?}");
     }
 }
