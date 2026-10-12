@@ -20,13 +20,12 @@ export function SwitchingSidebar({ placement, selected, context, onOpen }: { pla
 }
 function CountRow({ fixture, placement, selected, onOpen }: { fixture: WorkspaceFixture; placement: CountPlacement; selected: boolean; onOpen: Open }) {
   const waiting = waitingSubagents(fixture) > 0
-  // The empty stretch and the disc extend the name's pointer target; keyboard users reach the same action on the name button.
+  // The row's empty stretch and the disc extend the name's pointer target; keyboard users reach the same action on the name button. No spacer element, so no extra gap eats the name's width.
   const openRow = () => onOpen(fixture.state, false)
   const count = fixture.reporting === 'unreported' ? <UnknownCount fixture={fixture} placement={placement} selected={selected} onOpen={onOpen} /> : <ActiveCount fixture={fixture} placement={placement} selected={selected} onOpen={onOpen} />
-  return <div data-count-row={fixture.state} data-placement={placement} data-sample={fixture.sample || undefined} {...stylex.props(styles.row, selected && styles.selected)}>
+  return <div data-count-row={fixture.state} data-placement={placement} data-sample={fixture.sample || undefined} onClick={event => { if (event.target === event.currentTarget) openRow() }} {...stylex.props(styles.row, selected && styles.selected)}>
     <Button aria-current={selected ? 'page' : undefined} onPress={openRow} {...stylex.props(styles.name)}><span data-row-name {...stylex.props(styles.nameText)}>{fixture.label}</span></Button>
     {placement === 'chip' ? count : null}
-    <span aria-hidden="true" onClick={openRow} {...stylex.props(styles.fill)} />
     <span onClick={openRow} {...stylex.props(styles.disc)}><SidebarStatus status={waiting ? 'waiting' : 'working'} statusLabel={waiting ? 'Needs you' : 'Running'} freshness="live" variant="SG-1" iconOnly /></span>
     {placement === 'badge' ? count : null}
   </div>
@@ -63,12 +62,11 @@ const styles = stylex.create({
   nav: { display: 'flex', flexDirection: 'column', gap: s.md },
   list: { display: 'flex', flexDirection: 'column', gap: s.md, margin: s.zero, padding: s.zero, listStyle: 'none' },
   group: { margin: s.zero, marginTop: s.md, paddingInline: s.md, color: ink.fgMuted, fontSize: t.denseSize, lineHeight: t.metaLeading },
-  row: { display: 'flex', alignItems: 'center', gap: s.md, height: g.controlLg, minWidth: 0, boxSizing: 'border-box', paddingInline: s.md, borderRadius: r.sm, color: ink.fg, ':hover': { backgroundColor: surface.rowHover } },
+  row: { display: 'flex', alignItems: 'center', gap: s.md, height: g.controlLg, minWidth: 0, boxSizing: 'border-box', paddingInline: s.md, borderRadius: r.sm, color: ink.fg, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover } },
   selected: { backgroundColor: surface.rowActive, ':hover': { backgroundColor: surface.rowActive } },
   name: { flex: '0 1 auto', minWidth: 0, display: 'flex', alignItems: 'center', height: g.controlLg, padding: s.zero, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
   nameText: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  fill: { flex: '1 1 0', minWidth: 0, alignSelf: 'stretch', cursor: 'pointer' },
-  disc: { width: g.icon, height: g.icon, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' },
+  disc: { width: g.icon, height: g.icon, flexShrink: 0, marginInlineStart: 'auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' },
   // The hit area stays 24px tall; the visible tag inside it is the 11/16 tag: 1px border, r6, no fill, tone on text and border only.
   countHit: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', minHeight: g.controlSm, padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
   tag: { display: 'inline-flex', alignItems: 'center', gap: s.xs, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },

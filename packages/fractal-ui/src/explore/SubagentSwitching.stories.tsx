@@ -111,11 +111,13 @@ export default meta
 type Story = StoryObj<typeof meta>
 export const Exploration: Story = {}
 
+/** One line: every text box of the name and the count sits on the same line (an ellipsis may split a truncated name's boxes, never its line), nothing overflows, and the row stays 32px. */
 function singleLine(row: HTMLElement): boolean {
   return [...row.querySelectorAll('[data-row-name], [data-count-text]')].every(element => {
     const range = document.createRange()
     range.selectNodeContents(element)
-    return range.getClientRects().length === 1
+    const rects = [...range.getClientRects()]
+    return rects.length > 0 && rects.every(rect => Math.abs(rect.top - rects[0]!.top) < 1)
   }) && row.scrollWidth <= row.clientWidth && row.getBoundingClientRect().height <= 32
 }
 /**
