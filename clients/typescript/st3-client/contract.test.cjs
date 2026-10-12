@@ -634,7 +634,7 @@ test('terminalRoute encodes the selected subject and authenticates only the meta
         calls.push([String(url), init]); return response(String(url).endsWith('/capabilities') ? capabilityFixture : envelope(route));
     } });
     assert.deepEqual((await client.terminalRoute(route.terminal_id)).value, route);
-    assert.equal(calls[1][0], 'https://example.test/v1/client/terminals/agent%2Fdemo%2Fworker/route');
+    assert.equal(calls[1][0], 'https://example.test/v1/client/terminals/terminal%2Fagent%2Fdemo%2Fworker/route');
     assert.equal(calls[1][1].headers.Authorization, 'Bearer test-credential');
     assert.equal(calls[1][1].method, 'GET');
 });
