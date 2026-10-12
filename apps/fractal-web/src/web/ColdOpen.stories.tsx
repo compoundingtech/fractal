@@ -1,23 +1,41 @@
 import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react'
 import { expect, waitFor } from 'storybook/test'
-import { coldOpenDocument, type ColdOpenControl } from './coldOpen.fixtures.ts'
+import { coldOpenDocument } from './coldOpen.fixtures.ts'
 
-const BootstrapSurface = ({ control }: { readonly control?: ColdOpenControl }) => <iframe title="Cold workspace" srcDoc={coldOpenDocument(control)} onLoad={event => { event.currentTarget.dataset.loaded = 'true' }} style={{ width: '100%', height: 900, border: 0 }} />
-const meta = { title: 'Fractal/App/Shell/Cold open', component: BootstrapSurface, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof BootstrapSurface>
+const BootstrapSurface = ({ scheme = 'dark' }: { readonly scheme?: 'dark' | 'light' }) => <iframe title="Cold workspace" data-scheme={scheme} srcDoc={coldOpenDocument(undefined, scheme)} onLoad={event => { event.currentTarget.dataset.loaded = 'true' }} style={{ width: '100%', height: 900, border: 0 }} />
+const meta = { title: 'Fractal/App/Shell/Cold open', component: BootstrapSurface, args: { scheme: 'dark' }, argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } }, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof BootstrapSurface>
 export default meta
 type Story = StoryObj<typeof meta>
+const assertBootstrap = (frame: HTMLIFrameElement): void => {
+  const document = frame.contentDocument!
+  const scheme = frame.dataset.scheme
+  expect(document.documentElement.style.colorScheme).toBe(scheme)
+  expect(frame.contentWindow!.getComputedStyle(document.body).backgroundColor).toBe(scheme === 'light' ? 'rgb(252, 252, 252)' : 'rgb(10, 10, 10)')
+  expect(document.querySelectorAll('[data-wf-sidebar-skeleton] > div')).toHaveLength(8)
+  expect(document.querySelector('[data-wf-sidebar-skeleton]')!.getBoundingClientRect().width).toBe(256)
+}
 const bootstrapPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
   const frame = canvasElement.querySelector<HTMLIFrameElement>('iframe')!
   await waitFor(() => expect(frame.dataset.loaded).toBe('true'), { timeout: 90000 })
+  assertBootstrap(frame)
   const document = frame.contentDocument!
-  await expect(document.documentElement.style.colorScheme).toBe('dark')
-  await expect(frame.contentWindow!.getComputedStyle(document.body).backgroundColor).toBe('rgb(10, 10, 10)')
-  await expect(document.querySelectorAll('[data-wf-sidebar-skeleton] > div')).toHaveLength(8)
-  await expect(document.querySelector('[data-wf-sidebar-skeleton]')!.getBoundingClientRect().width).toBe(256)
+  const bodyStyle = document.body.getAttribute('style')
+  document.body.style.backgroundColor = 'white'
+  try { await expect(() => assertBootstrap(frame)).toThrow() }
+  finally {
+    if (bodyStyle === null) document.body.removeAttribute('style')
+    else document.body.setAttribute('style', bodyStyle)
+  }
+  const skeleton = document.querySelector('[data-wf-shell-skeleton]')!
+  const parent = skeleton.parentNode!
+  const next = skeleton.nextSibling
+  skeleton.remove()
+  try { await expect(() => assertBootstrap(frame)).toThrow() }
+  finally { parent.insertBefore(skeleton, next) }
+  assertBootstrap(frame)
   canvasElement.dataset.proof = 'passed'
 }
 export const DarkBeforeHydration: Story = { play: bootstrapPlay }
-export const WhitePageControl: Story = { args: { control: 'white-page' }, play: bootstrapPlay }
-export const MissingSkeletonControl: Story = { args: { control: 'missing-skeleton' }, play: bootstrapPlay }
+export const LightBeforeHydration: Story = { args: { scheme: 'light' }, play: bootstrapPlay }
 export const AllStates: Story = DarkBeforeHydration

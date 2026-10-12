@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-/** Gate18's fresh-document responseEnd -> themed-skeleton rAF/screencast method.
+/** Fresh-document responseEnd -> themed-skeleton rAF/screencast proof.
  * Own Vite server; real bootstrap; app/runtime modules held so the skeleton remains observable.
- * A 1100ms CSS response delay reproduces the gate's measured ~1126ms StyleX transfer, without
+ * A synthetic 1100ms CSS response delay exercises slow stylesheet delivery without
  * fabricating stylesheet bytes. The control restores the original blocking stylesheet link.
  */
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -53,8 +53,8 @@ try {
     if (index === 0) { cdp.on('Tracing.dataCollected', event => trace.push(...event.value)); await cdp.send('Tracing.start', { categories: 'devtools.timeline,loading,blink.user_timing', transferMode: 'ReportEvents' }) }
     await cdp.send('Page.startScreencast', { format: 'png', maxWidth: 1440, maxHeight: 1000, everyNthFrame: 1 })
     await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 60_000 })
-    // Gate18 retains each document for 1800ms after DOMContentLoaded; avoid overlapping
-    // unfinished stylesheets from rapidly closed pages in the next fresh-document sample.
+    // Retain each document for 1800ms after DOMContentLoaded to avoid overlapping
+    // unfinished stylesheets in the next fresh-document sample.
     await page.waitForTimeout(1800)
     await page.waitForFunction(() => window.__gatePaint?.firstSkeleton !== null && performance.getEntriesByType('paint').length > 0)
     await cdp.send('Page.stopScreencast')
@@ -68,7 +68,7 @@ try {
     await cdp.detach(); await page.close()
   }
   const summary = ['disabled', 'warmed'].map(cache => { const runs = results.filter(run => run.cache === cache), times = runs.map(run => run.skeletonAfterResponseEnd).sort((a, b) => a - b); return { cache, count: runs.length, within300: runs.filter(run => run.passes).length, min: times[0], median: (times[4] + times[5]) / 2, p95: times[9], max: times[9] } })
-  await writeFile(`${evidence}/${control ? 'old-control' : 'fixed'}.json`, JSON.stringify({ condition: 'Own loopback Vite; real CSS response delayed1100ms; modules held; Gate18 method', summary, results }, null, 2))
+  await writeFile(`${evidence}/${control ? 'old-control' : 'fixed'}.json`, JSON.stringify({ condition: 'Own loopback Vite; real CSS response delayed 1100ms; modules held; responseEnd-to-skeleton rAF and screencast proof', summary, results }, null, 2))
   console.log(JSON.stringify({ control, summary }))
   if (results.some(run => run.passes === control)) throw new Error('Skeleton paint control/acceptance failed')
 } finally { await browser.close(); await server.close() }
