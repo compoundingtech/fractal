@@ -28,6 +28,10 @@ existing PR concurrency group and cancels obsolete ready-head work while skippin
 Keep a PR draft while iterating and testing locally, then mark its final head ready for Intake.
 A later push to a ready PR still validates the replacement head and cancels its superseded run;
 this policy reduces iteration demand, rather than enforcing a lifetime one-run limit.
+GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run is the
+final safety gate and runs every required stage regardless of PR draft payload. Do not arm
+auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
+old draft event and stays skipped; use the ready transition or a new push for fresh checks.
  `Workspace CI` also runs on the `merge_group` event, so GitHub's merge queue receives
 the required checks for each queued entry.
 Checkout uses GitHub's default `pull_request` merge ref, not the contributor's unmerged
@@ -505,6 +509,14 @@ All required merge-group stages select `ci1-priority`, without consulting idle c
 the host controller must retain its release/merge-first classification and bounded reservations.
 `CI_MERGE_CI1` and `CI_MERGE_NAMESPACE_PROFILE` no longer redirect required merge jobs.
 Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
+The declared ci1 pool is five general workers (including one reserved priority worker) and one
+merge worker, with dynamic label lending. The current source run used `ci1-5` with
+`ci1-priority`; that proves a matching worker, not the current labels of all six workers.
+Priority PRs share the lane; this sharing is accepted, with release/merge-first ordering owned
+by the private controller. GitHub itself does not prioritize self-hosted jobs. The existing
+hosted queue observer warns once when an owned job has no assigned runner for five continuous
+minutes after its actual workflow dependencies complete. It preserves current work; it does
+not repair offline runners or guarantee starts. Watch the first merge after this lands.
 
 For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker. Trusted `ci-priority`
 PRs select that label for their producer and primary consumer. Ordinary trusted PRs may use an
