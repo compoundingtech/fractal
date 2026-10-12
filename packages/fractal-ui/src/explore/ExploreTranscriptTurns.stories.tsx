@@ -364,7 +364,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await waitFor(() => expect(tooltips()).toHaveLength(1))
     await userEvent.unhover(identity)
     await waitFor(() => expect(tooltips()).toHaveLength(0))
-    await userEvent.keyboard('{Shift}')
+    await userEvent.keyboard('{Escape}')
     identity.focus()
     await waitFor(() => expect(tooltips()).toHaveLength(1))
     await expect(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).toHaveLength(1)
