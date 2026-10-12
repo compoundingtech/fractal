@@ -25,7 +25,7 @@ function fixture(state: State, prefix: string): TranscriptStoryData {
   const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${prefix}/prompt`, role: 'user', text: 'Keep the row projection readable and verify that selection survives the change.', attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' }, sendState: state === 'pending-send' ? { _tag: 'Pending' } : state === 'failed-send' ? { _tag: 'Failed', reason: { _tag: 'Failed' }, detail: 'The connection dropped while sending. Your draft is still saved; try again in a moment.' } : undefined }
   const calls: ConversationItem[] = [
     { _tag: 'ToolCall', id: `${prefix}/read`, callId: `${prefix}/read`, name: 'read', input: { path: 'src/rows.ts' }, status: 'success', result: { content: source, mediaType: 'text/plain', isError: false, at: '2026-01-15T12:00:03Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' },
-    { _tag: 'ToolCall', id: `${prefix}/run`, callId: `${prefix}/run`, name: 'run', input: { command: 'pnpm test rows' }, status: failed ? 'error' : interrupted ? 'interrupted' : running ? 'running' : 'success', result: running ? undefined : { content: failed ? 'The row assertion did not match the observed selection.' : interrupted ? 'Stopped before the checks completed.' : '✓ selection retained\n✓ visible count matches\n✓ empty rows handled', mediaType: 'text/x-shellscript', isError: failed, at: '2026-01-15T12:00:18Z' }, callSeen: true, at: '2026-01-15T12:00:05Z' },
+    { _tag: 'ToolCall', id: `${prefix}/run`, callId: `${prefix}/run`, name: 'run', input: { command: 'pnpm test rows' }, status: failed ? 'error' : interrupted ? 'interrupted' : running ? 'running' : 'success', result: running ? undefined : { content: failed ? 'The row assertion did not match the observed selection.' : interrupted ? 'Stopped before the checks completed.' : 'Passed: selection retained\nPassed: visible count matches\nPassed: empty rows handled', mediaType: 'text/x-shellscript', isError: failed, at: '2026-01-15T12:00:18Z' }, callSeen: true, at: '2026-01-15T12:00:05Z' },
     { _tag: 'ToolCall', id: `${prefix}/empty`, callId: `${prefix}/empty`, name: 'read', input: { path: 'src/empty.ts' }, status: 'success', result: { content: '', isError: false, at: '2026-01-15T12:00:19Z' }, callSeen: true, at: '2026-01-15T12:00:19Z' },
   ]
   const reasoning: ConversationItem = { _tag: 'Reasoning', id: `${prefix}/thinking`, text: 'Compare the **observed selection** with the projected rows before changing the result.', streaming: running, at }
@@ -83,7 +83,8 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   await expect(canvasElement.querySelector('[data-testid="work-log"] hr')).toBeNull()
   await expect(canvas.getByTestId('work-log-children')).toContainElement(canvas.getByTestId('thinking-entry'))
   await expect(canvas.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'false')
-  const empty = canvasElement.querySelector('[data-tool-status="success"]:last-child')!
+  // E18/C3: Thinking shares the fold scroller, so the final tool row is no longer its last child.
+  const empty = Array.from(canvasElement.querySelectorAll('[data-tool-status="success"]')).at(-1)!
   await expect(empty.querySelector('button')).toBeNull()
   await expect(empty).not.toHaveTextContent('No output')
   await userEvent.click(canvas.getByRole('button', { name: 'Open read tool detail' }))

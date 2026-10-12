@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect } from 'storybook/test'
-import { statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
+import { colorVars as color, statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
@@ -44,6 +44,17 @@ const meta = { title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: {
     const value = getComputedStyle(probe).color
     probe.remove()
     return value
+  }
+  // C18 v1.1: secondary ink uses muted, not a fourth grey. Restore the retired alpha as a failing control.
+  for (const token of [text.fgMuted, color.fgMuted]) {
+    const property = token.slice(4, -1)
+    const original = scope.style.getPropertyValue(property)
+    const expected = args.scheme === 'light' ? 'rgb(102, 102, 110)' : 'rgb(129, 129, 129)'
+    await expect(paint(token)).toBe(expected)
+    scope.style.setProperty(property, args.scheme === 'light' ? 'rgba(39, 39, 42, 0.55)' : 'rgba(245, 245, 245, 0.52)')
+    await expect(paint(token)).not.toBe(expected)
+    if (original) scope.style.setProperty(property, original); else scope.style.removeProperty(property)
+    await expect(paint(token)).toBe(expected)
   }
   const aliases = () => [paint(tokens.good) === paint(text.fgSoft), paint(tokens.added) === paint(status.diffAddTint)]
   if (args.scheme === 'light' || args.theme === 'embrace') {
