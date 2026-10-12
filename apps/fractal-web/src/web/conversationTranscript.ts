@@ -35,6 +35,16 @@ export const transcriptSendFailureReason = (reason: string): KitSendFailureReaso
   return classified ?? sendFailureReasons.failed
 }
 
+/** Narrows each app item to the kit shape; a nested-property ternary cannot narrow `sendState`. */
+const toKitItem = (item: ConversationItem): KitConversationItem => {
+  if (item._tag === 'UnknownEvent') return { _tag: 'Notice', id: item.id, kind: 'event', text: 'An event this view cannot show yet.',
+    ...(item.at === undefined ? {} : { at: item.at }) }
+  if (item._tag !== 'Text') return item
+  const sendState = item.sendState
+  if (sendState?._tag !== 'Failed') return { ...item, sendState }
+  return { ...item, sendState: { ...sendState, reason: transcriptSendFailureReason(sendState.reason), detail: sendFailureDetail(sendState.reason) } }
+}
+
 
 const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly role: 'user' } =>
   item._tag === 'Text' && item.role === 'user'
@@ -149,14 +159,7 @@ export const prepareTranscriptTurns = (
     if (!options.showSystemEvents && isOmittedItem(sourceItem)) continue
     // The runtime must not receive unknown protocol payloads either: its converter and fallback
     // rows render the same short notice, never a raw JSON envelope or producer-specific kind.
-    const item: KitConversationItem = sourceItem._tag === 'UnknownEvent'
-      ? { _tag: 'Notice', id: sourceItem.id, kind: 'event', text: 'An event this view cannot show yet.',
-        ...(sourceItem.at === undefined ? {} : { at: sourceItem.at }) }
-      : sourceItem._tag === 'Text' && sourceItem.sendState?._tag === 'Failed'
-        ? { ...sourceItem, sendState: { ...sourceItem.sendState,
-          reason: transcriptSendFailureReason(sourceItem.sendState.reason),
-          detail: sendFailureDetail(sourceItem.sendState.reason) } }
-        : sourceItem
+    const item = toKitItem(sourceItem)
     if (isPrompt(item)) {
       flush()
       prompt = item
