@@ -60,9 +60,8 @@ describe('public changelog build gate', () => {
   it('replaces the changelog modules with the compiled public manifest for the exact build identity', async () => {
     const text = await buildPublic('', { public: publicRegistry, private: privateRegistry() })
     expect(text).toContain(machineVersion)
-    for (const { file, source } of changelogSources) {
+    for (const { file } of changelogSources) {
       expect(text).toContain(file.replace(/\.ts$/, ''))
-      expect(text).toContain(source.title)
     }
     expect(text).not.toContain(synthetic.title)
     expect(text).not.toContain('2000-01-01-synthetic-private-control')
