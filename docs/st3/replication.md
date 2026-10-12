@@ -140,6 +140,25 @@ uses one registry without document bindings, exchanges unknown claims and later 
 in both directions, then reopens the older store with the current registry. It requires equal
 log digests before upgrade and equal graph and every table digest after canonical replay.
 
+`work.submitted.submitted_incarnation` is an optional registry field recording the validated
+submitting lease incarnation. The actor, subject, attempt and evidence stay on the immutable
+claim; `claimant` and `claim_incarnation` still describe the cleared post-submission lease.
+Legacy submission claims replay without the field. Work detail reads expose the current
+attempt's `submitted_incarnation`, including submissions without a summary. Missing or null
+means unknown, and validators must never accept unknown as a matching incarnation.
+`model::work_submission_matches` compares the claim's subject, attempt, actor, nonempty
+incarnation and evidence references together.
+
+This changes the claim registry digest. An older member rejects the field at schema admission
+with `unknown-claim-field`, retains the original signed submission as a waiting unknown record,
+and continues projecting known claims. Its work projection cannot establish that submission's
+completion or incarnation until upgrade. Upgrade completion validators' members before relying
+on these receipts, and confirm waiting claims have been admitted after restart. No database
+schema migration or claim rewrite is required. The signed two-member regression
+`store::fleet_admission_tests::submitted_incarnation_waits_on_older_members_and_legacy_submissions_replay`
+checks legacy replay, waiting records, continued known-claim exchange, preserved receipt bytes,
+and graph/table convergence after upgrading the older registry.
+
 ## Projection digest coverage and cost
 
 `store/projection_digest.rs::TABLES` lists the shared tables: operations, blobs, documents,

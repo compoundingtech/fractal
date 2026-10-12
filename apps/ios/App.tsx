@@ -15,14 +15,15 @@ import { FULL_SCREEN, navigationRef, ROOTS, type StackParams, type TabParams } f
 import { StoreProvider, useStore } from './store';
 import { parseDevLink, tabLabel, tabNamed, type Tab } from './tabs';
 import { theme } from './theme';
-import { AgentsScreen, HistoryScreen } from './screens/Agents';
+import { HistoryScreen } from './screens/Agents';
 import { ConversationScreen } from './screens/Conversation';
 import { FleetScreen, PairScreen } from './screens/Fleet';
 import { UsageDetailScreen, UsageScreen } from './screens/Usage';
 import { AttentionScreen, HomeScreen } from './screens/Home';
-import { LaunchScreen, MissionScreen, MissionsScreen, NewMissionScreen } from './screens/Missions';
+import { LaunchScreen, MissionScreen, NewMissionScreen } from './screens/Missions';
 import { TerminalScreen } from './screens/Terminal';
 import { GlassesScreen, SpaceScreen } from './screens/Glasses';
+import { ResourceScreen } from './screens/Resource';
 import { SidebarScreen } from './screens/Sidebar';
 import { FabricProofScreen } from './screens/FabricProof';
 import { parseFabricProofLink, type FabricProofInput } from './fabricProof';
@@ -40,8 +41,7 @@ const navigationTheme = {
   colors: { ...DarkTheme.colors, primary: theme.accent, background: theme.base, card: theme.mantle, text: theme.text, border: theme.surface0, notification: theme.person },
 };
 
-const ICONS: Record<Tab, string> = { Home: 'bell', Agents: 'person.2', Missions: 'point.3.connected.trianglepath.dotted', Fleet: 'server.rack' };
-const ROOT_SCREENS = { HomeRoot: HomeScreen, AgentsRoot: AgentsScreen, MissionsRoot: MissionsScreen, FleetRoot: FleetScreen } as const;
+const ICONS: Record<Tab, string> = { Now: 'bell', Resources: 'folder', Fleet: 'server.rack', Spaces: 'app' };
 
 // Native header options only: the system font and look, tinted with the accent.
 const stackOptions: NativeStackNavigationOptions = {
@@ -53,12 +53,14 @@ const stackOptions: NativeStackNavigationOptions = {
   headerBackButtonDisplayMode: 'default',
 };
 
-function TabStack({ tab }: { tab: Tab | 'Glasses' }) {
+function TabStack({ tab }: { tab: Tab }) {
   return <Stack.Navigator screenOptions={stackOptions}>
-    {tab === 'Glasses'
-      ? <Stack.Screen name="GlassesRoot" component={GlassesScreen} options={{ title: 'Spaces' }} />
-      : <Stack.Screen name={ROOTS[tab] as keyof typeof ROOT_SCREENS} component={ROOT_SCREENS[ROOTS[tab] as keyof typeof ROOT_SCREENS]} options={{ title: tabLabel(tab) }} />}
-    <Stack.Screen name="Sidebar" component={SidebarScreen} options={{ title: 'Resources' }} />
+    {tab === 'Now' ? <Stack.Screen name="NowRoot" component={HomeScreen} options={{ title: 'Now' }} /> :
+     tab === 'Resources' ? <Stack.Screen name="ResourcesRoot" component={SidebarScreen} options={{ title: 'Resources' }} /> :
+     tab === 'Fleet' ? <Stack.Screen name="FleetRoot" component={FleetScreen} options={{ title: 'Fleet' }} /> :
+     <Stack.Screen name="SpacesRoot" component={GlassesScreen} options={{ title: 'Spaces' }} />}
+
+    <Stack.Screen name="Resource" component={ResourceScreen} options={{ title: 'Resource' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
@@ -72,12 +74,11 @@ function TabStack({ tab }: { tab: Tab | 'Glasses' }) {
   </Stack.Navigator>;
 }
 const TAB_COMPONENTS: Record<Tab, () => React.JSX.Element> = {
-  Home: () => <TabStack tab="Home" />,
-  Agents: () => <TabStack tab="Agents" />,
-  Missions: () => <TabStack tab="Missions" />,
+  Now: () => <TabStack tab="Now" />,
+  Resources: () => <TabStack tab="Resources" />,
   Fleet: () => <TabStack tab="Fleet" />,
+  Spaces: () => <TabStack tab="Spaces" />,
 };
-const GlassesTab = () => <TabStack tab="Glasses" />;
 
 function tabBarHidden(route: RouteProp<TabParams>): boolean {
   const focused = getFocusedRouteNameFromRoute(route) as keyof StackParams | undefined;
@@ -85,7 +86,7 @@ function tabBarHidden(route: RouteProp<TabParams>): boolean {
 }
 
 function Main({ proofSession = false }: { proofSession?: boolean }) {
-  const { pairDraft, credential, url, order, data, caps, actions, setTreeView, requestScroll, glassesOn } = useStore();
+  const { pairDraft, credential, url, order, data, caps, actions, requestScroll } = useStore();
   const homeCount = openAlerts(data.attention, caps?.session_actor).length;
   const paired = !!url && !!credential;
 
@@ -99,16 +100,15 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       if (!parsed) return;
       if (parsed.kind === 'pair' && proofSession) return;
       if (parsed.kind === 'pair') { if (lastPair !== link) { lastPair = link; void actions.pairFromLink(parsed.gateway, parsed.id, parsed.code); } return; }
-      if (parsed.kind === 'tree') { setTreeView(parsed.on); if (navigationRef.isReady()) navigationRef.navigate('Agents', { screen: 'AgentsRoot' }); return; }
       if (parsed.kind === 'scroll') { requestScroll(parsed.y); return; }
       if (!navigationRef.isReady()) { setTimeout(() => handle(link), 300); return; }
       if (parsed.kind === 'tab') navigationRef.navigate(parsed.tab, { screen: ROOTS[parsed.tab] } as never);
-      else if (parsed.kind === 'mission') navigationRef.navigate('Missions', { screen: 'Mission', params: { id: parsed.id }, initial: false });
-      else if (parsed.kind === 'agent') navigationRef.navigate('Agents', { screen: 'Conversation', params: { target: parsed.id }, initial: false });
-      else if (parsed.kind === 'terminal') navigationRef.navigate('Agents', { screen: 'Terminal', params: { terminalId: parsed.id }, initial: false });
+      else if (parsed.kind === 'mission') navigationRef.navigate('Resources', { screen: 'Mission', params: { id: parsed.id }, initial: false });
+      else if (parsed.kind === 'agent') navigationRef.navigate('Resources', { screen: 'Conversation', params: { target: parsed.id }, initial: false });
+      else if (parsed.kind === 'terminal') navigationRef.navigate('Resources', { screen: 'Terminal', params: { terminalId: parsed.id }, initial: false });
       else if (parsed.kind === 'session') {
-        navigationRef.navigate('Agents', { screen: 'Conversation', params: { target: parsed.id, sessionId: parsed.id }, initial: false });
-        if (parsed.terminal) setTimeout(() => navigationRef.navigate('Agents', { screen: 'Terminal', params: { terminalId: parsed.terminal! }, initial: false }), 300);
+        navigationRef.navigate('Resources', { screen: 'Conversation', params: { target: parsed.id, sessionId: parsed.id }, initial: false });
+        if (parsed.terminal) setTimeout(() => navigationRef.navigate('Resources', { screen: 'Terminal', params: { terminalId: parsed.terminal! }, initial: false }), 300);
       }
     };
     void Linking.getInitialURL().then(handle);
@@ -123,7 +123,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
 
   if (!paired || pairDraft) {
     return <Stack.Navigator screenOptions={stackOptions}>
-      <Stack.Screen name="HomeRoot" component={PairScreen} options={{ title: 'Pair this device' }} />
+      <Stack.Screen name="NowRoot" component={PairScreen} options={{ title: 'Pair this device' }} />
     </Stack.Navigator>;
   }
   const initial = (__DEV__ ? tabNamed(process.env.EXPO_PUBLIC_ST3_TEST_TAB) : null) ?? order[0];
@@ -133,7 +133,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       headerShown: false,
       tabBarActiveTintColor: theme.accent,
       // Spaces: one rounded rect, as stui's ▢.
-      tabBarIcon: { type: 'sfSymbol', name: (route.name === 'Glasses' ? 'app' : ICONS[route.name as Tab]) as never },
+      tabBarIcon: { type: 'sfSymbol', name: ICONS[route.name as Tab] as never },
       tabBarStyle: { display: tabBarHidden(route) ? 'none' : 'flex' },
     })}
   >
@@ -141,9 +141,8 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       key={tab}
       name={tab}
       component={TAB_COMPONENTS[tab]}
-      options={{ tabBarLabel: tabLabel(tab), title: tabLabel(tab), ...(tab === 'Home' && homeCount ? { tabBarBadge: homeCount, tabBarBadgeStyle: { backgroundColor: theme.person, color: theme.crust } } : {}) }}
+      options={{ tabBarLabel: tabLabel(tab), title: tabLabel(tab), ...(tab === 'Now' && homeCount ? { tabBarBadge: homeCount, tabBarBadgeStyle: { backgroundColor: theme.person, color: theme.crust } } : {}) }}
     />)}
-    {glassesOn ? <Tabs.Screen name="Glasses" component={GlassesTab} options={{ title: 'Spaces', tabBarLabel: 'Spaces' }} /> : null}
   </Tabs.Navigator>;
 }
 

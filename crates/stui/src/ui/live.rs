@@ -208,6 +208,7 @@ enum Fetched {
     /// The Fleet tab's machines and paired devices.
     Machines(Collection),
     Terminals(Vec<super::resource_sidebar::ResourceRow>, bool),
+    Observations { generation: u64, outcome: Result<(Vec<st3_client::ResourceObservation>, bool), String> },
     /// Token spend over a period of this many hours, or why st could not say.
     Usage(u64, Result<st3_client::UsagePeriod, String>),
     /// The clients connected to this member, or why they could not be read.
@@ -242,6 +243,7 @@ enum Fetched {
         reason: String,
     },
     /// st answered a glass write: the glass, the write's key, and the revision it accepted.
+    SidebarSaved { write: super::resource_sidebar::Write, outcome: Result<(), String> },
     GlassSaved {
         id: String,
         key: String,
@@ -390,6 +392,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
     let mut shown_tab = usize::MAX;
+    let mut resources_shown = false;
+    let mut resource_pane = None;
+    let mut resources_stale = true;
+    let mut resources_reading = false;
+    let mut resources_generation = 0_u64;
     // Whether the feed was last told to follow the missions window, and until when the last time
     // one was on screen keeps it followed.
     let mut missions_sent = false;
@@ -442,6 +449,7 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::GlassesVersion(version) => super::set_glasses_version(version),
                 feed::Update::Connected(member) => {
                     client = member;
+                    resources_generation += 1; resources_stale = true;
                     machines_stale = true;
                     extras.live = false;
                     attached = None;
@@ -452,6 +460,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
+                    ui.resource_sidebar.writable = true;
                     ui.resource_sidebar.arrangements = items.into_iter().filter_map(|item| match item {
                         Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted => Some(arrangement),
                         _ => None,
@@ -717,6 +726,10 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                 }
+                Fetched::SidebarSaved { write, outcome } => {
+                    ui.resource_sidebar.saved(&write, outcome.is_ok());
+                    if let Err(error) = outcome { ui.flash(format!("Sidebar edit not done: {error}")); }
+                }
                 Fetched::Machines(machines) => {
                     machines_reading = false;
                     model.machines = machines;
@@ -726,6 +739,12 @@ pub fn run(context: Context) -> Result<()> {
                     machines_reading = false;
                     ui.flash(format!("Could not load machines: {why}"));
                 }
+                Fetched::Observations { generation, outcome } => {
+                    resources_reading = false;
+                    if generation == resources_generation { match outcome {
+                    Ok((rows, has_more)) => { ui.resource_sidebar.observations = rows; ui.resource_sidebar.observations_has_more = has_more; ui.resource_sidebar.observations_issue = None; }
+                    Err(error) => ui.resource_sidebar.observations_issue = Some(error),
+                }}},
                 Fetched::Terminals(rows, has_more) => {
                     ui.resource_sidebar.terminals = rows;
                     ui.resource_sidebar.terminals_has_more = has_more;
@@ -848,6 +867,19 @@ pub fn run(context: Context) -> Result<()> {
         let (tab, selected) = ui.focus();
         // What a tab needs when it opens: harness sessions st did not start (Agents), and the
         // machines and devices (Fleet). They are read then, never on a timer.
+        let showing_resources = ui.glasses.as_ref().is_some_and(|g| g.sidebar.shown);
+        let focused_resource = match ui.focused_pane() { Some(super::pane::Pane::Resource(id)) => Some(id), _ => None };
+        if tab != shown_tab || showing_resources && !resources_shown || focused_resource.is_some() && focused_resource != resource_pane { resources_stale = true; }
+        resource_pane = focused_resource.clone();
+        if ui.glasses.is_some() && extras.live && resources_stale && !resources_reading {
+            resources_stale = false; resources_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.plain()));
+                let _ = tx.send(Fetched::Observations { generation, outcome });
+            });
+        }
+        resources_shown = showing_resources;
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
             // pauses it, and coming back shows the current screen first.
@@ -1138,6 +1170,20 @@ pub fn run(context: Context) -> Result<()> {
             if let Effect::SaveGlass(write) = effect {
                 if extras.live {
                     save_glass(&runtime, &client, &fetched_tx, write);
+                }
+                continue;
+            }
+            if let Effect::EditArrangement(write) = &effect {
+                let write = write.clone();
+                if !extras.live {
+                    ui.resource_sidebar.saved(&write, false);
+                    ui.flash("Offline · reconnect before editing the sidebar.");
+                } else {
+                    let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone(); let model = model.clone();
+                    runtime.spawn(async move {
+                        let outcome = perform_steadily(&client, &person, &model, effect, None).await.map(|_| ()).map_err(|error| plain(&error));
+                        let _ = tx.send(Fetched::SidebarSaved { write, outcome });
+                    });
                 }
                 continue;
             }
@@ -2009,6 +2055,18 @@ async fn agent_control(client: &Client, agent: &str, control: AgentControl) -> R
     Ok(())
 }
 
+/// Submit a register edit with one stable action identity; the stream remains authoritative.
+async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -> Result<()> {
+    let snapshot = client.capabilities().await?.snapshot;
+    let reply = client.arrangement_edit(
+        format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
+        Fence { snapshot_id: snapshot.id, ..Default::default() },
+        st3_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
+    ).await?;
+    anyhow::ensure!(matches!(reply.value.status, st3_client::ActionStatus::Completed), "Sidebar edit is not completed.");
+    Ok(())
+}
+
 async fn perform(
     client: &Client,
     person: &str,
@@ -2020,6 +2078,10 @@ async fn perform(
         // Glass writes and retries never reach here: the loop handles them itself.
         Effect::SaveGlass(_) | Effect::Resend { .. } | Effect::Forget { .. } | Effect::LoadContent(_) => {
             Ok((String::new(), None))
+        }
+        Effect::EditArrangement(write) => {
+            save_sidebar(client, &write).await?;
+            Ok(("Sidebar edit saved".into(), None))
         }
         Effect::AgentControl { agent, control } => {
             agent_control(client, &agent, control).await?;
@@ -2668,6 +2730,54 @@ mod tests {
             .expect("the message went after a fresh snapshot");
         assert_ne!(Some(second.as_str()), first.as_deref(), "a new message, once");
         assert_eq!(store.message(&second).unwrap().unwrap().content, "two");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn sidebar_register_edits_merge_and_survive_daemon_restart() {
+        use std::sync::Arc;
+        use st3_client::ArrangementOperation as Op;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("sidebar.sock");
+        async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<st3::store::Store>, tokio::task::JoinHandle<()>) {
+            let store = Arc::new(st3::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
+            let state = st3::api::AppState {
+                store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
+            };
+            let path = socket.to_owned();
+            let server = tokio::spawn(async move { st3::api::serve_unix(&path, st3::api::router(state)).await.unwrap(); });
+            for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
+            (store, server)
+        }
+        let (store, server) = serve(root.path(), &socket).await;
+        let client = Client::unix_as(&socket, "person/avery");
+        let other_device = Client::unix_as(&socket, "person/avery");
+        let subject = format!("arrangement/person/avery/{}", uuid::Uuid::now_v7());
+        let first = uuid::Uuid::now_v7().to_string(); let second = uuid::Uuid::now_v7().to_string();
+        let write = |operations| super::super::resource_sidebar::Write { subject: subject.clone(), owner: "person/avery".into(), operations, key: uuid::Uuid::now_v7().to_string(), creating: false };
+        let creation = write(vec![Op::Create { name: "Sidebar".into() }, Op::FolderCreate { id: first.clone(), name: "First".into(), parent: None, key: "a0".into() }, Op::FolderCreate { id: second.clone(), name: "Second".into(), parent: None, key: "a1".into() }, Op::SubjectPlace { subject: "agent/example/atlas".into(), folder: Some(first.clone()), key: "a0".into() }]);
+        save_sidebar(&client, &creation).await.unwrap();
+        // Distinct registers edited by two devices combine instead of replacing a layout.
+        save_sidebar(&other_device, &write(vec![Op::FolderRename { id: first.clone(), name: "Renamed".into() }])).await.unwrap();
+        save_sidebar(&client, &write(vec![Op::FolderMove { id: second.clone(), parent: None, key: "Zz".into() }, Op::SubjectPlace { subject: "agent/example/atlas".into(), folder: Some(second.clone()), key: "a1".into() }])).await.unwrap();
+        // Exact retry of the accepted create does not replace later register winners.
+        save_sidebar(&client, &creation).await.unwrap();
+        let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
+        assert_eq!(found.body.folders[&first].name.value, "Renamed");
+        assert!(found.body.folders[&second].position.value.key < found.body.folders[&first].position.value.key);
+        assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], Some(second.clone()));
+        save_sidebar(&client, &write(vec![Op::FolderDelete { id: second.clone() }])).await.unwrap();
+        server.abort(); let _ = server.await; drop(store);
+        let _ = std::fs::remove_file(&socket);
+        let (_store, server) = serve(root.path(), &socket).await;
+        let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
+        assert_eq!(found.body.folders[&first].name.value, "Renamed");
+        assert!(found.body.folders[&second].tombstone.is_some());
+        assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
+        // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
+        assert!(found.body.placements.contains_key("agent/example/atlas"));
         server.abort();
     }
 

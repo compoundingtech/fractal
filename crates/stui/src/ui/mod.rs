@@ -34,6 +34,8 @@ pub mod live;
 pub mod pane;
 mod prefs;
 mod resource_sidebar;
+mod arrangement_keys;
+mod observed_resources;
 mod pty;
 pub mod screens;
 pub mod text;
@@ -254,6 +256,8 @@ pub enum Effect {
     },
     /// Keep a glass in st, or delete it there.
     SaveGlass(glass::GlassWrite),
+    /// Change only the sidebar registers explicitly selected by the person.
+    EditArrangement(resource_sidebar::Write),
     /// Interrupt an agent's turn, as Esc does in its harness's own TUI.
     StopAgent {
         agent: String,
@@ -2284,6 +2288,7 @@ impl Ui {
             Pane::Worktree(id) => {
                 screens::worktree_detail(&self.world, id.as_deref(), width, self.spinner())
             }
+            Pane::Resource(id) => observed_resources::detail(id, self.resource_sidebar.observations.iter().find(|row| &row.id == id), width),
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
         };
         self.pane(buf, &pane.key(), area, doc, false);
@@ -5817,6 +5822,10 @@ impl Ui {
             Hit::Row(index) => self.select(index),
             Hit::NewTerminal => self.open_new_terminal(),
             Hit::ResourceRow(index) => self.open_resource_row(index),
+            Hit::ResourceNewFolder => self.open_sidebar_palette(resource_sidebar::PaletteMode::New { subject: None }),
+            Hit::ResourceAdd(folder) => self.open_sidebar_palette(resource_sidebar::PaletteMode::Add { folder }),
+            Hit::ResourceFolderMenu(id) => self.open_sidebar_palette(resource_sidebar::PaletteMode::Manage { id }),
+            Hit::ResourceFolderDrag(_) => {},
             Hit::ResourceFilter => {
                 self.resource_sidebar.focused = true;
                 self.resource_sidebar.filtering = true;
