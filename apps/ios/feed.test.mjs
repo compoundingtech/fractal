@@ -235,12 +235,13 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   const { handlers } = watch();
   const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
   await settle();
-  const issues = [];
-  feed.followConversation('agent/example/worker', { onEntries: () => {}, onIssue: issue => issues.push(issue) });
+  const issues = [], stops = [];
+  feed.followConversation('agent/example/worker', { onEntries: () => {}, onIssue: (issue, stopped) => { issues.push(issue); stops.push(stopped); } });
   const before = sockets[0].sent.length;
   const reason = 'the retained transcript starts after its first entries; st cannot show it from the start';
   sockets[0].frame({ kind: 'error', id: 'conversation', collection: 'conversation', code: 'timeline-history-incomplete', message: reason });
   assert.equal(issues.at(-1), reason, 'st\'s own words, without "trying again"');
+  assert.equal(stops.at(-1), true, 'the screen offers a retry instead of loading forever');
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(sockets[0].sent.length, before, 'not asked for again');
   feed.close();

@@ -347,7 +347,7 @@ fn a_watch_holds_the_nudge_until_it_has_not_woken_the_seat_for_two_hours() {
     let idle = fixture();
     let step = idle.hold("queued", "watched");
     idle.watch();
-    idle.observe(json!({}));
+    idle.observe(json!({"merge_queue": {"position": 4, "state": "queued"}}));
     idle.harness("idle");
 
     idle.at(31 * MINUTE);
@@ -362,8 +362,7 @@ fn a_watch_holds_the_nudge_until_it_has_not_woken_the_seat_for_two_hours() {
     idle.at(51 * MINUTE);
     idle.harness("idle");
 
-    // A movement the watch does not deliver, such as entering the merge queue, does not restart
-    // its clock.
+    // Routine queue position changes are not delivered and do not restart its clock.
     idle.at(2 * HOUR);
     idle.observe(json!({
         "required_checks": {"state": "pass", "source": "rules", "checks": ["build"], "failed": []},
@@ -428,7 +427,7 @@ fn a_wait_that_is_not_a_pull_request_holds_until_it_goes_quiet() {
 }
 
 #[test]
-fn a_pull_request_that_leaves_the_merge_queue_nudges_once_it_stays_out() {
+fn a_watched_pull_request_queue_exit_wakes_directly_without_a_duplicate_idle_nudge() {
     let idle = fixture();
     let step = idle.hold("queued", "queue");
     idle.watch();
@@ -436,11 +435,19 @@ fn a_pull_request_that_leaves_the_merge_queue_nudges_once_it_stays_out() {
     idle.observe(queued.clone());
     idle.harness("idle");
 
-    // Out of the queue for two minutes while it rebuilds, then back: not an action.
+    // Membership changes wake immediately, even when it re-enters two minutes later.
     idle.at(5 * MINUTE);
     idle.observe(json!({"merge_queue": null}));
+    assert!(idle.seat.store.has_undelivered_message(SEAT).unwrap());
+    idle.read_mail();
+    idle.harness("working");
+    idle.harness("idle");
     idle.at(7 * MINUTE);
     idle.observe(queued.clone());
+    assert!(idle.seat.store.has_undelivered_message(SEAT).unwrap());
+    idle.read_mail();
+    idle.harness("working");
+    idle.harness("idle");
     idle.at(13 * MINUTE);
     idle.evaluate();
     assert!(idle.nudges().is_empty());
@@ -448,33 +455,27 @@ fn a_pull_request_that_leaves_the_merge_queue_nudges_once_it_stays_out() {
     // Out, and it stays out.
     idle.at(14 * MINUTE);
     idle.observe(json!({"merge_queue": null}));
+    assert!(idle.seat.store.has_undelivered_message(SEAT).unwrap());
+    idle.read_mail();
+    idle.harness("working");
+    idle.harness("idle");
     idle.at(18 * MINUTE);
     idle.evaluate();
     assert!(idle.nudges().is_empty(), "not settled yet");
     idle.at(19 * MINUTE + 1);
     idle.evaluate();
-    let nudges = idle.nudges();
-    assert_eq!(
-        nudges.len(),
-        1,
-        "an action does not wait out the idle threshold"
-    );
     assert!(
-        nudges[0]
-            .content
-            .starts_with("acme/garden#12 left the merge queue without merging 5m ago"),
-        "{}",
-        nudges[0].content
-    );
-    assert!(
-        idle.nudged(&step)[0].body["fields"]["reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("left-merge-queue:acme/garden#12:")
+        idle.nudges().is_empty(),
+        "the queue-exit event already woke it"
     );
     idle.at(40 * MINUTE);
     idle.evaluate();
-    assert_eq!(idle.nudges().len(), 1, "one nudge per idle period");
+    assert!(idle.nudges().is_empty());
+    // If it remains quiet after reading the event, the ordinary two-hour reminder survives.
+    idle.at(14 * MINUTE + 2 * HOUR + 1);
+    idle.evaluate();
+    assert_eq!(idle.nudges().len(), 1);
+    assert_eq!(idle.nudged(&step)[0].body["fields"]["reason"], "quiet");
 }
 
 #[test]

@@ -500,6 +500,9 @@ async fn collection_items_with_windows(
             // after caller cancellation. A miss returns them without allocating shared guards.
             let mut admission = admission;
             let _roster_admission = roster_admission;
+            if let Some(admission) = &_roster_admission {
+                admission.enter_worker();
+            }
             let store = state.store.clone();
             let commits = windows.as_ref().map(|windows| windows.commits());
             let result = store.read_snapshot(|index| {

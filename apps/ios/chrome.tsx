@@ -18,9 +18,9 @@ function ageOf(ms: number): string | null {
 }
 
 export function StatusLine() {
-  const { status, hasSynced, gatewayHost, caps, snapshot, data } = useStore();
+  const { status, hasSynced, gatewayHost, caps, snapshot, data, cachedAt } = useStore();
   // Not live, what is shown is st's last snapshot: say how old it is.
-  const age = snapshot ? ageOf(Date.now() - Date.parse(snapshot.created_at)) : null;
+  const age = snapshot ? ageOf(Date.now() - Date.parse(snapshot.created_at)) : cachedAt ? ageOf(Date.now() - cachedAt) : null;
   const shown = age ? `showing data from ${age} ago` : 'showing last data';
   const [glyph, color, word] = status === 'online' ? ['●', theme.idle, 'live']
     : status === 'connecting' ? ['◌', theme.waiting, hasSynced ? `updating · ${shown}` : 'connecting']
@@ -32,7 +32,7 @@ export function StatusLine() {
     <T color={color}>{glyph} {word}</T>
     {gatewayHost ? <T dim numberOfLines={1} style={{ flex: 1 }}>  {gatewayHost}{caps?.session_actor ? ` · ${caps.session_actor.replace(/^person\//, '')}` : ''}</T> : null}
     </View>
-    {fresh ? <T dim>nothing running yet · Home → New → New terminal</T> : null}
+    {fresh ? <T dim>nothing running yet · Now → New → New terminal</T> : null}
   </View>;
 }
 

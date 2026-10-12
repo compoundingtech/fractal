@@ -40,95 +40,9 @@ impl Fixture {
     }
     fn seeded() -> Self {
         let fixture = Self::empty();
-        let intent = parse_intent(
-            r#"
-version 2
-mission "one" state="ready" {
- goal "Private source fixture."
- step "prepare" {
-   exec "probe" { workspace "/tmp"; command "true"; restart "never" }
-   gate "prepared" { field "exit_code" "exec/one/probe" is 0 }
- }
-}
-"#,
-            "node",
-        )
-        .unwrap();
-        let mission = intent.missions.values().next().unwrap();
-        let execution = parse_execution_intent(
-            mission.steps["prepare"]
-                .declarations_kdl
-                .as_deref()
-                .unwrap(),
-            "node",
-            "one",
-        )
-        .unwrap();
-        let mut desired = execution.subjects["exec/one/probe"].clone();
-        assert_eq!(desired.subject, fixture.source.binding.exec);
-        assert_eq!(desired.owner_run.as_deref(), Some("mission-run/one"));
-        desired.owner_run = Some(fixture.source.binding.run.clone());
-        desired.owner_generation = Some(fixture.source.binding.generation.clone());
-        desired.owner_step = Some(fixture.source.binding.step.clone());
         let mut writer = fixture.store.connection.write();
         let tx = writer.transaction().unwrap();
-        let publication = append_claim_tx(
-            &tx,
-            "node",
-            &mission.subject,
-            "mission.published",
-            Some("person/test"),
-            &serde_json::to_value(mission).unwrap(),
-            &[],
-            None,
-        )
-        .unwrap();
-        select_replicated_mission(&tx, &publication, publication.store_index).unwrap();
-        let created = append_claim_tx(
-            &tx,
-            "node",
-            "mission-run/one",
-            "mission-run.created",
-            None,
-            &json!({"fields":{"mission":"mission/one","revision":mission.revision,
-                "current_generation":"run-generation/one","workspace":"/tmp",
-                "requester":"person/test","mode":"run","root_revision":mission.revision,
-                "root_mission_run":"mission-run/one"},"evidence":[]}),
-            &[],
-            None,
-        )
-        .unwrap();
-        project_mission_run_created(&tx, &created).unwrap();
-        tx.execute(
-            "UPDATE step_runs SET status='working' WHERE subject='step-run/one/prepare'",
-            [],
-        )
-        .unwrap();
-        let declaration = append_claim_tx(
-            &tx,
-            "node",
-            "exec/one/probe",
-            "intent.desired",
-            Some("person/test"),
-            &serde_json::to_value(&desired).unwrap(),
-            &[],
-            None,
-        )
-        .unwrap();
-        select_replicated_desired(&tx, &declaration, &desired).unwrap();
-        append_claim_tx(
-            &tx,
-            "node",
-            "exec/one/probe",
-            "runtime.observed",
-            None,
-            &json!({"fields":{"runtime_id":"fixture-probe","host":"node","terminal":false,
-                "status":"exited","exit_code":2,"incarnation_id":"fixture-incarnation"},
-                "evidence":[declaration.id]}),
-            std::slice::from_ref(&declaration.id),
-            None,
-        )
-        .unwrap();
+        seed_native(&tx, &fixture.source.binding);
         fixture.source.finish(&tx).unwrap();
         assert_eq!(fixture.source.doctor_line(&tx)["status"], "warn");
         tx.commit().unwrap();
@@ -751,4 +665,96 @@ fn native_gate_guard_inventory_and_default_store_have_no_public_wiring() {
     drop(writer);
     assert_eq!(f.line()["status"], "warn");
     assert_eq!(f.store.connection.write().total_changes(), before);
+}
+
+// Shared only by the two private fixture modules; the native writers are unchanged.
+pub(super) fn seed_native(tx: &Transaction<'_>, binding: &Binding) -> String {
+    let intent = parse_intent(
+        r#"
+version 2
+mission "one" state="ready" {
+ goal "Private source fixture."
+ step "prepare" {
+   exec "probe" { workspace "/tmp"; command "true"; restart "never" }
+   gate "prepared" { field "exit_code" "exec/one/probe" is 0 }
+ }
+}
+"#,
+        "node",
+    )
+    .unwrap();
+    let mission = intent.missions.values().next().unwrap();
+    let execution = parse_execution_intent(
+        mission.steps["prepare"]
+            .declarations_kdl
+            .as_deref()
+            .unwrap(),
+        "node",
+        "one",
+    )
+    .unwrap();
+    let mut desired = execution.subjects["exec/one/probe"].clone();
+    assert_eq!(desired.subject, binding.exec);
+    assert_eq!(desired.owner_run.as_deref(), Some("mission-run/one"));
+    desired.owner_run = Some(binding.run.clone());
+    desired.owner_generation = Some(binding.generation.clone());
+    desired.owner_step = Some(binding.step.clone());
+    let publication = append_claim_tx(
+        tx,
+        "node",
+        &mission.subject,
+        "mission.published",
+        Some("person/test"),
+        &serde_json::to_value(mission).unwrap(),
+        &[],
+        None,
+    )
+    .unwrap();
+    select_replicated_mission(tx, &publication, publication.store_index).unwrap();
+    let created = append_claim_tx(
+        tx,
+        "node",
+        "mission-run/one",
+        "mission-run.created",
+        None,
+        &json!({"fields":{"mission":"mission/one","revision":mission.revision,
+                "current_generation":"run-generation/one","workspace":"/tmp",
+                "requester":"person/test","mode":"run","root_revision":mission.revision,
+                "root_mission_run":"mission-run/one"},"evidence":[]}),
+        &[],
+        None,
+    )
+    .unwrap();
+    project_mission_run_created(tx, &created).unwrap();
+    tx.execute(
+        "UPDATE step_runs SET status='working' WHERE subject='step-run/one/prepare'",
+        [],
+    )
+    .unwrap();
+    let declaration = append_claim_tx(
+        tx,
+        "node",
+        "exec/one/probe",
+        "intent.desired",
+        Some("person/test"),
+        &serde_json::to_value(&desired).unwrap(),
+        &[],
+        None,
+    )
+    .unwrap();
+    select_replicated_desired(tx, &declaration, &desired).unwrap();
+    append_claim_tx(
+        tx,
+        "node",
+        "exec/one/probe",
+        "runtime.observed",
+        None,
+        &json!({"fields":{"runtime_id":"fixture-probe","host":"node","terminal":false,
+                "status":"exited","exit_code":2,"incarnation_id":"fixture-incarnation"},
+                "evidence":[declaration.id]}),
+        std::slice::from_ref(&declaration.id),
+        None,
+    )
+    .unwrap();
+    declaration.id
 }
