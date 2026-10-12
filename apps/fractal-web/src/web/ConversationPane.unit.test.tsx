@@ -206,8 +206,9 @@ describe('ConversationPane kit composition', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    // Structural host, history frame, empty publication body and reserved composer dock.
-    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div'])
+    // Structural hosts plus app-owned authorization recovery copy; transcript presentation remains kit-owned.
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div', 'p'])
+    expect(pane).toContain('<Button onPress={() => { void binding.recover() }}>Check sending access</Button>')
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
     expect(workspace).toContain('createPortal(<WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} agentName={agentName} onOpenTool={setOpenedTool} ux={ux} />, paneHost)')
