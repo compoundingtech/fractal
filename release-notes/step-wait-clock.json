@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Stop a step's execution clock while its seat waits for a build slot or the merge queue, within one 12-hour wait budget per attempt",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes. The step timing fold gains a wait state that the checkpoint planner replays unchanged in shape; a node that runs older code ignores the new claim fields and charges a wait to the execution clock, so a step can time out sooner there, never later."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. A wait is a work.progress claim with the optional fields clock and wait_until_unix_ms; the step view gains optional execution fields that are omitted when empty."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention, authority or admission rule change and no rules-version change. The claim schema registry digest changes because work.* claims accept the two optional fields; the existing registry upgrade rules apply."},
+  "compatibility": {"status": "changed", "detail": "Adds the work actions wait and resume (st work wait --for DURATION --reason TEXT, st work resume), the optional work.* claim fields clock and wait_until_unix_ms, and optional step view fields. Existing actions, claims and views are unchanged. A wait is accepted only from the holder of a live lease, needs a reason, and draws on 12 hours per step attempt; a request past the budget is refused with wait-budget-exhausted. Nothing calls the new actions until a seat or the host build queue adopts them."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption; the change adds no store migration and no new background work beyond one reconciler wake at a wait's end."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes are required. The host cargo build-slot queue should call st work wait and st work resume around its queue wait to benefit; that is host configuration outside this repository."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new swap-back restrictions. An older node reading the new claims ignores the optional fields and charges waits to the execution clock again."}
+}
