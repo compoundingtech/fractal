@@ -1,8 +1,10 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { TabList, Tab, TooltipTrigger, Tooltip, Focusable } from 'react-aria-components'
+import { TabList, Tab, TooltipTrigger, Focusable } from 'react-aria-components'
 import { Icon, type IconName } from '../composition/Icons'
-import { surfaceVars as sf, textVars as tx, accentVars as ac, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, geometryNumbers as geo } from '../composition-tokens.stylex'
+import { TooltipSurface } from '../composition/Controls'
+import { ThemePortal } from '../taste/ThemePortal'
+import { surfaceVars as sf, textVars as tx, accentVars as ac, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import { paneKey, paneKind, type WorkbenchPane } from './workbench-model'
 import { layoutTabStrip, layoutTabStripViewport, type TabStripMode } from './tab-strip-layout'
 
@@ -203,8 +205,8 @@ function ResourceTab({ item, selected }: { item: TabStripItem; selected: boolean
   return <Tab ref={triggerRef} id={item.key} aria-label={item.label} data-tab-key={item.key} data-tab-kind={item.kind} data-icon-only data-tab-clipped {...triggerHandlers} {...stylex.props(styles.tab, selected && styles.selected)}>
     <span ref={seedTrigger} data-tab-label data-icon-only aria-hidden="true" {...stylex.props(styles.label)}>{item.label}</span>
     <span data-tab-icon data-icon-only aria-hidden="true" {...stylex.props(styles.icon)}><Icon name={item.icon} /></span>
-    <span data-tab-minimum aria-hidden="true" {...stylex.props(styles.metric, styles.minimum)}>{minimum}</span>
-    <TooltipTrigger delay={350} closeDelay={0}><Focusable><TabTooltipBridge title={item.label} triggerRef={triggerRef} handlersRef={handlersRef} /></Focusable></TooltipTrigger>
+    <span data-tab-minimum aria-hidden="true" {...stylex.props(styles.metric, styles.minimum)}><span {...stylex.props(styles.minimumIcon)} /><span>{minimum}</span></span>
+    <ThemePortal><TooltipTrigger delay={500} closeDelay={0}><Focusable><TabTooltipBridge title={item.label} triggerRef={triggerRef} handlersRef={handlersRef} /></Focusable></TooltipTrigger></ThemePortal>
   </Tab>
 }
 
@@ -225,20 +227,21 @@ const TabTooltipBridge = React.forwardRef<HTMLDivElement, TabTooltipBridgeProps>
     else tab?.removeAttribute('aria-describedby')
     return () => { if (handlersRef.current === triggerProps) handlersRef.current = null; tab?.removeAttribute('aria-describedby') }
   }, [handlersRef, triggerRef, triggerProps])
-  return <Tooltip placement="bottom" offset={geo.tooltipOffset} {...stylex.props(styles.tooltip)}>{title}</Tooltip>
+  return <TooltipSurface placement="bottom" style={styles.tooltip}>{title}</TooltipSurface>
 })
 
 const styles = stylex.create({
   root: { position: 'relative', flex: '1 1 0', minWidth: 0, maxWidth: '100%', height: g.controlSm },
   list: { display: 'flex', alignItems: 'center', gap: s.xs2, height: '100%', width: '100%', minWidth: 0, overflowX: 'auto', overflowY: 'hidden', scrollbarWidth: 'none', scrollSnapType: 'x mandatory', scrollBehavior: 'auto' },
-  tab: { position: 'relative', boxSizing: 'border-box', width: `var(--tab-cell-width, ${g.controlSm})`, height: g.controlSm, flexShrink: 0, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: sf.transparent, color: tx.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', scrollSnapAlign: 'start', scrollSnapStop: 'always', opacity: { default: 1, ':is([data-tab-clipped])': 0 }, pointerEvents: { default: 'auto', ':is([data-tab-clipped])': 'none' }, ':hover': { color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
-  selected: { backgroundColor: sf.washSubtle, color: tx.fg },
-  label: { position: 'absolute', insetBlock: 0, insetInline: s.sm, display: 'block', lineHeight: g.controlSm, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', visibility: { default: 'visible', ':is([data-icon-only])': 'hidden' }, pointerEvents: 'none' },
-  icon: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', visibility: { default: 'hidden', ':is([data-icon-only])': 'visible' }, pointerEvents: 'none' },
+  tab: { position: 'relative', boxSizing: 'border-box', width: `var(--tab-cell-width, ${g.controlSm})`, height: g.controlSm, flexShrink: 0, paddingInline: s.sm, borderWidth: 0, borderRadius: r.none, backgroundColor: sf.transparent, color: tx.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', scrollSnapAlign: 'start', scrollSnapStop: 'always', opacity: { default: 1, ':is([data-tab-clipped])': 0 }, pointerEvents: { default: 'auto', ':is([data-tab-clipped])': 'none' }, ':hover': { color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  selected: { color: tx.fg, borderBottomWidth: g.focusRing, borderBottomStyle: 'solid', borderBottomColor: ac.primary },
+  label: { position: 'absolute', insetBlock: 0, insetInlineStart: `calc(${s.sm} + ${g.icon} + ${s.xs})`, insetInlineEnd: s.sm, display: 'block', lineHeight: g.controlSm, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', visibility: { default: 'visible', ':is([data-icon-only])': 'hidden' }, pointerEvents: 'none' },
+  icon: { position: 'absolute', insetBlock: 0, insetInlineStart: { default: s.sm, ':is([data-icon-only])': 0 }, width: { default: g.icon, ':is([data-icon-only])': '100%' }, display: 'grid', placeItems: 'center', pointerEvents: 'none' },
   metric: { position: 'fixed', top: 0, left: 0, height: 0, visibility: 'hidden', pointerEvents: 'none' },
   iconMetric: { width: g.controlSm },
   maxMetric: { width: g.tabMax },
-  minimum: { width: 'max-content', whiteSpace: 'nowrap' },
+  minimum: { display: 'inline-flex', alignItems: 'center', gap: s.xs, width: 'max-content', whiteSpace: 'nowrap' },
+  minimumIcon: { width: g.icon, flexShrink: 0 },
   // RAC supplies placement only after measuring the real mounted anchor.
-  tooltip: { visibility: { default: 'hidden', ':is([data-placement])': 'visible' }, zIndex: 50, borderRadius: r.control, backgroundColor: tx.fg, color: sf.raised, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans },
+  tooltip: { visibility: { default: 'hidden', ':is([data-placement])': 'visible' } },
 })

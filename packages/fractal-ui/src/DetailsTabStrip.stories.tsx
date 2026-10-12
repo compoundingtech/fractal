@@ -182,7 +182,7 @@ async function containmentPlay({ canvasElement }: { canvasElement: HTMLElement }
   try {
     // Canonical states stay quick; scripts/tab-strip-interactions.mjs sweeps every
     // integer width and offset independently of this play and the layout policy.
-    for (const width of [118, 159, 160, 240, 320, 359.5, 360.25, 375.5, 376.25, 520, 640, 800]) {
+    for (const width of [118, 159, 160, 240, 320, 319.5, 320.25, 335.5, 336.25, 520, 640, 800]) {
       stage.style.width = `${width}px`
       workbench.style.width = `${width}px`
       await frames(1)
@@ -292,7 +292,7 @@ async function thresholdPlay({ canvasElement }: { canvasElement: HTMLElement }) 
     const width = Number(strip.dataset.tabMeasuredWidth)
     const collapse = Number(strip.dataset.tabCollapseBelow)
     const expand = Number(strip.dataset.tabExpandAt)
-    requireContract(Number.isFinite(width) && collapse >= 360 && expand === collapse + 16, 'Incorrect measured threshold')
+    requireContract(Number.isFinite(width) && collapse >= 320 && expand === collapse + 16, 'Incorrect measured threshold')
     if (width < collapse) requireContract(strip.dataset.tabMode === 'icons', 'Incorrect threshold mode')
     if (width >= expand) requireContract(strip.dataset.tabMode === 'labels', 'Incorrect threshold mode')
   }
@@ -304,16 +304,16 @@ async function thresholdPlay({ canvasElement }: { canvasElement: HTMLElement }) 
   const stage = within(canvasElement).getByTestId('tab-strip-stage')
   const originalWidth = stage.style.width
   const reserved = stage.getBoundingClientRect().width - strip.getBoundingClientRect().width
-  // These two short prefix probes fit far below the approved floor: the independently expected boundary is 360/376.
+  // These two short prefix probes fit far below the approved floor: the independently expected boundary is 320/336.
   requireContract([...strip.querySelectorAll<HTMLElement>('[data-tab-minimum]')].every(probe => probe.getBoundingClientRect().width < 100), 'Threshold fixture exceeds minimum budget')
-  requireContract(Number(strip.dataset.tabCollapseBelow) === 360, 'Incorrect measured threshold')
+  requireContract(Number(strip.dataset.tabCollapseBelow) === 320, 'Incorrect measured threshold')
   try {
     let previous: 'icons' | 'labels' = 'icons'
-    for (const width of [359, 360, 375.5, 376, 375.5, 360, 359.75, 360, 375.75, 376]) {
+    for (const width of [319, 320, 335.5, 336, 335.5, 320, 319.75, 320, 335.75, 336]) {
       stage.style.width = `${width + reserved}px`
       await frames()
       const measured = strip.getBoundingClientRect().width
-      previous = previous === 'icons' ? measured >= 376 ? 'labels' : 'icons' : measured < 360 ? 'icons' : 'labels'
+      previous = previous === 'icons' ? measured >= 336 ? 'labels' : 'icons' : measured < 320 ? 'icons' : 'labels'
       requireContract(strip.dataset.tabMode === previous, 'Incorrect hysteresis history')
       assertThreshold()
       assertPaint(strip)
@@ -388,8 +388,35 @@ async function stabilityPlay({ canvasElement }: { canvasElement: HTMLElement }) 
   } finally { observer.disconnect() }
 }
 
+async function surfacePlay({ canvasElement }: { canvasElement: HTMLElement }) {
+  await interactionPlay({ canvasElement })
+  const strip = await stripFor(canvasElement)
+  const selected = within(strip).getAllByRole('tab').find(tab => tab.getAttribute('aria-selected') === 'true')!
+  const assertActive = () => {
+    const css = getComputedStyle(selected)
+    requireContract(parseFloat(css.borderBottomWidth) === 2 && css.borderBottomStyle === 'solid', 'Missing active accent underline')
+    requireContract(selected.querySelector('[data-tab-icon] svg') !== null, 'Missing SVG tab glyph')
+  }
+  assertActive()
+  const oldBorder = selected.style.borderBottomWidth
+  selected.style.borderBottomWidth = '0'
+  try { await rejectsControl('Missing active accent underline', assertActive) } finally { selected.style.borderBottomWidth = oldBorder }
+  assertActive()
+  for (const tab of within(strip).getAllByRole('tab')) {
+    const icon = tab.querySelector<HTMLElement>('[data-tab-icon]')!
+    requireContract(getComputedStyle(icon).visibility === 'visible', 'Wide tabs lost their glyph')
+    requireContract(parseFloat(getComputedStyle(tab).fontSize) === 12, 'Incorrect tab label type')
+    requireContract(tab.getBoundingClientRect().height === 24, 'Incorrect tab height')
+  }
+}
+
+export const Dark440: Story = { args: { mountedWidth: 440 }, play: surfacePlay }
+export const Light440: Story = { args: { mountedWidth: 440, scheme: 'light' }, play: surfacePlay }
+export const Dark1440: Story = { args: { mountedWidth: 1440 }, play: surfacePlay }
+export const Light1440: Story = { args: { mountedWidth: 1440, scheme: 'light' }, play: surfacePlay }
+
 export const Wide: Story = { play: interactionPlay }
-export const Threshold: Story = { args: { layout: group(panes.slice(0, 2)), mountedWidth: 376 }, play: thresholdPlay }
+export const Threshold: Story = { args: { layout: group(panes.slice(0, 2)), mountedWidth: 336 }, play: thresholdPlay }
 export const Mounted159SelectedFirst: Story = { args: { mountedWidth: 159, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
 export const Mounted160SelectedFirst: Story = { args: { mountedWidth: 160, focusedPaneKey: paneKey(panes[0]!) }, play: containmentPlay }
 export const Mounted159SelectedLast: Story = { args: { mountedWidth: 159, focusedPaneKey: paneKey(panes.at(-1)!) }, play: containmentPlay }

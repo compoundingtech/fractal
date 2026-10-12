@@ -38,30 +38,30 @@ const layout = (availableWidth: number, previousMode?: TabStripMode, count = 4, 
   layoutTabStrip({ availableWidth, previousMode, items: items(count, minimumLabelWidth), metrics })
 
 test('immutable measured-strip policy and initial exact/fractional boundary', () => {
-  equal(TAB_STRIP_POLICY, { measuredWidthFloor: 360, restoreHeadroom: 16 }, 'product thresholds')
+  equal(TAB_STRIP_POLICY, { measuredWidthFloor: 320, restoreHeadroom: 16 }, 'product thresholds')
   assert(Object.isFrozen(TAB_STRIP_POLICY), 'policy must be immutable')
-  for (const width of [0, 118, 159, 160, 359.75, 360, 360.25, 375.75, 376, 520]) {
-    equal(layout(width).mode, width >= 360 ? 'labels' : 'icons', `initial ${width}`)
+  for (const width of [0, 118, 159, 160, 319.75, 320, 320.25, 335.75, 336, 520]) {
+    equal(layout(width).mode, width >= 320 ? 'labels' : 'icons', `initial ${width}`)
   }
-  equal(layout(360).collapseBelow, 360, 'measured floor')
-  equal(layout(360).expandAt, 376, 'restore headroom')
+  equal(layout(320).collapseBelow, 320, 'measured floor')
+  equal(layout(320).expandAt, 336, 'restore headroom')
 })
 
 test('both hysteresis histories and repeated sub-band oscillation', () => {
-  for (const width of [359.75, 360, 360.25, 375.75, 376, 376.25]) {
-    equal(layout(width, 'labels').mode, width >= 360 ? 'labels' : 'icons', `label history ${width}`)
-    equal(layout(width, 'icons').mode, width >= 376 ? 'labels' : 'icons', `icon history ${width}`)
+  for (const width of [319.75, 320, 320.25, 335.75, 336, 336.25]) {
+    equal(layout(width, 'labels').mode, width >= 320 ? 'labels' : 'icons', `label history ${width}`)
+    equal(layout(width, 'icons').mode, width >= 336 ? 'labels' : 'icons', `icon history ${width}`)
   }
   let mode: TabStripMode = 'icons'
   for (let cycle = 0; cycle < 32; cycle += 1) {
-    mode = layout(360.25, mode).mode
+    mode = layout(320.25, mode).mode
     equal(mode, 'icons', 'deadband must retain icons')
-    mode = layout(375.75, mode).mode
+    mode = layout(335.75, mode).mode
     equal(mode, 'icons', 'oscillation must not restore')
   }
-  mode = layout(376, mode).mode
+  mode = layout(336, mode).mode
   equal(mode, 'labels', 'exact restoration')
-  equal(layout(359.75, mode).mode, 'icons', 'collapse is immediate')
+  equal(layout(319.75, mode).mode, 'icons', 'collapse is immediate')
 })
 
 test('largest minimum label, padding and gaps determine content-fit floor', () => {
@@ -92,10 +92,10 @@ test('cell cap prevents impossible label restoration, including changed titles',
 })
 
 test('empty, zero, negative and token-dependent allocation', () => {
-  equal(layout(0), { mode: 'icons', cellWidth: 24, contentWidth: 108, collapseBelow: 360, expandAt: 376 }, 'zero mount reserves tracks')
+  equal(layout(0), { mode: 'icons', cellWidth: 24, contentWidth: 108, collapseBelow: 320, expandAt: 336 }, 'zero mount reserves tracks')
   equal(layout(-1), layout(0), 'negative available space behaves as zero')
-  equal(layout(0, undefined, 0), { mode: 'icons', cellWidth: 0, contentWidth: 0, collapseBelow: 360, expandAt: 376 }, 'empty zero mount')
-  equal(layout(360, undefined, 0).mode, 'labels', 'empty measured mount follows initial threshold')
+  equal(layout(0, undefined, 0), { mode: 'icons', cellWidth: 0, contentWidth: 0, collapseBelow: 320, expandAt: 336 }, 'empty zero mount')
+  equal(layout(320, undefined, 0).mode, 'labels', 'empty measured mount follows initial threshold')
   equal(layout(20, undefined, 1).cellWidth, 24, 'one item keeps compact floor')
   equal(layout(90, undefined, 1).cellWidth, 90, 'one item uses available budget')
   const custom = layoutTabStrip({ availableWidth: 100, items: items(8), metrics: { iconCellWidth: 32, maxCellWidth: 144, gap: 2, labelPadding: 6 } })
@@ -107,7 +107,7 @@ test('all integer widths and up to eight resources obey independent equal-cell f
   for (let count = 1; count <= 8; count += 1) {
     for (let width = 0; width <= 1200; width += 1) {
       const expectedCell = Math.max(24, Math.min(128, (width - 4 * (count - 1)) / count))
-      const expectedCollapse = Math.max(360, count * 56 + 4 * (count - 1))
+      const expectedCollapse = Math.max(320, count * 56 + 4 * (count - 1))
       for (const previousMode of [undefined, 'labels', 'icons'] as const) {
         const result = layout(width, previousMode, count)
         near(result.cellWidth, expectedCell, 'equal cell floor/cap/budget')
@@ -207,7 +207,7 @@ for (let count = 1; count <= 8; count += 1) {
 }
 
 test('159/160 eight-item fractional width and edge offsets never admit real partial paint', () => {
-  for (const width of [118, 158.75, 159, 159.25, 159.75, 160, 160.25, 359.75, 360, 360.25]) {
+  for (const width of [118, 158.75, 159, 159.25, 159.75, 160, 160.25, 319.75, 320, 320.25]) {
     const allocation = layout(width, undefined, 8)
     const clip = { left: 0.25, right: width + 0.25, top: 10, bottom: 34 }
     for (const offset of [0, 0.25, 0.5, 0.75, 1, 27.75, 28, 28.25, allocation.contentWidth - width]) {
@@ -239,7 +239,7 @@ test('paired controls falsify threshold, fit and partial-intersection policies',
   rejects(() => thresholdOracle(layout(368).mode), 'restore hysteresis ignored')
   const fitOracle = (mode: TabStripMode): void => assert(mode === 'icons', 'content-fit floor ignored')
   fitOracle(layout(400, 'labels', 8).mode)
-  rejects(() => fitOracle(400 >= 360 ? 'labels' : 'icons'), 'content-fit floor ignored')
+  rejects(() => fitOracle(400 >= 320 ? 'labels' : 'icons'), 'content-fit floor ignored')
   const clip = { left: 0, right: 159, top: 10, bottom: 34 }
   const cells = cellRects(8, 24, 4, 1)
   const paintOracle = (keys: string[]): void => assert(keys.every((key) => cells.some((cell) => cell.key === key && fullyInside(cell, clip))), 'partial edge painted')

@@ -1,7 +1,7 @@
 export type TabStripMode = 'labels' | 'icons'
 
 /** Product thresholds use measured strip space, never the enclosing pane width. */
-export const TAB_STRIP_POLICY = Object.freeze({ measuredWidthFloor: 360, restoreHeadroom: 16 })
+export const TAB_STRIP_POLICY = Object.freeze({ measuredWidthFloor: 320, restoreHeadroom: 16 })
 
 export interface TabStripLayoutInput {
   availableWidth: number
