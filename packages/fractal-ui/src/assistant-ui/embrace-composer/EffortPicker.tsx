@@ -24,13 +24,13 @@ export function EffortPicker({ control, value, pinned, onChange, onPinnedChange,
   readonly compact?: boolean
 }) {
   if (control.state === 'unknown') return null
-  if (control.state === 'unsupported') return <TooltipTrigger delay={150}><Focusable><span role="group" tabIndex={0} aria-label="Effort unsupported reason" {...stylex.props(styles.reasonTrigger)}><Button aria-label="Effort unsupported" isDisabled {...stylex.props(styles.button, styles.disabled, compact && styles.buttonCompact)}><Icon name="clock" size={12} /></Button></span></Focusable><Tooltip {...stylex.props(styles.popup)}>{control.reason}</Tooltip></TooltipTrigger>
+  if (control.state === 'unsupported') return <TooltipTrigger delay={150}><Focusable><span role="group" tabIndex={0} aria-label="Effort unsupported reason" {...stylex.props(styles.reasonTrigger)}><Button aria-label="Effort unsupported" isDisabled {...stylex.props(styles.button, styles.disabled, compact && styles.buttonCompact)}><Icon name="effort" size={12} /></Button></span></Focusable><Tooltip {...stylex.props(styles.popup)}>{control.reason}</Tooltip></TooltipTrigger>
   const selected = value !== undefined && control.values.includes(value) ? value : control.default
   return <div {...stylex.props(styles.group)}>
     <MenuTrigger>
       <TooltipTrigger delay={150} closeDelay={0}>
         <Button aria-label={`Select effort: ${effortLabel(selected)}`} {...stylex.props(styles.button, compact && styles.buttonCompact)}>
-          {compact ? <><Icon name="clock" size={12} /><RenderProfiler id="EffortValue"><span>{effortLabel(selected)}</span></RenderProfiler></> : <><RenderProfiler id="EffortValue"><span>Effort: {effortLabel(selected)}</span></RenderProfiler><Icon name="chevron-down" size={12} /></>}
+          {compact ? <><Icon name="effort" size={12} /><RenderProfiler id="EffortValue"><span>{effortLabel(selected)}</span></RenderProfiler></> : <><RenderProfiler id="EffortValue"><span>Effort: {effortLabel(selected)}</span></RenderProfiler><Icon name="chevron-down" size={12} /></>}
         </Button>
         <Tooltip {...stylex.props(styles.popup)}>Effort: {effortLabel(selected)}</Tooltip>
       </TooltipTrigger>

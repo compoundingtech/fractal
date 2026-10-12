@@ -154,7 +154,7 @@ export function ThreadHeader({
     <header data-testid="thread-header" {...stylex.props(styles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={onToggleSidebar} {...stylex.props(styles.ghostMd)}>
-          <Icon name="chevron-right" />
+          <Icon name="sidebar-expand" />
         </button>
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
@@ -171,17 +171,17 @@ export function ThreadHeader({
         {onOpen !== undefined && <button type="button" onClick={onOpen} {...stylex.props(styles.outlineXs)}>Open <Icon name="chevron-down" size={12} /></button>}
         {onCommit !== undefined && <button type="button" onClick={onCommit} {...stylex.props(styles.outlineXs)}>Commit <Icon name="chevron-down" size={12} /></button>}
         {terminalAvailable && <button type="button" aria-label="Toggle terminal drawer" title="Toggle terminal drawer" aria-pressed={drawerOpen} onClick={onToggleDrawer} {...stylex.props(styles.ghostMd, drawerOpen && styles.ghostOn)}>
-          <Icon name="drawer" />
+          <Icon name="panel-bottom" />
         </button>}
         {/* A disabled button receives no pointer events, so the hover title sits on its wrapper. */}
         {!terminalAvailable && terminalDisabledReason !== undefined && <span data-testid="terminal-toggle-disabled" title={terminalDisabledReason} {...stylex.props(styles.disabledWrap)}>
           <Button isDisabled aria-label="Toggle terminal drawer" aria-describedby={terminalReasonId} {...stylex.props(styles.ghostMd, styles.ghostDisabled)}>
-            <Icon name="drawer" />
+            <Icon name="panel-bottom" />
           </Button>
           <span id={terminalReasonId} hidden>{terminalDisabledReason}</span>
         </span>}
         <button type="button" aria-label="Toggle right panel" title="Toggle right panel" aria-pressed={panelOpen} onClick={onTogglePanel} {...stylex.props(styles.ghostMd, panelOpen && styles.ghostOn)}>
-          <Icon name="panel" />
+          <Icon name="panel-right" />
         </button>
       </div>
     </header>

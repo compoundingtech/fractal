@@ -17,6 +17,8 @@ manifest_license = api["manifest_license"]
 check_package_set = api["check_package_set"]
 installed_manifests = api["installed_manifests"]
 archive_manifest = api["archive_manifest"]
+vendored_source = api["vendored_source"]
+vendored_licenses = api["vendored_licenses"]
 INTEGRITY = "sha512-" + base64.b64encode(bytes(64)).decode()
 LOCK = f"""lockfileVersion: '9.0'
 importers:
@@ -98,6 +100,18 @@ class LicenseTests(unittest.TestCase):
             archive_manifest(data, INTEGRITY, ("binary", "2.0.0"))
         with self.assertRaises(ValueError):
             archive_manifest(data, integrity, ("binary", "1.0.0"))
+
+    def test_vendored_source_headers(self):
+        header = "// GENERATED\n// Source: lucide-static@1.55.0 (ISC), the npm registry archive with the integrity below\n"
+        self.assertEqual(vendored_source(header, "glyphs.ts"), {"name": "lucide-static", "version": "1.55.0", "license": "ISC", "path": "glyphs.ts"})
+        for text in ("// GENERATED\n", header.replace("(ISC)", "(UNKNOWN)"), header.replace("@1.55.0", "@latest"), header.replace("// Source:", "Source:")):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                vendored_source(text, "glyphs.ts")
+
+    def test_committed_vendored_files_are_recorded(self):
+        root = Path(__file__).resolve().parent.parent
+        self.assertEqual([entry["name"] for entry in vendored_licenses(root)], ["lucide-static"])
+        self.assertEqual(json.loads((root / "buck2/dependencies/licenses.json").read_text())["vendored"], vendored_licenses(root))
 
 
 if __name__ == "__main__":

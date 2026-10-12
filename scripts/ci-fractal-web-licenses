@@ -6,6 +6,8 @@ all package-level node_modules, not just the root. For packages omitted by the i
 (e.g. optional platform binaries), read package.json from the exact npm archive after
 verifying its lockfile integrity. Never use mutable registry license metadata or UNKNOWN.
 The lock-only mode needs only Python's standard library, no install or network.
+Vendored third-party data files (no package dependency) are recorded from their generated
+`// Source: name@version (license), origin` header, so the inventory covers them too.
 """
 
 import argparse
@@ -22,11 +24,14 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parent.parent
 INVENTORY = Path("buck2/dependencies/licenses.json")
+# Generated files that embed third-party data; each carries a Source header and the upstream LICENSE.
+VENDORED_FILES = ("packages/fractal-ui/src/assistant-ui/composition/icon-glyphs.generated.ts",)
 PROVENANCE = {
     "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
-    "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
+    "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives; vendored file Source headers",
     "schemaVersion": 1,
 }
+INVENTORY_LISTS = ("packages", "vendored")
 
 
 def lock_packages(text):
@@ -65,6 +70,18 @@ def lock_packages(text):
     if not packages or any(value is None for value in packages.values()):
         raise ValueError("every lock package must have a sha512 registry resolution")
     return packages
+
+
+def vendored_source(text, path):
+    # Fail closed: a vendored file must name its exact package, version and license up front.
+    match = re.search(r"^// Source: ((?:@[a-z0-9._-]+/)?[a-z0-9._-]+)@(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.+-]+)?) \(([^()]+)\), \S.*$", text, re.M)
+    if not match:
+        raise ValueError(f"vendored file has no Source header: {path}")
+    return {"name": match[1], "version": match[2], "license": license_string(match[3]), "path": path}
+
+
+def vendored_licenses(root):
+    return sorted((vendored_source((root / path).read_text(), path) for path in VENDORED_FILES), key=lambda entry: entry["path"])
 
 
 def manifest_license(manifest):
@@ -188,12 +205,14 @@ def main():
     if args.check or args.check_lockfile:
         recorded = json.loads(path.read_text())
         check_package_set(recorded, packages)
-        if {key: value for key, value in recorded.items() if key != "packages"} != metadata:
+        if recorded.get("vendored") != vendored_licenses(ROOT):
+            raise ValueError("vendored license drift; regenerate dependency licenses")
+        if {key: value for key, value in recorded.items() if key not in INVENTORY_LISTS} != metadata:
             raise ValueError("inventory provenance drift; regenerate dependency licenses")
         if args.check_lockfile:
             print(f"Dependency license lockfile check passed: {len(packages)} packages")
             return 0
-    expected = render({**metadata, "packages": collect_licenses(ROOT, packages)})
+    expected = render({**metadata, "packages": collect_licenses(ROOT, packages), "vendored": vendored_licenses(ROOT)})
     if args.check:
         if path.read_text() != expected:
             raise ValueError("dependency licenses differ from manifests; regenerate inventory")

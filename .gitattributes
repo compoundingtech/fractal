@@ -16,3 +16,6 @@ fixtures/scenarios/huge/** -diff
 # either side and regenerate. The wasm hash is pinned in the provenance json.
 apps/fractal-web/src/terminal/ghosttyKeyCodes.generated.ts linguist-generated=true
 apps/fractal-web/src/terminal/assets/ghostty-key-encoder.generated.* linguist-generated=true
+# Written by packages/fractal-ui/scripts/vendor-icon-glyphs.py from a pinned Lucide archive; after a
+# merge conflict, take either side and regenerate.
+packages/fractal-ui/src/assistant-ui/composition/icon-glyphs.generated.ts linguist-generated=true

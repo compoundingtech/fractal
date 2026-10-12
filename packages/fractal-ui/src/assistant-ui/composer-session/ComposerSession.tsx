@@ -145,7 +145,7 @@ function AttachmentPreview() {
     setUrl(next)
     return () => URL.revokeObjectURL(next)
   }, [file])
-  return <AttachmentPrimitive.Root {...stylex.props(styles.attachment)}>{url !== undefined && <img src={url} alt={attachment.name} {...stylex.props(styles.image)} />}<span {...stylex.props(styles.name)}><AttachmentPrimitive.Name /></span><AttachmentPrimitive.Remove asChild><Button aria-label={`Remove ${attachment.name}`} {...stylex.props(styles.button)}><Icon name="x" /></Button></AttachmentPrimitive.Remove></AttachmentPrimitive.Root>
+  return <AttachmentPrimitive.Root {...stylex.props(styles.attachment)}>{url !== undefined && <img src={url} alt={attachment.name} {...stylex.props(styles.image)} />}<span {...stylex.props(styles.name)}><AttachmentPrimitive.Name /></span><AttachmentPrimitive.Remove asChild><Button aria-label={`Remove ${attachment.name}`} {...stylex.props(styles.button)}><Icon name="close" /></Button></AttachmentPrimitive.Remove></AttachmentPrimitive.Root>
 }
 const styles = stylex.create({
   stack: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },

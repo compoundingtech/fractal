@@ -269,20 +269,20 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
       {selectRecipient ? <MenuTrigger>
         <TooltipTrigger delay={150} closeDelay={0}>
           <Button aria-label={`Select recipient: ${target.label}`} {...stylex.props(styles.button, styles.target, compact && styles.targetCompact, iconOnly && styles.targetIcon)}>
-            <span data-composer-picker-label={!iconOnly ? true : undefined} {...stylex.props(styles.targetLabel)}>{iconOnly ? <Icon name="message" /> : target.label}</span>
+            <span data-composer-picker-label={!iconOnly ? true : undefined} {...stylex.props(styles.targetLabel)}>{iconOnly ? <Icon name="recipient" /> : target.label}</span>
             {!compact && <Icon name="chevron-down" size={12} />}
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.label}</Tooltip>
         </TooltipTrigger>
         <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption)}>{choice.label}</MenuItem>)}</Menu></Popover>
       </MenuTrigger> : <TooltipTrigger delay={150} closeDelay={0}>
-        <Focusable><span tabIndex={0} role="img" aria-label={target.model === undefined ? 'Recipient' : 'Recipient and model'} data-composer-target-readout={readoutName} data-composer-readout={!iconOnly ? true : undefined} {...stylex.props(styles.readout, compact && styles.readoutCompact)}>{iconOnly ? <Icon name="message" /> : target.label}</span></Focusable>
+        <Focusable><span tabIndex={0} role="img" aria-label={target.model === undefined ? 'Recipient' : 'Recipient and model'} data-composer-target-readout={readoutName} data-composer-readout={!iconOnly ? true : undefined} {...stylex.props(styles.readout, compact && styles.readoutCompact)}>{iconOnly ? <Icon name="recipient" /> : target.label}</span></Focusable>
         <Tooltip {...stylex.props(styles.targetTooltip)}>{readoutName}</Tooltip>
       </TooltipTrigger>}
       {selectModel && <MenuTrigger>
         <TooltipTrigger delay={150} closeDelay={0}>
           <Button aria-label={`Select model: ${target.model ?? 'Model'}`} {...stylex.props(styles.button, styles.target, compact && styles.targetCompact, iconOnly && styles.targetIcon)}>
-            <span data-composer-picker-label={!iconOnly ? true : undefined} {...stylex.props(styles.targetLabel)}>{iconOnly ? <Icon name="gear" /> : target.model ?? 'Model'}</span>
+            <span data-composer-picker-label={!iconOnly ? true : undefined} {...stylex.props(styles.targetLabel)}>{iconOnly ? <Icon name="model" /> : target.model ?? 'Model'}</span>
             {!compact && <Icon name="chevron-down" size={12} />}
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.model ?? 'Model'}</Tooltip>
@@ -291,8 +291,8 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
       </MenuTrigger>}
       <EffortPicker {...effort} compact={compact} />
     </div>
-    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
-    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
+    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="attach-image" /></Button></ComposerPrimitive.AddAttachment>
+    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="stop-run" /></Button></ComposerPrimitive.Cancel>}
   </>
 }
 
@@ -560,7 +560,7 @@ function TokenComposer({
         <div {...stylex.props(styles.grow)} />
         {variant === 'C3' && toolbar === undefined ? <>
           <Button isDisabled={readOnly || history.length === 0} onPress={() => recallHistory('previous')}
-            aria-label="Recall previous message" aria-description="ArrowUp on an empty field" {...stylex.props(styles.button)}><Icon name="clock" /></Button>
+            aria-label="Recall previous message" aria-description="ArrowUp on an empty field" {...stylex.props(styles.button)}><Icon name="history" /></Button>
           <ComposerPrimitive.Cancel disabled={readOnly || !canCancel} title={canCancel ? undefined : cancelUnavailableReason} {...stylex.props(styles.button, styles.cancelVisibility)}>Cancel run</ComposerPrimitive.Cancel>
         </> : null}
         {/* A controlled TokenField can contain a draft before runtime text is bridged.

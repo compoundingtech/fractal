@@ -64,13 +64,13 @@ export function ErrorOverlay({ id, title, detail, rawDetail, command, onRetry, o
   if (dismissedId === id || host?.dismissedIds.includes(id)) return null
   if (host !== null && !host.lane && host.layer === null) return null
   const banner = <div role="alert" data-error-overlay data-error-overlay-id={id} onKeyDown={event => { if (host === null && event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); setDismissedId(id) } }} {...stylex.props(styles.banner, host?.lane === true && styles.bannerLane)}>
-    <Icon name="alert" size={14} />
+    <Icon name="warning" size={14} />
     <div {...stylex.props(styles.text)}><strong {...stylex.props(styles.title)}>{title}</strong>{detail !== undefined && <span {...stylex.props(styles.detail, rawDetail !== undefined && styles.reason)}>{detail}</span>}
       {rawDetail !== undefined && <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}><Button slot="trigger" {...stylex.props(styles.rawTrigger)}>Show raw input/output</Button><DisclosurePanel>{rawOpen && <>{command !== undefined && <pre data-testid="error-overlay-command" {...stylex.props(styles.rawOutput, styles.command)}><code>{command}</code></pre>}<pre {...stylex.props(styles.rawOutput)}>{rawDetail}</pre></>}</DisclosurePanel></Disclosure>}
     </div>
     {onRetry !== undefined && <Button onPress={onRetry} {...stylex.props(styles.action)}>Retry</Button>}
     {onOpenOutput !== undefined && <Button onPress={onOpenOutput} {...stylex.props(styles.action)}>Open output</Button>}
-    <Button aria-label={`Dismiss: ${title}`} onPress={() => setDismissedId(id)} {...stylex.props(styles.close)}><Icon name="x" size={12} /></Button>
+    <Button aria-label={`Dismiss: ${title}`} onPress={() => setDismissedId(id)} {...stylex.props(styles.close)}><Icon name="close" size={12} /></Button>
   </div>
   return host === null || host.lane || host.layer === null ? banner : createPortal(banner, host.layer)
 }

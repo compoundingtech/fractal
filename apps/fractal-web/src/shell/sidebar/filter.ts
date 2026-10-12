@@ -3,7 +3,7 @@ import type { Agent } from '../../data/source.ts'
 import type { ProjectedFolder } from '../../folders/core.mts'
 import type { Workspace } from '../workspaces.ts'
 import type { SidebarFilters } from './state.ts'
-import type { AgentStatus } from './StatusIcon.tsx'
+import type { AgentStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 
 /** User-facing labels for the sidebar's supported sort modes. */
 export const sortModes = {

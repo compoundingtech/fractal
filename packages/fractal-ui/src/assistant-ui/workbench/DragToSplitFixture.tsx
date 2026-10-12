@@ -20,10 +20,10 @@ export function AgentDragRow({ onOpen, agentKey = draggedAgent, title = 'worker-
   return (
     <div {...stylex.props(styles.row)}>
       <button {...dragProps} aria-label={`Drag ${title}`} data-testid="drag-agent" data-agent-key={agentKey} {...stylex.props(styles.agent)}>
-        <Icon name="message" /><span {...stylex.props(styles.agentTitle)}>{title}</span>
+        <Icon name="agent" /><span {...stylex.props(styles.agentTitle)}>{title}</span>
       </button>
       <MenuTrigger>
-        <Button aria-label={`${title} actions`} {...stylex.props(styles.actions)}><Icon name="chevron-down" /></Button>
+        <Button aria-label={`${title} actions`} {...stylex.props(styles.actions)}><Icon name="more" /></Button>
         <Popover placement="bottom end" {...stylex.props(styles.popover)}>
           <Menu aria-label={`Open ${title}`} onAction={key => onOpen(key as AgentPlacement)} {...stylex.props(styles.menu)}>
             <MenuItem id="center" {...stylex.props(styles.item)}>Open as tab</MenuItem>

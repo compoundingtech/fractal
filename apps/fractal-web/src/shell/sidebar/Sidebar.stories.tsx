@@ -20,7 +20,8 @@ import { WorkbenchContextProvider } from '../context.tsx'
 import { dailyDriver } from '../fixtures/layouts.ts'
 import { createWindow, projectWorkspaces, reduceWindow, type WindowAction } from '../workspaces.ts'
 import { defaultFilters, fixtureSidebarState, type SidebarFilters } from './state.ts'
-import { StatusIcon, statuses, type AgentStatus } from './StatusIcon.tsx'
+import { statuses, type AgentStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { SidebarStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
 
 const styles = stylex.create({
   sidebar: {
@@ -172,26 +173,12 @@ export const AllStates: Story = {
       <div {...stylex.props(styles.statusGrid)}>
         {(Object.keys(statuses) as AgentStatus[]).map((status) => (
           <div key={status} {...stylex.props(styles.status)}>
-            <StatusIcon status={status} />
+            <SidebarStatus status={status} variant="SG-3" freshness="live" iconOnly />
             {statuses[status].label}
           </div>
         ))}
       </div>
       <FolderTree />
     </>
-  ),
-}
-export const EndedOptions: Story = {
-  render: () => (
-    <div {...stylex.props(styles.statusGrid)}>
-      <div {...stylex.props(styles.status)}>
-        <StatusIcon status="ended" />
-        Stop circle · ended (recommended)
-      </div>
-      <div {...stylex.props(styles.status)}>
-        <StatusIcon status="ended" endedGlyph="flag" />
-        Finish flag · ended
-      </div>
-    </div>
   ),
 }

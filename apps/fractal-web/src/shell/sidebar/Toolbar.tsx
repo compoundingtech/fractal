@@ -16,7 +16,7 @@ import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
 import { IconButton } from '../../workbench-kit/IconButton.tsx'
 import { sortModes, type SortMode } from './filter.ts'
 import { defaultFilters, type SidebarFilters } from './state.ts'
-import { statuses, type AgentStatus } from './StatusIcon.tsx'
+import { statuses, type AgentStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 
 /** Sidebar search, visibility, host, status and view-only ordering controls. */
 export const SidebarToolbar = ({

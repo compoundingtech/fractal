@@ -139,6 +139,12 @@ export const geometryNumbers = {
   threadViewportMin: 96,
 } as const
 
+/** Icon tokens: glyph sizes icon-12/14/16, plus the stroke width and dot diameter every glyph keeps on screen. */
+export const iconVars = stylex.defineVars({
+  size12: '12px', size14: '14px', size16: '16px',
+  stroke: '1.5px', dot: '2px',
+})
+
 export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
   ease: 'ease', linear: 'linear',

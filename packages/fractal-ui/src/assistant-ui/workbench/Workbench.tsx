@@ -365,10 +365,10 @@ function TabGroupNode({ node, path, layout, workspaceId, resources, hideSingleTa
         })}
       </TabList>
       {!appearance && <div {...stylex.props(styles.groupActions)}>
-        <AriaButton aria-label={`Close ${paneTitle(activePane)}`} onPress={() => close(paneKey(activePane))} {...stylex.props(styles.ghostMd)}><Icon name="x" /></AriaButton>
-        <AriaButton aria-label="New thread pane" onPress={() => { const pane = nextThreadPane(); change(addTabAtPath(layout.current, path, pane)); select(paneKey(pane)) }} {...stylex.props(styles.ghostMd)}><Icon name="plus" /></AriaButton>
-        <AriaButton aria-label="Split right" onPress={() => change(splitGroupAtPath(layout.current, path, 'right', { uri: 'about:blank' }))} {...stylex.props(styles.ghostMd)}><Icon name="panel" /></AriaButton>
-        <AriaButton aria-label="Split below" onPress={() => change(splitGroupAtPath(layout.current, path, 'below', { uri: 'about:blank' }))} {...stylex.props(styles.ghostMd)}><Icon name="drawer" /></AriaButton>
+        <AriaButton aria-label={`Close ${paneTitle(activePane)}`} onPress={() => close(paneKey(activePane))} {...stylex.props(styles.ghostMd)}><Icon name="close" /></AriaButton>
+        <AriaButton aria-label="New thread pane" onPress={() => { const pane = nextThreadPane(); change(addTabAtPath(layout.current, path, pane)); select(paneKey(pane)) }} {...stylex.props(styles.ghostMd)}><Icon name="add" /></AriaButton>
+        <AriaButton aria-label="Split right" onPress={() => change(splitGroupAtPath(layout.current, path, 'right', { uri: 'about:blank' }))} {...stylex.props(styles.ghostMd)}><Icon name="split-right" /></AriaButton>
+        <AriaButton aria-label="Split below" onPress={() => change(splitGroupAtPath(layout.current, path, 'below', { uri: 'about:blank' }))} {...stylex.props(styles.ghostMd)}><Icon name="split-down" /></AriaButton>
       </div>}
     </div>
   )
@@ -435,8 +435,8 @@ function GroupHeader({ pane, children, titleInTab, onOpenDiff, resources }: { pa
     </div>}
     {children}
     {appearance?.header !== 'H3' && paneKind(pane) === 'thread' && <div {...stylex.props(styles.groupActions)}>
-      <Tooltip label="Open diff"><AriaButton aria-label="Open diff" isDisabled={resources.diffs.size === 0} onPress={onOpenDiff} {...stylex.props(styles.ghostMd)}><Icon name="panel" /></AriaButton></Tooltip>
-      <Tooltip label="Open terminal"><AriaButton aria-label="Open terminal" isDisabled={onOpenTerminal === undefined} onPress={() => onOpenTerminal?.()} {...stylex.props(styles.ghostMd)}><Icon name="drawer" /></AriaButton></Tooltip>
+      <Tooltip label="Open diff"><AriaButton aria-label="Open diff" isDisabled={resources.diffs.size === 0} onPress={onOpenDiff} {...stylex.props(styles.ghostMd)}><Icon name="diff" /></AriaButton></Tooltip>
+      <Tooltip label="Open terminal"><AriaButton aria-label="Open terminal" isDisabled={onOpenTerminal === undefined} onPress={() => onOpenTerminal?.()} {...stylex.props(styles.ghostMd)}><Icon name="terminal" /></AriaButton></Tooltip>
       <Tooltip label="Open pull request"><Link aria-label="Open pull request" href={details.pullRequestUrl} isDisabled={details.pullRequestUrl === undefined} target="_blank" rel="noreferrer" {...stylex.props(styles.ghostMd)}><Icon name="pull-request" /></Link></Tooltip>
       <StopAgentButton title={details.title} onStop={details.onStop} />
     </div>}
@@ -448,7 +448,7 @@ function StopAgentButton({ title, onStop }: { title: string; onStop?: () => void
   const titleId = React.useId()
   const descriptionId = React.useId()
   return <DialogTrigger>
-    <Tooltip label="Stop agent"><AriaButton aria-label="Stop agent" isDisabled={onStop === undefined} {...stylex.props(styles.ghostMd)}><Icon name="stop-circle" /></AriaButton></Tooltip>
+    <Tooltip label="Stop agent"><AriaButton aria-label="Stop agent" isDisabled={onStop === undefined} {...stylex.props(styles.ghostMd)}><Icon name="stop-agent" /></AriaButton></Tooltip>
     <ModalOverlay isDismissable {...stylex.props(styles.modalOverlay)}><Modal {...stylex.props(styles.modal)}><Dialog role="alertdialog" aria-labelledby={titleId} aria-describedby={descriptionId} {...stylex.props(styles.dialog)}>
       {({ close }) => <><Heading id={titleId} slot="title" {...stylex.props(styles.dialogTitle)}>Stop {title}?</Heading><p id={descriptionId} {...stylex.props(styles.dialogDescription)}>The current run will be interrupted. Your draft stays available.</p><div {...stylex.props(styles.dialogActions)}><AriaButton autoFocus onPress={close} {...stylex.props(styles.dialogButton)}>Cancel</AriaButton><AriaButton onPress={() => { close(); onStop?.() }} {...stylex.props(styles.dialogButton, styles.destructive)}>Stop agent</AriaButton></div></>}
     </Dialog></Modal></ModalOverlay>

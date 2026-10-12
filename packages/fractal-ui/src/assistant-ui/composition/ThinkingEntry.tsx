@@ -11,7 +11,7 @@ export function ThinkingEntry({ text: value, streaming = false }: { text: string
   const contentId = React.useId()
   return <div data-testid="thinking-entry" data-streaming={streaming} {...stylex.props(styles.thinking)}>
     <AriaButton aria-expanded={open} aria-controls={contentId} onPress={() => setOpen(value => !value)} {...stylex.props(styles.thinkingControl)}>
-      <Icon name={streaming ? 'spinner' : open ? 'chevron-down' : 'chevron-right'} spinning={streaming} /><span>Thinking</span>
+      <Icon name={streaming ? 'running' : open ? 'chevron-down' : 'chevron-right'} /><span>Thinking</span>
     </AriaButton>
     {open ? <div id={contentId}><Markdown text={value} streaming={streaming} /></div> : null}
   </div>

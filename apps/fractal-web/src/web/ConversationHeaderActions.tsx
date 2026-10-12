@@ -32,7 +32,7 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
     : undefined
   return <div {...stylex.props(styles.actions)}>
     <Aria.DialogTrigger isOpen={resourcesOpen} onOpenChange={setResourcesOpen}>
-      <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button)}><CompositionIcon name="folder" />Resources</Aria.Button>
+      <Aria.Button aria-label="Resources" aria-expanded={resourcesOpen} isDisabled={disabledReason !== undefined} aria-describedby={disabledReason === undefined ? undefined : reasonId} {...stylex.props(styles.button)}><CompositionIcon name="resources" />Resources</Aria.Button>
       <Aria.ModalOverlay isDismissable {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>
           <Aria.Dialog aria-label="Agent resources" {...stylex.props(styles.dialog)}>
@@ -44,7 +44,7 @@ export const ConversationHeaderActions = ({ agentRef }: { readonly agentRef: str
     </Aria.DialogTrigger>
     {disabledReason === undefined ? null : <span id={reasonId} {...stylex.props(styles.reason)}>{disabledReason}</span>}
     <Aria.MenuTrigger>
-      <Aria.Button aria-label="Conversation menu" {...stylex.props(styles.button)}><CompositionIcon name="gear" /></Aria.Button>
+      <Aria.Button aria-label="Conversation menu" {...stylex.props(styles.button)}><CompositionIcon name="more" /></Aria.Button>
       <Aria.Popover {...stylex.props(styles.popover)}>
         <Aria.Menu aria-label="Conversation settings" selectionMode="multiple" selectedKeys={showSystemEvents ? ['system'] : []} onSelectionChange={keys => setShowSystemEvents(keys === 'all' || keys.has('system'))} {...stylex.props(styles.menu)}>
           <Aria.MenuItem id="system" {...stylex.props(styles.menuItem)}>Show all system events</Aria.MenuItem>

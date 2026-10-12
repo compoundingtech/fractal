@@ -33,51 +33,6 @@ const paths: Readonly<Record<string, ReactNode>> = {
       <circle cx="13" cy="15" r="1" />
     </>
   ),
-  working: <path d="m8 3 7 7-7 7z" />,
-  waiting: <path d="M7 4v12M13 4v12" />,
-  idle: <circle cx="10" cy="10" r="6" />,
-  unobserved: (
-    <>
-      <circle cx="10" cy="10" r="6" strokeDasharray="2 3" />
-      <path d="M10 7v4M10 14h.01" />
-    </>
-  ),
-  stale: (
-    <>
-      <circle cx="10" cy="10" r="7" />
-      <path d="M10 5v6l3 2" />
-    </>
-  ),
-  ended: (
-    <>
-      <circle cx="10" cy="10" r="7" />
-      <path d="m6 6 8 8M14 6l-8 8" />
-    </>
-  ),
-  pending: (
-    <>
-      <circle cx="10" cy="10" r="7" />
-      <path d="M10 5v5H6" />
-    </>
-  ),
-  retired: (
-    <>
-      <rect x="3" y="4" width="14" height="12" rx="1" />
-      <path d="M3 8h14M8 11h4" />
-    </>
-  ),
-  offline: (
-    <>
-      <circle cx="10" cy="10" r="6" />
-      <path d="m4 16 12-12" />
-    </>
-  ),
-  suspended: (
-    <>
-      <rect x="3" y="3" width="14" height="14" rx="2" />
-      <path d="M7 6v8M13 6v8" />
-    </>
-  ),
   check: <path d="m4 10 4 4 8-9" />,
   inbox: (
     <>

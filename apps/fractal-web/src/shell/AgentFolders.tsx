@@ -16,6 +16,9 @@ import {
   type TreeProps,
 } from 'react-aria-components'
 
+import { compactTime, type AgentStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
+
 import { Button } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 import { RenderProfiler } from '../telemetry/meters.tsx'
@@ -39,7 +42,7 @@ import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.t
 import { filterFolders, matchesRow, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
 import type { SidebarFilters } from './sidebar/state.ts'
-import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
+import { agentStatus } from './sidebar/agentStatus.ts'
 import { SidebarToolbar } from './sidebar/Toolbar.tsx'
 import type { Workspace, WindowAction } from './workspaces.ts'
 
@@ -880,15 +883,14 @@ const AgentFolderRow = React.memo(
                   {...stylex.props(styles.rowContent)}
                 >
                   <div {...stylex.props(styles.line)}>
-                    <span
-                      title={
-                        agent?.statusSince === undefined
-                          ? 'Status boundary unavailable; last activity is not time in status'
-                          : `Observed status since ${new Date(agent.statusSince).toLocaleString()} · ${compactTime({ at: agent.statusSince, now })} in status`
-                      }
-                    >
-                      <StatusIcon status={status} />
-                    </span>
+                    <SidebarStatus
+                      status={status}
+                      variant="SG-3"
+                      statusSince={agent?.statusSince}
+                      now={now}
+                      freshness={feed._tag === 'Observed' ? feed.freshness : 'unobserved'}
+                      iconOnly
+                    />
                     <span {...stylex.props(styles.nameSpace)}>
                       <span {...stylex.props(styles.nameSlot)}>
                         <span

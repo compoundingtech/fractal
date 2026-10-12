@@ -54,17 +54,18 @@ export interface SidebarActions {
 }
 
 export interface SidebarSubagent { readonly id: string; readonly subagent_type?: string; readonly work_id?: string; readonly session_id?: string; readonly started_at?: string; readonly lease_expires_at: string }
+/** Accessible labels for observed agent statuses; colour comes from the status tone tokens. */
 export const statuses = {
-  working: { label: 'Working', tone: 'green' },
-  waiting: { label: 'Needs you', tone: 'amber' },
-  idle: { label: 'Idle', tone: 'gray' },
-  pending: { label: 'Pending', tone: 'gray' },
-  stale: { label: 'Stale observation', tone: 'gray' },
-  offline: { label: 'Offline', tone: 'gray' },
-  ended: { label: 'Ended', tone: 'gray' },
-  suspended: { label: 'Suspended', tone: 'gray' },
-  retired: { label: 'Retired', tone: 'gray' },
-  unobserved: { label: 'Not observed', tone: 'gray' },
+  working: { label: 'Working' },
+  waiting: { label: 'Needs you' },
+  idle: { label: 'Idle' },
+  pending: { label: 'Pending' },
+  stale: { label: 'Stale observation' },
+  offline: { label: 'Offline' },
+  ended: { label: 'Ended' },
+  suspended: { label: 'Suspended' },
+  retired: { label: 'Retired' },
+  unobserved: { label: 'Not observed' },
 } as const
 export type AgentStatus = keyof typeof statuses
 export const compactTime = ({ at, now }: { readonly at: number; readonly now: number }): string => {
