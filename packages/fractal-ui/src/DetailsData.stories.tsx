@@ -299,9 +299,11 @@ function assertSession(root:HTMLElement) {
 function assertPartialFacts(root:HTMLElement) {
  const card=Array.from(root.querySelectorAll('[data-resource-card]')).find(item=>item.textContent?.includes('native-child'))
  requireContract(card, 'Unavailable label hid the known descendant identity')
- requireContract(!card.textContent?.includes('Invalid Date')&&!card.textContent?.includes('NaN')&&!card.textContent?.includes('First observed')&&!card.textContent?.includes('Parent ·')&&card.textContent?.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
+ // Dense metadata is whole-or-absent on paint; the row's accessible name always carries the reported facts.
+ const facts=`${card.textContent??''} ${card.querySelector('[data-details-resource-row]')?.getAttribute('aria-label')??''}`
+ requireContract(!facts.includes('Invalid Date')&&!facts.includes('NaN')&&!facts.includes('First observed')&&!facts.includes('Parent ·')&&facts.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
  requireContract(root.textContent?.includes('Showing 1 of 4 traced sessions'), 'Missing descendant facts changed the reported descendant count')
- requireContract(!card.textContent?.includes('gpt-5.4'), 'Unavailable model was fabricated')
+ requireContract(!facts.includes('gpt-5.4'), 'Unavailable model was fabricated')
 }
 function assertContextSamples(root:HTMLElement) {
  assertPercentOnly(root)
@@ -339,6 +341,9 @@ export const PartialDescendantFacts: Story = {
     invented.textContent='gpt-5.4'
     card.append(invented)
     await rejectsControl('Unavailable model was fabricated',()=>assertPartialFacts(wrong))
+    const row=card.querySelector('[data-details-resource-row]');requireContract(row,'Missing descendant lifecycle negative control target')
+    invented.remove();row.setAttribute('aria-label',(row.getAttribute('aria-label')??'').replace(/Last observed[^·]*/,''))
+    await rejectsControl('Unavailable timestamps or parent fabricated lifecycle facts',()=>assertPartialFacts(wrong))
   },
 }
 export const ContextPercentOnly: Story = {
