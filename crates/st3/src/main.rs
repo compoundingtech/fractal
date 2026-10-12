@@ -10028,11 +10028,14 @@ fn render_product_page_headed(
                     item.session_actor,
                     item.scopes.len()
                 );
-                let _ = writeln!(
-                    output,
-                    "  action: st devices --as {} revoke {}",
-                    item.person_id, item.header.id
-                );
+                if let Some(person) = &item.person_id {
+                    let _ = writeln!(
+                        output, "  action: st devices --as {} revoke {}",
+                        person, item.header.id
+                    );
+                } else if let Some(grant) = &item.grant_id {
+                    let _ = writeln!(output, "  action: st devices grant revoke {grant}");
+                }
             }
             ClientResource::Session(item) => {
                 let _ = writeln!(
@@ -28350,6 +28353,14 @@ mod tests {
                 "  action: st devices --as person/alex revoke device/ios-release\n",
             )
         );
+        let mut assistant = fixture_product_page(&["device"], false);
+        let ClientResource::Device(device) = &mut assistant.items[0] else { panic!("device fixture"); };
+        device.person_id = None;
+        device.grant_id = Some("assistant-grant/0123456789abcdef01234567".into());
+        device.session_actor = "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
+        let shown = render_product_page("DEVICES", &assistant, "st devices");
+        assert!(shown.contains("action: st devices grant revoke assistant-grant/0123456789abcdef01234567"));
+        assert!(!shown.contains("--as person/"));
     }
 
     #[test]
