@@ -152,6 +152,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
       id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,
       detail: toolOutput(call.result?.content) || undefined,
+      output: call.result?.content,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
       changedPath: kind === 'edit' && call.callSeen && call.status === 'success' ? path : undefined,
       command: kind === 'run' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,

@@ -5,6 +5,7 @@ import { expect, userEvent, within } from 'storybook/test'
 import { Button } from 'react-aria-components'
 import { WorkLogV1 } from './assistant-ui/taste/WorkLogV1.tsx'
 import type { WorkLogCall, WorkLogTurn } from './assistant-ui/taste/work-log.ts'
+import { workLogTurnFromItems } from './assistant-ui/taste/work-log.ts'
 import { baselineTheme } from './assistant-ui/neutral-theme.ts'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme.ts'
 import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex.ts'
@@ -12,6 +13,9 @@ import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t 
 const call: WorkLogCall = { id: 'sample-search', kind: 'run', title: 'Search for matches', status: 'error', startedAt: '2032-01-01T00:00:00Z', endedAt: '2032-01-01T00:00:01Z', detail: 'Process exited with code 1' }
 const turn: WorkLogTurn = { calls: [call], durationMs: 1000, running: false, failed: false, interrupted: false, foldable: false }
 const serviceCall = (ready: boolean): WorkLogCall => ({ ...call, id: 'sample-service', status: 'success', metadata: { service: { name: 'sample-watcher', state: ready ? 'running' : 'starting', ready, timedOut: !ready } } })
+const projectedService = workLogTurnFromItems([
+  { _tag: 'ToolCall', id: 'sample-projected', callId: 'call/sample-projected', name: 'run', input: {}, status: 'success', callSeen: true, at: call.startedAt, result: { content: { details: { service: { name: 'sample-projected', ready: true } } }, isError: false, at: call.endedAt! } },
+], { kindFor: () => 'run', running: false, failed: false, interrupted: false }).calls[0]!
 const PolicySurface = ({ scheme = 'dark', width = 1440, omitServiceFacts = false }: { readonly scheme?: Scheme; readonly width?: number; readonly omitServiceFacts?: boolean }) => {
   const [ready, setReady] = React.useState(false)
   const service = serviceCall(ready)
@@ -20,7 +24,7 @@ const PolicySurface = ({ scheme = 'dark', width = 1440, omitServiceFacts = false
     <section aria-label="Routine command failure"><WorkLogV1 ariaLabel="Routine command work" turn={turn} interactiveCalls={false} /></section>
     <section aria-label="Run-ending failure"><WorkLogV1 ariaLabel="Run-ending command work" turn={{ ...turn, failed: true, failureNote: 'The command ended the run.' }} interactiveCalls={false} /></section>
     <section aria-label="Interrupted run"><WorkLogV1 ariaLabel="Interrupted command work" turn={{ ...turn, failed: true, interrupted: true }} interactiveCalls={false} /></section>
-    <section aria-label="Service readiness"><WorkLogV1 ariaLabel="Recorded service work" turn={{ ...turn, calls: [{ ...service, metadata: omitServiceFacts ? undefined : service.metadata }, { ...call, id: 'sample-command-timeout', status: 'success', metadata: { timedOut: true } }] }} interactiveCalls={false} /></section>
+    <section aria-label="Service readiness"><WorkLogV1 ariaLabel="Recorded service work" turn={{ ...turn, calls: [{ ...service, metadata: omitServiceFacts ? undefined : service.metadata }, projectedService, { ...call, id: 'sample-command-timeout', status: 'success', metadata: { timedOut: true } }] }} interactiveCalls={false} /></section>
     <Button onPress={() => setReady(value => !value)}>{ready ? 'Record readiness timeout' : 'Record ready service'}</Button>
   </section>
 }
@@ -37,6 +41,9 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(service.querySelector('[data-service-readiness]')).toHaveTextContent('Timed out')
   await expect(service.querySelector('[data-service-tone]')).toHaveAttribute('data-service-tone', 'warning')
   await expect(canvasElement.querySelector('[data-item-id="sample-command-timeout"] [data-service-readiness]')).toBeNull()
+  const projected = canvasElement.querySelector<HTMLElement>('[data-item-id="sample-projected"]')!
+  await expect(projected).toHaveTextContent('Service sample-projected')
+  await expect(projected.querySelector('[data-service-readiness]')).toHaveTextContent('Ready')
   await userEvent.click(canvas.getByRole('button', { name: 'Record ready service' }))
   await expect(canvasElement.querySelector('[data-item-id="sample-service"]')).toBe(service)
   await expect(service).toHaveTextContent('Service sample-watcher · running')

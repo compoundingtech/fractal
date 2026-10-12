@@ -24,6 +24,13 @@ test('readiness uses recorded service facts, not command success or timeout alon
 const at = '2026-01-15T12:30:00Z'
 const project = content => workLogTurnFromItems([{ _tag: 'ToolCall', id: 'tool/read', callId: 'call/read', name: 'read', input: {}, status: 'success', callSeen: true, at, result: { content, isError: false, at } }], { kindFor: () => 'read', running: false, failed: false, interrupted: false }).calls[0]
 
+test('native projection preserves recorded service output by identity', () => {
+  const output = { details: { service: { name: 'sample-watcher', state: 'starting', ready: false, timedOut: true } } }
+  const call = project(output)
+  assert.equal(call.output, output)
+  assert.deepEqual(workServicePresentation(call), { name: 'sample-watcher', state: 'starting', readiness: 'Timed out', warning: true })
+})
+
 test('string output remains the work-log detail', () => assert.equal(project('Native output').detail, 'Native output'))
 test('native content arrays retain every text part in order', () => assert.equal(project([{ type: 'text', text: 'First' }, { type: 'text', text: 'Second' }]).detail, 'First\nSecond'))
 test('empty output has no detail', () => {
