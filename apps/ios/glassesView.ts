@@ -13,7 +13,7 @@ import type { MachineView } from './projectionCache';
 /** What a pane opens on the phone. */
 export type PaneTarget = {
   key: string;
-  kind: 'agent' | 'mission' | 'machine' | 'terminal' | 'usage' | 'other';
+  kind: 'agent' | 'mission' | 'machine' | 'terminal' | 'usage' | 'resource' | 'other';
   /** The subject's id: `agent/…`, `mission/…`, `machine/…`; the key for anything else. */
   id: string;
   title: string;
@@ -92,6 +92,7 @@ export function paneTarget(key: string, lists: GlassLists, labels = missionLabel
   if (kind === 'terminal' && id.startsWith('terminal/')) {
     return { key, kind: 'terminal', id, title: 'shell', needsYou: false, gone: false };
   }
+  if (kind === 'resource' && id) return { key, kind: 'resource', id, title: id, needsYou: false, gone: false };
   if (kind === 'usage') {
     return { key, kind: 'usage', id, title: 'Usage', needsYou: false, gone: false };
   }

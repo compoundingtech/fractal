@@ -20,6 +20,7 @@ pub(super) struct RunReport {
     pub to: String,
     pub stalled_after_ms: u64,
     pub completed: bool,
+    pub stalls: bool,
 }
 
 /// What happened to a run that its reporter is told.
@@ -71,25 +72,26 @@ fn can_stall(run: &MissionRunView) -> bool {
 
 impl<R: RuntimeControl> Reconciler<R> {
     /// Who a run reports to: its latest `st missions report-to`, else what it was created with.
-    pub(super) fn run_report(&self, run: &MissionRunView) -> Result<Option<RunReport>> {
+    pub(super) fn run_report(&self, run: &str) -> Result<Option<RunReport>> {
         let claim = match self
             .store
-            .latest_claim(&run.subject, Some(crate::store::RUN_REPORT_KIND))?
+            .latest_claim(run, Some(crate::store::RUN_REPORT_KIND))?
         {
             Some(changed) => changed,
             None => match self
                 .store
-                .latest_claim(&run.subject, Some("mission-run.created"))?
+                .latest_claim(run, Some("mission-run.created"))?
             {
                 Some(created) => created,
                 None => return Ok(None),
             },
         };
         Ok(crate::store::run_report_fields(&claim.body).map(
-            |(to, stalled_after_ms, completed)| RunReport {
+            |(to, stalled_after_ms, completed, stalls)| RunReport {
                 to,
                 stalled_after_ms,
                 completed,
+                stalls,
             },
         ))
     }
@@ -112,7 +114,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.tell_reporter(run, report, event)?;
             return Ok(None);
         }
-        if !can_stall(run) {
+        if !report.stalls || !can_stall(run) {
             return Ok(None);
         }
         let since = run_activity(run);

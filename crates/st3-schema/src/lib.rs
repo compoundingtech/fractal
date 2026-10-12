@@ -1529,6 +1529,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.nudged",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
             "gate.requested",
             &["gate-operation"],
             WritePolicy::SystemOnly,
@@ -2613,11 +2622,13 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("after", reference()),
             ("report_to", reference()),
             ("stalled_after_ms", integer()),
+            ("report_stalls", boolean()),
             ("report_completed", boolean()),
         ],
         "mission-run.report-to" => &[
             ("report_to", reference()),
             ("stalled_after_ms", integer()),
+            ("report_stalls", boolean()),
             ("report_completed", boolean()),
         ],
         "mission-run.state" => &[
@@ -2753,6 +2764,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("handoff_to", reference()),
             ("handoff_message", reference()),
             ("handoff_acknowledged", reference()),
+        ],
+        "work.nudged" => &[
+            ("attempt", integer()),
+            ("agent", reference()),
+            ("message", reference()),
+            ("idle_since_unix_ms", string()),
+            ("reason", string()),
+            ("waits", array()),
         ],
         "gate.requested" => &[
             ("status", string()),
@@ -3605,6 +3624,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         .cloned()
         .map(|(name, spec)| (name.into(), spec))
         .collect();
+    if kind == "work.submitted" {
+        fields.insert("submitted_incarnation".into(), string());
+    }
     if matches!(kind, "work.person-done" | "gate.result" | "message.closed") {
         fields.insert("acted_for".into(), reference_to(&["person"]));
         fields.insert("delegation".into(), object());
@@ -3854,6 +3876,33 @@ fn validate_harness_todo(fields: &BTreeMap<String, Value>) -> Result<(), Validat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_report_stall_policy_is_an_optional_boolean() {
+        for kind in ["mission-run.created", "mission-run.report-to"] {
+            let mut fields =
+                BTreeMap::from([("report_to".into(), serde_json::json!("agent/ops/watcher"))]);
+            assert!(
+                registry()
+                    .validate_claim("mission-run/parent/1", kind, &fields)
+                    .is_ok()
+            );
+            for value in [serde_json::json!(false), serde_json::json!(true)] {
+                fields.insert("report_stalls".into(), value);
+                assert!(
+                    registry()
+                        .validate_claim("mission-run/parent/1", kind, &fields)
+                        .is_ok()
+                );
+            }
+            fields.insert("report_stalls".into(), serde_json::json!("false"));
+            assert!(
+                registry()
+                    .validate_claim("mission-run/parent/1", kind, &fields)
+                    .is_err()
+            );
+        }
+    }
 
     fn todo_fields() -> BTreeMap<String, Value> {
         serde_json::from_value(serde_json::json!({
@@ -4215,6 +4264,7 @@ mod tests {
                 "work.claimed",
                 "work.extended",
                 "work.failed",
+                "work.nudged",
                 "work.person-asked",
                 "work.person-cancelled",
                 "work.person-done",
@@ -4496,6 +4546,41 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn submitted_incarnation_is_optional_and_only_registered_on_submissions() {
+        let fields = BTreeMap::from([("attempt".into(), Value::from(1))]);
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
+        let mut fields = fields;
+        fields.insert("submitted_incarnation".into(), Value::from("garden:one"));
+        registry()
+            .validate_claim("step-run/garden/build", "work.submitted", &fields)
+            .unwrap();
+        for kind in [
+            "work.claimed",
+            "work.progress",
+            "work.released",
+            "work.failed",
+        ] {
+            assert_eq!(
+                registry()
+                    .validate_claim("step-run/garden/build", kind, &fields)
+                    .unwrap_err()
+                    .code,
+                "unknown-claim-field"
+            );
+        }
+        fields.insert("submitted_incarnation".into(), Value::from(1));
+        assert_eq!(
+            registry()
+                .validate_claim("step-run/garden/build", "work.submitted", &fields)
+                .unwrap_err()
+                .code,
+            "invalid-claim-field"
+        );
+    }
 
     #[test]
     fn checked_in_schema_document_matches_the_registry() {

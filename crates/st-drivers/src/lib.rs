@@ -18,6 +18,7 @@
 mod ci_test_paths;
 
 pub mod account;
+pub mod access;
 pub mod catalog;
 pub mod catalog_archive;
 pub mod catalog_lock;
@@ -92,6 +93,7 @@ pub mod task_inventory;
 pub mod telemetry;
 pub mod validate;
 pub mod version;
+pub mod work_claim_failure;
 mod watch;
 
 // The declaration model and the catalog walk live in the `agent-spec` crate, so st2 and any other

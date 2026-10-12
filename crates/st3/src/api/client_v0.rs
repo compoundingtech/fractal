@@ -3,6 +3,88 @@ use crate::model::DesiredSubject;
 use axum::http::HeaderMap;
 use axum::http::header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL};
 use std::collections::BTreeSet;
+use tracing::Instrument as _;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+/// Socket ownership ends this root only after the first data frame reaches the client.
+struct FirstFrame {
+    span: tracing::Span,
+    read_pending: bool,
+}
+
+fn subscription_first_frame(
+    collection: &str,
+    id: &str,
+    upgrade: Option<&opentelemetry::trace::SpanContext>,
+) -> Option<FirstFrame> {
+    if !crate::otel::export_enabled() {
+        return None;
+    }
+    let collection = match collection {
+        "missions" => "missions",
+        "attention" => "attention",
+        "agents" => "agents",
+        "work" => "work",
+        "glasses" => "glasses",
+        "arrangements" => "arrangements",
+        "conversation" => "conversation",
+        "terminal" => "terminal",
+        _ => return None,
+    };
+    let span = tracing::info_span!(
+        parent: None,
+        "st.subscription.first_frame",
+        otel.kind = "internal",
+        st.collection = collection,
+        st.subscription.id = id,
+        st.projection.hit = false,
+        st.projection.cold = false,
+        st.projection.incremental = false,
+        st.projection.shared = true,
+        st.page.rows = tracing::field::Empty,
+        st.page.bytes = tracing::field::Empty,
+        span.label = collection,
+    );
+    span.set_parent(opentelemetry::Context::new());
+    if let Some(upgrade) = upgrade.filter(|context| context.is_valid()) {
+        span.add_link(upgrade.clone());
+    }
+    Some(FirstFrame { span, read_pending: true })
+}
+
+async fn first_frame_work<F: Future>(span: Option<tracing::Span>, work: F) -> F::Output {
+    match span {
+        Some(span) => work.instrument(span).await,
+        None => work.await,
+    }
+}
+
+/// Whether the current span is an exported subscription's first-frame root.
+fn first_frame_current() -> bool {
+    crate::otel::export_enabled()
+        && tracing::Span::current()
+            .metadata()
+            .is_some_and(|metadata| metadata.name() == "st.subscription.first_frame")
+}
+
+/// Reuse the actual serialized frame length; later frames do not inspect their payload.
+fn record_subscription_page(value: &Value, bytes: usize) {
+    if !first_frame_current() {
+        return;
+    }
+    let span = tracing::Span::current();
+    let body = value.get("value").unwrap_or(value);
+    let rows = body["items"].as_array().map_or_else(
+        || body["rows"].as_u64().unwrap_or(0) as usize,
+        Vec::len,
+    );
+    let collection = value["collection"].as_str().unwrap_or_else(|| {
+        if body["kind"] == "terminal-screen" { "terminal" } else { "conversation" }
+    });
+    crate::otel::record_page(rows, bytes);
+    span.record("span.label", format!("{collection} {rows}"));
+}
+use smallclaims::fifo::{Kind, Queue};
 
 pub(super) mod raw_terminal;
 pub(super) mod resources;
@@ -176,8 +258,10 @@ pub(super) async fn collection_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
+    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let upgrade = upgrade.and_then(|Extension(context)| context.0);
     require_scope(&session, "read.projections")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -195,7 +279,7 @@ pub(super) async fn collection_stream(
     let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
     Ok(websocket
         .protocols([COLLECTION_SUBPROTOCOL])
-        .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence)))
+        .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
 }
 
 /// Acquiring another resource never waits while retaining these unrelated guards.
@@ -204,7 +288,7 @@ struct CollectionReadAdmission {
     read_gate: Arc<tokio::sync::Semaphore>,
     socket: Option<tokio::sync::OwnedSemaphorePermit>,
     window: Option<tokio::sync::OwnedMutexGuard<()>>,
-    roster: Option<tokio::sync::OwnedMutexGuard<()>>,
+    roster: Option<crate::store::AdmissionGuard>,
     reader: Option<smallclaims::sqlite::ReadPermit>,
 }
 
@@ -249,12 +333,12 @@ impl CollectionReadAdmission {
                 }
             }
             if self.roster.is_none() && needs_roster {
-                self.roster = store.try_admit_agent_resources();
+                self.roster = store.try_admit_agent_resources("ws");
                 if self.roster.is_none() {
                     drop(self.reader.take());
                     drop(self.socket.take());
                     drop(self.window.take());
-                    self.roster = Some(store.admit_agent_resources().await);
+                    self.roster = Some(store.admit_agent_resources("ws").await);
                     continue;
                 }
             }
@@ -383,6 +467,10 @@ async fn collection_items_with_windows(
     let custom_forms = session.custom_forms;
     let arrangement_window = collection == "arrangements";
     let mut admitted = collection != "agents";
+    // Attribute the first frame, and any later cold root; never create a per-frame span.
+    let traced = matches!(collection.as_str(), "agents" | "summary") && first_frame_current();
+    let roster_telemetry = matches!(collection.as_str(), "agents" | "summary") && crate::otel::export_enabled();
+    let mut roster_attributes = None;
     let (snapshot, mut items, mut has_more) = loop {
         // Summary reads the published roster once a refresher keeps one; only a store without
         // one folds it here, behind the shared admission.
@@ -393,6 +481,7 @@ async fn collection_items_with_windows(
         let read_permit = gates.socket.take().expect("admitted collection socket");
         let admission = gates.window.take();
         let roster_admission = gates.roster.take();
+        let submitted = roster_telemetry.then(std::time::Instant::now);
         let state = state.clone();
         let session = session.clone();
         let request = request.clone();
@@ -404,16 +493,19 @@ async fn collection_items_with_windows(
         let prepared = prepared.clone();
         let windows = windows.clone();
         let worker_store = state.store.clone();
-        let (result, read_permit, returned_admission) = super::blocking_store(move || {
-            worker_store.readers.request_read_with_permit(reader_permit, move || {
-        // The worker owns both guards until its physical snapshot finishes, including
-        // after caller cancellation. A miss returns them without allocating shared guards.
-        let mut admission = admission;
-        let result = crate::profile::task(collection_window_label(&collection), || {
+        let (result, read_permit, returned_admission, attributes) = super::blocking_store(move || {
+            crate::profile::task(collection_window_label(&collection), || super::roster_worker(roster_telemetry, submitted, roster_attributes, || {
+            let (result, read_permit, admission) = worker_store.readers.request_read_with_permit(reader_permit, move || {
+            // The worker owns both guards until its physical snapshot finishes, including
+            // after caller cancellation. A miss returns them without allocating shared guards.
+            let mut admission = admission;
             let _roster_admission = roster_admission;
+            if let Some(admission) = &_roster_admission {
+                admission.enter_worker();
+            }
             let store = state.store.clone();
             let commits = windows.as_ref().map(|windows| windows.commits());
-            store.read_snapshot(|index| {
+            let result = store.read_snapshot(|index| {
                 let now = client_now_ms();
                 // Recheck paired grants, including expiry and changed scopes, before any reuse.
                 let (current, person) = match (|| {
@@ -443,21 +535,26 @@ async fn collection_items_with_windows(
                 // Every served roster says when it was published.
                 let mut published = None;
                 let mut published_at = None;
+                let mut roster_path = "exact_cold";
                 let cached_agents = if collection == "agents" {
                     store.note_agent_roster_read();
                     match store.agent_resources_published_at(index, false, None)? {
                         Some((cards, at)) => {
+                            roster_path = "published_complete";
                             published_at = Some(at);
                             Some(cards)
                         }
                         // Before the first complete roster, an unfiltered window can come
                         // from the head the refresher publishes first.
-                        None => match store.published_agent_roster(index, false).or_else(|| {
+                        None => match store.published_agent_roster(index, false)
+                            .map(|roster| ("published_complete", roster)).or_else(|| {
                             status.is_none().then(|| store.published_agent_roster_head(index, limit + 1))
-                                .flatten().map(|(cut, _, head, at)| (cut, Arc::new(head), at))
+                                .flatten()
+                                .map(|(cut, _, head, at)| ("published_head", (cut, Arc::new(head), at)))
                         }) {
-                            Some((cut, cards, at)) => {
+                            Some((path, (cut, cards, at))) => {
                                 store.request_agent_roster_refresh();
+                                roster_path = path;
                                 published = Some(cut);
                                 published_at = Some(at);
                                 Some(cards)
@@ -466,6 +563,9 @@ async fn collection_items_with_windows(
                             // has published one, the window is not ready yet.
                             None if store.agent_roster_refresher_running() => {
                                 store.request_agent_roster_refresh();
+                                if traced {
+                                    crate::otel::record_roster_read("not_ready", index, None, false);
+                                }
                                 return Ok(Err(super::agent_roster_not_ready()));
                             }
                             None if admitted => None,
@@ -480,6 +580,8 @@ async fn collection_items_with_windows(
                 } else {
                     None
                 };
+                // A window hit reuses rows an earlier exact fold computed at this cut.
+                let folded = std::cell::Cell::new(false);
                 let snapshot = match published_at {
                     Some(at) => super::roster_snapshot(&state, published.unwrap_or(index), at),
                     None => client_snapshot_at(&state, index),
@@ -524,9 +626,13 @@ async fn collection_items_with_windows(
                             match &cached_agents {
                                 Some(cards) => cards.iter().take(keep).cloned().collect(),
                                 None if status.is_none() => {
+                                    folded.set(true);
                                     return client_agent_window_cards(&store, index, limit);
                                 }
-                                None => client_agent_resources_cached(&store, false, index)?,
+                                None => {
+                                    folded.set(true);
+                                    client_agent_resources_cached(&store, false, index)?
+                                }
                             }
                         }
                         "work" => client_work_resources(
@@ -571,6 +677,15 @@ async fn collection_items_with_windows(
                     // beside the others instead of behind them.
                     drop(admission.take());
                     overlay_agent_resources(&store, &mut items, &at)?;
+                    if traced {
+                        let path = match (status.is_some(), roster_path, folded.get()) {
+                            (true, _, _) => "filtered_full",
+                            (false, "exact_cold", false) => "exact_warm",
+                            (false, path, _) => path,
+                        };
+                        let served = published.unwrap_or(index);
+                        crate::otel::record_roster_read(path, index, Some(served), false);
+                    }
                     if let Some(status) = &status {
                         items.retain(|item| item["state"].as_str() == Some(status.as_str()));
                     }
@@ -578,14 +693,18 @@ async fn collection_items_with_windows(
                     items.truncate(limit);
                 }
                 Ok(Ok(Some((snapshot, items, has_more))))
-            })
-        });
-        Ok((result?, read_permit, admission))
-        })?
+            });
+            Ok::<_, anyhow::Error>((result?, read_permit, admission))
+            })??;
+            // Keep the failed probe's measurements for the admitted retry, before the
+            // worker scope restores its thread-local accumulator.
+            Ok((result, read_permit, admission, crate::otel::take_roster_attributes()))
+        }))
         })
         .await?;
         gates.socket = Some(read_permit);
         gates.window = returned_admission;
+        roster_attributes = attributes;
         if let Some(rows) = result? {
             break rows;
         }
@@ -635,12 +754,20 @@ fn collection_window_label(collection: &str) -> &'static str {
 }
 
 async fn send_collection(socket: &mut WebSocket, value: Value) -> bool {
-    let Ok(payload) = serde_json::to_string(&value) else {
+    let encode = || serde_json::to_string(&value);
+    // Only an agents subscription's first frame attributes its encoding to the roster.
+    let encoded = if value["collection"] == "agents" && first_frame_current() {
+        crate::otel::roster_scope(|| crate::otel::roster_phase("serialization", encode))
+    } else {
+        encode()
+    };
+    let Ok(payload) = encoded else {
         return false;
     };
     if payload.len() > CLIENT_MAX_RESPONSE_BYTES {
         return false;
     }
+    record_subscription_page(&value, payload.len());
     send_collection_message(socket, WsMessage::Text(payload.into())).await
 }
 
@@ -802,6 +929,7 @@ async fn open_terminal_subscription(
     state: &AppState,
     session: &ClientSession,
     request: &CollectionSubscribe,
+    upgrade: Option<opentelemetry::trace::SpanContext>,
 ) -> Result<watch::Receiver<TerminalFrame>, ApiError> {
     let id = request
         .terminal
@@ -830,7 +958,7 @@ async fn open_terminal_subscription(
     };
     let (sender, receiver) = watch::channel(TerminalFrame::Waiting);
     let state = state.clone();
-    tokio::spawn(follow.run(state, TerminalSink::Subscription(sender)));
+    tokio::spawn(follow.run(state, TerminalSink::Subscription(sender), upgrade, None));
     Ok(receiver)
 }
 
@@ -1039,14 +1167,28 @@ fn conversation_open_local_marked(
     BEFORE_CONVERSATION_PAGE.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
-    let page = timeline_value(
-        state, &snapshot, session, session_id,
-        &ClientListQuery { limit: Some(200), ..Default::default() },
-    )?.0;
-    let native = native_latest_sequence(&page);
-    let cursor = conversation_cursor(
-        state, session_id, snapshot.store_index, local_position, native,
-    );
+    let (page, source_generation) =
+        match conversation_first_page_at_generation(state, &snapshot, session, session_id) {
+            Ok(page) => page,
+            Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS => return Err(error),
+            // OPEN keeps the established managed-transcript availability notice and stored
+            // fallback. Successful native reads still capture page and generation together;
+            // change replay deliberately continues to surface native-read failures.
+            Err(error) => {
+                require_scope(session, "read.projections")?;
+                (timeline_first_page(
+                    state, &snapshot, session, session_id.to_owned(),
+                    &ClientListQuery { limit: Some(200), ..Default::default() },
+                    Some(error),
+                )?.0, 0)
+            }
+        };
+    let cursor = conversation_cursor(state, session_id, ConversationPosition {
+        store_index: snapshot.store_index,
+        local_position,
+        native_sequence: native_latest_sequence(&page),
+        source_generation,
+    });
     remember_cursor(&cursor, mark.transcript_seen);
     Ok((json!({"next_cursor":cursor}), page, mark))
 }
@@ -1069,17 +1211,23 @@ fn conversation_stream_error(id: &str, error: &ApiError) -> Value {
 /// Follow a conversation with no subscription time. The collections socket calls
 /// [`follow_conversation_since`]; this form is for the tests that exercise the follower itself.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 async fn follow_conversation(
     state: AppState,
     session: ClientSession,
     id: String,
     generation: u64,
-    session_id: String,
-    remote: Option<String>,
+    (session_id, remote): (String, Option<String>),
     outbox: tokio::sync::mpsc::UnboundedSender<(String, u64, Value)>,
+    queue: Arc<Queue>,
+    first_frame: (
+        Option<opentelemetry::trace::SpanContext>, Option<tracing::Span>,
+    ),
 ) {
-    follow_conversation_since(state, session, id, generation, session_id, remote, outbox, None)
-        .await;
+    follow_conversation_since(
+        state, session, id, generation, session_id, remote, outbox, None, queue, first_frame,
+    )
+    .await;
 }
 
 /// [`follow_conversation`] for a subscription made at `subscribed`, so its first page counts
@@ -1094,12 +1242,19 @@ async fn follow_conversation_since(
     remote: Option<String>,
     outbox: tokio::sync::mpsc::UnboundedSender<(String, u64, Value)>,
     mut subscribed: Option<std::time::Instant>,
+    queue: Arc<Queue>,
+    (_upgrade, mut first_read): (
+        Option<opentelemetry::trace::SpanContext>, Option<tracing::Span>,
+    ),
 ) {
     let remote = remote.as_deref();
     let failed = |error: &ApiError| conversation_stream_error(&id, error);
     let mut first_open = true;
     loop {
-        let mut opened = conversation_open_value(&state, &session, &session_id, remote).await;
+        let mut opened = first_frame_work(
+            first_read.take(),
+            conversation_open_value(&state, &session, &session_id, remote),
+        ).await;
         if std::mem::take(&mut first_open) && remote.is_some()
             && matches!(&opened, Err(error) if error.code == "remote-unavailable")
         {
@@ -1120,15 +1275,18 @@ async fn follow_conversation_since(
             Err(error) => {
                 if client_error_retryable(error.status, Some(&error.code)) {
                     // Say why, so a client showing its last copy can say that copy is stale.
-                    if outbox.send((id.clone(), generation, json!({"kind":"resync", "id":id, "collection":"conversation", "retryable":true, "code":error.code, "message":error.message}))).is_err() { return; }
+                    if queue.send(|| outbox.send((id.clone(), generation, json!({"kind":"resync", "id":id, "collection":"conversation", "retryable":true, "code":error.code, "message":error.message})))).is_err() { return; }
                     tokio::time::sleep(COLLECTION_REREAD_INTERVAL).await;
                     continue;
                 }
-                let _ = outbox.send((id.clone(), generation, failed(&error)));
+                let _ = queue.send(|| outbox.send((id.clone(), generation, failed(&error))));
                 return;
             }
         };
         let mut frame = json!({"kind":"conversation", "id":id, "collection":"conversation", "session_id":session_id, "replace":true, "items":page["items"], "has_more":page["page"]["has_more"]});
+        if let Some(header) = page.get("header") {
+            frame["header"] = header.clone();
+        }
         // A page of long tool output can outgrow one frame: keep its newest entries.
         while frame_bytes(&frame) > CLIENT_MAX_RESPONSE_BYTES {
             let Some(items) = frame["items"]
@@ -1141,7 +1299,7 @@ async fn follow_conversation_since(
             items.drain(..drop);
             frame["has_more"] = Value::Bool(true);
         }
-        if outbox.send((id.clone(), generation, frame)).is_err() {
+        if queue.send(|| outbox.send((id.clone(), generation, frame))).is_err() {
             return;
         }
         if let Some(subscribed) = subscribed.take() {
@@ -1165,12 +1323,15 @@ async fn follow_conversation_since(
                         .as_array()
                         .is_some_and(|items| !items.is_empty())
                     {
-                        let frame = json!({"kind":"conversation", "id":id, "collection":"conversation", "session_id":session_id, "replace":false, "items":changes["items"]});
+                        let mut frame = json!({"kind":"conversation", "id":id, "collection":"conversation", "session_id":session_id, "replace":false, "items":changes["items"]});
+                        if let Some(header) = changes.get("header") {
+                            frame["header"] = header.clone();
+                        }
                         // Too much changed for one frame: send the newest page instead.
                         if frame_bytes(&frame) > CLIENT_MAX_RESPONSE_BYTES {
                             break;
                         }
-                        if outbox.send((id.clone(), generation, frame)).is_err() {
+                        if queue.send(|| outbox.send((id.clone(), generation, frame))).is_err() {
                             return;
                         }
                     }
@@ -1186,7 +1347,7 @@ async fn follow_conversation_since(
                     break;
                 }
                 Err(error) => {
-                    let _ = outbox.send((id.clone(), generation, failed(&error)));
+                    let _ = queue.send(|| outbox.send((id.clone(), generation, failed(&error))));
                     return;
                 }
             }
@@ -1226,6 +1387,7 @@ async fn collection_stream_socket(
     state: AppState,
     session: ClientSession,
     presence: super::client_presence::StreamGuard,
+    upgrade: Option<opentelemetry::trace::SpanContext>,
 ) {
     let windows = collection_windows::Windows::attach(&state.store);
     // Complete source adapters are admitted explicitly, never inferred from partial view IDs.
@@ -1242,12 +1404,13 @@ async fn collection_stream_socket(
             }
         }
     };
-    collection_stream_socket_with_sources(
+    collection_stream_socket_with_context(
         socket,
         state,
         session,
         Some(presence),
         sources,
+        upgrade,
         move |state, session, request, permit| {
             let windows = windows.clone();
             async move {
@@ -1272,9 +1435,10 @@ async fn collection_stream_socket_with_reader<F, Fut>(
         + 'static,
     Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
 {
-    collection_stream_socket_with_sources(socket, state, session, presence, None, read).await;
+    collection_stream_socket_with_context(socket, state, session, presence, None, None, read).await;
 }
 
+#[cfg(test)]
 async fn collection_stream_socket_with_sources<F, Fut>(
     socket: WebSocket,
     state: AppState,
@@ -1289,8 +1453,26 @@ async fn collection_stream_socket_with_sources<F, Fut>(
         + 'static,
     Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
 {
+    collection_stream_socket_with_context(socket, state, session, presence, sources, None, read).await;
+}
+
+async fn collection_stream_socket_with_context<F, Fut>(
+    socket: WebSocket,
+    state: AppState,
+    session: ClientSession,
+    presence: Option<super::client_presence::StreamGuard>,
+    sources: Option<Arc<collection_ivm::Sources>>,
+    upgrade: Option<opentelemetry::trace::SpanContext>,
+    read: F,
+) where
+    F: Fn(AppState, ClientSession, CollectionSubscribe, tokio::sync::OwnedSemaphorePermit) -> Fut
+        + Clone
+        + Send
+        + 'static,
+    Fut: Future<Output = Result<(ClientSnapshot, Vec<Value>, bool), ApiError>> + Send,
+{
     collection_stream_socket_with_admission(
-        socket, state, session, presence, sources, read, open_conversation_subscription,
+        socket, state, session, presence, (sources, upgrade), read, open_conversation_subscription,
     ).await;
 }
 
@@ -1299,7 +1481,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     state: AppState,
     session: ClientSession,
     presence: Option<super::client_presence::StreamGuard>,
-    sources: Option<Arc<collection_ivm::Sources>>,
+    (sources, upgrade): (Option<Arc<collection_ivm::Sources>>, Option<opentelemetry::trace::SpanContext>),
     read: F,
     admit: A,
 ) where
@@ -1321,8 +1503,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     // When each terminal subscription began, until its first screen is sent.
     let mut terminals_opened = BTreeMap::<String, std::time::Instant>::new();
     let mut conversations = ConversationFollowers::default();
-    let (conversation_outbox, mut conversation_frames) =
+    let mut first_frames = BTreeMap::<String, FirstFrame>::new();
+    let (conversation_outbox, conversation_frames) =
         tokio::sync::mpsc::unbounded_channel::<(String, u64, Value)>();
+    let conversation_queue = Queue::new(Kind::Conversation);
+    let mut conversation_frames = conversation_queue.receiver(conversation_frames);
     // The commits already weighed, the windows due for a reread, and when the last reread ran.
     let mut attention_clock = tokio::time::interval_at(
         tokio::time::Instant::now() + ATTENTION_CLOCK_INTERVAL,
@@ -1378,6 +1563,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             terminals.remove(&request.id);
                             terminals_opened.remove(&request.id);
                             conversations.stop(&request.id);
+                            first_frames.remove(&request.id);
                             break 'command;
                         }
                         let held = subscriptions.contains_key(&request.id) || terminals.contains_key(&request.id) || conversations.0.contains_key(&request.id);
@@ -1402,6 +1588,10 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         // Allocate a fresh token for every accepted subscribe, including terminal
                         // replacements, so queued collection/conversation results cannot reuse it.
                         generation += 1;
+                        first_frames.remove(&request.id);
+                        if let Some(first_frame) = subscription_first_frame(&request.collection, &request.id, upgrade.as_ref()) {
+                            first_frames.insert(request.id.clone(), first_frame);
+                        }
                         if request.collection == "conversation" {
                             let (state, session, outbox, admit) =
                                 (state.clone(), session.clone(), conversation_outbox.clone(), admit.clone());
@@ -1409,6 +1599,9 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             let id = subscription_id.clone();
                             let admission_slots = admission_slots.clone();
                             let opened = std::time::Instant::now();
+                            let first_read = first_frames.get(&request.id).map(|first| first.span.clone());
+                            let upgrade = upgrade.clone();
+                            let queue = conversation_queue.clone();
                             let follower = tokio::spawn(async move {
                                 let permits = ConversationAdmissionPermits {
                                     _socket: admission_slots.acquire_owned().await.expect("socket admission slots stay open"),
@@ -1416,11 +1609,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                                 };
                                 match admit(state.clone(), session.clone(), request, permits).await {
                                     Ok((session_id, remote)) => {
-                                        follow_conversation_since(state, session, id, generation, session_id, remote, outbox, Some(opened)).await;
+                                        follow_conversation_since(state, session, id, generation, session_id, remote, outbox, Some(opened), queue, (upgrade, first_read)).await;
                                     }
                                     Err(error) => {
                                         let frame = json!({"kind":"error", "id":id, "collection":"conversation", "code":error.code, "message":error.message});
-                                        let _ = outbox.send((id, generation, frame));
+                                        let _ = queue.send(|| outbox.send((id, generation, frame)));
                                     }
                                 }
                             });
@@ -1429,13 +1622,14 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         if request.collection == "terminal" {
                             let opened = std::time::Instant::now();
-                            match open_terminal_subscription(&state, &session, &request).await {
+                            match open_terminal_subscription(&state, &session, &request, upgrade.clone()).await {
                                 Ok(receiver) => {
                                     terminals.insert(request.id.clone(), receiver);
                                     terminals_opened.insert(request.id.clone(), opened);
                                 }
                                 Err(error) => {
                                     if !send_collection(&mut socket, json!({"kind":"error", "id":request.id, "collection":"terminal", "code":error.code, "message":error.message})).await { return; }
+                                    first_frames.remove(&request.id);
                                 }
                             }
                             break 'command;
@@ -1454,17 +1648,21 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if subscription.generation != generation { continue; }
                 subscription.reading = None;
                 if std::mem::take(&mut subscription.dirty) { refresh.push(id.clone()); }
-                let refreshed = match result {
-                    CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result).await,
-                    CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh).await,
-                };
+                let first_span = first_frames.get(&id).map(|first| first.span.clone());
+                let refreshed = first_frame_work(first_span, async {
+                    match result {
+                        CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result).await,
+                        CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh).await,
+                    }
+                }).await;
+                if subscription.delivered { first_frames.remove(&id); }
                 match refreshed {
                     Refreshed::Current => {}
                     Refreshed::Retry => {
                         if subscription.ivm.is_some() { subscription.dirty = true; }
                         else { reread_due.insert(id.clone()); }
                     }
-                    Refreshed::Dropped => { subscriptions.remove(&id); reread_due.remove(&id); }
+                    Refreshed::Dropped => { subscriptions.remove(&id); reread_due.remove(&id); first_frames.remove(&id); }
                     Refreshed::Closed => return,
                 }
             }
@@ -1586,10 +1784,14 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 continue;
             }
             Some((id, frame_generation, frame)) = conversation_frames.recv(), if !command_waiting => {
+                conversation_queue.dequeued();
                 // Replaced or unsubscribed admissions/followers may still have a frame queued.
                 if conversations.0.get(&id).is_none_or(|(generation, _)| *generation != frame_generation) { continue; }
                 if frame["kind"] == "error" { conversations.0.remove(&id); }
-                if !send_collection(&mut socket, frame).await { return; }
+                let data = frame["kind"] == "conversation";
+                let first_span = first_frames.get(&id).map(|first| first.span.clone());
+                if !first_frame_work(first_span, send_collection(&mut socket, frame)).await { return; }
+                if data || !conversations.0.contains_key(&id) { first_frames.remove(&id); }
                 continue;
             }
             (id, frame) = next_terminal_frame(&mut terminals), if !command_waiting && !terminals.is_empty() => {
@@ -1606,10 +1808,12 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         json!({"kind":"error", "id":id, "collection":"terminal", "code":"internal", "message":"the terminal stream stopped"})
                     }
                 };
-                if !send_collection(&mut socket, message).await { return; }
+                let first_span = first_frames.get(&id).map(|first| first.span.clone());
+                if !first_frame_work(first_span, send_collection(&mut socket, message)).await { return; }
                 if message_is_screen && let Some(opened) = terminals_opened.remove(&id) {
                     super::record_stream_latency("terminal", opened.elapsed(), false);
                 }
+                if message_is_screen || !terminals.contains_key(&id) { first_frames.remove(&id); }
                 continue;
             }
         }
@@ -1652,18 +1856,21 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
             let adapter = subscription.ivm.clone();
             let cursor = subscription.cursor.clone();
             let previous = subscription.previous.clone();
+            let first_span = first_frames.get_mut(&id).and_then(|first| {
+                std::mem::take(&mut first.read_pending).then(|| first.span.clone())
+            });
             reads.push(async move {
                 tokio::select! {
                     biased;
                     _ = canceled => None,
-                    result = async {
+                    result = first_frame_work(first_span, async {
                         let permit = read_slots.acquire_owned().await.expect("socket read slots stay open");
                         if let (Some(sources), Some(adapter)) = (sources, adapter) {
                             CollectionRead::Ivm(Box::new(collection_ivm::read(state, session, request, permit, sources, adapter, collection_ivm::Held {cursor, rows:previous}).await))
                         } else {
                             CollectionRead::Legacy(read(state, session, request, permit).await)
                         }
-                    } => {
+                    }) => {
                         Some((id, generation, result))
                     }
                 }
@@ -2931,6 +3138,7 @@ fn mission_resources_filtered(
                                         .or_else(|| step.wake.as_ref().and_then(|wake| wake.failure.as_deref())),
                                     "wake": wake,
                                     "claim_expires_at": step.claim_expires_at_unix_ms.map(client_timestamp),
+                                    "nudged_at": step.nudged_at_unix_ms.map(client_timestamp),
                                 })
                             })
                             .collect::<Vec<_>>()
@@ -4967,6 +5175,63 @@ fn timeline_order(a: &Value, b: &Value) -> std::cmp::Ordering {
         .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
 }
 
+/// The conversation header (client contract `conversation-blocks.v1` §3): derived from a
+/// normalized bounded window, with live register values winning once the register (#1583)
+/// exists. Native keyset pages pass their newest bounded head, not an offset page cache.
+fn conversation_page_header(
+    state: &AppState,
+    session: &ClientSession,
+    session_id: &str,
+    items: &[Value],
+    window_truncated: bool,
+) -> Option<Value> {
+    if !session.conversation_blocks {
+        return None;
+    }
+    let derived = crate::conversation_header::derive(
+        items,
+        window_truncated || crate::conversation_header::window_truncated(items),
+    );
+    crate::conversation_header::merge_register(
+        derived,
+        crate::conversation_header::register_value(state, session_id).as_ref(),
+    )
+}
+
+/// Only offset continuations (OpenCode and claim timelines) retain their original window
+/// in the page cache. Native keyset continuations derive a bounded head in native_slice_page.
+fn offset_continuation_header(
+    state: &AppState,
+    session: &ClientSession,
+    session_id: &str,
+    snapshot: &ClientSnapshot,
+    cursor: &str,
+) -> Option<Value> {
+    if !session.conversation_blocks {
+        return None;
+    }
+    let cursor = super::decode_client_cursor(cursor).ok()?;
+    let collection = format!("timeline/{session_id}");
+    if cursor.collection != collection || cursor.snapshot.id != snapshot.id {
+        return None;
+    }
+    let items = {
+        let cache = super::client_page_cache()
+            .lock()
+            .expect("client page cache poisoned");
+        cache
+            .iter()
+            .find(|entry| {
+                entry.snapshot_id == cursor.snapshot.id
+                    && entry.collection == collection
+                    && entry.items_digest == cursor.items_digest
+            })?
+            .items
+            .clone()
+    };
+    conversation_page_header(state, session, session_id, &items, false)
+}
+
 fn native_session_messages(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -5006,6 +5271,7 @@ fn native_session_messages(
 fn native_timeline_page(
     state: &AppState,
     snapshot: &ClientSnapshot,
+    session: &ClientSession,
     session_id: &str,
     query: &ClientListQuery,
     mut items: Vec<Value>,
@@ -5026,6 +5292,7 @@ fn native_timeline_page(
     }
     keyed.sort_by(|(_, a), (_, b)| a.cmp_in(b, order));
     items = keyed.into_iter().rev().map(|(item, _)| item).collect();
+    let header = conversation_page_header(state, session, session_id, &items, false);
     let mut page = client_page(
         state,
         snapshot,
@@ -5034,12 +5301,16 @@ fn native_timeline_page(
         query,
     )?;
     page.items.reverse();
-    Ok(Json(json!({
+    let mut page_value = json!({
         "kind": "timeline-page",
         "session_id": session_id,
         "items": page.items,
         "page": page.page
-    })))
+    });
+    if let Some(header) = header {
+        page_value["header"] = header;
+    }
+    Ok(Json(page_value))
 }
 
 fn native_timeline_order(
@@ -5141,6 +5412,19 @@ fn native_slice_page(
     query: &ClientListQuery,
     source: &crate::external_sessions::ExternalSession,
 ) -> Result<Json<Value>, ApiError> {
+    native_slice_page_at_generation(state, snapshot, session, session_id, query, source)
+        .map(|(page, _)| page)
+}
+
+/// [`native_slice_page`] together with the source content generation it was read at.
+fn native_slice_page_at_generation(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    session_id: &str,
+    query: &ClientListQuery,
+    source: &crate::external_sessions::ExternalSession,
+) -> Result<(Json<Value>, u64), ApiError> {
     let cursor = query.cursor.as_deref().map(decode_native_page_cursor).transpose()?;
     let source_basis = conversation_blocks::basis(source)?;
     let order = native_timeline_order(state, snapshot, session_id)?;
@@ -5175,7 +5459,17 @@ fn native_slice_page(
         |cursor| cursor.expires_at_unix_ms,
     );
     let before = cursor.as_ref().map(|cursor| &cursor.boundary);
-    let native = conversation_blocks::read_slice(source, session, session_id, order, before, limit + 1)?;
+    // A keyset header summarizes the newest 200 native items, not the older page being
+    // served. Reuse the first-page read for that head; continuations read a bounded head
+    // separately. Derive once per request, never scan the whole window or use the offset cache.
+    let read_limit = if session.conversation_blocks && before.is_none() {
+        (limit + 1).max(CLIENT_MAX_PAGE_ITEMS)
+    } else {
+        limit + 1
+    };
+    let mut native = conversation_blocks::read_slice(
+        source, session, session_id, order, before, read_limit,
+    )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
     }
@@ -5186,6 +5480,28 @@ fn native_slice_page(
             "the transcript was replaced while paging; restart pagination",
         ));
     }
+    let header = if session.conversation_blocks {
+        let head = if before.is_some() {
+            Some(conversation_blocks::read_slice(
+                source, session, session_id, order, None, CLIENT_MAX_PAGE_ITEMS,
+            )?)
+        } else {
+            None
+        };
+        let head = head.as_ref().unwrap_or(&native);
+        if head.basis != source_basis {
+            return Err(client_page_expired("the transcript changed while reading the header"));
+        }
+        let count = head.items.len().min(CLIENT_MAX_PAGE_ITEMS);
+        conversation_page_header(
+            state, session, session_id, &head.items[..count],
+            head.has_more || head.items.len() > count,
+        )
+    } else {
+        None
+    };
+    native.has_more |= native.items.len() > limit + 1;
+    native.items.truncate(limit + 1);
     let messages = if order == crate::external_sessions::TimelineOrder::TimestampSequence {
         native_session_messages(state, snapshot, session_id)?
     } else {
@@ -5237,7 +5553,7 @@ fn native_slice_page(
         None
     };
     let items: Vec<_> = items.into_iter().rev().map(|(item, _)| item).collect();
-    Ok(Json(json!({
+    let mut page_value = json!({
         "kind": "timeline-page",
         "session_id": session_id,
         "items": items,
@@ -5245,7 +5561,11 @@ fn native_slice_page(
             limit, has_more, next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
         },
-    })))
+    });
+    if let Some(header) = header {
+        page_value["header"] = header;
+    }
+    Ok((Json(page_value), native.generation))
 }
 
 /// What st3 established about a managed seat's native transcript.
@@ -5690,21 +6010,29 @@ pub(super) fn timeline_value(
             Vec::new(),
             query,
         )?;
+        let header = query
+            .cursor
+            .as_deref()
+            .and_then(|cursor| offset_continuation_header(state, session, &session_id, snapshot, cursor));
         for item in &mut page.items {
             if !session.conversation_blocks && let Some(body) = item["body"].as_object_mut() {
                 body.remove("blocks");
             }
         }
         page.items.reverse();
-        return Ok(Json(json!({
+        let mut page_value = json!({
             "kind": "timeline-page",
             "session_id": session_id,
             "items": page.items,
             "page": page.page
-        })));
+        });
+        if let Some(header) = header {
+            page_value["header"] = header;
+        }
+        return Ok(Json(page_value));
     }
     crate::performance::task("conversation/first-page", || {
-        timeline_first_page(state, snapshot, session, session_id, query)
+        timeline_first_page(state, snapshot, session, session_id, query, None)
     })
 }
 
@@ -5714,6 +6042,7 @@ fn timeline_first_page(
     session: &ClientSession,
     session_id: String,
     query: &ClientListQuery,
+    native_read_error: Option<ApiError>,
 ) -> Result<Json<Value>, ApiError> {
     #[cfg(test)]
     if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
@@ -5722,6 +6051,9 @@ fn timeline_first_page(
     let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
         .map_err(ApiError::internal)?;
     let Some((owner, incarnation, _)) = managed else {
+        if let Some(error) = native_read_error {
+            return Err(error);
+        }
         let conversation = crate::external_sessions::find_conversation(
             state.native_session_home.as_deref(),
             &session_id,
@@ -5735,9 +6067,23 @@ fn timeline_first_page(
                 }
                 conversation_blocks::read(&external, session, &session_id)?
             }
-            other => external_conversation_items(other, &session_id)?,
+            // A subagent conversation id resolves beside its parent before it is unknown.
+            other => match crate::subagent_sessions::resolve_child(
+                state.native_session_home.as_deref(),
+                &session_id,
+            )
+            .map_err(ApiError::internal)?
+            {
+                Some(child) => {
+                    if child.driver != crate::external_sessions::ExternalDriver::OpenCode {
+                        return native_slice_page(state, snapshot, session, &session_id, query, &child);
+                    }
+                    conversation_blocks::read(&child, session, &session_id)?
+                }
+                None => external_conversation_items(other, &session_id)?,
+            },
         };
-        return native_timeline_page(state, snapshot, &session_id, query, items);
+        return native_timeline_page(state, snapshot, session, &session_id, query, items);
     };
     let owner = owner.as_str();
     let incarnation = incarnation.as_deref();
@@ -5747,14 +6093,16 @@ fn timeline_first_page(
     if let Some(incarnation) = incarnation
         && let Some(managed) = managed_transcript(state, owner, incarnation)?
     {
-        let read = {
+        let read = if let Some(error) = native_read_error.as_ref() {
+            Err(format!("the transcript could not be read: {}", error.message))
+        } else {
             let _span = crate::profile::span("timeline/native-read");
             match managed.transcript.as_ref() {
                 Ok(external) => match if external.driver != crate::external_sessions::ExternalDriver::OpenCode {
                     native_slice_page(state, snapshot, session, &session_id, query, external)
                 } else {
                     conversation_blocks::read(external, session, &session_id)
-                        .and_then(|items| native_timeline_page(state, snapshot, &session_id, query, items))
+                        .and_then(|items| native_timeline_page(state, snapshot, session, &session_id, query, items))
                 } {
                     Ok(page) => Ok(page),
                     Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS => return Err(error),
@@ -6147,6 +6495,7 @@ fn timeline_first_page(
         items.extend([query_notice, prefix_notice].into_iter().flatten());
     }
     items.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
+    let header = conversation_page_header(state, session, &session_id, &items, false);
     // A conversation opens at its newest bounded window. The cursor walks toward older
     // windows, while each individual page remains chronological for straightforward rendering.
     items.reverse();
@@ -6158,12 +6507,16 @@ fn timeline_first_page(
         query,
     )?;
     page.items.reverse();
-    Ok(Json(json!({
+    let mut page_value = json!({
         "kind": "timeline-page",
         "session_id": session_id,
         "items": page.items,
         "page": page.page
-    })))
+    });
+    if let Some(header) = header {
+        page_value["header"] = header;
+    }
+    Ok(Json(page_value))
 }
 
 #[derive(Default, Deserialize)]
@@ -6172,20 +6525,27 @@ pub(super) struct ConversationQuery {
     wait_ms: Option<u64>,
 }
 
-fn conversation_cursor(
-    state: &AppState,
-    session_id: &str,
+/// Where a conversation follower stands. `source_generation` fences the native transcript:
+/// appends keep it, while an in-place rewrite of already-delivered records (for example an
+/// OMP retry settling a failed turn's `retryRecovery`) moves it. Such a rewrite changes
+/// entries the follower already holds without a new sequence, so the follower must reload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ConversationPosition {
     store_index: u64,
     local_position: u64,
     native_sequence: u64,
-) -> String {
+    source_generation: u64,
+}
+
+fn conversation_cursor(state: &AppState, session_id: &str, position: ConversationPosition) -> String {
     format!(
-        "conversation-cursor/{}/{}/{}.{}.{}",
+        "conversation-cursor/{}/{}/{}.{}.{}.{}",
         state.node,
         session_id.trim_start_matches("session/"),
-        store_index,
-        local_position,
-        native_sequence
+        position.store_index,
+        position.local_position,
+        position.native_sequence,
+        position.source_generation
     )
 }
 
@@ -6221,7 +6581,7 @@ fn conversation_position(
     state: &AppState,
     session_id: &str,
     after: &str,
-) -> Result<(u64, u64, u64), ApiError> {
+) -> Result<ConversationPosition, ApiError> {
     let prefix = format!(
         "conversation-cursor/{}/{}/",
         state.node,
@@ -6231,11 +6591,12 @@ fn conversation_position(
         .strip_prefix(&prefix)
         .and_then(|part| {
             let mut parts = part.split('.');
-            let result = (
-                parts.next()?.parse().ok()?,
-                parts.next()?.parse().ok()?,
-                parts.next()?.parse().ok()?,
-            );
+            let result = ConversationPosition {
+                store_index: parts.next()?.parse().ok()?,
+                local_position: parts.next()?.parse().ok()?,
+                native_sequence: parts.next()?.parse().ok()?,
+                source_generation: parts.next()?.parse().ok()?,
+            };
             parts.next().is_none().then_some(result)
         })
         .ok_or_else(|| ApiError {
@@ -6260,15 +6621,16 @@ fn conversation_read_now(
     })
 }
 
-fn conversation_read_now_unbounded(
+/// Read OPEN and change-replay pages through the same bounded fold, retaining the generation
+/// of the returned page without a second native read.
+fn conversation_first_page_at_generation(
     state: &AppState,
+    snapshot: &ClientSnapshot,
     session: &ClientSession,
     session_id: &str,
-    after: Option<&str>,
-) -> Result<Value, ApiError> {
-    let snapshot = new_client_snapshot(state);
+) -> Result<(Value, u64), ApiError> {
     let query = ClientListQuery { limit: Some(200), ..Default::default() };
-    let page = match conversation_blocks::source(state, session_id) {
+    match conversation_blocks::source(state, session_id) {
         // Replay selects only its newest bounded projection, including for OpenCode.
         Ok(source) => {
             // Native replay bypasses timeline_first_page after the incremental-fold cutover.
@@ -6276,10 +6638,31 @@ fn conversation_read_now_unbounded(
             if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
                 *rebuilds.entry(session_id.to_owned()).or_default() += 1;
             }
-            native_slice_page(state, &snapshot, session, session_id, &query, &source)
-        },
-        Err(_) => timeline_value(state, &snapshot, session, session_id, &query),
-    }?.0;
+            let (page, generation) = native_slice_page_at_generation(
+                state, snapshot, session, session_id, &query, &source,
+            )?;
+            // OpenCode's generation moves on every append, so it cannot fence rewrites
+            // without turning each append into a full reload.
+            let fence = if source.driver == crate::external_sessions::ExternalDriver::OpenCode {
+                0
+            } else {
+                generation
+            };
+            Ok((page.0, fence))
+        }
+        Err(_) => Ok((timeline_value(state, snapshot, session, session_id, &query)?.0, 0)),
+    }
+}
+
+fn conversation_read_now_unbounded(
+    state: &AppState,
+    session: &ClientSession,
+    session_id: &str,
+    after: Option<&str>,
+) -> Result<Value, ApiError> {
+    let snapshot = new_client_snapshot(state);
+    let (page, source_generation) =
+        conversation_first_page_at_generation(state, &snapshot, session, session_id)?;
     let all = page["items"]
         .as_array()
         .ok_or_else(|| ApiError::internal("the timeline has no items"))?;
@@ -6297,10 +6680,10 @@ fn conversation_read_now_unbounded(
     let position = after
         .map(|cursor| conversation_position(state, session_id, cursor))
         .transpose()?;
-    if let Some((store_index, local_position, native_sequence)) = position {
-        if store_index > snapshot.store_index
-            || local_position > local_latest
-            || native_sequence > native_latest
+    if let Some(position) = position {
+        if position.store_index > snapshot.store_index
+            || position.local_position > local_latest
+            || position.native_sequence > native_latest
         {
             return Err(ApiError {
                 status: StatusCode::GONE,
@@ -6312,12 +6695,25 @@ fn conversation_read_now_unbounded(
                 )])),
             });
         }
+        if position.source_generation != source_generation {
+            // Already-delivered entries changed in place under unchanged sequences, which a
+            // sequence-filtered delta cannot carry: send the authoritative newest page.
+            return Err(ApiError {
+                status: StatusCode::GONE,
+                code: "cursor-gap".into(),
+                message: "the transcript was rewritten in place; refresh the newest conversation page".into(),
+                details: Box::new(serde_json::Map::from_iter([(
+                    "full_resync".into(),
+                    Value::Bool(true),
+                )])),
+            });
+        }
     }
     let mut changed_indexes = BTreeSet::new();
     let mut explicit_ids = BTreeSet::new();
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
-    if let Some((store_index, local_position, _)) = position {
+    if let Some(ConversationPosition { store_index, local_position, .. }) = position {
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
@@ -6387,7 +6783,7 @@ fn conversation_read_now_unbounded(
     let mut items = all
         .iter()
         .filter(|item| {
-            let Some((_, _, native_sequence)) = position else {
+            let Some(ConversationPosition { native_sequence, .. }) = position else {
                 return false;
             };
             let id = item["id"].as_str().unwrap_or_default();
@@ -6432,7 +6828,7 @@ fn conversation_read_now_unbounded(
         .iter()
         .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)))
         || (all.len() == 200
-            && position.is_some_and(|(_, _, native)| {
+            && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
                 native_oldest.is_some_and(|first| first > native)
             }))
     {
@@ -6446,9 +6842,17 @@ fn conversation_read_now_unbounded(
             )])),
         });
     }
-    Ok(
-        json!({"kind":"conversation-changes", "session_id":session_id, "items":items, "next_cursor":conversation_cursor(state, session_id, snapshot.store_index, local_latest, native_latest)}),
-    )
+    let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
+        store_index: snapshot.store_index,
+        local_position: local_latest,
+        native_sequence: native_latest,
+        source_generation,
+    });
+    let mut value = json!({"kind":"conversation-changes", "session_id":session_id, "items":items, "next_cursor":next_cursor});
+    if let Some(header) = page.get("header") {
+        value["header"] = header.clone();
+    }
+    Ok(value)
 }
 
 /// What a conversation read last saw, so a wake-up can tell cheaply whether anything that
@@ -6548,7 +6952,12 @@ impl ConversationMark {
             (Some(owner), Some(incarnation)) => managed_transcript(state, owner, incarnation)?
                 .and_then(|managed| managed.transcript.ok()),
             _ => crate::external_sessions::find(state.native_session_home.as_deref(), session_id)
-                .map_err(ApiError::internal)?,
+                .map_err(ApiError::internal)?
+                .or(crate::subagent_sessions::resolve_child(
+                    state.native_session_home.as_deref(),
+                    session_id,
+                )
+                .map_err(ApiError::internal)?),
         }
         .map(|external| external.transcript);
         Ok(Self {
@@ -6639,7 +7048,7 @@ async fn conversation_changes_local_marked(
     let mut quiet = None;
     if let Some(cursor) = after
         && let Some(seen) = issued_transcript(cursor)
-        && let Ok((store_index, local_position, _)) =
+        && let Ok(ConversationPosition { store_index, local_position, .. }) =
             conversation_position(state, session_id, cursor)
     {
         let mut since = ConversationMark {
@@ -6684,14 +7093,12 @@ async fn conversation_changes_local_marked(
                 // Nothing concerned it: move the cursor past what was checked without a read.
                 let mut value = value;
                 if let Some(cursor) = value["next_cursor"].as_str() {
-                    let (_, _, native) = conversation_position(state, session_id, cursor)?;
-                    let next = conversation_cursor(
-                        state,
-                        session_id,
-                        mark.store_index,
-                        mark.local_position,
-                        native,
-                    );
+                    let checked = ConversationPosition {
+                        store_index: mark.store_index,
+                        local_position: mark.local_position,
+                        ..conversation_position(state, session_id, cursor)?
+                    };
+                    let next = conversation_cursor(state, session_id, checked);
                     remember_cursor(&next, mark.transcript_seen);
                     value["next_cursor"] = Value::String(next);
                 }
@@ -6769,10 +7176,13 @@ pub(super) async fn conversation_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
+    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ConversationQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let upgrade = upgrade.and_then(|Extension(context)| context.0);
+    let first_frame = subscription_first_frame("conversation", "conversation", upgrade.as_ref());
     require_scope(&session, "read.projections")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -6816,7 +7226,7 @@ pub(super) async fn conversation_stream(
         .protocols([CONVERSATION_SUBPROTOCOL])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
-            conversation_stream_socket(socket, state, session, session_id, query.after, remote).await
+            conversation_stream_socket(socket, state, session, session_id, query.after, remote, (upgrade, first_frame)).await
         }))
 }
 
@@ -6827,6 +7237,9 @@ async fn conversation_stream_socket(
     session_id: String,
     mut after: Option<String>,
     remote: Option<String>,
+    (_upgrade, mut first_frame): (
+        Option<opentelemetry::trace::SpanContext>, Option<FirstFrame>,
+    ),
 ) {
     loop {
         let after_input = after.clone();
@@ -6864,6 +7277,10 @@ async fn conversation_stream_socket(
                 .await
             }
         };
+        let first_span = first_frame.as_mut().and_then(|first| {
+            std::mem::take(&mut first.read_pending).then(|| first.span.clone())
+        });
+        let read = first_frame_work(first_span, read);
         tokio::pin!(read);
         let value = tokio::select! { value = &mut read => value, message = socket.recv() => { if matches!(message, None | Some(Err(_)) | Some(Ok(WsMessage::Close(_)))) { return; } else { continue; } } };
         let mut value = match value {
@@ -6880,9 +7297,11 @@ async fn conversation_stream_socket(
                 .as_array()
                 .is_some_and(|items| !items.is_empty())
         {
-            if !send_terminal_stream_value(&mut socket, &terminal_stream_envelope(&state, value))
-                .await
-            {
+            let first_span = first_frame.as_ref().map(|first| first.span.clone());
+            if !first_frame_work(
+                first_span,
+                send_terminal_stream_value(&mut socket, &terminal_stream_envelope(&state, value)),
+            ).await {
                 close_terminal_stream(
                     &mut socket,
                     1009,
@@ -6891,6 +7310,7 @@ async fn conversation_stream_socket(
                 .await;
                 return;
             }
+            first_frame = None;
         }
         after = next;
     }
@@ -8043,10 +8463,13 @@ pub(super) async fn terminal_stream(
     websocket: WebSocketUpgrade,
     State(state): State<AppState>,
     Extension(session): Extension<ClientSession>,
+    upgrade: Option<Extension<crate::otel::UpgradeContext>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<TerminalStreamQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let upgrade = upgrade.and_then(|Extension(context)| context.0);
+    let first_frame = subscription_first_frame("terminal", "terminal", upgrade.as_ref());
     require_scope(&session, "terminal.read")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -8092,7 +8515,7 @@ pub(super) async fn terminal_stream(
         .protocols([TERMINAL_SUBPROTOCOL])
         .on_upgrade(move |socket| async move {
             let _presence = presence;
-            follow.run(state, TerminalSink::Socket(Box::new(socket))).await
+            follow.run(state, TerminalSink::Socket(Box::new(socket)), upgrade, first_frame).await
         }))
 }
 
@@ -8111,10 +8534,16 @@ enum TerminalFollow {
 }
 
 impl TerminalFollow {
-    async fn run(self, state: AppState, sink: TerminalSink) {
+    async fn run(
+        self,
+        state: AppState,
+        sink: TerminalSink,
+        upgrade: Option<opentelemetry::trace::SpanContext>,
+        first_frame: Option<FirstFrame>,
+    ) {
         match self {
             Self::Local { id, incarnation } => {
-                terminal_stream_socket(sink, state, id, incarnation).await;
+                terminal_stream_socket(sink, state, id, incarnation, upgrade, first_frame).await;
             }
             Self::Remote {
                 id,
@@ -8122,7 +8551,7 @@ impl TerminalFollow {
                 authority_actor,
                 incarnation,
             } => {
-                remote_terminal_stream_socket(sink, state, id, owner, authority_actor, incarnation)
+                remote_terminal_stream_socket(sink, state, id, owner, authority_actor, incarnation, (upgrade, first_frame))
                     .await;
             }
         }
@@ -8252,6 +8681,9 @@ async fn remote_terminal_stream_socket(
     owner: String,
     authority_actor: String,
     incarnation: String,
+    (_upgrade, mut first_frame): (
+        Option<opentelemetry::trace::SpanContext>, Option<FirstFrame>,
+    ),
 ) {
     let Some(relay) = state.client_relay.as_ref() else {
         sink.fail(&remote_unavailable_for_owner(&state, &owner)).await;
@@ -8278,6 +8710,10 @@ async fn remote_terminal_stream_socket(
             },
         };
         let read = relay.read(&owner, &request);
+        let first_span = first_frame.as_mut().and_then(|first| {
+            std::mem::take(&mut first.read_pending).then(|| first.span.clone())
+        });
+        let read = first_frame_work(first_span, read);
         tokio::pin!(read);
         let read = tokio::select! {
             read = &mut read => read,
@@ -8312,11 +8748,13 @@ async fn remote_terminal_stream_socket(
         if sent.as_deref() == Some(revision.as_str()) {
             continue;
         }
-        if !sink.send(&terminal_stream_envelope(&state, screen)).await {
+        let first_span = first_frame.as_ref().map(|first| first.span.clone());
+        if !first_frame_work(first_span, sink.send(&terminal_stream_envelope(&state, screen))).await {
             sink.close(1009, "terminal screen exceeds the client limit")
                 .await;
             return;
         }
+        first_frame = None;
         sent = Some(revision);
     }
 }
@@ -8813,6 +9251,7 @@ async fn send_terminal_stream_value(socket: &mut WebSocket, value: &Value) -> bo
     if bytes.len() > CLIENT_MAX_RESPONSE_BYTES {
         return false;
     }
+    record_subscription_page(value, bytes.len());
     let Ok(text) = String::from_utf8(bytes) else {
         return false;
     };
@@ -8849,6 +9288,8 @@ async fn terminal_stream_socket(
     state: AppState,
     id: String,
     expected_incarnation: String,
+    _upgrade: Option<opentelemetry::trace::SpanContext>,
+    mut first_frame: Option<FirstFrame>,
 ) {
     let subject = terminal_subject(&id);
     let live_store = state.store.clone();
@@ -8875,7 +9316,8 @@ async fn terminal_stream_socket(
     let mut screens =
         terminal_view::subscribe(&state.pty_root, &live.runtime_id, &live.incarnation_id);
     let first = tokio::time::Instant::now() + TERMINAL_FIRST_SCREEN_TIMEOUT;
-    let mut screen = match terminal_view::next_screen(&mut screens, None, first).await {
+    let first_span = first_frame.as_ref().map(|first| first.span.clone());
+    let mut screen = match first_frame_work(first_span, terminal_view::next_screen(&mut screens, None, first)).await {
         Ok(Some(screen)) => Some(screen),
         Ok(None) => {
             sink.fail(&terminal_unavailable("the terminal screen did not arrive"))
@@ -8948,11 +9390,13 @@ async fn terminal_stream_socket(
             continue;
         }
         let value = screen.value(&terminal_id, &live.incarnation_id);
-        if !sink.send(&terminal_stream_envelope(&state, value)).await {
+        let first_span = first_frame.as_ref().map(|first| first.span.clone());
+        if !first_frame_work(first_span, sink.send(&terminal_stream_envelope(&state, value))).await {
             sink.close(1009, "terminal screen exceeds the client limit")
                 .await;
             return;
         }
+        first_frame = None;
         sent = Some(screen.revision().to_owned());
     }
 }
@@ -11675,7 +12119,7 @@ mission "queue-parity" state="ready" {
         let (_, expected, _) = collection_items_with_windows(&state, &session, &request,
             semaphore.clone().acquire_owned().await.unwrap(), windows.clone()).await.unwrap();
         let builds = state.store.agent_resources_builds_for_test();
-        let _cold_builder = state.store.admit_agent_resources().await;
+        let _cold_builder = state.store.admit_agent_resources("other").await;
         let start = std::time::Instant::now();
         let (_, actual, _) = tokio::time::timeout(std::time::Duration::from_secs(1),
             collection_items_with_windows(&state, &session, &request,
@@ -11722,7 +12166,7 @@ mission "queue-parity" state="ready" {
             let prepared = windows.prepare(&state, &session, &request).unwrap();
             let held_window = (gate == "window").then(|| prepared.try_admit().unwrap());
             let held_roster = (gate == "roster")
-                .then(|| state.store.try_admit_agent_resources().unwrap());
+                .then(|| state.store.try_admit_agent_resources("other").unwrap());
             let socket = Arc::new(tokio::sync::Semaphore::new(1));
             let mut read = Box::pin(collection_items_with_windows(
                 &state, &session, &request, socket.clone().acquire_owned().await.unwrap(),
@@ -11737,7 +12181,7 @@ mission "queue-parity" state="ready" {
                 assert!(prepared.try_admit().is_some(),
                     "roster followers must release the window gate");
             } else {
-                assert!(state.store.try_admit_agent_resources().is_some(),
+                assert!(state.store.try_admit_agent_resources("other").is_some(),
                     "window followers must not reserve the roster gate");
             }
             let response = tokio::time::timeout(Duration::from_secs(5),
@@ -11771,7 +12215,7 @@ mission "queue-parity" state="ready" {
                 "runtime_id":"cycle-roster", "incarnation_id":"one"})).unwrap(),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
-        let roster = state.store.admit_agent_resources().await;
+        let roster = state.store.admit_agent_resources("other").await;
         let (waiting, mut waits) = tokio::sync::mpsc::unbounded_channel();
         let app = axum::Router::new()
             .route("/v1/client/agents", axum::routing::get({
@@ -11844,7 +12288,7 @@ mission "queue-parity" state="ready" {
                 "runtime_id":"miss-roster", "incarnation_id":"one"})).unwrap(),
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
-        let roster = state.store.admit_agent_resources().await;
+        let roster = state.store.admit_agent_resources("other").await;
         let session = ClientSession::local(None).unwrap();
         let request: CollectionSubscribe = serde_json::from_value(json!({
             "kind":"subscribe", "id":"miss-roster", "collection":"agents", "limit":200,
@@ -11998,7 +12442,7 @@ mission "queue-parity" state="ready" {
                 .then(|| socket.clone().try_acquire_owned().unwrap());
             let held_window = (gate == "window").then(|| prepared.try_admit().unwrap());
             let held_roster = (gate == "roster")
-                .then(|| state.store.try_admit_agent_resources().unwrap());
+                .then(|| state.store.try_admit_agent_resources("other").unwrap());
             drop(held_reader);
             assert!(futures_util::poll!(&mut collection).is_pending());
             assert!(state.store.readers.try_admit_read().is_some(),
@@ -12010,7 +12454,7 @@ mission "queue-parity" state="ready" {
                 assert!(prepared.try_admit().is_some());
             }
             if gate != "roster" {
-                assert!(state.store.try_admit_agent_resources().is_some());
+                assert!(state.store.try_admit_agent_resources("other").is_some());
             }
             drop(held_socket);
             drop(held_window);
@@ -12170,7 +12614,7 @@ mission "queue-parity" state="ready" {
             .await.expect("the daemon publishes its roster as it starts").unwrap();
         assert_eq!(state.store.published_agent_roster(first, false).unwrap().0, first);
         // Hold the next refresh back: readers must answer from the publication without it.
-        let refresh = state.store.admit_agent_resources().await;
+        let refresh = state.store.admit_agent_resources("other").await;
         append("harness.observed", json!({"state":"working", "driver":"codex",
             "incarnation_id":"one"}));
         let current = state.store.index().unwrap();
@@ -12604,7 +13048,7 @@ mission "queue-parity" state="ready" {
 
         // Local activity changes the card without advancing the graph. The stream rereads the
         // same-index publication while the refresh is held, and receives nothing new.
-        let refresh = state.store.admit_agent_resources().await;
+        let refresh = state.store.admit_agent_resources("other").await;
         let revision = *published.borrow_and_update();
         state.store.append_claim(&ClaimInput {
             subject: subject.into(), kind: "harness.timeline".into(),
@@ -12678,7 +13122,7 @@ mission "queue-parity" state="ready" {
 
         // Once that roster is no longer published, the continuation restarts; it never folds.
         // Holding the refresher back keeps it from republishing that cut meanwhile.
-        let _refresh = state.store.admit_agent_resources().await;
+        let _refresh = state.store.admit_agent_resources("other").await;
         state.store.forget_current_views();
         let builds = state.store.agent_resources_builds_for_test();
         let expired = client_agents(State(state.clone()), Extension(first_snapshot),
@@ -12702,7 +13146,7 @@ mission "queue-parity" state="ready" {
         tokio::time::timeout(Duration::from_secs(5), published.wait_for(|revision| *revision > 0))
             .await.unwrap().unwrap();
         // A slow refresh holds the roster admission; summary must not queue behind it.
-        let _refresh = state.store.admit_agent_resources().await;
+        let _refresh = state.store.admit_agent_resources("other").await;
         let request: CollectionSubscribe = serde_json::from_value(json!({
             "kind":"subscribe", "id":"summary", "collection":"summary",
         })).unwrap();
@@ -12775,9 +13219,10 @@ mission "queue-parity" state="ready" {
                 ClientSession::local(None).unwrap(),
                 "chat".into(),
                 1,
-                "session/missing".into(),
-                remote.map(str::to_owned),
+                ("session/missing".into(), remote.map(str::to_owned)),
                 sender,
+                Queue::new(Kind::Conversation),
+                (None, None),
             ));
             let (_, generation, frame) = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
                 .await
@@ -12898,7 +13343,7 @@ mission "queue-parity" state="ready" {
                 async move {
                     upgrade.on_upgrade(move |socket| {
                         collection_stream_socket_with_admission(
-                            socket, state, ClientSession::local(None).unwrap(), None, None,
+                            socket, state, ClientSession::local(None).unwrap(), None, (None, None),
                             |state, session, request, permit| async move {
                                 collection_items(&state, &session, &request, permit).await
                             },
@@ -12975,7 +13420,7 @@ mission "queue-parity" state="ready" {
                 async move {
                     upgrade.on_upgrade(move |socket| {
                         collection_stream_socket_with_admission(
-                            socket, state, ClientSession::local(None).unwrap(), None, None,
+                            socket, state, ClientSession::local(None).unwrap(), None, (None, None),
                             |state, session, request, permit| async move {
                                 collection_items(&state, &session, &request, permit).await
                             },
@@ -13057,7 +13502,7 @@ mission "queue-parity" state="ready" {
                     async move {
                         upgrade.on_upgrade(move |socket| {
                             collection_stream_socket_with_admission(
-                                socket, state, ClientSession::local(None).unwrap(), None, None,
+                                socket, state, ClientSession::local(None).unwrap(), None, (None, None),
                                 |state, session, request, permit| async move {
                                     collection_items(&state, &session, &request, permit).await
                                 },
@@ -17187,7 +17632,9 @@ mission "example/zero-run" state="ready" {
             let session = ClientSession::local(Some("person/example")).unwrap();
             let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
             let follower = tokio::spawn(follow_conversation(
-                state.clone(), session, "chat".into(), 1, session_id.clone(), None, sender,
+                state.clone(), session, "chat".into(), 1, (session_id.clone(), None), sender,
+                Queue::new(Kind::Conversation),
+                (None, None),
             ));
             let (_, _, frame) = tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await.unwrap().unwrap();
             assert_eq!(frame["replace"], true, "{frame}");
@@ -17293,11 +17740,14 @@ mission "example/zero-run" state="ready" {
             .any(|item| item["id"] == "timeline-entry/open-local-frontier");
         assert!(!contains_local(&page));
         let cursor = start["next_cursor"].as_str().unwrap();
-        let (graph, local, native) = conversation_position(&state, &session_id, cursor).unwrap();
+        let position = conversation_position(&state, &session_id, cursor).unwrap();
         let latest_local = local_latest_position(&state).unwrap();
-        assert!(latest_local > local);
+        assert!(latest_local > position.local_position);
         // Control: the former post-snapshot local high-water silently skips this exact row.
-        let skipped = conversation_cursor(&state, &session_id, graph, latest_local, native);
+        let skipped = conversation_cursor(&state, &session_id, ConversationPosition {
+            local_position: latest_local,
+            ..position
+        });
         remember_cursor(&skipped, issued_transcript(cursor).unwrap());
         let lost = conversation_changes_local(&state, &session, &session_id, Some(&skipped), 0).await.unwrap();
         assert!(!contains_local(&lost));
@@ -17394,7 +17844,12 @@ mission "example/zero-run" state="ready" {
         assert_eq!(rebuilds(), 2);
         // A cursor this member did not give out (another member's, or one from before a
         // restart) is read as before.
-        let unknown = conversation_cursor(&owner, &session_id, 0, 0, 0);
+        let unknown = conversation_cursor(&owner, &session_id, ConversationPosition {
+            store_index: 0,
+            local_position: 0,
+            native_sequence: 0,
+            source_generation: 0,
+        });
         conversation_changes_local(&owner, &session, &session_id, Some(&unknown), 0)
             .await
             .unwrap();
@@ -18208,6 +18663,96 @@ mission "example/zero-run" state="ready" {
     }
 
     #[test]
+    fn conversation_followers_reload_when_retry_recovery_rewrites_a_delivered_error() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let mut state = test_state_named(root.path(), "retry-recovery-follower");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let path = root.path().join(".omp/agent/sessions/example/retry-follow.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let session_id = format!(
+            "session/external-{}",
+            &hex::encode(Sha256::digest(b"omp:retry-follow"))[..24]
+        );
+        let header = json!({"type":"session","id":"retry-follow","cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"});
+        let question = json!({"type":"message","id":"question","timestamp":"2026-10-06T12:00:01Z",
+            "message":{"role":"user","content":[{"type":"text","text":"synthetic question"}]}});
+        let failed = |retry: Option<Value>| {
+            let mut record = json!({"type":"message","id":"failed-turn","timestamp":"2026-10-06T12:00:02Z",
+                "message":{"role":"assistant","content":[{"type":"text","text":"synthetic partial answer"}],
+                    "provider":"synthetic-provider","model":"synthetic-model",
+                    "stopReason":"error","errorMessage":"synthetic socket closed"}});
+            if let Some(retry) = retry {
+                record["message"]["retryRecovery"] = retry;
+            }
+            record
+        };
+        let reply = json!({"type":"message","id":"retried-turn","timestamp":"2026-10-06T12:00:03Z",
+            "message":{"role":"assistant","content":[{"type":"text","text":"synthetic retried answer"}],"stopReason":"stop"}});
+        std::fs::write(&path, format!("{header}\n{question}\n{}\n", failed(None))).unwrap();
+        let mut session = ClientSession::local(Some("person/alex")).unwrap();
+        session.conversation_blocks = true;
+        let error_view = |value: &Value| {
+            value["items"].as_array().unwrap().iter().find_map(|item| {
+                item["body"]["blocks"].as_array()?.iter()
+                    .find(|block| block["view"]["type"] == "assistant_error")
+                    .map(|block| (item["sequence"].as_u64().unwrap(), block["view"].clone()))
+            })
+        };
+        let newest_page = || timeline_value(
+            &state, &new_client_snapshot(&state), &session, &session_id,
+            &ClientListQuery { limit: Some(200), ..Default::default() },
+        ).unwrap().0;
+        // Local OPEN captures the initial page and its generation-fenced cursor together.
+        let (opened, page) = conversation_open_local(&state, &session, &session_id).unwrap();
+        let (failed_sequence, view) = error_view(&page).expect("the failed turn renders an error");
+        assert_eq!(view["status"], "failed");
+        assert_eq!(view["presentation"], "full");
+        assert_ne!(
+            conversation_position(&state, &session_id, opened["next_cursor"].as_str().unwrap())
+                .unwrap().source_generation,
+            0,
+            "OPEN must fence the exact native page it delivered",
+        );
+        // The retry's answer is a pure append: it stays an incremental delta.
+        writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(), "{reply}").unwrap();
+        let appended = conversation_read_now(
+            &state, &session, &session_id, opened["next_cursor"].as_str(),
+        ).unwrap();
+        assert!(appended["items"].as_array().unwrap().iter()
+            .any(|item| item.to_string().contains("synthetic retried answer")), "{appended}");
+        assert!(error_view(&appended).is_none(), "an append does not resend the failed turn");
+        // Settling the retry rewrites the already-delivered failed record in place; its
+        // sequence does not move, so a sequence-filtered delta could never carry it.
+        let mut cursor = appended["next_cursor"].as_str().unwrap().to_owned();
+        for (status, presentation) in [("recovered", "compact-recovered"), ("superseded", "none")] {
+            let retry = json!({"kind":"auto-retry","status":status,"attempt":1,
+                "recovery":"plain","note":"error; retried"});
+            std::fs::write(
+                &path,
+                format!("{header}\n{question}\n{}\n{reply}\n", failed(Some(retry))),
+            ).unwrap();
+            let gap = conversation_read_now(&state, &session, &session_id, Some(&cursor))
+                .unwrap_err();
+            assert_eq!(gap.status, StatusCode::GONE);
+            assert_eq!(gap.code, "cursor-gap");
+            assert_eq!(gap.details["full_resync"], true);
+            // The follower's reload carries the updated presentation under the same sequence.
+            let reloaded = newest_page();
+            let (sequence, view) = error_view(&reloaded).expect("the settled turn keeps its error block");
+            assert_eq!(sequence, failed_sequence);
+            assert_eq!(view["status"], status);
+            assert_eq!(view["presentation"], presentation);
+            assert_eq!(view["message"], "synthetic socket closed");
+            let (reopened, _) = conversation_open_local(&state, &session, &session_id).unwrap();
+            cursor = reopened["next_cursor"].as_str().unwrap().to_owned();
+        }
+        // With nothing rewritten since the reload, the follower resumes incrementally.
+        let quiet = conversation_read_now(&state, &session, &session_id, Some(&cursor)).unwrap();
+        assert!(quiet["items"].as_array().unwrap().is_empty(), "{quiet}");
+    }
+
+    #[test]
     fn native_keyset_pages_exclude_newer_appends_between_pages() {
         use std::io::Write as _;
         let root = tempfile::tempdir().unwrap();
@@ -18473,6 +19018,38 @@ mission "example/zero-run" state="ready" {
                         .starts_with("transcript not bound: the transcript could not be read"),
                     "{notice:#}"
                 );
+                let (start, opened) =
+                    conversation_open_local(&state, &session, &session_id).unwrap();
+                let items = opened["items"].as_array().unwrap();
+                assert!(items.iter().any(|item|
+                    item["type"] == "message"
+                        && item["body"]["message_id"] == "message/managed-native"),
+                    "OPEN keeps the stored timeline: {opened:#}");
+                let opened_notice = items.iter()
+                    .find(|item| item["body"]["code"] == "transcript-not-bound")
+                    .expect("OPEN explains the unreadable managed transcript");
+                assert_eq!(opened_notice["body"], notice["body"]);
+                assert_eq!(
+                    conversation_position(&state, &session_id, start["next_cursor"].as_str().unwrap())
+                        .unwrap().source_generation,
+                    0,
+                    "a stored fallback must not claim a native generation",
+                );
+                let native_error = conversation_read_now(&state, &session, &session_id, None)
+                    .expect_err("change reads keep surfacing the native-read failure");
+                // Even if the file becomes readable after the failed native read, OPEN's
+                // fallback path must not retry it and deliver a native page with generation zero.
+                std::fs::set_permissions(&transcript, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let fallback = timeline_first_page(
+                    &state, &new_client_snapshot(&state), &session, session_id.clone(),
+                    &ClientListQuery { limit: Some(200), ..Default::default() },
+                    Some(native_error),
+                ).unwrap().0;
+                assert!(!fallback["items"].as_array().unwrap().iter()
+                    .any(|item| item["body"]["text"] == "Exact managed transcript"
+                        || item["body"]["text"] == "Native reply"));
+                assert!(fallback["items"].as_array().unwrap().iter()
+                    .any(|item| item["body"]["code"] == "transcript-not-bound"));
             }
             std::fs::set_permissions(&transcript, std::fs::Permissions::from_mode(0o600)).unwrap();
         }

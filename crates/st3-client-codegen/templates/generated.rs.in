@@ -986,6 +986,9 @@ pub struct MissionStep {
     pub wake: Option<MissionWake>,
     #[serde(default)]
     pub claim_expires_at: Option<String>,
+    /// When st last nudged this held step's holder for idling with nothing set to wake it.
+    #[serde(default)]
+    pub nudged_at: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionWake {
@@ -1039,12 +1042,18 @@ pub struct Work {
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// Submitting incarnation for this attempt; missing or null means unknown.
+    #[serde(default)]
+    pub submitted_incarnation: Option<String>,
     #[serde(default)]
     pub agentless: bool,
     #[serde(default)]
     pub claim_expires_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_started_at_unix_ms: Option<u64>,
+    /// When st last nudged this held step's holder for idling with nothing set to wake it.
+    #[serde(default)]
+    pub nudged_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_elapsed_ms: u64,
     #[serde(default)]
@@ -1801,6 +1810,8 @@ pub struct ConversationChanges {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub next_cursor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1809,6 +1820,8 @@ pub struct TimelinePage {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -3098,6 +3111,8 @@ pub struct TimelineBlock {
     pub visibility: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<Value>,
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ConversationContentRef>,
@@ -3123,3 +3138,32 @@ pub struct ConversationContentChunk {
     pub data: String,
     pub next_offset: Option<u64>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationReport {
+    pub report_id: String,
+    pub samples: Vec<ObservationSample>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ObservationSample {
+    #[serde(rename = "latency")]
+    Latency {
+        target: String, carrier: String, #[serde(default,skip_serializing_if="Option::is_none")] path: Option<String>,
+        interval_start: String, interval_end: String,
+        count: u64, over_target: u64, max_ms: u64, buckets: Vec<(u64,u64)>,
+    },
+    #[serde(rename = "live-share")]
+    LiveShare {
+        target: String, carrier: String, #[serde(default,skip_serializing_if="Option::is_none")] path: Option<String>,
+        interval_start: String, interval_end: String, foreground_ms: u64, live_ms: u64,
+    },
+}
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObservationAccepted { pub accepted: bool }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObservationResponse {pub api_version: String, pub request_id: String, pub value: ObservationAccepted}

@@ -81,6 +81,20 @@ within a sixteenth of its sample and never above the window's exact maximum. The
 is counted exactly as each sample finishes. Nothing samples on a thread of its own. A window ages
 out when it is next written or read, and a restart empties it.
 
+With `[observations.otlp]` set, the daemon also sends the windows to the collector once a minute
+as gauges, from a timer task that reads the same report as the request-latency read and does no
+work on a request path. A minute the collector refuses is dropped, not replayed; the collector
+holds the history. Each point carries `target`, `series` (`owner` or `remote` for a read target;
+`reported` for a latency paired phones reported; `statement`, `read`, `write` or `writer_hold` for
+the store), `window` (`1m`, `5m`, `1h`) and, on
+latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
+`st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
+figure from `slo/targets.toml`, so one query sets a host's number against its target),
+`st_slo_cpu_cores` and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
+phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
+`st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
+the targets, not every path's snapshot.
+
 `st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
 over their target in the last five minutes. A p99 target is missed in a window when more than 1%
 of its samples are over. A max target is missed when any one sample is over. A miss is `info`,
@@ -168,6 +182,16 @@ response reached the caller. Work still running when the daemon stops has no com
 SQLite reports a statement's time from its first step to its reset, at millisecond resolution. A
 query whose rows the caller processes one at a time includes that processing, so the outer query
 of a nested loop looks slow. Statement times from concurrent operations overlap.
+
+With OpenTelemetry export enabled, `st.reconcile_pass` and `st.reconcile_deadline` are
+independent roots, even when called inside a request or an attached OpenTelemetry context.
+A pass that continues after an isolated member failure or an unavailable PTY snapshot still
+exports ERROR status. `st.fifo.depth` and `st.fifo.oldest_age` describe pending work only:
+writer jobs leave the backlog before waiting to begin their transaction, and closing a writer,
+conversation, or terminal-emulation receiver discards its pending observations.
+Writer observations include foreground jobs, background loans and configuration fences, but not
+internal background-ready notifications. Dispatch removes the selected job's timestamp, so a
+foreground job overtaking a background loan does not erase the older loan's waiting time.
 
 ## Raw terminal cold opens
 
@@ -378,6 +402,9 @@ The performance report exposes each roster stage under bounded task labels:
 `roster/admission-wait` (waiting for the shared admission or an in-flight build),
 `roster/frontier-read`, `roster/cache-hit`, `roster/build` (incremental advance or cold build),
 `roster/card-projection` (refolding changed cards) and `agent_work_queues`.
+With trace export enabled, HTTP reads of a published complete roster or startup head report
+`st.roster.mode=hit` and the served publication's card count on their request span. Rebuilds
+remain independent roots of the background refresher, not children of the reading request.
 
 The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
 incremental-update costs with `cargo test -p st3 --lib agent_roster_snapshot_fixture_timing --

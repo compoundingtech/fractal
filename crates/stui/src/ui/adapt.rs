@@ -737,6 +737,12 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         .iter()
                         .map(|label| label_text(model, label))
                         .collect(),
+                    next_mission: agent.next_work.as_ref().map(|label| label.mission_id.clone()),
+                    queue_missions: agent
+                        .upcoming_work
+                        .iter()
+                        .map(|label| label.mission_id.clone())
+                        .collect(),
                     queued: agent.queued_work_count,
                     harness_state: agent.harness_state.clone(),
                     runtime: None,
@@ -745,6 +751,12 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         .as_ref()
                         .and_then(|usage| usage.context.as_ref())
                         .and_then(|context| context.model.clone()),
+                    effort: agent
+                        .extra
+                        .get("effort")
+                        .and_then(Value::as_str)
+                        .filter(|effort| !effort.is_empty())
+                        .map(str::to_owned),
                     fault: agent.fault.clone().or_else(|| {
                         agent.delivery.as_ref()
                             .filter(|delivery| delivery.state == "stale")
@@ -905,11 +917,57 @@ pub fn names(model: &Model, person: &str) -> BTreeMap<String, String> {
 
 #[cfg(test)]
 use st3_conversation_ui::adapt::from_harness;
-pub use st3_conversation_ui::adapt::{conversation, unreadable_transcript};
+pub use st3_conversation_ui::adapt::unreadable_transcript;
+
+/// Standalone native images need a focusable row even when the text adapter has no words.
+pub fn conversation(timeline: &[st3_client::TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
+    let mut entries = st3_conversation_ui::adapt::conversation(timeline, names);
+    for (index, source) in timeline.iter().enumerate() {
+        let st3_client::TimelineBody::Content(content) = &source.body else { continue };
+        if !super::content::has_images(&content.blocks) { continue; }
+        if content.blocks.iter().all(|block| matches!(block.kind.as_str(), "image" | "source_record"))
+            && content.text.as_deref().is_none_or(|text| {
+                text.is_empty() || matches!(text, "[image]" | "[image · load from owner]")
+            })
+        {
+            // Replace the shared text adapter's image-only placeholder instead
+            // of adding a second row for the same image.
+            let prefix = format!("{}#", source.id);
+            entries.retain(|entry| entry.id != source.id && !entry.id.starts_with(&prefix));
+        }
+        let at = entries.iter().rposition(|entry| entry.id == source.id || entry.id.starts_with(&format!("{}#", source.id)))
+            .map(|at| at + 1)
+            .or_else(|| timeline[index + 1..].iter().find_map(|next| {
+                entries.iter().position(|entry| entry.id == next.id || entry.id.starts_with(&format!("{}#", next.id)))
+            })).unwrap_or(entries.len());
+        entries.insert(at, Entry {
+            id: format!("{}#images", source.id),
+            at: source.timestamp.get(11..16).unwrap_or("").into(),
+            body: Body::Tool { title: "image · Ctrl+Enter details · Ctrl+U load inline".into(),
+                state: st3_conversation_ui::ToolState::Ok, output: Vec::new() },
+        });
+    }
+    entries
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standalone_native_image_blocks_get_a_focusable_inline_row() {
+        let timeline = serde_json::from_value::<Vec<TimelineEntry>>(json!([{
+            "id":"picture","sequence":1,"revision":1,"timestamp":"2026-10-08T10:00:00Z",
+            "role":"assistant","type":"content","final":true,"body":{"media_type":"image/png","blocks":[{
+                "id":"picture-block","kind":"image","source_type":"native","payload":{},
+                "continuation":{"ref":"picture-ref","media_type":"application/octet-stream","reason":"on-demand"}
+            }]}
+        }])).unwrap();
+        let entries = conversation(&timeline, &BTreeMap::new());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "picture#images");
+        assert!(matches!(&entries[0].body, Body::Tool { title, .. } if title.contains("load inline")));
+    }
     use serde_json::json;
 
     #[test]
@@ -1787,6 +1845,7 @@ mod tests {
             st3_ui_model::missions::StepMetadata {
                 blocked_reason: None,
                 last_progress: Some("  Tests pass on\nmain; opening the PR \n".into()),
+                nudged: None,
             },
         );
         mission.step_metadata.insert(
@@ -1900,6 +1959,25 @@ mod tests {
             .unwrap(),
         );
         assert!(!attention(&model, &Extras::default())[0].is_alert());
+    }
+
+    #[test]
+    fn a_seats_configured_effort_reaches_its_details() {
+        let mut model = Model::default();
+        let resource = |effort: serde_json::Value| {
+            serde_json::json!({
+                "id": "agent/example/seat", "kind": "agent", "revision": "r1",
+                "updated_at": "2026-10-10T12:00:00Z", "name": "example/seat",
+                "state": "running", "reachability": "local", "harness_state": "working",
+                "effort": effort, "runtime_ids": [], "under": [],
+            })
+        };
+        model.agents = window(vec![resource(serde_json::json!("high"))]);
+        assert_eq!(agents(&model, &[])[0].details.effort.as_deref(), Some("high"));
+        model.agents = window(vec![resource(serde_json::Value::Null)]);
+        assert_eq!(agents(&model, &[])[0].details.effort, None);
+        model.agents = window(vec![resource(serde_json::json!(""))]);
+        assert_eq!(agents(&model, &[])[0].details.effort, None);
     }
 
     #[test]
