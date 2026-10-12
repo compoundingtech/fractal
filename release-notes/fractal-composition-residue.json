@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add host-owned native composer draft binding, recorded service readiness and cancellable accessible resizable splits.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "changed", "detail": "Hosts can bind native composer text with read/write/flush storage and supply recorded service facts on work-log calls. Command errors promote to the inline failure banner only when the host reports a run-ending failure. Reverse splits resize consistently from keyboard and pointer; Escape restores a held drag without committing. Non-resizable tracks have no focusable separator." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

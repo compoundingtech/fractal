@@ -7,6 +7,7 @@ import { ErrorOverlay } from '../composition/ErrorOverlay'
 import { HighlightedSource } from '../composition/Markdown'
 import type { WorkLogCall, WorkLogTurn } from './work-log'
 import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, workLogOutputLanguage } from './work-log'
+import { workKindPresentation, workServicePresentation } from './work-row-presentation.ts'
 
 export type WorkLogCallDetailRenderer = (call: WorkLogCall) => React.ReactNode
 const CallDetailRenderer = React.createContext<WorkLogCallDetailRenderer | undefined>(undefined)
@@ -29,7 +30,7 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   const durationLabel = formatWorkDuration(turn.durationMs)
   const [open, setOpen] = React.useState(false)
   const failedCall = turn.calls.find(call => call.status === 'error')
-  const failed = turn.failed || failedCall !== undefined
+  const failed = turn.failed && !turn.interrupted
   const workLabel = turn.running ? 'Working' : settled ? `Worked${durationLabel ? ` for ${durationLabel}` : ''}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
   const summary = [workLabel, settled && turn.commands ? `${turn.commands} ${turn.commands === 1 ? 'command' : 'commands'}` : undefined, settled && turn.changedFiles ? `${turn.changedFiles} ${turn.changedFiles === 1 ? 'file changed' : 'files changed'}` : undefined].filter(value => value !== undefined).join(' · ')
   const started = turn.running ? NaN : Date.parse(turn.startedAt ?? '')
@@ -52,12 +53,23 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   const displayed = hasOutput && (!interactive || open || preview && call.status !== 'error')
   const result = call.detail ?? (call.status === 'running' ? 'Running…' : 'No output')
   const label = call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`
+  const service = workServicePresentation(call)
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // A non-success outcome stays visible as a word beside the pinned disclosure; running rows say so in the duration column until they end.
-  const word = call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : undefined
-  const row = <><span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : call.kind === 'read' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} spinning={call.status === 'running'} size={14} /></span><span data-call-title {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-word {...stylex.props(styles.callWord)}>{word}</span><span aria-hidden="true" data-row-disclosure={hasOutput && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{hasOutput && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span></>
-  return <div data-tool-status={call.status}>{hasOutput && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <pre data-testid="work-call-output" {...stylex.props(styles.output)}><code><HighlightedSource code={result} language={workLogOutputLanguage(call)} /></code></pre> : renderDetail(call))}</div>
+  const word = call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : service?.readiness
+  const row = <>
+    <span aria-hidden="true" {...stylex.props(styles.slot, call.status === 'error' && styles.failureInk)}>
+      <Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : workKindPresentation[call.kind].icon} spinning={call.status === 'running'} size={14} />
+    </span>
+    <span data-call-title {...stylex.props(styles.callLabel)}>
+      {service !== undefined ? <>Service {service.name}{service.state === undefined ? null : <> · {service.state}</>}</> : call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}
+    </span>
+    <span data-call-word data-service-readiness={service === undefined ? undefined : ''} data-service-tone={service === undefined ? undefined : service.warning ? 'warning' : 'neutral'} {...stylex.props(styles.callWord, call.status === 'error' && styles.failureInk, service?.warning && styles.serviceWarning)}>{word}</span>
+    <span aria-hidden="true" data-row-disclosure={hasOutput && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{hasOutput && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span>
+    <span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span>
+  </>
+  return <div data-item-id={call.id} data-tool-status={call.status}>{hasOutput && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall)}>{row}</div>}{displayed && (renderDetail === undefined ? <pre data-testid="work-call-output" {...stylex.props(styles.output)}><code><HighlightedSource code={result} language={workLogOutputLanguage(call)} /></code></pre> : renderDetail(call))}</div>
 }
 const styles = stylex.create({
   summary: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.toolRow, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.uiSize, padding: 0, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
@@ -81,5 +93,6 @@ const styles = stylex.create({
   live: { minHeight: g.toolRow, display: 'flex', alignItems: 'center', gap: s.md, color: ink.fgMuted, fontSize: t.metaSize },
   promoted: { display: 'flex', alignItems: 'center', gap: s.md, marginTop: s.md, padding: s.md, backgroundColor: surface.washSubtle, borderRadius: r.md, color: ink.fgSoft, fontSize: t.metaSize, lineHeight: t.uiLeading },
   failureInk: { color: status.dangerFg },
+  serviceWarning: { color: status.attention },
   hover: { maxWidth: g.tooltipMax, padding: s.md, borderRadius: r.md, backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.uiLeading, zIndex: 10 },
 })

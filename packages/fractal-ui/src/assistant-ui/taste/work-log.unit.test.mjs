@@ -5,6 +5,22 @@ import { createServer } from 'vite'
 const server = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true } })
 after(() => server.close())
 const { errorReason, failedCommandSource, readableCommand, workLogTurnFromItems, formatWorkDuration } = await server.ssrLoadModule('/src/assistant-ui/taste/work-log.ts')
+const { workServicePresentation } = await server.ssrLoadModule('/src/assistant-ui/taste/work-row-presentation.ts')
+
+test('readiness uses recorded service facts, not command success or timeout alone', () => {
+  const call = { id: 'sample-service', kind: 'run', title: 'Start watcher', status: 'success', startedAt: '2032-01-01T00:00:00Z' }
+  assert.equal(workServicePresentation(call), undefined)
+  assert.equal(workServicePresentation({ ...call, metadata: { timedOut: true } }), undefined)
+  for (const facts of [
+    { metadata: { service: { name: 'sample-watcher', ready: false, timedOut: true } } },
+    { view: { service: { name: 'sample-watcher', ready: false, timedOut: true } } },
+    { view: { type: 'service', name: 'sample-watcher', ready: false, timedOut: true } },
+    { output: { details: { service: { name: 'sample-watcher', ready: false, timedOut: true } } } },
+  ]) assert.deepEqual(workServicePresentation({ ...call, ...facts }), { name: 'sample-watcher', readiness: 'Timed out', warning: true })
+  assert.deepEqual(workServicePresentation({ ...call, metadata: { service: { name: 'sample-watcher', ready: true, state: 'running' } } }), { name: 'sample-watcher', state: 'running', readiness: 'Ready', warning: false })
+  assert.equal(workServicePresentation({ ...call, metadata: { service: { name: 'sample-watcher' } } }).readiness, 'Readiness unreported')
+  assert.equal(workServicePresentation({ ...call, metadata: { service: { name: 'sample-watcher', ready: false } } }).readiness, 'Not ready')
+})
 const at = '2026-01-15T12:30:00Z'
 const project = content => workLogTurnFromItems([{ _tag: 'ToolCall', id: 'tool/read', callId: 'call/read', name: 'read', input: {}, status: 'success', callSeen: true, at, result: { content, isError: false, at } }], { kindFor: () => 'read', running: false, failed: false, interrupted: false }).calls[0]
 

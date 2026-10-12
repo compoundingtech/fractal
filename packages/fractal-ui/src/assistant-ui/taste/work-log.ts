@@ -17,6 +17,10 @@ export interface WorkLogCall {
   readonly changedPath?: string
   /** A run's own command or script source; display it only as code inside the raw disclosure. */
   readonly command?: string
+  /** Complete recorded service facts; the host owns classification and lifecycle. */
+  readonly output?: unknown
+  readonly view?: Readonly<Record<string, unknown>>
+  readonly metadata?: Readonly<Record<string, unknown>>
 }
 export interface WorkLogTurn {
   readonly calls: readonly WorkLogCall[]
