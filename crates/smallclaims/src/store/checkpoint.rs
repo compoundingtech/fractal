@@ -665,13 +665,40 @@ fn open_checkpoint_copy(copy: &Path) -> Result<Connection> {
     let connection = Connection::open(copy)?;
     projection_digest::register(&connection)?;
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
-    // belongs on disk, not in an allocation proportional to the database's size.
+    // belongs on disk, not in an allocation proportional to the database's size. The copy is
+    // discarded after the proof, so its commits need not wait for the disk.
     connection.execute_batch(&format!(
-        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE;
+        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
          PRAGMA cache_size = -{}; PRAGMA temp_store = FILE;",
         crate::sqlite::READ_CACHE_KIB,
     ))?;
     Ok(connection)
+}
+
+/// Keep only the sealed set on a proof copy. Blobs go with the claims that reference them.
+/// Admission needs a claim's blobs, so every node that holds the sealed claims holds these, while
+/// the blobs of later claims depend on what has arrived since the cut. A trim deletes no blob.
+fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
+         DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
+         DELETE FROM replica_records WHERE NOT EXISTS (
+             SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
+               AND s.sequence=replica_records.sequence AND s.envelope_hash=replica_records.envelope_hash);",
+    )?;
+    // Number the claims in canonical order. Every node that holds the sealed set then proves
+    // on the same store, whatever order its claims arrived in, so readers that compare store
+    // indexes answer alike and the digests can match across nodes.
+    connection.execute_batch(&format!(
+        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
+         INSERT INTO temp.canonical_index(old, new)
+             SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
+             FROM claims JOIN batches ON batches.id=claims.batch_id;
+         UPDATE claims SET store_index=-(SELECT new FROM temp.canonical_index
+                                         WHERE old=claims.store_index);
+         UPDATE claims SET store_index=-store_index;"
+    ))?;
+    Ok(())
 }
 
 /// Project a copy of the sealed set with and without the drop, and compare the graph and every
@@ -684,6 +711,30 @@ pub fn prove_on_copy(
     copy: &Path,
     sealed: &SealedSet,
     plan: &DropPlan,
+) -> Result<CheckpointProof> {
+    prove(runtime, copy, sealed, plan, false)
+}
+
+/// `prove_on_copy` for a copy that is deleted afterwards. Keeping the sealed set and numbering
+/// it commit first, statement by statement, so their rollback journal never holds every claim
+/// page at once. Inside one transaction each renumbering pass also kept a statement journal: the
+/// original of every claim page it moved, spilled to a temporary file. Only the replays and the
+/// comparison share a transaction, as before.
+fn prove_on_scratch_copy(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    sealed: &SealedSet,
+    plan: &DropPlan,
+) -> Result<CheckpointProof> {
+    prove(runtime, copy, sealed, plan, true)
+}
+
+fn prove(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    sealed: &SealedSet,
+    plan: &DropPlan,
+    commit_preparation: bool,
 ) -> Result<CheckpointProof> {
     let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
@@ -718,28 +769,14 @@ pub fn prove_on_copy(
         )?;
     }
     runtime.clear_checkpoint_projections(&transaction)?;
-    // Blobs go with the claims that reference them. Admission needs a claim's blobs, so every
-    // node that holds the sealed claims holds these, while the blobs of later claims depend on
-    // what has arrived since the cut. A trim deletes no blob.
-    transaction.execute_batch(
-        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
-         DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
-         DELETE FROM replica_records WHERE NOT EXISTS (
-             SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
-               AND s.sequence=replica_records.sequence AND s.envelope_hash=replica_records.envelope_hash);",
-    )?;
-    // Number the claims in canonical order. Every node that holds the sealed set then proves
-    // on the same store, whatever order its claims arrived in, so readers that compare store
-    // indexes answer alike and the digests can match across nodes.
-    transaction.execute_batch(&format!(
-        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
-         INSERT INTO temp.canonical_index(old, new)
-             SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
-             FROM claims JOIN batches ON batches.id=claims.batch_id;
-         UPDATE claims SET store_index=-(SELECT new FROM temp.canonical_index
-                                         WHERE old=claims.store_index);
-         UPDATE claims SET store_index=-store_index;"
-    ))?;
+    let transaction = if commit_preparation {
+        transaction.commit()?;
+        keep_sealed_claims_in_canonical_order(&connection)?;
+        connection.transaction()?
+    } else {
+        keep_sealed_claims_in_canonical_order(&transaction)?;
+        transaction
+    };
     let subjects = plan
         .claims
         .iter()
@@ -1407,7 +1444,7 @@ impl Store {
         let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
         let result = self
             .copy_store_to(&copy)
-            .and_then(|_| prove_on_copy(&*self.runtime, &copy, sealed, plan));
+            .and_then(|_| prove_on_scratch_copy(&*self.runtime, &copy, sealed, plan));
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = fs::remove_file(format!("{}{suffix}", copy.display()));
         }

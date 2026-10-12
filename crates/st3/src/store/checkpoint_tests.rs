@@ -612,10 +612,19 @@ fn a_usage_trim_keeps_lifetime_usage_and_the_proof_guards_it() {
     wrong.claims.push(claim_tombstone(newest));
     let copy = scratch.path().join("wrong.sqlite3");
     store.copy_store_to(&copy).unwrap();
-    let proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
+    let wrong_proof = prove_on_copy(&copy, &sealed, &wrong).unwrap();
     assert!(
-        !proof.passed,
+        !wrong_proof.passed,
         "dropping a series total changes lifetime usage"
+    );
+    // The daemon's proof commits its preparation on the scratch copy; prove_on_copy keeps it in
+    // the one transaction it rolls back. Both prove the same thing, passing or failing.
+    let copy = scratch.path().join("same.sqlite3");
+    store.copy_store_to(&copy).unwrap();
+    assert_eq!(prove_on_copy(&copy, &sealed, &plan).unwrap(), proof);
+    assert_eq!(
+        store.prove_checkpoint_plan(&sealed, &wrong, scratch.path()).unwrap(),
+        wrong_proof
     );
 }
 
