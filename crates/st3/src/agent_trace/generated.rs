@@ -1,5 +1,5 @@
-// Generated; do not edit. Inputs: src/schema.ts, src/bindings.ts, src/projection.ts, src/generator.ts, src/registry.ts, ../schema-registry/rust/Cargo.toml, ../schema-registry/rust/src/lib.rs, ../schema-registry/rust/src/numbers.rs, ../schema-registry/rust/src/runtime.rs, ../schema-registry/rust/src/bin/schema-registry-rust.rs, rust/Cargo.lock, package.json, ../../.oxfmtrc.json.
-// Regenerate: pnpm run generate; sha256=432af657e02502dee2a6f3f1dfdddeae98bd9abfa988515b3f1ec1d47cf90344
+// Generated; do not edit. Inputs: src/schema.ts, src/bindings.ts, src/projection.ts, src/generator.ts, src/registry.ts, ../schema-registry/src/primitives.ts, ../schema-registry/rust/Cargo.toml, ../schema-registry/rust/src/lib.rs, ../schema-registry/rust/src/numbers.rs, ../schema-registry/rust/src/runtime.rs, ../schema-registry/rust/src/bin/schema-registry-rust.rs, rust/Cargo.lock, package.json, ../../.oxfmtrc.json.
+// Regenerate: pnpm run generate; sha256=7a73b89e61756bf5cc1afaa1e1e5c08956d1c9fda39028d2855628f7b272904c
 pub mod __schema_registry_runtime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error { Invalid(String) }
@@ -227,11 +227,13 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1Type { fn deserialize<D
 pub struct AgentTraceRuntimeV1WhoAgent(String);
 impl AgentTraceRuntimeV1WhoAgent { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:agent(?:\\/[a-z0-9]+(?:-[a-z0-9]+)*)+|(?:[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:direct\\.[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:[a-z0-9](?:[a-z0-9-]{0,6}[a-z0-9])?|x-(?:2[de]|3[0-9]|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9a]){1,255}))$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:agent\\/[A-Za-z0-9][A-Za-z0-9._@-]*(?:\\/(?:[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.\\.[A-Za-z0-9._@-]*|\\.))*|(?:[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:direct\\.[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:[a-z0-9](?:[a-z0-9-]{0,6}[a-z0-9])?|x-(?:2[de]|3[0-9]|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9a]){1,255}))$").expect("schema pattern"));
+static PATTERN_3: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:agent\\/[A-Za-z0-9._@/-]{1,512}|[^/]+)$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoAgent: minLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoAgent: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoAgent: pattern".into())); }
 if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoAgent: pattern".into())); }
+if !PATTERN_3.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoAgent: pattern".into())); }
 Ok(()) } }
 impl TryFrom<String> for AgentTraceRuntimeV1WhoAgent { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
 impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhoAgent { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
@@ -240,9 +242,12 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhoAgent { fn deseriali
 pub struct AgentTraceRuntimeV1WhoPrincipal(String);
 impl AgentTraceRuntimeV1WhoPrincipal { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^person\\/[A-Za-z0-9][A-Za-z0-9._@-]*(?:\\/(?:[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.\\.[A-Za-z0-9._@-]*|\\.))*$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoPrincipal: minLength".into())); }
+if value.len() > 519 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoPrincipal: x-maxUtf8ByteLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoPrincipal: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoPrincipal: pattern".into())); }
+if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoPrincipal: pattern".into())); }
 Ok(()) } }
 impl TryFrom<String> for AgentTraceRuntimeV1WhoPrincipal { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
 impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhoPrincipal { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
@@ -273,11 +278,13 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhoPersona { fn deseria
 pub struct AgentTraceRuntimeV1WhoSupervisor(String);
 impl AgentTraceRuntimeV1WhoSupervisor { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:agent(?:\\/[a-z0-9]+(?:-[a-z0-9]+)*)+|(?:[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:direct\\.[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:[a-z0-9](?:[a-z0-9-]{0,6}[a-z0-9])?|x-(?:2[de]|3[0-9]|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9a]){1,255}))$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:agent\\/[A-Za-z0-9][A-Za-z0-9._@-]*(?:\\/(?:[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.\\.[A-Za-z0-9._@-]*|\\.))*|(?:[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:direct\\.[a-z0-9]+(?:-[a-z0-9]+)*\\.)?(?:[a-z0-9](?:[a-z0-9-]{0,6}[a-z0-9])?|x-(?:2[de]|3[0-9]|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9a]){1,255}))$").expect("schema pattern"));
+static PATTERN_3: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:agent\\/[A-Za-z0-9._@/-]{1,512}|[^/]+)$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoSupervisor: minLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoSupervisor: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoSupervisor: pattern".into())); }
 if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoSupervisor: pattern".into())); }
+if !PATTERN_3.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhoSupervisor: pattern".into())); }
 Ok(()) } }
 impl TryFrom<String> for AgentTraceRuntimeV1WhoSupervisor { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
 impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhoSupervisor { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }
@@ -309,8 +316,9 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyMissionName { fn des
 pub struct AgentTraceRuntimeV1WhyMissionRun(String);
 impl AgentTraceRuntimeV1WhyMissionRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:[0-9a-f]{32}|mission-run\\/(?:[a-z0-9][a-z0-9._-]*\\/)+[0-9a-f]{32})$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:[0-9a-f]{32}|mission-run\\/[A-Za-z0-9][A-Za-z0-9._@-]*(?:\\/(?:[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.[A-Za-z0-9_@-][A-Za-z0-9._@-]*|\\.\\.\\.[A-Za-z0-9._@-]*|\\.))*)$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: minLength".into())); }
+if value.len() > 524 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: x-maxUtf8ByteLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
 if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
@@ -340,8 +348,9 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyStepName { fn deseri
 pub struct AgentTraceRuntimeV1WhyStepRun(String);
 impl AgentTraceRuntimeV1WhyStepRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:work-)?[0-9a-f]{32}$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^[A-Za-z0-9][A-Za-z0-9._@-]{0,511}$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: minLength".into())); }
+if value.len() > 512 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: x-maxUtf8ByteLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
 if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
@@ -418,7 +427,7 @@ pub r#version: Option<AgentTraceRuntimeV1HowHarnessVersion>,
 pub struct AgentTraceRuntimeV1HowModelRoute(String);
 impl AgentTraceRuntimeV1HowModelRoute { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^[a-z0-9][a-z0-9._-]*\\/[a-z0-9][a-z0-9._+-]*$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^[a-z0-9][a-z0-9._-]*\\/[^\0- \u{7f}-\u{a0}\u{ad}\u{600}-\u{605}\u{61c}\u{6dd}\u{70f}\u{890}-\u{891}\u{8e2}\u{1680}\u{180e}\u{2000}-\u{200f}\\u2028-\u{202f}\u{205f}-\u{2064}\u{2066}-\u{206f}\u{3000}\u{feff}\u{fff9}-\u{fffb}\u{110bd}\u{110cd}\u{13430}-\u{1343f}\u{1bca0}-\u{1bca3}\u{1d173}-\u{1d17a}\u{e0001}\u{e0020}-\u{e007f}]+$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowModelRoute: minLength".into())); }
 if self::__schema_registry_runtime::utf16_len(value) > 64 { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowModelRoute: maxLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowModelRoute: pattern".into())); }
@@ -503,11 +512,10 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1HowIssuanceVariant0Tag 
 pub struct AgentTraceRuntimeV1HowIssuanceVariant0StepRun(String);
 impl AgentTraceRuntimeV1HowIssuanceVariant0StepRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^step-run\\/(?:work-)?[0-9a-f]{32}\\/[a-z0-9][a-z0-9._-]*$").expect("schema pattern"));
+static PATTERN_0: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^step-run\\/[A-Za-z0-9][A-Za-z0-9._@-]{0,511}\\/[^/\t-\\r \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\\u2028-\\u2029\u{202f}\u{205f}\u{3000}]+(?:\\/[^/\t-\\r \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\\u2028-\\u2029\u{202f}\u{205f}\u{3000}]+)*$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: minLength".into())); }
-if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: pattern".into())); }
-if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: pattern".into())); }
-if !PATTERN_2.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: pattern".into())); }
+if value.split('/').skip(2).any(|segment| segment.len() > 160) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: x-maxUtf8SegmentByteLength".into())); }
+if !PATTERN_0.is_match(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: pattern".into())); }
 Ok(()) } }
 impl TryFrom<String> for AgentTraceRuntimeV1HowIssuanceVariant0StepRun { type Error = self::__schema_registry_runtime::Error; fn try_from(value: String) -> Result<Self, Self::Error> { Self::validate(&value)?; Ok(Self(value)) } }
 impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1HowIssuanceVariant0StepRun { fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> { let value = <String as serde::Deserialize>::deserialize(d)?; Self::try_from(value).map_err(serde::de::Error::custom) } }

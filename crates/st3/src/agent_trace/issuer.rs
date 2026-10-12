@@ -251,22 +251,22 @@ mod tests {
 
     #[test]
     fn declared_principal_is_only_a_validated_fallback_for_missing_reduction() {
-        let reduced = "person/reduced";
+        let reduced = "person/requester";
         assert!(reduced.starts_with("person/"));
         assert!(crate::graph::validate_name(reduced, true).is_ok());
         assert!(AgentTraceRuntimeV1WhoPrincipal::validate(reduced).is_ok());
-        for declared in [None, Some("person/fallback"), Some("agent/not-a-human")] {
-            assert_eq!(resolve_principal(Some("person/reduced".into()), declared),
-                Some("person/reduced".into()));
+        for declared in [None, Some("person/avery"), Some("agent/not-a-human")] {
+            assert_eq!(resolve_principal(Some("person/requester".into()), declared),
+                Some("person/requester".into()));
         }
-        for declared in ["person/fallback", "person/Team/User@Role", "person/user.name"] {
+        for declared in ["person/avery", "person/NAME/IDENTITY@IDENTITY", "person/NAME/._-"] {
             assert!(crate::graph::validate_name(declared, true).is_ok());
             assert_eq!(resolve_principal(None, Some(declared)), Some(declared.to_owned()));
         }
         assert_eq!(resolve_principal(None, None), None);
         for invalid in ["agent/not-a-human", "person/", "person/a:b", "person/../human",
             "person/a b", "person/é", "person//human",
-            " person/fallback", "person/fallback\n", "person/fallback "] {
+            " person/avery", "person/avery\n", "person/avery "] {
             assert_eq!(resolve_principal(None, Some(invalid)), None, "{invalid:?}");
         }
         assert_eq!(resolve_principal(None, Some(&format!("person/{}", "x".repeat(512)))), None);
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn unrepresentable_lease_omits_purpose_instead_of_fabricating_references() {
         let mut step = lease();
-        step.generation = "run-generation/not-a-generation".into();
+        step.generation = "run-generation/not a generation".into();
         let runtime = build(&facts(), Some(&step)).unwrap();
         assert!(runtime.why.is_none());
         assert!(runtime.how.issuance.is_none());

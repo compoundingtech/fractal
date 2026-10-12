@@ -1346,7 +1346,7 @@ async fn trace_principal_mission_owner_cost_is_independent_of_step_count() {
         assert_eq!(run.steps.len(), steps);
         let source = r#"version 2
 account "principal/bound" {
-  provider "anthropic"; owner "person/bound"; plan "max"; login "/logins/principal";
+  provider "anthropic"; owner "person/owner"; plan "max"; login "/logins/principal";
 }
 agent "cost/principal-owned" { command "true" }
 agent "cost/principal-authored" { command "true" }
@@ -1363,7 +1363,7 @@ agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
             kdl: source.into(), source_name: None,
         }).unwrap();
         store.apply_as(
-            &intent, &planned.subject_tokens, "principal-seats", Some("person/author"),
+            &intent, &planned.subject_tokens, "principal-seats", Some("person/reviewer"),
         ).unwrap();
         let app = st3::api::router(AppState {
             store: store.clone(),
@@ -1400,14 +1400,14 @@ agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/bound"));
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/owner"));
         // A declaration without mission ownership follows its writer.
         let response = app.oneshot(Request::builder()
             .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-authored")
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/author"));
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/reviewer"));
     }
     let (small, large) = (measurements[0], measurements[1]);
     println!("trace principal 100 -> 1000 mission steps: {small:?} -> {large:?}");
