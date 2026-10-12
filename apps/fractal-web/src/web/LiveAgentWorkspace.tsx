@@ -29,6 +29,7 @@ import { AgentFolders } from '../shell/AgentFolders.tsx'
 import { useSidebarFolders } from '../folders/useSidebarFolders.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
 import { fixtureSidebarState, sidebarState } from '../shell/sidebar/state.ts'
+import { ResponsiveAgentSidebar, sidebarDrawerBreakpoint, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
 
 // A static import would evaluate the kit Transcript/Markdown/refractor before the shell paints.
 // Demand and speculative prefetch share one in-flight request; rejection releases it for retry.
@@ -126,7 +127,21 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), now = useNow()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [scheme, setScheme] = useAtom(palette)
-  const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
+  const [sidebarDrawerOpen, setSidebarDrawerOpen] = React.useState(false)
+  const sidebarOpener = React.useRef<HTMLButtonElement>(null)
+  const subscribeSidebarViewport = React.useCallback((callback: () => void) => subscribeViewport(() => {
+    if (window.innerWidth >= sidebarDrawerBreakpoint) setSidebarDrawerOpen(false)
+    callback()
+  }), [])
+  const viewport = React.useSyncExternalStore(subscribeSidebarViewport, viewportWidth, viewportWidth)
+  const narrowSidebar = viewport < sidebarDrawerBreakpoint
+  const toggleSidebar = React.useCallback(() => {
+    if (narrowSidebar) {
+      sidebarOpener.current?.focus()
+      setSidebarDrawerOpen(value => !value)
+    } else setCollapsed(value => !value)
+  }, [narrowSidebar, setCollapsed])
+  useSidebarShortcut(toggleSidebar)
   const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
@@ -137,6 +152,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
     // as closing the card, without replacing any roster nodes during a switch.
     hoverOwner.current?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     hoverOwner.current = null
+    setSidebarDrawerOpen(false)
   }, [location])
   const agents = fleet._tag === 'Observed' ? fleet.value.agents : []
   const rosterObserved = fleet._tag === 'Observed'
@@ -180,6 +196,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
     if (ref !== current) onSelectConversation?.(ref)
     setDiffOpen(false)
     setOpenedTool(undefined)
+    setSidebarDrawerOpen(false)
     navigate(ref)
   }
   const open = (request: OpenRequest) => {
@@ -211,10 +228,10 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
   const chosen = panes.find((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ?? urlPane
   const visiblePanes = chosen && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...panes, chosen] : panes
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
-  const width = dragWidth ?? Math.round(ratio * viewport)
-  const maxPanel = Math.max(240, viewport - (collapsed ? 40 : Math.min(width, Math.max(208, Math.min(440, viewport - 640)))) - 640)
+  const maxSidebar = Math.max(sidebarMinimumWidth, Math.min(440, viewport - 640))
+  const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
+  const maxPanel = Math.max(240, viewport - (narrowSidebar || collapsed ? 0 : width) - 640)
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
-  const maxSidebar = Math.max(208, Math.min(440, viewport - 640))
   const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
   // The panes are portalled from outside the shell providers: those values change on every
   // switch, and React then scans every fiber below a memoized pane for consumers, which costs
@@ -225,15 +242,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
           <ThreadHeaderSlotContext.Provider value={headerSlot}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-              <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
-                <header {...stylex.props(styles.brand)}>
-                  <Aria.Button aria-label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} {...stylex.props(styles.iconButton)}>
-                    {collapsed ? '»' : '«'}
-                  </Aria.Button>
-                  {collapsed ? null : <strong>Fractal</strong>}
-                </header>
-                {collapsed ? null : (
-                  <>
+              <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={sidebarDrawerOpen} onDrawerOpenChange={setSidebarDrawerOpen} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>
                     <LiveSidebarSearch value={search} onChange={setSearch} />
                     <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
                       {fleet._tag === 'Waiting' ? <div aria-hidden="true" data-wf-roster-skeleton="waiting" {...stylex.props(styles.rosterSkeleton)}>
@@ -266,12 +275,9 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                       </Aria.Button>
                       <GatewayConnectionStatus />
                     </footer>
-                  </>
-                )}
-              </aside>
-              <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
+              </ResponsiveAgentSidebar>
               <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                <ThreadHeader terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <ConversationHeaderActions key={current} agentRef={current} />} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
+                <ThreadHeader sidebarCollapsed={narrowSidebar || collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={current === '' ? undefined : <ConversationHeaderActions key={current} agentRef={current} />} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} status={headerRow?.status} statusLabel={headerRow?.statusLabel} statusSince={headerRow?.statusSince} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} now={now} panelOpen={diffOpen} drawerOpen={selectedPane.includes('terminal/')} onTogglePanel={() => setDiffOpen((value) => !value)} onToggleDrawer={() => { if (selectedPane.startsWith('terminal/')) navigate(current); else if (terminalRef !== undefined) open({ ref: terminalRef }) }} />
                 <LiveConnectionBanner />
                 {visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
@@ -412,8 +418,6 @@ export function LiveSidebarSearch({ value, onChange }: { readonly value: string;
 const styles = stylex.create({
   legacyBridge: { '--canvas': c.canvas, '--panel': c.raised, '--recess': c.message, '--ink': c.fg, '--muted': c.fgMuted, '--line': c.borderStrong, '--accent': c.primary, '--on-accent': c.onPrimary, '--selection': c.rowActive, '--good': c.done, '--warning': c.attention, '--danger': c.dangerFg, '--sans': t.fontSans, '--mono': t.fontMono },
   app: { display: 'flex', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', width: '100%', overflow: 'hidden', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
-  sidebar: { display: 'flex', flexDirection: 'column', flexShrink: 0, minHeight: 0, overflow: 'hidden', backgroundColor: c.sidebar },
-  brand: { height: g.band, paddingInline: s.lg, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
   iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   textButton: { padding: '4px 8px', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer', fontSize: t.metaSize },
   // Message fill plus a hairline: raised equals the sidebar surface in light mode.

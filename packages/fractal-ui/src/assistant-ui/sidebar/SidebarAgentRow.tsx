@@ -9,6 +9,7 @@ import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './Sidebar
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
 import { SidebarRowSignals, attachSidebarLine1Fit } from './SidebarRowSignals'
+import { SidebarTreeLevel } from './SidebarTreeLevel'
 
 export type RowVariant = 'SR-1' | 'SR-2' | 'SR-3'
 export type RowLayout = 'SR2-A' | 'SR2-B' | 'SR2-C'
@@ -32,6 +33,8 @@ export type SidebarAgentRowProps = SidebarClock & {
   readonly onToggleChildren?: (ref: string) => void
   readonly inTree?: boolean
   readonly treeExpanded?: boolean
+  /** Controlled expansion for recursive, non-RAC subagent rows. */
+  readonly expandedRefs?: ReadonlySet<string>
   /** Nested navigation can spend its first line on the title without discarding time. */
   readonly timePlacement?: 'column' | 'subtitle'
 }
@@ -116,7 +119,8 @@ export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & Sideba
     </dl>
   </div>
 }
-export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', active = false, query = '', now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded, timePlacement = 'column' }: SidebarAgentRowProps) {
+export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', active = false, query = '', now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded, expandedRefs, timePlacement = 'column' }: SidebarAgentRowProps) {
+  const treeLevel = React.useContext(SidebarTreeLevel)
   const title = sidebarRowTitle(item)
   const host = item.host
   const metadata = React.useMemo(() => sidebarRowDescription(item), [item])
@@ -128,7 +132,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const usd = item.usage._tag === 'Known' ? item.usage.usd : undefined
   const tokens = item.usage._tag === 'Known' ? item.usage.tokens : undefined
   const usageScope = item.usage._tag === 'Known' && item.usage.scope === '24h-root-and-subagents' ? '24h root and subagents' : 'Lifetime including subagents'
-  const expanded = treeExpanded ?? false
+  const expanded = treeExpanded ?? expandedRefs?.has(item.ref) ?? false
   const canOpen = callbacks?.select !== undefined || onOpen !== undefined
   const rowLayout = variant === 'SR-2' ? layout : 'SR2-A'
   const rowGlyph = variant === 'SR-2' ? 'SG-1' : glyph
@@ -181,7 +185,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   </>
   const rowStyle = stylex.props(styles.row)
   return <div ref={hoverLifetime} data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') { clearTimeout(hoverTimer.current); setHoverOpen(false) }; if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() } }}>
-    <div ref={rowAnchor} data-testid="taste-agent-row" data-time-placement={subtitleTime ? 'subtitle' : 'column'} data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} aria-description={metadata} {...stylex.props(styles.rowWrap, variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, subtitleTime && (item.children.length === 0 ? styles.rowWrapSubtitleTime : styles.rowWrapParentSubtitleTime), styles[variant], active && styles.active)}>
+    <div ref={rowAnchor} data-testid="taste-agent-row" data-time-placement={subtitleTime ? 'subtitle' : 'column'} data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} aria-description={metadata} {...stylex.props(styles.rowWrap, styles.treeIndent(treeLevel), variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, subtitleTime && (item.children.length === 0 ? styles.rowWrapSubtitleTime : styles.rowWrapParentSubtitleTime), styles[variant], active && styles.active)}>
       <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly /></span>
       <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" title="Needs your attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
       {!subtitleTime && <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>}
@@ -205,7 +209,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
         {item.children.length > 0 && <Button data-row-column="children" slot={inTree ? 'chevron' : undefined} isDisabled={!inTree && onToggleChildren === undefined} aria-labelledby="" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${item.children.length} subagents`} aria-expanded={expanded} onPress={inTree ? undefined : () => onToggleChildren?.(item.ref)} {...stylex.props(styles.iconButton, styles.childrenToggle, variant === 'SR-2' && styles.childrenTop, variant === 'SR-1' && styles.childrenSingle)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} />{extraSignals.includes('X-subs') && <span data-row-signal="X-subs" data-line1-drop="subs">{item.children.length}</span>}</Button>}
       </div>
     </div>
-    {!inTree && expanded && item.children.length > 0 && <div {...stylex.props(styles.children)}>{item.children.map(child => <SidebarAgentRow key={child.ref} item={child} variant={variant} layout={layout} glyph={glyph} extraSignals={extraSignals} discRefinement={discRefinement} query={query} {...clock} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} onToggleChildren={onToggleChildren} />)}</div>}
+    {!inTree && expanded && item.children.length > 0 && <SidebarTreeLevel value={treeLevel + 1}>{item.children.map(child => <SidebarAgentRow key={child.ref} item={child} variant={variant} layout={layout} glyph={glyph} extraSignals={extraSignals} discRefinement={discRefinement} query={query} {...clock} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} onToggleChildren={onToggleChildren} expandedRefs={expandedRefs} />)}</SidebarTreeLevel>}
   </div>
 })
 const styles = stylex.create({
@@ -218,6 +222,7 @@ const styles = stylex.create({
   // The row is the containing block for its visually hidden details trigger; without it the
   // absolutely positioned trigger escapes every scroll clip and extends the document.
   rowWrap: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) ${g.controlSm} var(--sidebar-metric-track, ${g.sidebarMetric}) max-content`, alignContent: 'center', alignItems: 'center', columnGap: s.xs2, rowGap: s.xs2, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fg, ':hover': { backgroundColor: surface.rowHover } },
+  treeIndent: (level: number) => ({ paddingInlineStart: `calc(${s.sm} + ${level - 1} * var(--sidebar-tree-step, 16px))` }),
   row: { display: 'grid', gridColumn: '2 / -1', gridRow: '1 / -1', gridTemplateColumns: 'subgrid', gridTemplateRows: 'subgrid', alignItems: 'center', minWidth: 0, width: '100%', height: '100%', padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
   'SR-1': { height: g.controlLg, gridTemplateRows: '1fr' }, 'SR-2': { height: g.sidebarRow, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, rowGap: s.zero }, 'SR-3': { height: g.sidebarThree, gridTemplateRows: `${t.uiLeading} ${g.controlSm} ${t.metaLeading}` },
   active: { backgroundColor: surface.rowActive },
@@ -251,5 +256,5 @@ const styles = stylex.create({
   detailValue: { margin: s.zero, minWidth: 0, color: ink.fg },
   popover: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.sm, minWidth: g.menuMin, boxShadow: elevation.popover, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 30 },
   menu: { outline: 'none' }, menuItem: { display: 'flex', alignItems: 'center', minHeight: g.menuRow, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outline: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
-  mark: { backgroundColor: surface.rowActive, color: ink.fg, fontWeight: t.weightSemibold }, children: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.border },
+  mark: { backgroundColor: surface.rowActive, color: ink.fg, fontWeight: t.weightSemibold },
 })

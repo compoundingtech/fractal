@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { describe, expect, it, vi } from 'vitest'
 import type { AgentFoldersProps, SidebarNode } from '../folders/sidebarContract.ts'
 import { expect as expectA11y, within } from 'storybook/test'
-import { SidebarAgentRow } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, SidebarTreeLevel } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { sidebarRow } from '../web/sidebarRow.ts'
 import { fleetFromAgents } from '../data/projections.ts'
 import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
@@ -38,6 +38,7 @@ const fixture: readonly SidebarNode[] = [
     { _tag: 'Agent', id: 'agent/two', subject: 'agent/two', label: 'Two' },
   ] },
 ]
+const LevelProbe = ({ label }: { readonly label: string }) => <span data-sidebar-level={React.useContext(SidebarTreeLevel)}>{label}</span>
 const mount = async () => {
   const host = document.createElement('div')
   document.body.append(host)
@@ -49,7 +50,7 @@ const mount = async () => {
     const props: AgentFoldersProps = {
       tree: apply(fixture), canDrop: () => ({ ok: true }), onMove: () => {}, onCreateFolder: () => {}, onRenameFolder: () => {}, onDeleteFolder: () => {},
       onToggleCollapsed: change => { toggles.push(change); setCollapsed(previous => { const next = new Set(previous); if (change.collapsed) next.add(change.id); else next.delete(change.id); return next }) },
-      renderAgent: node => <span>{node.label}</span>,
+      renderAgent: node => <LevelProbe label={node.label} />,
     }
     return <AgentFolders {...props} />
   }
@@ -58,14 +59,17 @@ const mount = async () => {
   return { host, row, toggles, dispose: async () => { await React.act(async () => root.unmount()); host.remove() } }
 }
 describe('bound live folder tree', () => {
-  it('derives levels and compact 8px offsets from RAC hierarchy, including folder members and Unfiled', async () => {
+  it('supplies RAC levels to inner content without shifting full-width rows; the browser story proves the 16px step', async () => {
     const view = await mount()
     try {
-      for (const [label, level, offset] of [['Alpha', 1, 0], ['Beta', 2, 8], ['Gamma', 3, 16], ['One', 2, 8], ['Two', 2, 8]] as const) {
+      for (const [label, level] of [['Alpha', 1], ['Beta', 2], ['Gamma', 3], ['One', 2], ['Two', 2]] as const) {
         const row = view.row(label)
         expect(row, label).toBeDefined()
         expect(row.getAttribute('aria-level'), label).toBe(String(level))
-        expect(Number.parseFloat(row.querySelector<HTMLElement>('[data-sidebar-content]')?.style.marginInlineStart ?? ''), label).toBe(offset)
+        expect(row.style.getPropertyValue('--tree-item-level'), label).toBe(String(level))
+        expect(row.querySelector<HTMLElement>('[data-sidebar-content]')?.style.marginInlineStart, label).toBe('')
+        const probe = row.querySelector<HTMLElement>('[data-sidebar-level]')
+        if (probe !== null) expect(probe.dataset.sidebarLevel, label).toBe(String(level))
       }
     } finally { await view.dispose() }
   })

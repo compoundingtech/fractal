@@ -11,7 +11,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { initialFeedSync, type FeedSyncObservation } from '../data/feedSync.ts'
 import { observed, waiting, type ConversationPage, type DataSource, type Feed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
-import { SidebarAgentRow } from '@smalltalk/fractal-ui/assistant-ui/shell'
+import { SidebarAgentRow, SidebarTreeLevel } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { within } from 'storybook/test'
 import { sidebarRow } from './sidebarRow.ts'
 import { fleetFromAgents } from '../data/projections.ts'
@@ -69,7 +69,7 @@ const mount = async (width: number) => {
   Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
 }
-const sidebar = () => host.querySelector('aside[aria-label="Agents"]')!
+const sidebar = () => host.querySelector<HTMLElement>('aside[aria-label="Agents"]')!
 const roster = () => sidebar().querySelector('nav[aria-label="Agent roster"]')!
 const footerStatus = () => sidebar().querySelector('footer [role="status"]')!
 
@@ -166,8 +166,8 @@ describe('kit sidebar time placement', () => {
   })
   it('reclaims the time track for nested titles while retaining time and the status glyph', async () => {
     const item = { ref: 'agent/example', id: 'agent/example', title: 'Example Agent', host: 'host/example', status: 'idle', statusLabel: 'Idle', freshness: 'live', children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Known', at: 4000, kind: 'turn-completed' } } as const
-    const mountRow = async (timePlacement: 'column' | 'subtitle') => {
-      await act(async () => root.render(<SidebarAgentRow inTree item={item} now={5000} extraSignals={[]} timePlacement={timePlacement} />))
+    const mountRow = async (timePlacement: 'column' | 'subtitle', level = 1) => {
+      await act(async () => root.render(<SidebarTreeLevel value={level}><SidebarAgentRow inTree item={item} now={5000} extraSignals={[]} timePlacement={timePlacement} /></SidebarTreeLevel>))
       return host.querySelector('[data-testid="taste-agent-row"]')!
     }
     // jsdom cannot measure layout. Assert the real kit's emitted grid contract instead;
@@ -180,21 +180,51 @@ describe('kit sidebar time placement', () => {
     const nextGrid = JSON.parse(subtitle.getAttribute('data-style-contract')!).gridTemplateColumns
     expect(nextGrid).toContain('0px 0px max-content')
     expect(nextGrid).not.toContain('var(--sidebar-metric-track')
-    // Real 1440x900 browser fixture: the flat reference title at 256px is 170px.
-    // Read the emitted kit geometry, not jsdom's (nonexistent) layout. RAC's live
-    // tree adds no inset; the roster contributes 8px on each side and hierarchy 8px.
-    const geometry = JSON.parse(subtitle.getAttribute('data-style-contract')!)
-    const signals = JSON.parse(subtitle.querySelector('[data-row-trailing-signals]')!.getAttribute('data-style-contract')!)
-    const px = (value: string) => Number.parseFloat(value)
-    for (const level of [2, 3]) {
-      const width = 256 - 16 - (level - 1) * 8 - 2 * px(geometry.paddingInline)
-        - px(nextGrid) - px(signals.minWidth) - px(signals.marginInlineStart) - 3 * px(geometry.columnGap)
-      expect(width, `level ${level} versus measured flat reference`).toBeGreaterThanOrEqual(170)
+    // The 16px step spends title space exactly once. The browser stories measure
+    // text/glyph/right-column positions; jsdom checks the actual emitted contract.
+    for (const level of [1, 2, 3, 4, 5, 6]) {
+      const nested = await mountRow('subtitle', level)
+      const geometry = JSON.parse(nested.getAttribute('data-style-contract')!)
+      expect(geometry.paddingInlineStart).toBe(`calc(${geometry.paddingInline} + ${level - 1} * var(--sidebar-tree-step, 16px))`)
     }
     expect(subtitle.querySelector('[data-row-column="time"]')).toBeNull()
     expect(subtitle.querySelector('[data-row-column="subtitle"] [data-row-field="last-turn"]')).not.toBeNull()
     expect(subtitle.querySelector('[data-row-column="status"]')).not.toBeNull()
     // Negative control: the unchanged/default layout cannot satisfy the reclaimed-track contract.
     expect(previousGrid).not.toContain('0px 0px max-content')
+  })
+})
+
+describe('responsive agent navigation', () => {
+  it.each([440, 700])('starts closed below 900px and opens a minimum-width modal at %ipx', async width => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(host.querySelector('aside[aria-label="Agents"]')).toBeNull()
+    expect(host.querySelector('[data-resizer="live-agent-sidebar"]')).toBeNull()
+    const opener = within(host).getByRole('button', { name: 'Expand sidebar' })
+    await act(async () => opener.click())
+    const dialog = within(host).getByRole('dialog', { name: 'Agent navigation' })
+    const workspace = host.querySelector<HTMLElement>('section[aria-label="Agent workspace"]')!
+    expect(dialog.getAttribute('aria-modal')).toBe('true')
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).not.toBeNull()
+    expect(dialog.closest('[inert], [aria-hidden="true"]')).toBeNull()
+    expect(sidebar().getAttribute('data-sidebar-presentation')).toBe('drawer')
+    expect(Number.parseFloat(sidebar().style.width)).toBeGreaterThanOrEqual(240)
+    await act(async () => within(host).getByRole('button', { name: 'Close agents' }).click())
+    expect(host.querySelector('aside[aria-label="Agents"]')).toBeNull()
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).toBeNull()
+    await act(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', ctrlKey: true, bubbles: true })) })
+    const reopened = within(host).getByRole('dialog', { name: 'Agent navigation' })
+    expect(reopened.getAttribute('aria-modal')).toBe('true')
+    expect(workspace.closest('[inert], [aria-hidden="true"]')).not.toBeNull()
+  })
+
+  it.each([900, 1440])('keeps a minimum-width dock and resize floor at %ipx', async width => {
+    registry.set(agents, observed({ value: [agent] }))
+    await mount(width)
+    expect(sidebar().getAttribute('data-sidebar-presentation')).toBe('dock')
+    expect(Number.parseFloat(sidebar().style.width)).toBeGreaterThanOrEqual(240)
+    expect(within(host).getByRole('separator', { name: 'Agent sidebar width' }).getAttribute('aria-valuemin')).toBe('240')
+    expect(host.querySelector('[role="dialog"]')).toBeNull()
   })
 })

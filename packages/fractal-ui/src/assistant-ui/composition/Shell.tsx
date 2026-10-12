@@ -121,6 +121,7 @@ export function ThreadHeader({
   onToggleDrawer,
   sidebarCollapsed = false,
   onToggleSidebar,
+  sidebarToggleRef,
 }: {
   /** Reported folder for the breadcrumb; omitted entirely when the host knows none. */
   folder?: string
@@ -148,14 +149,15 @@ export function ThreadHeader({
   /** When the sidebar is collapsed its separator is gone; the header carries the expand toggle. */
   sidebarCollapsed?: boolean
   onToggleSidebar?: () => void
+  sidebarToggleRef?: React.Ref<HTMLButtonElement>
 }) {
   const terminalReasonId = React.useId()
   return (
     <header data-testid="thread-header" {...stylex.props(styles.header)}>
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
-        <button type="button" aria-label="Expand sidebar" title="Expand sidebar" onClick={onToggleSidebar} {...stylex.props(styles.ghostMd)}>
-          <Icon name="chevron-right" />
-        </button>
+        <Button ref={sidebarToggleRef} aria-label="Expand sidebar" onPress={onToggleSidebar} {...stylex.props(styles.ghostMd)}>
+          <span title="Expand sidebar (⌘/Ctrl+B)"><Icon name="chevron-right" /></span>
+        </Button>
       ) : null}
       <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>

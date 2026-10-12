@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Derive agent-tree indentation from hierarchy levels and use an isolated minimum-width navigation drawer on narrow screens.",
+  "replay": { "status": "none", "detail": "Web presentation only." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No policy changes." },
+  "compatibility": { "status": "none", "detail": "Wide screens retain docked navigation. Narrow screens open agent navigation as a modal drawer with focus and background isolation." },
+  "downtime": { "status": "none", "detail": "No downtime required." },
+  "manual": { "status": "none", "detail": "No manual steps required." },
+  "recovery": { "status": "none", "detail": "No persisted state changes." }
+}

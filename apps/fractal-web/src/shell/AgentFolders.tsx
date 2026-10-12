@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
 import type * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
+import { SidebarTreeLevel } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { useLocale } from 'react-aria'
 import {
   Button as AriaButton,
@@ -73,6 +74,7 @@ const styles = stylex.create({
     position: 'relative',
     gap: '3px',
     padding: '5px 6px',
+    paddingInlineStart: 'calc(6px + (var(--tree-item-level, 1) - 1) * var(--sidebar-tree-step, 16px))',
     marginBlock: '1px',
     borderRadius: scale.radiusSm,
     backgroundColor: {
@@ -144,8 +146,8 @@ const styles = stylex.create({
   affordance: {
     display: 'inline-flex',
     alignItems: 'center',
-    justifyContent: 'center',
-    width: '14px',
+    justifyContent: 'start',
+    width: '16px',
     height: '18px',
     flexShrink: 0,
     color: tokens['--ds-gray-900'],
@@ -161,6 +163,7 @@ const styles = stylex.create({
     position: 'relative',
     gap: '4px',
     padding: '4px 8px',
+    paddingInlineStart: 'calc(6px + (var(--tree-item-level, 1) - 1) * var(--sidebar-tree-step, 16px))',
     minHeight: '30px',
   },
   // React Aria Components 1.21.1 Tree hardcodes hasDragButton: true and requires
@@ -190,7 +193,7 @@ const styles = stylex.create({
     fontWeight: 600,
   },
   drag: { position: 'absolute', insetInlineEnd: 0, top: 0, opacity: { default: 0, ':focus-visible': 1 }, width: 16, height: 16 },
-  indent: (depth: number) => ({ marginInlineStart: `${depth * 16}px` }),
+  treeContent: { position: 'relative', width: '100%' },
 })
 
 /** Fractal folders own membership; view-only filters, order and collapse use shared persistence. */
@@ -320,12 +323,11 @@ const LegacyAgentFolders = React.memo(
       [selection, dispatch, filters.query, multipleHosts, source],
     )
     for (const id of agentElements.keys()) if (!rows.has(id)) agentElements.delete(id)
-    const renderAgent = ({ id, depth }: { readonly id: string; readonly depth: number }) => {
+    const renderAgent = ({ id }: { readonly id: string }) => {
       const { workspace } = rows.get(id)!
       const cached = agentElements.get(id)
       if (
         cached !== undefined &&
-        cached.depth === depth &&
         cached.workspace.title === workspace.title &&
         cached.workspace.host === workspace.host &&
         cached.workspace.unread.length === workspace.unread.length
@@ -364,7 +366,6 @@ const LegacyAgentFolders = React.memo(
                 workspace={rowWorkspace}
                 selection={selection}
                 dispatch={dispatch}
-                depth={depth}
                 query={filters.query}
                 multipleHosts={multipleHosts}
               />
@@ -372,26 +373,23 @@ const LegacyAgentFolders = React.memo(
           </TreeItemContent>
         </TreeItem>
       )
-      agentElements.set(id, { workspace: rowWorkspace, depth, element })
+      agentElements.set(id, { workspace: rowWorkspace, element })
       return element
     }
     const renderFolder = ({
       folder,
-      depth,
     }: {
       readonly folder: ProjectedFolder
-      readonly depth: number
     }): React.ReactElement => {
       const children = [
-        ...folder.folders.map((child) => renderFolder({ folder: child, depth: depth + 1 })),
-        ...folder.members.map((id) => renderAgent({ id, depth: depth + 1 })),
+        ...folder.folders.map((child) => renderFolder({ folder: child })),
+        ...folder.members.map((id) => renderAgent({ id })),
       ]
       const count = descendantCount(folder)
       const cached = folderElements.get(folder.id)
       const sameContent =
         cached !== undefined &&
         cached.name === folder.name &&
-        cached.depth === depth &&
         cached.count === count
       if (sameContent && sameElements(cached.children, children)) return cached.element
       const content = sameContent ? (
@@ -399,7 +397,7 @@ const LegacyAgentFolders = React.memo(
       ) : (
         <TreeItemContent>
           {({ isExpanded }) => (
-            <div {...stylex.props(styles.folder, styles.indent(depth))}>
+            <div {...stylex.props(styles.folder)}>
               <AriaButton slot="chevron" {...stylex.props(styles.affordance)}>
                 <WfIcon name={isExpanded ? 'chevronDown' : 'chevronRight'} />
               </AriaButton>
@@ -429,10 +427,10 @@ const LegacyAgentFolders = React.memo(
           {children}
         </TreeItem>
       )
-      folderElements.set(folder.id, { name: folder.name, depth, count, content, children, element })
+      folderElements.set(folder.id, { name: folder.name, count, content, children, element })
       return element
     }
-    const unfiledChildren = visibleUnfiled.map((id) => renderAgent({ id, depth: 1 }))
+    const unfiledChildren = visibleUnfiled.map((id) => renderAgent({ id }))
     const cachedUnfiled = folderElements.get(unfiled)
     const unfiledContent =
       cachedUnfiled?.count === visibleUnfiled.length ? (
@@ -468,7 +466,6 @@ const LegacyAgentFolders = React.memo(
       )
     folderElements.set(unfiled, {
       name: 'Unfiled',
-      depth: 0,
       count: visibleUnfiled.length,
       content: unfiledContent,
       children: unfiledChildren,
@@ -480,7 +477,7 @@ const LegacyAgentFolders = React.memo(
       [folderElements],
     )
     const nextItems = [
-      ...visibleFolders.map((folder) => renderFolder({ folder, depth: 0 })),
+      ...visibleFolders.map((folder) => renderFolder({ folder })),
       ...(visibleUnfiled.length === 0 && (visibleFolders.length > 0 || searching)
         ? []
         : [unfiledElement]),
@@ -655,12 +652,10 @@ export const sameFolderFleet = (
 type AgentRowWorkspace = Pick<Workspace, 'id' | 'title' | 'host' | 'unread'>
 interface CachedAgentElement {
   readonly workspace: AgentRowWorkspace
-  readonly depth: number
   readonly element: React.ReactElement
 }
 interface CachedFolderElement {
   readonly name: string
-  readonly depth: number
   readonly count: number
   readonly content: React.ReactElement
   readonly children: readonly React.ReactElement[]
@@ -724,9 +719,9 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     <TreeItem key={node.id} id={node.id} textValue={node.label} hasChildItems={node._tag !== 'Agent'} onAction={node._tag === 'Agent' ? () => props.onSelect?.(node.id) : undefined} data-wf-agent-ref={node._tag === 'Agent' ? node.subject : undefined} className={treeItemClassName}>
       <TreeItemContent>
         {({ level, isExpanded }) => (
-          <div data-sidebar-content="" style={{ marginInlineStart: (level - 1) * 8, position: 'relative' }}>
+          <div data-sidebar-content="" {...stylex.props(styles.treeContent)}>
             <AriaButton slot="drag" aria-label={`Move ${node.label}`} {...stylex.props(styles.drag)} />
-            {node._tag === 'Agent' ? props.renderAgent?.(node) : (
+            {node._tag === 'Agent' ? <SidebarTreeLevel value={level}>{props.renderAgent?.(node)}</SidebarTreeLevel> : (
               <div {...stylex.props(styles.folder)}>
                 <AriaButton slot="chevron" {...stylex.props(styles.affordance)}><WfIcon name={isExpanded ? 'chevronDown' : 'chevronRight'} /></AriaButton>
                 <span {...stylex.props(styles.folderLabel)}>{node.label}</span>
@@ -906,14 +901,12 @@ const AgentFolderRow = React.memo(
     workspace,
     selection,
     dispatch,
-    depth,
     query,
     multipleHosts,
   }: {
     readonly workspace: AgentRowWorkspace
     readonly selection: Atom.Atom<string>
     readonly dispatch: (action: WindowAction) => void
-    readonly depth: number
     readonly query: string
     readonly multipleHosts: boolean
   }) => {
@@ -951,7 +944,7 @@ const AgentFolderRow = React.memo(
       })
     }
     return (
-      <CurrentAgent selection={selection} agentRef={workspace.id} status={status} depth={depth}>
+      <CurrentAgent selection={selection} agentRef={workspace.id} status={status}>
         {(current) => (
           <>
             <AgentUsageRow
@@ -1046,13 +1039,11 @@ const CurrentAgent = ({
   selection,
   agentRef,
   status,
-  depth,
   children,
 }: {
   readonly selection: Atom.Atom<string>
   readonly agentRef: string
   readonly status: AgentStatus
-  readonly depth: number
   readonly children: (current: boolean) => React.ReactNode
 }) => {
   const current = useAtomValue(selection, (selected) => selected === agentRef)
@@ -1064,7 +1055,6 @@ const CurrentAgent = ({
         status === 'working' && styles.workingRail,
         status === 'waiting' && styles.waitingRail,
         status === 'stale' && styles.staleRail,
-        styles.indent(depth),
         current && styles.selected,
       )}
     >
