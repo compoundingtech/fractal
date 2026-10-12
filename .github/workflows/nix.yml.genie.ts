@@ -38,7 +38,9 @@ export default githubWorkflow({
     "nix-release-x86_64-linux": {
       "if": "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository",
       "runs-on": ["self-hosted", "Linux", "X64", "smalltalk-nix-persistent"],
-      "timeout-minutes": 180,
+      // The complete graph includes legacy feature builds and the native runtime suite.
+      // Bound a first build without cutting off the suite after compilation has finished.
+      "timeout-minutes": 360,
       "steps": [
         {
           "uses": "actions/checkout@v4",
