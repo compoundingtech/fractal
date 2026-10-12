@@ -109,3 +109,49 @@ fn failed_feed_and_fresh_consumer_remain_conservative() {
     let fresh = Incremental::default(); fresh.observe(&store).unwrap();
     assert!(fresh.needs("stop:agent/invented-settled", 0));
 }
+
+
+#[test]
+fn directive_note_dirty_and_pending_hooks_advance_observation_without_changing_the_note() {
+    let store = managed_store();
+    let key = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+    store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    store.set_member_key(Some(key.clone())).unwrap();
+    store.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "daemon/amber".into(), kind: "daemon.started".into(), actor: None,
+        fields: std::collections::BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("features".into(), json!({"person_directive_note": 1})),
+        ]), evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let note = store.set_directive_note("person/gardener", "person/gardener", Some("Harvest the orchard"), None)
+        .unwrap().unwrap();
+    assert!(store.project_replication_backlog().unwrap());
+    let notes = store.directive_notes("person/gardener").unwrap();
+    for pending in [false, true] {
+        let incremental = cached_stop(&store);
+        let before = store.replication_projection_observation();
+        if pending {
+            store.connection.write().execute(
+                "INSERT INTO local_directive_note_pending(claim_id) VALUES(?1)", [&note.revision],
+            ).unwrap();
+        } else {
+            store.connection.write().execute(
+                "INSERT INTO local_directive_note_dirty(subject) VALUES('person/gardener')", [],
+            ).unwrap();
+        }
+        assert!(store.project_replication_backlog().unwrap());
+        assert_ne!(store.replication_projection_observation().0, before.0,
+            "directive-note hook row changes must refuse empty-token restoration");
+        assert!(!store.replication_projection_observation().1);
+        incremental.observe(&store).unwrap();
+        assert!(incremental.needs("stop:agent/invented-settled", 0));
+        assert_eq!(store.directive_notes("person/gardener").unwrap(), notes);
+        for table in ["local_directive_note_pending", "local_directive_note_dirty"] {
+            assert_eq!(store.readers.get().query_row(&format!("SELECT COUNT(*) FROM {table}"), [],
+                |row| row.get::<_, u64>(0)).unwrap(), 0);
+        }
+    }
+}
