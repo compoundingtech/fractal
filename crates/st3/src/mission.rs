@@ -1046,6 +1046,18 @@ fn parse_loop_stop(node: &KdlNode, metrics: &BTreeSet<String>) -> Result<LoopSto
                     ));
                 }
             }
+            "no-progress" => {
+                let value = child_integer_value(child)?;
+                if !(2..=100).contains(&value) {
+                    return Err(St3Error::new(
+                        "invalid-no-progress",
+                        "no-progress must be between 2 and 100",
+                    ));
+                }
+                if stop.no_progress.replace(value as u32).is_some() {
+                    return Err(St3Error::new("duplicate-no-progress", "no-progress repeats"));
+                }
+            }
             "token-budget" => {
                 let value = child_integer_value(child)?;
                 if value <= 0 {
