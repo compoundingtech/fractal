@@ -8,7 +8,7 @@ import { Button, Disclosure, DisclosurePanel, Tooltip, TooltipTrigger } from 're
 import { useHover } from 'react-aria'
 import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { AgentMessage } from '../assistant-ui/AgentMessage'
-import { AgentMessage as TranscriptAnswer } from '../assistant-ui/composition/Transcript'
+import { SeatProse } from '../assistant-ui/composition/Transcript'
 import { Icon, type IconName } from '../assistant-ui/composition/Icons'
 import { EmbraceRuntimeProvider } from '../assistant-ui/EmbraceRuntime'
 import type { TextItem } from '../assistant-ui/embrace-data/model'
@@ -26,7 +26,7 @@ const dimensions = {
   M: [{ id: 'M1', description: 'Time in input header; seat time / copy float above the run on reveal.' }, { id: 'M2', description: 'Time in the left first-line gutter; copy overlay top-right on reveal.' }, { id: 'M3', description: 'Time divider for inputs after ≥5 minutes or a day change; exact-time tooltip.' }, { id: 'M4', description: 'Time inline after the last line; copy overlay top-right on reveal.' }],
 } as const
 interface ExploreArgs { turn: `T${1 | 2 | 3}`; kind: 'K1' | 'K2' | 'K3'; meta: 'M1' | 'M2' | 'M3' | 'M4'; compareT: boolean; compareK: boolean; compareM: boolean; scheme: 'dark' | 'light'; width: 1440 | 900; recommended: boolean; probe: boolean }
-const glyphs: Record<TurnBlock['kind'], IconName> = { Person: 'message', Agent: 'message', Relay: 'send', System: 'gear', Seat: 'thought' }
+const glyphs: Record<TurnBlock['kind'], IconName> = { Person: 'person', Agent: 'message', Relay: 'arrow-right', System: 'gear', Seat: 'thought' }
 const clockFormat = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
 const exactFormat = new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'long' })
 const dayFormat = new Intl.DateTimeFormat('en-US', { dateStyle: 'short' })
@@ -37,7 +37,7 @@ const isDivider = (block: TurnBlock, previous?: TurnBlock) => block.kind !== 'Se
 function ExploreAnswer({ showMeta = false }: { readonly showMeta?: boolean }) {
   const item = useAuiState(state => state.message.metadata.custom.item) as TextItem | undefined
   if (item === undefined || item.role !== 'assistant') return null
-  return <TranscriptAnswer item={item as TextItem & { role: 'assistant' }} showMeta={showMeta} />
+  return <SeatProse item={item as TextItem & { role: 'assistant' }} showMeta={showMeta} />
 }
 // A new component closure per Block render remounted the prose after setTail, leaving
 // its timestamp portal attached to a detached paragraph and dropping descendant focus.
@@ -79,14 +79,14 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
   const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time>{time}</span></> : null}</span>
   const content = seat
     ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
-    : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human', frame: { _tag: 'Card' } } : { _tag: 'Incoming' }} headerMeta={inputMeta} headerGlyph={turn === `T${3}` ? { _tag: 'Hidden' } : { _tag: 'Icon', name: glyphs[block.kind] }} frameStyles={[...(turn === 'T2' ? [styles.bubbleFrame] : []), ...(kind === 'K2' ? [block.kind === 'Person' ? styles.humanRail : block.kind === 'Agent' ? styles.agentRail : styles.quietRail] : [])]} />
+    : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human', frame: { _tag: 'Card' } } : { _tag: 'Incoming' }} headerMeta={inputMeta} headerGlyph={turn === `T${3}` ? { _tag: 'Hidden' } : { _tag: 'Icon', name: glyphs[block.kind] }} frameStyles={[...(block.kind === 'Person' ? [styles.humanRail] : []), ...(turn === 'T2' ? [styles.bubbleFrame] : []), ...(kind === 'K2' && block.kind !== 'Person' ? [block.kind === 'Agent' ? styles.agentRail : styles.quietRail] : [])]} />
   const header = seat && turn === `T${3}` && previous?.sender !== block.sender
     ? <header data-turn-header {...stylex.props(styles.header)}><strong>{block.sender}</strong></header> : null
   const body = <div data-turn-content {...stylex.props(styles.content)}>{content}</div>
   return <div ref={root} {...hoverProps} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-hovered={isHovered || undefined} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && previous !== undefined && styles.turnStart, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, collapsedKind && styles.quiet)}>
     {turn === `T${3}` && !collapsedKind ? <span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name={glyphs[block.kind]} /></span> : null}
     {meta === 'M3' && isDivider(block, previous) ? <div data-time-divider {...stylex.props(styles.divider)}>{time}</div> : null}
-    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary, marker && styles.marker)}><span data-input-kind-icon aria-hidden="true" {...stylex.props(styles.summarySlot)}><Icon name={glyphs[block.kind]} scale="status" /></span><strong data-input-sender {...stylex.props(styles.summarySender)}>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}><span data-input-title-run {...stylex.props(styles.summaryRun)}>{block.text.split('\n')[0]}</span></span><span data-input-chevron data-expanded={expanded || undefined} {...stylex.props(styles.summarySlot)}><Icon name="chevron-right" /></span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{header}{body}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
+    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary, marker && styles.marker)}><span data-input-kind-icon aria-hidden="true" {...stylex.props(styles.summarySlot)}><Icon name={glyphs[block.kind]} scale="status" /></span><strong data-input-sender {...stylex.props(styles.summarySender)}>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}><span data-input-title-run {...stylex.props(styles.summaryRun)}>{block.text.split('\n')[0]}</span></span><span data-input-chevron data-expanded={expanded || undefined} {...stylex.props(styles.summarySlot)}><Icon name="chevron-right" scale="disclosure" /></span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{header}{body}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
     {meta === 'M1' && seat ? <div data-seat-meta-overlay data-affordance="reveal" {...stylex.props(styles.seatMeta)}><span data-meta-time>{time}</span>{copy}</div> : null}
     {meta === 'M1' && collapsedKind && !expanded ? <span data-collapsed-meta {...stylex.props(styles.collapsedMeta)}>{copy}<span data-meta-time>{time}</span></span> : null}
     {meta === 'M2' ? <div data-meta-time data-affordance="reveal" {...stylex.props(styles.timeOverlay, styles.gutterTime)}>{time}</div> : null}
@@ -143,7 +143,7 @@ const projectionCss = `
 [data-turns-explorer] [data-turn-block][data-hovered] [data-affordance="reveal"],
 [data-turns-explorer] [data-turn-block]:focus-within [data-affordance="reveal"],
 [data-turns-explorer] [data-turn-block][data-tapped] [data-affordance="reveal"] { opacity: 1; }
-[data-turns-explorer] [data-input-chevron] svg { width: ${g.iconSm}; height: ${g.iconSm}; transition: transform ${m.fast} ${m.ease}; }
+[data-turns-explorer] [data-input-chevron] svg { transition: transform ${m.fast} ${m.ease}; }
 [data-turns-explorer] [data-input-chevron][data-expanded] svg { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) { [data-turns-explorer] [data-input-chevron] svg { transition: none; } }
 `
