@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Compare publication and reconcile launch changes against the running incarnation's start evidence.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or derived-table version change. Existing start and runtime observations remain the evidence sources."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds three seek indexes for runtime observations by origin and start successes by incarnation, including locally retained successes. Existing stores create these additive indexes at open; numeric schema version and stored claim bodies are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged; no coordinated member upgrade is required. Members on earlier builds still use their earlier launch comparison."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Publication preview uses running-launch evidence and can report restart when the selected declaration already matches the file but the running incarnation has drifted. Reconcile no longer borrows start evidence from a different incarnation. Existing adopted runtimes without matching launch evidence keep running. No public CLI option or resource field is added in this slice; mixed-build clients and fleets have not been exercised."
+  },
+  "downtime": {
+    "status": "unknown",
+    "detail": "No deliberate seat interruption is added. Index creation can delay API readiness when opening an existing store; restart-to-API and restart-to-health durations have not been measured on deployed store sizes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual migration, identity change or operator action is required. Indexes install at normal store open."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Earlier binaries can reopen these stores and ignore the additive indexes. Reinstalling an earlier binary preserves claims but restores its earlier launch-evidence comparison."
+  }
+}

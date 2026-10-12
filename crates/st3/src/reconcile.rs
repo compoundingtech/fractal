@@ -877,9 +877,6 @@ pub struct Reconciler<R = NativeRuntime> {
     /// index of the subject's newest declaration it was read from.
     declared_checkouts: Mutex<HashMap<String, (u64, Option<(Checkout, String)>)>>,
     materialized_mission_generations: Mutex<BTreeSet<String>>,
-    /// Each running seat's incarnation and the member it was launched from, read once per
-    /// incarnation, so a pass compares the declared launch without reading the store.
-    launched_members: Mutex<HashMap<String, (String, Option<MemberSpec>)>>,
     retired_predecessor_generations: Mutex<BTreeSet<String>>,
     /// The person whose published launch geometry terminal seats start at.
     person: Option<String>,
@@ -1030,7 +1027,6 @@ impl Reconciler<NativeRuntime> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
-            launched_members: Mutex::new(HashMap::new()),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
@@ -1114,7 +1110,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
-            launched_members: Mutex::new(HashMap::new()),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
@@ -2730,7 +2725,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             Some(observation) if observation.status == "running" => {
                                 self.record_member(subject, &observation, true)?;
                                 if let Some(changes) =
-                                    self.declared_launch_changes(subject, member, &observation)?
+                                    self.declared_launch_changes(subject, &observation)?
                                 {
                                     // Rendering must succeed before we shut down a still-running seat.
                                     if let Some(error) = blocked.take() {
@@ -4761,60 +4756,32 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(self.store.launch_lineage(subject)?.pop().unwrap_or_default())
     }
 
-    /// Whether the latest launch was for the selected declaration, or for a revision it only
-    /// relabels. Older launches do not count: after A → B → A the seat runs A again.
-    /// What a running seat's declaration changed about how it launches since its running
-    /// incarnation started, when that matters: its host, workspace, harness, terminal, command,
-    /// model or arguments. A seat st did not launch, or whose launch it no longer has, has
-    /// nothing to compare and keeps running.
+    /// Judge the running incarnation using the same launch boundary as publication.
     fn declared_launch_changes(
         &self,
         subject: &DesiredSubject,
-        member: &MemberSpec,
         observation: &RuntimeObservation,
     ) -> Result<Option<Vec<&'static str>>> {
-        if subject.kind != "agent" || member.lifecycle != MemberLifecycle::Service {
-            return Ok(None);
-        }
-        let Some(incarnation) = observation.incarnation_id.as_deref() else {
-            return Ok(None);
-        };
-        let mut launched = self
-            .launched_members
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let launched = match launched.get(&subject.subject) {
-            Some((known, launched)) if known == incarnation => launched.clone(),
-            _ => {
-                // The latest start this node made launched the running incarnation; an adopted
-                // runtime it did not start has none, or an older one it then outlived.
-                let read = self
-                    .store
-                    .observations_for(&subject.subject, "runtime.action.succeeded")?
-                    .iter()
-                    .rev()
-                    .find_map(|claim| {
-                        claim
-                            .body
-                            .pointer("/fields/desired_token")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .map(|token| self.store.claim_by_id(&token))
-                    .transpose()?
-                    .flatten()
-                    .and_then(|claim| serde_json::from_value::<DesiredSubject>(claim.body).ok())
-                    .and_then(|desired| desired.member);
-                launched.insert(
-                    subject.subject.clone(),
-                    (incarnation.to_owned(), read.clone()),
-                );
-                read
+        let launched = observation
+            .incarnation_id
+            .as_deref()
+            .map(|incarnation| self.store.publication_launch(&subject.subject, incarnation))
+            .transpose()?
+            .flatten();
+        match crate::publication::interruption(
+            subject,
+            observation.status == "running",
+            observation.incarnation_id.as_deref(),
+            launched.as_ref(),
+        ) {
+            crate::publication::Interruption::Restart(changes) => Ok(Some(changes)),
+            // An adopted runtime can keep running, but Unknown is never proof that a
+            // publication is non-interrupting. The commit guard refuses it.
+            crate::publication::Interruption::Unknown | crate::publication::Interruption::None => {
+                Ok(None)
             }
-        };
-        Ok(launched
-            .map(|launched| member.launch_changes(&launched))
-            .filter(|changes| !changes.is_empty()))
+            crate::publication::Interruption::Stop => Ok(None),
+        }
     }
 
     fn member_was_launched_for_selected_desired(&self, subject: &str) -> Result<bool> {
@@ -19879,6 +19846,88 @@ mission "feedback-review" state="ready" {
         assert_eq!(structured_token_usage("the gate finished"), None);
     }
 
+    #[test]
+    fn publication_launch_comparison_is_shared_with_reconcile_and_scoped_to_incarnation() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "original",
+        );
+        let original = store
+            .desired_subject_with_writer("agent/example/worker")
+            .unwrap()
+            .unwrap()
+            .0;
+        let token = store
+            .selected_desired_token(&original.subject)
+            .unwrap()
+            .unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), serde_json::json!("start")),
+                    ("incarnation_id".into(), serde_json::json!("one")),
+                    ("desired_token".into(), serde_json::json!(token)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"false\"; }",
+            "drift",
+        );
+        let proposed = store
+            .desired_subject_with_writer(&original.subject)
+            .unwrap()
+            .unwrap()
+            .0;
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime,
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let mut observation = RuntimeObservation {
+            runtime_id: proposed.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("one".into()),
+        };
+        assert_eq!(
+            reconciler
+                .declared_launch_changes(&proposed, &observation)
+                .unwrap(),
+            Some(vec!["launch"])
+        );
+        assert_eq!(
+            reconciler
+                .declared_launch_changes(&original, &observation)
+                .unwrap(),
+            None
+        );
+        observation.incarnation_id = Some("replacement".into());
+        assert_eq!(
+            reconciler
+                .declared_launch_changes(&proposed, &observation)
+                .unwrap(),
+            None
+        );
+        assert!(
+            store
+                .publication_launch(&original.subject, "replacement")
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn a_successful_launch_records_its_action_incarnation_and_desired_token() {
         let store = Arc::new(Store::open_memory("node").unwrap());

@@ -29,6 +29,7 @@ mod github_workflow_failures;
 pub mod git_changes;
 pub(crate) mod message_subscriptions;
 mod rollouts;
+pub(crate) mod publication;
 mod seat_status;
 mod card_fold;
 #[cfg(test)]
@@ -648,6 +649,15 @@ WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT N
 -- of other kinds plan as they did.
 CREATE INDEX IF NOT EXISTS claims_runtime_subject_index ON claims(subject, store_index)
 WHERE kind='runtime.observed';
+CREATE INDEX IF NOT EXISTS claims_seat_runtime_origin_index
+ON claims(subject, origin, length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='runtime.observed';
+-- A launch comparison reads only the start of the checked incarnation, even when a
+-- seat has years of action history. Match the JSON expressions in publication.rs.
+CREATE INDEX IF NOT EXISTS claims_seat_start_incarnation_index
+ON claims(subject, origin, json_extract(body, '$.fields.incarnation_id'),
+    length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='runtime.action.succeeded' AND json_extract(body, '$.fields.action')='start';
 -- An already-open raw stream revalidates the original paired actor, never a full graph scan.
 CREATE INDEX IF NOT EXISTS claims_client_pairing_actor_index
 ON claims(json_extract(body, '$.fields.session_actor'))
@@ -1032,6 +1042,9 @@ WHERE kind='harness.timeline';
 CREATE INDEX IF NOT EXISTS local_observations_roster_frontier_index
 ON local_observations(id, after_store_index)
 WHERE kind='harness.timeline' AND subject LIKE 'agent/%';
+CREATE INDEX IF NOT EXISTS local_seat_start_incarnation_index
+ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id)
+WHERE kind='runtime.action.succeeded' AND json_extract(body, '$.fields.action')='start';
 -- A mission capacity retry is scheduling state owned by this reconciler. Replicating every
 -- backoff attempt makes every peer reconcile even though only this node can retry it.
 CREATE TABLE IF NOT EXISTS local_subscription_mission_deferrals (
@@ -9750,20 +9763,23 @@ impl Store {
                 subject.clone(),
                 intent_leaves_at(&connection, subject, at_index).map_err(internal)?,
             );
-            if current.as_ref().is_some_and(|row| row.revision == revision) {
+            let changed = current.as_ref().is_none_or(|row| row.revision != revision);
+            if changed {
+                changes.push(SubjectChange {
+                    subject: subject.clone(),
+                    change: if current.is_some() {
+                        "update"
+                    } else {
+                        "create"
+                    }
+                    .into(),
+                    old_revision: current.as_ref().map(|row| row.revision.clone()),
+                    new_revision: revision,
+                });
+            }
+            if !changed && desired.member.is_none() {
                 continue;
             }
-            changes.push(SubjectChange {
-                subject: subject.clone(),
-                change: if current.is_some() {
-                    "update"
-                } else {
-                    "create"
-                }
-                .into(),
-                old_revision: current.as_ref().map(|row| row.revision.clone()),
-                new_revision: revision,
-            });
             if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
                 Ok(current.as_ref().and_then(|row| row.member.as_deref())
                     .map(serde_json::from_str::<crate::model::MemberSpec>)
@@ -9771,39 +9787,20 @@ impl Store {
             })
                 .map_err(internal)?
             {
-                actions.push(action);
+                if changed || action.action == "restart" {
+                    actions.push(action);
+                }
             } else if desired.kind == "stop" {
                 actions.push(PlannedAction {
                     subject: subject.clone(),
                     action: "stop".into(),
                     reason: "the desired state explicitly stops this member".into(),
                 });
-            } else if let Some(member) = &desired.member {
-                // A seat restarts when its declared launch changes; say so before it does.
-                let changes = current
-                    .as_ref()
-                    .filter(|row| row.kind == "agent")
-                    .and_then(|row| row.member.as_deref())
-                    .and_then(|launched| {
-                        serde_json::from_str::<crate::model::MemberSpec>(launched).ok()
-                    })
-                    .map(|launched| member.launch_changes(&launched))
-                    .unwrap_or_default();
-                actions.push(if changes.is_empty() {
-                    PlannedAction {
-                        subject: subject.clone(),
-                        action: "observe-or-start".into(),
-                        reason: "the desired member is active".into(),
-                    }
-                } else {
-                    PlannedAction {
-                        subject: subject.clone(),
-                        action: "restart".into(),
-                        reason: format!(
-                            "the declared {} changed; a running seat restarts on its last session",
-                            changes.join(" and ")
-                        ),
-                    }
+            } else if desired.member.is_some() && changed {
+                actions.push(PlannedAction {
+                    subject: subject.clone(),
+                    action: "observe-or-start".into(),
+                    reason: "the desired member is active".into(),
                 });
             }
         }
@@ -10008,7 +10005,20 @@ impl Store {
         idempotency_key: &str,
         actor: Option<&str>,
     ) -> Result<ApplyResponse, St3Error> {
-        self.apply_as_impl(intent, expected, idempotency_key, actor, None, None)
+        self.apply_as_impl(intent, expected, idempotency_key, actor, None, None, None)
+    }
+
+    /// Internal commit-time guard. Runs after subject CAS checks, before publication writes,
+    /// using the writer's current runtime and incarnation rather than preview evidence.
+    pub(crate) fn apply_as_checked(
+        &self,
+        intent: &NormalizedIntent,
+        expected: &BTreeMap<String, Vec<String>>,
+        key: &str,
+        actor: Option<&str>,
+        guard: &publication::Guard,
+    ) -> Result<ApplyResponse, St3Error> {
+        self.apply_as_impl(intent, expected, key, actor, None, None, Some(guard))
     }
 
     /// Atomically commit the declaration and its caller-facing completed response. Exact retries
@@ -10029,6 +10039,7 @@ impl Store {
             None,
             None,
             Some((response_key, &value)),
+            None,
         )
     }
 
@@ -10040,6 +10051,7 @@ impl Store {
         actor: Option<&str>,
         owned: Option<&owned_sets::Options>,
         local_receipt: Option<(&str, &Value)>,
+        guard: Option<&publication::Guard>,
     ) -> Result<ApplyResponse, St3Error> {
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, St3Error> {
@@ -10382,6 +10394,13 @@ impl Store {
                 }
                 for repair in &intent.replica_repairs {
                     operations_changed |= validate_replica_repair(transaction, repair)?;
+                }
+                if let Some(guard) = guard {
+                    let at = current_index_tx(transaction).map_err(internal)?;
+                    for desired in intent.subjects.values().filter(|desired| matches!(desired.kind.as_str(), "agent" | "stop")) {
+                        let check = publication::check(transaction, desired, at, &self.origin).map_err(internal)?;
+                        guard(desired, &check)?;
+                    }
                 }
                 let changed = desired_changed || missions_changed || operations_changed || owned_plan.is_some();
                 if !changed {
