@@ -71,9 +71,12 @@ const AgentIdTrigger = ({ id, parts }: { readonly id: string; readonly parts: re
     setOpen(next)
   }
   const leaf = parts.length - 1
-  return <span data-agent-id={id} {...stylex.props(styles.agentSlot)}><Tooltip label={id} isOpen={isOpen} onOpenChange={onOpenChange}><Button ref={trigger} data-agent-id-trigger onPress={event => { if (event.pointerType === 'touch') onOpenChange(true) }} {...stylex.props(styles.agentRun)}>{parts.map((part, index) => <React.Fragment key={index}>
-    {index > 0 ? <><span aria-hidden="true" {...stylex.props(styles.agentChevron)}><Icon name="chevron-right" scale="disclosure" /></span><VisuallyHidden>.</VisuallyHidden></> : null}
-    <span data-agent-segment={index === leaf ? 'leaf' : 'parent'} {...stylex.props(styles.agentSegment, index === leaf ? styles.agentLeaf : part.length > 3 ? styles.agentParent : styles.agentShortParent)}>{part}</span>
+  // Parent tracks give way first, down to three characters; the leaf track is never narrower than its text, so the
+  // run's min-content keeps the leaf whole and every ancestor slot inherits that floor.
+  const columns = parts.map((part, index) => `${index > 0 ? 'max-content ' : ''}${index === leaf || part.length <= 3 ? 'max-content' : 'minmax(3ch, max-content)'}`).join(' ')
+  return <span data-agent-id={id} {...stylex.props(styles.agentSlot)}><Tooltip label={id} isOpen={isOpen} onOpenChange={onOpenChange}><Button ref={trigger} data-agent-id-trigger onPress={event => { if (event.pointerType === 'touch') onOpenChange(true) }} {...stylex.props(styles.agentRun, styles.agentColumns(columns))}>{parts.map((part, index) => <React.Fragment key={index}>
+    {index > 0 ? <><span aria-hidden="true" {...stylex.props(styles.agentChevron)}><Icon name="chevron-right" scale="disclosure" /></span><VisuallyHidden elementType="span">.</VisuallyHidden></> : null}
+    <span data-agent-segment={index === leaf ? 'leaf' : 'parent'} {...stylex.props(styles.agentSegment)}>{part}</span>
   </React.Fragment>)}</Button></Tooltip></span>
 }
 
@@ -119,9 +122,11 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
   const loaded = loadRequested && body._tag === 'Full'
   const preview = body.markdown.slice(0, 4000)
   const counterpart = variant._tag === 'Outgoing' ? to : from
+  const counterpartDotted = counterpart?.includes('.') === true
+  const toDotted = variant._tag === 'Incoming' && to?.includes('.') === true
   return <MessageFrame variant={variant} frameStyles={frameStyles} label={variant._tag === 'Outgoing' ? `Message to ${to ?? ''}` : `Message from ${from}`} subject={subject} header={<>
     {headerGlyph?._tag !== 'Hidden' ? <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name={headerGlyph?._tag === 'Icon' ? headerGlyph.name : variant._tag === 'Human' ? 'person' : 'message'} scale="status" /></span> : null}
-    <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta, styles.fixed)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span>{counterpart !== undefined ? <strong {...stylex.props(styles.sender, styles.senderSlot)}><AgentIdHierarchy id={counterpart} tooltip /></strong> : null}{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta, styles.senderSlot)}><span {...stylex.props(styles.fixed)}> → </span><AgentIdHierarchy id={to} tooltip /></span> : null}{via !== undefined ? <span data-message-channel {...stylex.props(styles.meta, styles.channel)}> · {({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span> : null}</span>
+    <span {...stylex.props(styles.counterpart, (counterpartDotted || toDotted) && styles.keepLeaf)}><span {...stylex.props(styles.meta, styles.fixed)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span>{counterpart !== undefined ? <strong {...stylex.props(styles.sender, styles.senderSlot, counterpartDotted && styles.keepLeaf)}><AgentIdHierarchy id={counterpart} tooltip /></strong> : null}{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta, styles.senderSlot, toDotted && styles.keepLeaf)}><span {...stylex.props(styles.fixed)}> → </span><AgentIdHierarchy id={to} tooltip /></span> : null}{via !== undefined ? <span data-message-channel {...stylex.props(styles.meta, styles.channel)}> · {({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span> : null}</span>
     {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <Tooltip label={`Reply to ${replyTo}`}><Button aria-label={`Reply to ${replyTo}`} {...stylex.props(styles.agentTrigger, styles.meta)}><Icon name="arrow-left" scale="status" /></Button></Tooltip> : null}
     {delivery?._tag === 'BroadcastCopy' ? <span {...stylex.props(styles.chip)}>broadcast · {delivery.recipients} seats</span> : arrivedWhileWorking ? <span {...stylex.props(styles.chip)}>arrived while working</span> : null}
     {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label={`Copy id`} {...stylex.props(styles.headerAction, styles.copy)} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}
@@ -213,20 +218,19 @@ const styles = stylex.create({
   openedSubject: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   // The header row is a flex line, not an ellipsis box: an ellipsis cannot enter the atomic identity button, so it
-  // would clip it. The channel yields first, then parent segments, then the leaf.
+  // would clip it. The channel yields first (it only takes leftover space), then parent segments, then the leaf.
   counterpart: { flex: '1 1 auto', minWidth: 0, display: 'flex', alignItems: 'center', gap: s.xs, overflow: 'hidden', whiteSpace: 'nowrap' },
+  keepLeaf: { minWidth: 'min-content' },
   fixed: { flex: '0 0 auto' },
   senderSlot: { flex: '0 1 auto', minWidth: 0, display: 'flex', alignItems: 'center', gap: s.xs },
-  channel: { flex: '0 1000 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
+  channel: { flexGrow: 1, flexShrink: 1, width: 0, minWidth: 0, maxWidth: 'max-content', overflow: 'hidden', textOverflow: 'ellipsis' },
   agentPlain: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   agentPath: { display: 'inline-flex', alignItems: 'center', flexWrap: 'nowrap', whiteSpace: 'nowrap', verticalAlign: 'top', maxWidth: '100%' },
-  agentSlot: { display: 'flex', minWidth: 0, maxWidth: '100%' },
-  agentRun: { display: 'flex', alignItems: 'center', minWidth: 0, maxWidth: '100%', overflow: 'hidden', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: 'inherit', font: 'inherit', whiteSpace: 'nowrap', cursor: 'default', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid' } },
-  agentChevron: { flex: '0 0 auto', display: 'inline-flex' },
+  agentSlot: { display: 'flex' },
+  agentRun: { display: 'grid', alignItems: 'center', minWidth: 'min-content', overflow: 'hidden', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: 'inherit', font: 'inherit', whiteSpace: 'nowrap', cursor: 'default', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid' } },
+  agentColumns: (columns: string) => ({ gridTemplateColumns: columns }),
+  agentChevron: { display: 'inline-flex' },
   agentSegment: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  agentParent: { flex: '0 1 auto', minWidth: '3ch' },
-  agentShortParent: { flex: '0 0 auto' },
-  agentLeaf: { flex: '0 0.001 auto' },
   agentTrigger: { display: 'inline-flex', alignItems: 'center', maxWidth: '100%', verticalAlign: 'top', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: 'inherit', font: 'inherit', cursor: 'default', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid' } },
   direction: { flex: '0 0 auto', width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
   sender: { color: textVars.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium },

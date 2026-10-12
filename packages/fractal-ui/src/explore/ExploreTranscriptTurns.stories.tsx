@@ -79,7 +79,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
   }, [expanded, meta, block.id, block.sender, turn, kind])
   const time = <time data-turn-time dateTime={block.at} {...stylex.props(styles.time)}>{clock(block.at)}</time>
   const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy, meta === 'M1' && seat && styles.rowCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? `${copied ? 'Copied · ' : ''}${exact(block.at)}` : copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
-  const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time>{time}</span></> : null}</span>
+  const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span data-input-kind {...stylex.props(styles.inputKind)}>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time {...stylex.props(styles.inputFixed)}>{time}</span></> : null}</span>
   const content = seat
     ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
     : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} bodyStyles={[styles.unclampedBody]} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human', frame: { _tag: 'Card' } } : { _tag: 'Incoming' }} headerMeta={inputMeta} headerGlyph={turn === `T${3}` ? { _tag: 'Hidden' } : { _tag: 'Icon', name: glyphs[block.kind] }} frameStyles={[...(block.kind === 'Person' ? [styles.humanRail] : []), ...(turn === 'T2' ? [styles.bubbleFrame] : []), ...(kind === 'K2' && block.kind !== 'Person' ? [block.kind === 'Agent' ? styles.agentRail : styles.quietRail] : [])]} />
@@ -187,7 +187,10 @@ const styles = stylex.create({
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   // The seat row is one 16px meta line; Copy keeps a 24px hit area by overhanging it equally above and below.
   rowCopy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.controlSm, minHeight: g.controlSm, marginBlock: `calc((${t.metaLeading} - ${g.controlSm}) / 2)` },
-  inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
+  // The meta cluster yields before the sender's identity leaf: the kind word truncates, Copy and time stay whole.
+  inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flex: '0 1 auto', minWidth: 0 },
+  inputKind: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  inputFixed: { flex: '0 0 auto', whiteSpace: 'nowrap' },
   // M1 reserves one 16px meta row above each seat run at every width. The row replaces the 8px block gap rather than
   // stacking on it, so a reply stays closer to its own trigger than to the next turn; the toolbar never overlays text.
   seatMeta: { width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: t.metaLeading, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
@@ -451,6 +454,10 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await exactlyOne('identity tooltip on touch tap')
     identity.blur()
     await waitFor(() => expect(tooltips()).toHaveLength(0))
+    // Hand the input back to the mouse so later hover checks are not read as emulated touch hover. The package lib is
+    // ES2022 (no Promise.withResolvers); wait past React Aria's emulated-mouse window.
+    await new Promise(resolve => view.setTimeout(resolve, 100))
+    await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
   }
   if (canvasElement.ownerDocument.defaultView!.innerWidth <= 440) {
     await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
