@@ -125,7 +125,7 @@ function FilterProbe({ light, narrow }: { readonly light: boolean; readonly narr
     }
     setQuery(event.currentTarget.value)
   }
-  return <section ref={root} data-testid={`filter-probe-${id}`} data-synchronous-cost-ms="0" data-rebuild-control="false" data-visible-count={items.length} {...stylex.props(styles.probe, light && lightTheme, narrow ? styles.narrow : styles.wide)}>
+  return <section ref={root} data-testid={`filter-probe-${id}`} data-query={query} data-synchronous-cost-ms="0" data-rebuild-control="false" data-visible-count={items.length} {...stylex.props(styles.probe, light && lightTheme, narrow ? styles.narrow : styles.wide)}>
     <div {...stylex.props(styles.toolbar)}>
       <span>{light ? 'Light' : 'Dark'} · {narrow ? '240' : '440'} · 78 agents</span>
       <input aria-label={`Filter agents ${id}`} type="search" value={query} onInputCapture={capture(pendingFilter)} onChange={changeQuery} {...stylex.props(styles.input)} />
@@ -205,17 +205,27 @@ type Inputs = { readonly reference: HTMLInputElement; readonly filter: HTMLInput
 // With `busyControl`, each filter keystroke busy-waits `controlRatio` times the reference
 // keystroke just before it, so every filter sample is at least that multiple of its pair
 // and the filter p90 is at least `controlRatio` times the reference p90, whatever the load.
-async function collect(root: HTMLElement, inputs: Inputs, busyControl = false) {
+async function collect(root: HTMLElement, inputs: Inputs, phase: string, busyControl = false) {
   const before = { reference: read(root, 'referenceSamples').length, filter: read(root, 'filterSamples').length }
   await expect(inputs.reference.value).toBe('')
   await expect(inputs.filter.value).toBe('')
+  // A settle timeout names the probe, phase, sample, typed value and committed query. The
+  // message is built only on failure, so polling adds no work to the timed keystrokes.
+  const settle = async (input: 'reference' | 'filter', index: number) => {
+    const key = input === 'filter' ? 'filterSamples' : 'referenceSamples'
+    try {
+      await waitFor(() => expect(read(root, key)[before[input] + index]?.renders).toBeDefined(), settled)
+    } catch (error) {
+      throw new Error(`${root.dataset.testid} ${phase} ${input} sample ${index}: input "${inputs[input].value}", committed query "${root.dataset.query}", ${read(root, key).length - before[input]} samples recorded`, { cause: error })
+    }
+  }
   for (let index = 0; index < sampleCount; index++) {
     const toggle = index % 2 === 0
     await userEvent.type(inputs.reference, toggle ? 'r' : '{Backspace}')
-    await waitFor(() => expect(read(root, 'referenceSamples')[before.reference + index]?.renders).toBeDefined(), settled)
+    await settle('reference', index)
     if (busyControl) root.dataset.synchronousCostMs = String(controlRatio * read(root, 'referenceSamples')[before.reference + index]!.durationMs)
     await userEvent.type(inputs.filter, toggle ? 'x' : '{Backspace}')
-    await waitFor(() => expect(read(root, 'filterSamples')[before.filter + index]?.renders).toBeDefined(), settled)
+    await settle('filter', index)
   }
   await expect(inputs.reference.value).toBe('')
   await expect(inputs.filter.value).toBe('')
@@ -256,7 +266,7 @@ export const FilterKeystrokeToPaint: Story = {
       const inputs: Inputs = { filter: within(root).getByRole('searchbox') as HTMLInputElement, reference: within(root).getByRole('textbox') as HTMLInputElement }
       await expect(root.dataset.visibleCount).toBe('78')
       const phase = async (name: string, busyControl = false) => {
-        const sampled = await collect(root, inputs, busyControl)
+        const sampled = await collect(root, inputs, name, busyControl)
         root.dataset[`${name}Ratio`] = String(p90(sampled.samples) / p90(sampled.reference))
         return sampled
       }

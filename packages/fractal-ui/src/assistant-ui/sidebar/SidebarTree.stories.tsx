@@ -50,7 +50,7 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
   }, [cold, noSettle])
   return <section data-example={sticky && !noSettle ? 'sticky' : 'control'} ref={root} {...stylex.props(styles.example, light && lightTheme, width === 240 ? styles.narrow : width === 1440 ? styles.wide : styles.small)}>
     <div {...stylex.props(styles.toolbar)}><button onClick={() => handle.current?.reveal(deepKey)}>Reveal review</button><button onClick={() => handle.current?.reveal('south.a.a.a.a.a.a.35')}>Reveal unvisited branch</button><button onClick={() => handle.current?.reveal('north.a.a.a.a.a.a.69')}>Reveal boundary</button><button onClick={() => setFiltered(value => !value)}>Filter reviews</button><button onClick={() => setKeys(new Set())}>Collapse all</button><button onClick={() => setReverse(value => !value)}>Reorder</button></div>
-    <div {...stylex.props(styles.viewport)}><SidebarTree ref={handle} aria-label="Project reviews" items={items} expandedKeys={keys} onExpandedChange={setKeys} stickyAncestors={sticky} renderRow={item => <div {...stylex.props(styles.label, resized && styles.resized)}>{item.textValue}</div>} /></div>
+    <div {...stylex.props(styles.viewport)}><SidebarTree ref={handle} aria-label="Project reviews" items={items} expandedKeys={keys} onExpandedChange={setKeys} stickyAncestors={sticky} renderRow={item => <div {...stylex.props(styles.label, resized && styles.resized)}><span {...stylex.props(styles.labelText)}>{item.textValue}</span></div>} /></div>
   </section>
 }
 // The cold control keeps stickiness and disables measured settling instead: with 24px estimates a
@@ -199,8 +199,27 @@ export const RevealUnvisitedAncestors: Story = { render: pair, play: async ({ ca
 export const Light440: Story = { render: () => <Pair light /> }
 export const Dark1440: Story = { render: () => <Pair width={1440} /> }
 export const Light1440: Story = { render: () => <Pair width={1440} light /> }
-export const Modal240: Story = { render: () => <Pair width={240} /> }
-export const Modal240Light: Story = { render: () => <Pair width={240} light /> }
+/**
+ * At 240px the breadcrumb truncates inside its own block box, the only kind of box that paints
+ * text-overflow, and the padded crumb itself never overflows, so no glyph is cut at its edge.
+ */
+async function assertBreadcrumbEllipsis(canvas: HTMLElement) {
+  const [yes] = examples(canvas)
+  await frames()
+  await scroll(yes)
+  const crumb = yes.querySelector<HTMLElement>('[data-sidebar-breadcrumb]')
+  await expect(crumb).not.toBeNull()
+  const text = crumb!.querySelector<HTMLElement>('[data-sidebar-breadcrumb-text]')
+  await expect(text).not.toBeNull()
+  const style = getComputedStyle(text!)
+  await expect({ display: style.display, overflowX: style.overflowX, whiteSpace: style.whiteSpace, textOverflow: style.textOverflow }).toEqual({ display: 'block', overflowX: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' })
+  await expect(text!.scrollWidth).toBeGreaterThan(text!.clientWidth)
+  await expect(crumb!.scrollWidth).toBeLessThanOrEqual(crumb!.clientWidth)
+  const contentEnd = crumb!.getBoundingClientRect().right - parseFloat(getComputedStyle(crumb!).paddingRight)
+  await expect(text!.getBoundingClientRect().right).toBeLessThanOrEqual(contentEnd + 0.5)
+}
+export const Modal240: Story = { render: () => <Pair width={240} />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
+export const Modal240Light: Story = { render: () => <Pair width={240} light />, play: ({ canvasElement }) => assertBreadcrumbEllipsis(canvasElement) }
 export const AllStates: Story = { render: () => <main {...stylex.props(styles.matrix)}>{[240, 440, 1440].flatMap(width => [false, true].map(light => <Example key={`${width}-${light}`} width={width} light={light} />))}</main> }
 const styles = stylex.create({
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl, padding: s.xl, backgroundColor: surface.canvas },
@@ -209,5 +228,6 @@ const styles = stylex.create({
   toolbar: { display: 'flex', flexWrap: 'wrap', gap: s.xs, padding: s.xs },
   viewport: { height: sizes.viewport, minHeight: 0 },
   label: { display: 'flex', alignItems: 'center', height: sizes.row, overflow: 'hidden', whiteSpace: 'nowrap', paddingInline: s.sm, minWidth: 0 },
+  labelText: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
   resized: { height: sizes.resizedRow },
 })

@@ -432,7 +432,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
         if (target.closest('[data-pinned-toggle]')) { const keys = new Set(props.expandedKeys); keys.has(pin.item.id) ? keys.delete(pin.item.id) : keys.add(pin.item.id); props.onExpandedChange(keys) }
         else focusReal(pin.item.id)
       }} onContextMenu={event => props.onRowContextMenu?.(pin.item, event)}>
-        <div inert {...stylex.props(styles.copy)}>{pin.breadcrumb ? <div data-sidebar-breadcrumb {...stylex.props(styles.breadcrumb)}>{pin.breadcrumb.map(item => item.textValue).join(' / ')}</div> : row(pin.item, props.expandedKeys.has(pin.item.id), true)}</div>
+        <div inert {...stylex.props(styles.copy)}>{pin.breadcrumb ? <div data-sidebar-breadcrumb {...stylex.props(styles.breadcrumb)}><span data-sidebar-breadcrumb-text {...stylex.props(styles.breadcrumbText)}>{pin.breadcrumb.map(item => item.textValue).join(' / ')}</span></div> : row(pin.item, props.expandedKeys.has(pin.item.id), true)}</div>
         {pin.item.children?.length && !pin.breadcrumb ? <span data-pinned-toggle {...stylex.props(styles.toggleProxy, dragging && styles.dragPassthrough)} style={{ insetInlineStart: `calc(${s.lg} * ${pin.item.depth})` }} /> : null}
       </div></div>)}
     </div>
@@ -457,5 +457,7 @@ const styles = stylex.create({
   dropIndicator: { position: 'absolute', insetInlineStart: 0, boxSizing: 'border-box', zIndex: 3, pointerEvents: 'none', borderStyle: 'solid', borderWidth: g.focusRing, borderColor: accent.primary },
   copy: { height: '100%', pointerEvents: 'none' },
   toggleProxy: { position: 'absolute', top: 0, width: g.controlSm, height: '100%' },
-  breadcrumb: { height: '100%', display: 'flex', alignItems: 'center', paddingInline: s.md, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', fontSize: 'inherit', color: ink.fgMuted },
+  breadcrumb: { height: '100%', display: 'flex', alignItems: 'center', paddingInline: s.md, overflow: 'hidden', fontSize: 'inherit', color: ink.fgMuted },
+  // text-overflow paints only in a block container; a flex container's anonymous text is cut mid-glyph.
+  breadcrumbText: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
 })
