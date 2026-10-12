@@ -180,7 +180,7 @@ const styles = stylex.create({
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
-  seatMeta: { position: geometry.metaPosition, bottom: '100%', right: `calc(-1 * clamp(${s.zero}, calc((100vw - ${g.lane}) / 2 - ${s.section}), ${s.panel}))`, width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  seatMeta: { position: geometry.metaPosition, bottom: '100%', right: `calc(-1 * ${s.panel})`, width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
   coveredLine: { position: 'absolute', top: 0, bottom: 'auto', left: 0, right: 'auto' },
   noOverhang: { position: 'absolute', right: 0 },
   overhangControl: { width: g.previewMax, maxWidth: '100%', display: 'flex', flexDirection: 'column', gap: s.md },
@@ -273,6 +273,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         await expect(previousLastLine.length).toBeGreaterThan(0)
         for (const line of visibleTextRects(previous)) await expect(intersects(overlay.getBoundingClientRect(), line)).toBe(false)
         await expect(overlay.getBoundingClientRect().right).toBeLessThanOrEqual(lane.getBoundingClientRect().right)
+        if (getComputedStyle(overlay).position === 'absolute') await expect(overlay.getBoundingClientRect().right - block.getBoundingClientRect().right).toBe(32)
         await expect(overlay.getBoundingClientRect().left).toBeGreaterThanOrEqual(lane.getBoundingClientRect().left)
       }
     }
