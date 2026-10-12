@@ -4,6 +4,50 @@ use crate::parse_intent;
 
 mod empty_authority_guard;
 
+#[test]
+fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() {
+    let store = Store::open_memory("amber").unwrap();
+    let input = parse_intent(
+        "version 2\nmission \"harvest\" state=\"ready\" { goal \"Harvest\"; step \"work\" { assigned-to \"agent/garden/orchard\" } }\nagent \"garden/orchard\" { command \"true\" }",
+        "amber",
+    ).unwrap();
+    apply(&store, &input, 1);
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    let columns = "kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step";
+    let read_desired = || tx.query_row(
+        &format!("SELECT {columns} FROM desired WHERE subject='agent/garden/orchard'"),
+        [], |row| (0..8).map(|i| row.get::<_, rusqlite::types::Value>(i)).collect::<rusqlite::Result<Vec<_>>>(),
+    ).unwrap();
+    let expected = read_desired();
+    let before = tx.total_changes();
+    owned_sets::project_tx(&tx).unwrap();
+    assert_eq!(tx.total_changes(), before, "identical projection must not write rows");
+    assert_eq!(read_desired(), expected);
+    for column in columns.split(',') {
+        tx.execute(&format!("UPDATE desired SET {column}='invented-change' WHERE subject='agent/garden/orchard'"), []).unwrap();
+        let before = tx.total_changes();
+        owned_sets::project_tx(&tx).unwrap();
+        assert_eq!(tx.total_changes() - before, 1, "changed desired column {column}");
+        assert_eq!(read_desired(), expected, "restored desired column {column}");
+    }
+    let read_mission = || tx.query_row(
+        "SELECT revision,state,claim_id FROM mission_definitions WHERE mission_id='harvest'",
+        [], |row| (0..3).map(|i| row.get::<_, rusqlite::types::Value>(i)).collect::<rusqlite::Result<Vec<_>>>(),
+    ).unwrap();
+    let expected = read_mission();
+    for column in ["revision", "state", "claim_id"] {
+        tx.execute(&format!("UPDATE mission_definitions SET {column}='invented-change' WHERE mission_id='harvest'"), []).unwrap();
+        let before = tx.total_changes();
+        owned_sets::project_tx(&tx).unwrap();
+        assert_eq!(tx.total_changes() - before, 1, "changed mission column {column}");
+        assert_eq!(read_mission(), expected);
+    }
+    tx.rollback().unwrap();
+    drop(connection);
+    store.owned_member_guard("agent/garden/orchard").unwrap();
+}
+
 fn bundle(command: &str, meadow: bool) -> NormalizedIntent {
     parse_intent(
         &format!(

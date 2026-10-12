@@ -1132,7 +1132,10 @@ pub(super) fn project_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> 
                     continue;
                 };
                 transaction.execute("INSERT INTO mission_definitions(mission_id,revision,state,claim_id) VALUES (?1,?2,?3,?4)
-                    ON CONFLICT(mission_id) DO UPDATE SET revision=excluded.revision,state=excluded.state,claim_id=excluded.claim_id",
+                    ON CONFLICT(mission_id) DO UPDATE SET revision=excluded.revision,state=excluded.state,claim_id=excluded.claim_id
+                    WHERE mission_definitions.revision IS NOT excluded.revision
+                       OR mission_definitions.state IS NOT excluded.state
+                       OR mission_definitions.claim_id IS NOT excluded.claim_id",
                     params![s.trim_start_matches("mission/"),m.revision,if retired{"retired"}else{c.body["state"].as_str().unwrap_or("draft")},m.claim]).map_err(internal)?;
             } else {
                 let desired: DesiredSubject = if implicit {
@@ -1142,7 +1145,11 @@ pub(super) fn project_tx(transaction: &Transaction<'_>) -> Result<(), St3Error> 
                         .map_err(internal)?
                 };
                 transaction.execute("INSERT INTO desired(subject,kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step) VALUES (?1,?2,?3,?4,?5,?6,NULL,NULL,NULL)
-                    ON CONFLICT(subject) DO UPDATE SET kind=excluded.kind,revision=excluded.revision,claim_id=excluded.claim_id,body=excluded.body,member=excluded.member,owner_run=NULL,owner_generation=NULL,owner_step=NULL",
+                    ON CONFLICT(subject) DO UPDATE SET kind=excluded.kind,revision=excluded.revision,claim_id=excluded.claim_id,body=excluded.body,member=excluded.member,owner_run=NULL,owner_generation=NULL,owner_step=NULL
+                    WHERE desired.kind IS NOT excluded.kind OR desired.revision IS NOT excluded.revision
+                       OR desired.claim_id IS NOT excluded.claim_id OR desired.body IS NOT excluded.body
+                       OR desired.member IS NOT excluded.member OR desired.owner_run IS NOT NULL
+                       OR desired.owner_generation IS NOT NULL OR desired.owner_step IS NOT NULL",
                     params![s,desired.kind,m.revision,m.claim,canonical_json_text(&desired.desired).map_err(internal)?,desired.member.as_ref().map(canonical_serialized_json_text).transpose().map_err(internal)?]).map_err(internal)?;
             }
         }
