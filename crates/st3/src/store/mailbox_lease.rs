@@ -1650,6 +1650,7 @@ impl Store {
     }
 
     /// Captured public-card fault source, bounded to the selected subjects and cut.
+    /// Keep the capture on one blocking worker: its CPU budget belongs to that thread.
     pub(crate) fn mailbox_faults_for(
         &self,
         subjects: &[String],
