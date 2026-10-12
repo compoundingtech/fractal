@@ -20,6 +20,12 @@ pub enum EvidenceCommand {
         #[arg(long)]
         artifact: u64,
     },
+    /// Installed observer for a protected profile; accepts an immutable daemon claim ID.
+    #[command(hide = true)]
+    ObserveReview {
+        #[arg(long)]
+        claim: String,
+    },
     /// Import an observation: signed full/test, or explicitly unsigned degraded.
     Put {
         #[arg(long, default_value = ".")]
@@ -65,6 +71,7 @@ pub fn run(args: EvidenceArgs) -> Result<()> {
             attempt,
             artifact,
         } => ci_transport::observe_ci(run, attempt, artifact)?,
+        EvidenceCommand::ObserveReview { claim } => review_transport::observe_review(&claim)?,
         EvidenceCommand::Put {
             repo,
             record,

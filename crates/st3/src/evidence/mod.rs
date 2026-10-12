@@ -11,9 +11,11 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub mod cli;
 mod ci_transport;
+pub mod cli;
 pub mod observers;
+pub mod review_observer;
+mod review_transport;
 #[cfg(test)]
 mod tests;
 
@@ -386,7 +388,7 @@ impl Statement {
                 base_commit,
                 files,
                 tests,
-                ..
+                verdict,
             } => {
                 ensure!(!reviewer.trim().is_empty(), "missing reviewer");
                 oid(base_commit)?;
@@ -394,7 +396,10 @@ impl Statement {
                     changed_files(repo, base_commit, &subject.name)? == *files,
                     "review must cover every changed file with its exact blob hash"
                 );
-                ensure!(!tests.is_empty(), "review must cite tests");
+                ensure!(
+                    *verdict == Verdict::STOP || !tests.is_empty(),
+                    "GO review must cite tests"
+                );
                 let mut unique = BTreeSet::new();
                 for test in tests {
                     oid(test)?;
@@ -459,6 +464,15 @@ fn producer_digest() -> Result<&'static str> {
 }
 
 fn write_observation(repo: &Path, statement: &Statement, ssh_key: Option<&Path>) -> Result<String> {
+    write_observation_message(repo, statement, ssh_key, b"st gate observation v1\n")
+}
+
+fn write_observation_message(
+    repo: &Path,
+    statement: &Statement,
+    ssh_key: Option<&Path>,
+    message: &[u8],
+) -> Result<String> {
     let mut statement = statement.clone();
     statement.predicate.producer_sha256 = producer_digest()?.to_owned();
     let observed_tree = statement.validate(repo)?;
@@ -488,7 +502,7 @@ fn write_observation(repo: &Path, statement: &Statement, ssh_key: Option<&Path>)
         args.push("-S");
     }
     args.extend([&notes_tree, "-p", &statement.subject[0].name]);
-    let signed = git_text(repo, &args, Some(b"st gate observation v1\n"))?;
+    let signed = git_text(repo, &args, Some(message))?;
     oid(&signed)?;
     Ok(signed)
 }
