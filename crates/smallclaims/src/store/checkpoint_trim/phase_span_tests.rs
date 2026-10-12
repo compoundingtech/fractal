@@ -81,7 +81,8 @@ fn a_profiled_resume_records_the_resume_delete_and_final_mark_phases_once() {
     for name in ["trim.resume", "trim.delete", "trim.final_mark"] {
         assert_eq!(span(name).unwrap_or_else(|| panic!("{name} missing"))["count"], 1, "{name}");
     }
-    // The final mark is two statements; the spans count SQL, they add none.
+    // The final mark is two statements. This checks that the span reports their SQL; that the spans add no SQL
+    // holds by construction and is not tested here.
     assert!(span("trim.final_mark").unwrap()["sql_count"].as_u64().unwrap() >= 2);
     // Nothing in a resume records tombstones or captures a plan.
     assert!(span("trim.record").is_none());
