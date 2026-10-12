@@ -7,6 +7,7 @@ import type { ResourceData } from './resource-model'
 import { spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g } from '../composition-tokens.stylex'
 import { baselineTheme } from '../neutral-theme'
 import { lightTheme } from '../composition-theme'
+import { ThemePortal } from '../taste/ThemePortal'
 
 /** Synthetic fully reported diff; every count and preview is known. */
 const resource: ResourceData = {
@@ -28,7 +29,7 @@ const meta = {
 export default meta
 type Story = StoryObj<Args>
 
-export const HoverAndDialog: Story = { name: 'Hover and dialog · no native titles', render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}><div {...stylex.props(styles.frame)}><ResourceCardV1 resource={resource} variant="RC-2" /></div></main>, play: async ({ canvasElement }) => {
+export const HoverAndDialog: Story = { name: 'Hover and dialog · no native titles', render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}><ThemePortal><div {...stylex.props(styles.frame)}><ResourceCardV1 resource={resource} variant="RC-2" /></div></ThemePortal></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
   // The summary is named by its painted content in order: label, counts, then the Open affordance.
