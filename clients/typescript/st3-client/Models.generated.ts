@@ -2384,6 +2384,7 @@ export type Work = ResourceHeader & {
   progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
+  submitted_incarnation?: string | null;
   timeout_ms?: number | null;
   title?: string | null;
   usage?: (UsageSummary | null);

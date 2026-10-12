@@ -992,6 +992,7 @@
             "readiness_epoch": { "type": "integer", "minimum": 0 },
             "claimant": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
             "claim_incarnation": { "type": ["string", "null"] },
+            "submitted_incarnation": { "type": ["string", "null"], "description": "Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match." },
             "agentless": { "type": "boolean" },
             "claim_expires_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },
             "execution_started_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms" },

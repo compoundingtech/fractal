@@ -224,7 +224,7 @@ When active revisions declare different limits, st uses the strictest limit. A l
 
 An exact idempotent retry returns its existing run before the capacity check. A direct start error lists the active run subjects.
 
-`report-to`, `stalled-after` and `report-completed` are optional and opt the mission's runs into [run reports](#run-reports).
+`report-to`, `report-stalls`, `stalled-after` and `report-completed` are optional and opt the mission's runs into [run reports](#run-reports).
 
 `revisions="human-only"` is optional and inherited by child steps. `revision-reviewer` requires that protection.
 
@@ -1086,12 +1086,14 @@ A running run can be opted in, moved to another agent, or cleared without restar
 
 ```sh
 st missions report-to RUN --agent agent/ops/watcher --stalled-after 1h --as agent/ops/owner
+st missions report-to RUN --agent agent/ops/watcher --report-stalls false --as person/operator
 st missions report-to RUN --clear --as person/operator
 ```
 
 Only a person or the agent that requested the run may change it, and only to an agent. Each
 call states the whole report, as `missions start --report-to` would: `--stalled-after` defaults
-to the mission's `stalled-after`, else 30 minutes, and the completed event is reported with
+to the mission's `stalled-after`, else 30 minutes; `--report-stalls true|false` defaults to the
+mission's `report-stalls`, else true; and the completed event is reported with
 `--report-completed` or when the mission asks for it. `--clear` reports the run to nobody, even
 when its mission names a reporter. The change is a `mission-run.report-to` claim on the run. Its
 latest one replaces what the creation claim recorded, and the creation claim itself is left
@@ -1107,8 +1109,31 @@ The reporter gets one message from `daemon/runtime` for each of these events:
 | --- | --- |
 | failed | The run fails, including a mission `timeout`, and starts its cleanup. |
 | cancelled | The run is cancelled and starts its cleanup. |
-| stalled | The run has made no progress for `stalled-after` (30 minutes unless set). |
+| stalled | With `report-stalls=#true` (the default), the run has made no progress for `stalled-after` (30 minutes unless set). |
 | completed | The run completes, only with `report-completed`. |
+
+Set the mission property `report-stalls=#false` for a parent that intentionally waits until
+retirement while its schedule starts finite child runs:
+
+```kdl
+mission "daily-parent" state="ready" report-to="agent/ops/watcher" report-stalls=#false {
+  goal "Keep the daily schedule active until retirement."
+  step "retire" {
+    agentless
+    gate "retired" { field "state" "mission/daily-parent" is "retired" }
+  }
+  // Declare the schedule here; its child mission chooses its own report policy.
+}
+```
+
+The property is a Boolean and requires a `report-to` agent, even when explicitly true.
+False suppresses only this run's stall reports and removes its stall reporting deadline.
+Failure, cancellation and requested completion reports still apply. Child runs use their own
+mission's policy; schedules retain their timers, catch-up and no-overlap behavior. The field
+does not change schedule admission or schedule faults. `stalled-after` remains a positive
+duration even when stall reports are disabled. Older mission definitions and run claims
+without `report-stalls` / `report_stalls` keep stall reports enabled with the existing limit
+(30 minutes unless set).
 
 A stall is measured from the run's last sign of life: its last state change, any step's last
 change or progress record, and the end of any step's lease. A run in cleanup, and a run that
