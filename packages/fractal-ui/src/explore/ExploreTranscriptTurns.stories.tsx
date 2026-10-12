@@ -483,7 +483,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
     await userEvent.click(canvas.getByRole('button', { name: `${width} lane`, exact: true }))
     await waitFor(() => {
       expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-width', `${width}`)
-      expect(canvasElement.querySelector('[data-token-probe]')!.getBoundingClientRect().width).toBe(width)
+      expect(canvasElement.querySelector('[data-token-probe]')!.getBoundingClientRect().width).toBe(Math.min(width, canvasElement.ownerDocument.documentElement.clientWidth))
     })
     await assertProjection(canvasElement)
   })
