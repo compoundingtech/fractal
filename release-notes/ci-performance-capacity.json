@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Move light CI checks to GitHub-hosted runners and scope optional PR load Performance while retaining every main/queue/nightly run.",
+  "summary": "Move light CI checks to GitHub-hosted runners and scope optional PR load Performance while retaining every main/nightly/manual run.",
   "replay": {
     "status": "none",
     "detail": "CI runner placement and optional workflow admission only; no deployed runtime, data or protocol change."

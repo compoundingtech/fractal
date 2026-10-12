@@ -59,14 +59,15 @@ ordering previously allowed new merge jobs to overtake these prerequisites. This
 waiting jobs and neither preempts running work nor reserves capacity. The picker, local pools,
 runner shapes, run affinity and required checks are unchanged.
 
-Performance runs on every main push, merge group, nightly schedule and manual dispatch.
+Performance runs on every main push, nightly schedule and manual dispatch; it does not
+start a load test for merge groups.
 PR runs start for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load
 workload and its workflow, or an explicit `ci-perf` label. The metadata-only admission job
 checks the PR head before and after its bounded changed-file inventory, including rename
 sources. Only an explicit successful `run=false` skips the optional workload; malformed
 metadata, head drift or failed admission retain coverage. Unrelated label events cannot
 cancel a running load test. The existing load test and its budgets are unchanged.
-Its Namespace priority is always 2, including merge groups. A busy queue can delay optional
+Its Namespace priority is always 2. A busy queue can delay optional
 loads and main baseline reports until required work drains; priority does not reserve a slot.
 
 The complete 2026-10-11 UTC day contained 201 PR and 50 merge-group Workspace runs.

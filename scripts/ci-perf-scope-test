@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep main/queue coverage and PR label/path admission independent of runner load."""
+"""Keep main/nightly coverage and PR label/path admission independent of runner load."""
 import importlib.machinery
 import importlib.util
 import ast
@@ -16,7 +16,7 @@ spec = importlib.util.spec_from_loader(loader.name, loader)
 module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
 event = {'pull_request': {'number': 42, 'labels': [], 'head': {'sha': 'a' * 40}}}
-for name in ('push', 'merge_group', 'schedule', 'workflow_dispatch'):
+for name in ('push', 'schedule', 'workflow_dispatch'):
     assert module.decision(name, {}, [])[0], name
 for name in ('crates/st3/src/api/client_v0.rs', 'crates/st3/src/store.rs',
              'crates/smallclaims/src/sqlite.rs', 'crates/st3/tests/daemon_load.rs',
@@ -108,6 +108,7 @@ with tempfile.TemporaryDirectory() as tmp:
 # Evaluate the generated job conditions: an empty/failed scope must still run the load,
 # while unrelated label events skip both jobs and cannot enter the PR cancellation group.
 workflow = (ROOT / '.github/workflows/perf.yml').read_text()
+assert '  merge_group:' not in workflow, 'optional loads must not add merge-queue work'
 conditions = {}
 for job in ['scope', 'perf-load']:
     match = re.search(r'^  ' + job + r':\n.*?^    if: (.+)$', workflow, re.M | re.S)
@@ -139,4 +140,4 @@ for action in ['labeled', 'unlabeled']:
         assert not admits(job, action=action, label='reviewed', output='true', result='failure')
         assert admits(job, action=action, label='ci-perf', output='true')
 assert 'nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=2' in workflow
-print('Performance scope controls passed: every main/queue/nightly/manual, labels, read paths, renames and uncertain lookup fail-open')
+print('Performance scope controls passed: every main/nightly/manual, labels, read paths, renames and uncertain lookup fail-open')

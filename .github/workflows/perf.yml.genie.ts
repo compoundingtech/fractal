@@ -14,7 +14,6 @@ export default githubWorkflow({
   name: 'Performance',
   on: {
     push: { branches: ['main'] },
-    merge_group: {},
     schedule: [{ cron: '23 2 * * *' }],
     pull_request: { types: ['opened', 'synchronize', 'reopened', 'labeled', 'unlabeled', 'ready_for_review'] },
     workflow_dispatch: {},
@@ -38,7 +37,7 @@ export default githubWorkflow({
       permissions: { contents: 'read', 'pull-requests': 'read' },
       outputs: { run: '${{ steps.scope.outputs.run }}' },
       steps: [{
-        name: 'Admit main, queue, nightly and selected PR Performance', id: 'scope',
+        name: 'Admit main, nightly and selected PR Performance', id: 'scope',
         env: { GH_TOKEN: '${{ github.token }}' },
         // Workflow bytes from this run's ref (the PR merge ref for pull_request).
         // Metadata-only: no extra PR checkout or compiler; token is read-only.

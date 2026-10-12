@@ -6,7 +6,6 @@ name: Performance
 on:
   push:
     branches: [main]
-  merge_group: {}
   schedule:
     - cron: 23 2 * * *
   pull_request:
@@ -40,14 +39,14 @@ jobs:
     outputs:
       run: ${{ steps.scope.outputs.run }}
     steps:
-      - name: Admit main, queue, nightly and selected PR Performance
+      - name: Admit main, nightly and selected PR Performance
         id: scope
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PERF_SCOPE_PY'
           #!/usr/bin/env python3
-          """Admit optional Performance for main/queue/nightly/manual and relevant or labelled PRs."""
+          """Admit optional Performance for main/nightly/manual and relevant or labelled PRs."""
           import fnmatch
           import json
           import os
@@ -65,7 +64,7 @@ jobs:
 
           def decision(event_name, event, filenames):
               if event_name != 'pull_request':
-                  return True, 'main, merge queue, nightly or manual coverage'
+                  return True, 'main, nightly or manual coverage'
               if any(label['name'] == 'ci-perf' for label in event['pull_request']['labels']):
                   return True, 'explicit ci-perf label'
               if any(fnmatch.fnmatchcase(name, pattern) for name in filenames for pattern in PATHS):
