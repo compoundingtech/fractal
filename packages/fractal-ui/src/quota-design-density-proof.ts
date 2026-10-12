@@ -59,8 +59,7 @@ export function assertQuotaDrawerDensity(drawer: HTMLElement) {
     const resetCell = row.querySelector<HTMLElement>('[data-quota-cell="reset"]')!
     if (reset === null || !visibleBox(reset, row) || reset.getBoundingClientRect().right > resetCell.getBoundingClientRect().right + 1) throw new Error('Governing reset is hidden or clipped')
     const more = row.querySelector<HTMLButtonElement>('[data-quota-more]')
-    const moreTitle = more?.querySelector<HTMLElement>('[data-quota-more-count]')?.title
-    if (more === null || moreTitle === undefined || more.querySelector('[data-quota-more-description]')?.textContent?.trim() !== moreTitle || !moreTitle.includes('amount and reset evidence')) throw new Error('Secondary evidence has no accessible disclosure')
+    if (more === null || !more.querySelector('[data-quota-more-description]')?.textContent?.includes('amount and reset evidence')) throw new Error('Secondary evidence has no accessible disclosure')
     const cells = [...row.querySelectorAll<HTMLElement>('[data-quota-cell]')]
     if (cells.length !== headers.length) throw new Error('Account cells must match table header columns')
     for (const header of headers) {
@@ -78,21 +77,21 @@ export function assertQuotaDrawerDensity(drawer: HTMLElement) {
   return { accounts: rows.length, heights, maxOffset, scrollHeight: scroll.scrollHeight, viewportHeight: scroll.clientHeight }
 }
 
-/** Native titles and full screen-reader values survive visual truncation. */
+/** Full values stay mounted for screen readers and name their focusable tooltip triggers; no native title doubles a custom hover (React Aria's hidden `<select title="">` shows none). */
 export const assertQuotaDrawerDisclosure = (drawer: HTMLElement): void => {
+  if (drawer.querySelector('[title]:not([title=""])') !== null) throw new Error('Native title duplicates a custom disclosure')
   for (const header of drawer.querySelectorAll<HTMLElement>('[data-quota-column]')) {
-    const label = header.querySelector<HTMLElement>('[title]')
-    const full = label?.querySelector<HTMLElement>('[data-quota-full-value]')?.textContent ?? label?.textContent
-    if (label === null || !label.title || full !== label.title) throw new Error('Missing full header disclosure')
+    const full = header.querySelector<HTMLElement>('[data-quota-full-value]')?.textContent ?? header.textContent
+    if (!full?.trim()) throw new Error('Missing full header disclosure')
   }
   for (const row of drawer.querySelectorAll<HTMLElement>('[data-quota-row]')) {
     const account = row.querySelector<HTMLButtonElement>('[data-quota-cell="account"] button')
-    const caption = account?.querySelector<HTMLElement>('[title]')
-    if (account === null || caption === null || caption === undefined || !caption.title.includes(caption.textContent ?? '') || !account.getAttribute('aria-label')?.includes(caption.title)) throw new Error('Missing full account disclosure')
+    const label = account?.querySelector<HTMLElement>('[data-quota-account-label]')?.textContent
+    if (account === null || !label || !account.getAttribute('aria-label')?.includes(label)) throw new Error('Missing full account disclosure')
     for (const column of ['amount', 'reset']) {
-      const value = row.querySelector<HTMLElement>(`[data-quota-cell="${column}"] > [title]`)
-      const full = value?.querySelector<HTMLElement>('[data-quota-full-value]')
-      if (value === null || !value.title || full?.textContent !== value.title) throw new Error(`Missing full-value disclosure: ${column}`)
+      const trigger = row.querySelector<HTMLElement>(`[data-quota-cell="${column}"] > [data-full-value-trigger]`)
+      const value = trigger?.querySelector<HTMLElement>('[data-quota-full-value]')
+      if (trigger === null || value === null || value === undefined || trigger.tabIndex !== 0 || !value.textContent?.trim() || trigger.getAttribute('aria-labelledby') !== value.id || trigger.firstElementChild?.getAttribute('aria-hidden') !== 'true') throw new Error(`Missing full-value disclosure: ${column}`)
     }
   }
 }

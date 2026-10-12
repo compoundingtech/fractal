@@ -3,6 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
+import { expect, waitFor } from 'storybook/test'
+import { expectNoNativeTitles, expectSingleFullValueTooltip } from './full-value-tooltip-play.ts'
 import { UsageMeterHistoryChart, UsageMeterTable, type UsageMeterHistory, type UsageMeterHistoryPoint, type UsageMeterRow, type UsageMeterSortKey, type UsageMeterTableProps } from './UsageMeterTable'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
@@ -114,7 +116,7 @@ function Controlled(args: Args & { readonly displayRows?: readonly UsageMeterRow
 function AllStatesStory() {
   return <div {...stylex.props(styles.matrix)}>{(['dark', 'light'] as const).flatMap(scheme => (['wide', 'narrow'] as const).map(width => <section key={`${scheme}-${width}`} aria-label={`${scheme} ${width}`}>
     <h2 {...stylex.props(styles.caption)}>{scheme} · {width} · detail open</h2>
-    <Frame scheme={scheme} width={width}><UsageMeterTable rows={rows} status={{ kind: 'stale', text: statusText.stale }} sort={{ key: 'governing', direction: 'descending' }} selectedId="meter-harbor" onSort={() => {}} onCycleSort={() => {}} onSelect={() => {}} onCloseDetail={() => {}} history={histories.ready} /></Frame>
+    <Frame scheme={scheme} width={width}><UsageMeterTable rows={rows} status={{ kind: 'stale', text: statusText.stale }} sort={{ key: 'governing', direction: 'descending' }} selectedId="meter-harbor" onSort={() => {}} onCycleSort={() => {}} onSelect={() => {}} onCloseDetail={() => {}} history={histories.ready} landmarkContext={`${scheme} ${width}`} /></Frame>
   </section>))}</div>
 }
 
@@ -141,9 +143,28 @@ export const Detail: Story = { args: { selectedId: 'meter-north' } }
 export const NarrowDetail: Story = { args: { width: 'narrow', selectedId: 'meter-meadow', status: 'unreachable' } }
 export const DetailHistory: Story = { args: { selectedId: 'meter-north', history: 'ready' } }
 export const NarrowDetailHistory: Story = { args: { width: 'narrow', selectedId: 'meter-north', history: 'ready', scheme: 'light' } }
-export const HistoryStates: Story = { render: args => <Frame scheme={args.scheme} width={args.width}>{(['loading', 'unavailable', 'empty', 'ready'] as const).map(state => <UsageMeterHistoryChart key={state} history={histories[state]} />)}</Frame> }
+export const HistoryStates: Story = { render: args => <Frame scheme={args.scheme} width={args.width}>{(['loading', 'unavailable', 'empty', 'ready'] as const).map(state => <UsageMeterHistoryChart key={state} history={histories[state]} landmarkContext={state} />)}</Frame> }
 export const HourlyHistogram: Story = { render: args => <Frame scheme={args.scheme} width={args.width}><UsageMeterHistoryChart history={{ kind: 'ready', label: 'Merged per hour', text: '24h · max 8 · 23:00 partial', points: hourlyPoints, facts: [] }} /></Frame> }
 export const Empty: Story = { render: args => <Frame scheme={args.scheme} width={args.width}><UsageMeterTable rows={[]} status={{ kind: 'loading', text: statusText.loading }} sort={{ key: args.sortKey, direction: args.direction }} onSort={() => {}} onCycleSort={() => {}} onSelect={() => {}} onCloseDetail={() => {}} /></Frame> }
+/** A clipped reading and a history period each disclose their full value through one tooltip on hover and on keyboard focus; no native title remains. */
+export const NarrowFullValueTooltips: Story = {
+  args: { width: 'narrow', selectedId: 'meter-north', history: 'ready' },
+  play: async ({ canvasElement }) => {
+    const row = await waitFor(() => {
+      const found = canvasElement.querySelector<HTMLElement>('[data-usage-meter-row="meter-north"]')
+      expect(found).not.toBeNull()
+      return found!
+    })
+    const table = row.closest<HTMLElement>('[data-usage-meter-table]')!
+    await expectNoNativeTitles(table)
+    const reading = row.querySelector<HTMLElement>('[data-usage-meter-reading]')!
+    await expect(reading.scrollWidth).toBeGreaterThan(reading.clientWidth)
+    await expectSingleFullValueTooltip(reading.closest<HTMLElement>('[data-full-value-trigger]')!, '5h window · 72% · 3.6k / 5k')
+    const open = dailyPoints.at(-1)!
+    await expectSingleFullValueTooltip(table.querySelector<HTMLElement>(`[data-usage-meter-history-point="${open.id}"]`)!, `${open.label}: ${open.text} (open)`)
+    await expectNoNativeTitles(table)
+  },
+}
 
 const styles = stylex.create({
   frame: { width: quotaGeometry.meterStoryWidth, maxWidth: '100%', backgroundColor: surface.canvas, color: ink.fg, padding: s.md },

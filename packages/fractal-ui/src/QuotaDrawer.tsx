@@ -8,6 +8,7 @@ import type { QuotaAccount, QuotaDrawerProps, QuotaSortKey, QuotaWindow } from '
 import { filterQuotaAccounts, quotaAccountAmount, quotaGoverningResetAt, quotaOmittedWindowCount, quotaProviderSubtotal, quotaRoleWindow, quotaSortKeys, quotaVisibleWindows, quotaWindowFraction, sortQuotaAccounts } from './quota-design-sort.ts'
 import { usageMeterGrid, usageMeterGridVars } from './UsageMeterGrid.stylex.ts'
 import { quotaStateLabels } from './quota-design-copy.ts'
+import { FullValueTooltip, ValueTooltipTrigger } from './FullValueTooltip.tsx'
 
 export type { QuotaDrawerProps } from './quota-design-types.ts'
 
@@ -41,10 +42,10 @@ const WindowMeter = ({ window, chip = false, stale = false }: { readonly window:
   const warning = !danger && fraction !== undefined && fraction >= 0.6
   const reading = fraction === undefined ? '—' : `${Math.round(fraction * 100)}%`
   const explanation = `${window.label}: ${fraction === undefined ? 'Unreported' : `${reading} used`}${window.exhausted ? '; exhausted' : ''}${window.governing ? '; governing' : ''}${window.comparison ? '; comparison' : ''}${stale ? '; last-known reading' : ''}`
-  return <div aria-label={explanation} title={explanation} data-quota-window={window.id} data-quota-exhausted={window.exhausted || undefined} data-quota-fraction={fraction} data-quota-stale={stale || undefined} {...stylex.props(styles.meter, chip && styles.chip)}>
+  return <FullValueTooltip full={explanation} data={{ 'data-quota-window': window.id, 'data-quota-exhausted': window.exhausted || undefined, 'data-quota-fraction': fraction, 'data-quota-stale': stale || undefined }} style={[styles.meter, chip && styles.chip]} visibleStyle={styles.meterLine}>
     <span {...stylex.props(styles.reading, warning && styles.warning, danger && styles.danger)}>{reading}{window.exhausted && <Icon name="alert" size={10} />}</span>
-    {fraction !== undefined && <span aria-hidden="true" data-quota-bar {...stylex.props(styles.track, stale && styles.staleMeter)}><span {...stylex.props(styles.fill, warning && styles.warningFill, danger && styles.dangerFill, styles.fraction(Math.min(1, fraction)))} /></span>}
-  </div>
+    {fraction !== undefined && <span data-quota-bar {...stylex.props(styles.track, stale && styles.staleMeter)}><span {...stylex.props(styles.fill, warning && styles.warningFill, danger && styles.dangerFill, styles.fraction(Math.min(1, fraction)))} /></span>}
+  </FullValueTooltip>
 }
 
 interface DrawerRow {
@@ -94,6 +95,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
     : [{ id: 'windows', label: 'Windows' }]
   const filtersActive = props.provider !== '' || props.plan !== '' || props.state !== ''
   const retained = props.accounts.length > 0 && (props.status.kind === 'loading' || props.status.kind === 'stale' || props.status.kind === 'failed')
+  const statusNote = retained ? 'Last-good accounts retained' : props.status.kind === 'current' ? 'Reported usage · no forecasts' : 'Source status · no inferred usage'
   const cycleSort = () => {
     const index = quotaSortKeys.indexOf(props.sort.key)
     const key = quotaSortKeys[(index + 1) % quotaSortKeys.length] ?? 'governing'
@@ -120,9 +122,11 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
       <Button aria-label={`Toggle unit: ${props.unit === 'usd' ? '$ / tok' : 'tok / $'}`} aria-keyshortcuts="u" onPress={toggleUnit} {...stylex.props(styles.button)}>{props.unit === 'usd' ? '$ / tok' : 'tok / $'}</Button>
       <Button aria-label={props.collapsed ? 'Expand quota' : 'Collapse quota'} aria-expanded={!props.collapsed} aria-keyshortcuts="m" onPress={() => props.onCollapsed(!props.collapsed)} {...stylex.props(styles.button)}><Icon name={props.collapsed ? 'chevron-right' : 'chevron-down'} size={12} /></Button>
     </header>
-    <div role="status" aria-live="polite" data-quota-status={props.status.kind} title={`${props.status.text}${retained ? ' · Last-good accounts retained' : ''}`} {...stylex.props(styles.statusSlot, (props.status.kind === 'failed' || props.status.kind === 'incompatible') && styles.danger)}>
-      <span {...stylex.props(styles.statusLine)}>{props.status.text}</span>
-      <span {...stylex.props(styles.statusNote)}>{retained ? 'Last-good accounts retained' : props.status.kind === 'current' ? 'Reported usage · no forecasts' : 'Source status · no inferred usage'}</span>
+    <div role="status" aria-live="polite" data-quota-status={props.status.kind} {...stylex.props(styles.statusSlot, (props.status.kind === 'failed' || props.status.kind === 'incompatible') && styles.danger)}>
+      <FullValueTooltip full={`${props.status.text} · ${statusNote}`} style={styles.statusTrigger}>
+        <span {...stylex.props(styles.statusLine)}>{props.status.text}</span>
+        <span {...stylex.props(styles.statusNote)}>{statusNote}</span>
+      </FullValueTooltip>
     </div>
     {!props.collapsed && <>
       <div {...stylex.props(styles.filters)}>
@@ -136,19 +140,21 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
       </div>
       <div data-quota-scroll {...stylex.props(styles.scroll)}>
         <div role="toolbar" aria-label="Sort quota" {...stylex.props(styles.sortHeader)}>
-          {quotaSortKeys.map(key => <Button key={key} data-quota-sort={key} aria-label={`Sort by ${sortLabels[key]}: ${sortNames[key]}`} aria-pressed={props.sort.key === key} aria-keyshortcuts="s S" onPress={() => props.onSort({ key, direction: key === props.sort.key ? props.sort.direction === 'descending' ? 'ascending' : 'descending' : key === 'account' ? 'ascending' : 'descending' })} {...stylex.props(styles.sortButton, props.sort.key === key && styles.activeSort)}>{sortLabels[key]}<span aria-hidden="true" {...stylex.props(styles.sortArrow)}>{<Icon name={props.sort.key === key ? props.sort.direction === 'descending' ? 'chevron-down' : 'send' : 'swap'} size={10} />}</span></Button>)}
+          {quotaSortKeys.map(key => <ValueTooltipTrigger key={key} label={`Sort by ${sortNames[key]}`}>
+            <Button data-quota-sort={key} aria-label={`Sort by ${sortLabels[key]}: ${sortNames[key]}`} aria-pressed={props.sort.key === key} aria-keyshortcuts="s S" onPress={() => props.onSort({ key, direction: key === props.sort.key ? props.sort.direction === 'descending' ? 'ascending' : 'descending' : key === 'account' ? 'ascending' : 'descending' })} {...stylex.props(styles.sortButton, props.sort.key === key && styles.activeSort)}>{sortLabels[key]}<span aria-hidden="true" data-quota-sort-indicator {...stylex.props(styles.sortArrow, props.sort.key !== key && styles.inactiveSortArrow)}><Icon name={props.sort.key === key ? props.sort.direction === 'descending' ? 'chevron-down' : 'send' : 'swap'} size={10} /></span></Button>
+          </ValueTooltipTrigger>)}
         </div>
         <Table aria-label="Account quotas" selectionMode="none" aria-busy={props.status.kind === 'loading'} onRowAction={key => {
           const row = rows.find(value => value.id === key)
           if (row?.account !== undefined) props.onOpenUsage(row.account.id)
         }} {...stylex.props(usageMeterGrid.table, styles.table)}>
           <TableHeader {...stylex.props(usageMeterGrid.header)}>
-            <Column id="account" data-quota-column="account" textValue="Account" isRowHeader {...stylex.props(usageMeterGrid.column, styles.column, styles.accountColumn)}><span title="Account">Account</span></Column>
-            <Column id="primary" data-quota-column="primary" textValue="Governing usage" {...stylex.props(usageMeterGrid.column, styles.column, styles.primaryColumn)}><span title="Governing usage"><span aria-hidden="true">Usage</span><VisuallyHidden><span data-quota-full-value>Governing usage</span></VisuallyHidden></span></Column>
-            <Column id="reset" data-quota-column="reset" textValue="Reset" {...stylex.props(usageMeterGrid.column, styles.column, styles.resetColumn, styles.numeric)}><span title="Reset">Reset</span></Column>
-            {displayColumns.map(column => <Column key={column.id} id={`window:${column.id}`} data-quota-column={`window:${column.id}`} textValue={column.label} {...stylex.props(usageMeterGrid.column, styles.column, styles.secondaryColumn)}><span title={column.label}>{column.label}</span></Column>)}
-            <Column id="amount" data-quota-column="amount" textValue={props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'} {...stylex.props(usageMeterGrid.column, styles.column, styles.amountColumn, styles.numeric)}><span title={props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'}><span aria-hidden="true">{props.unit === 'usd' ? '$ / tok' : 'Tokens'}</span><VisuallyHidden><span data-quota-full-value>{props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'}</span></VisuallyHidden></span></Column>
-            <Column id="more" data-quota-column="more" textValue="All window evidence" {...stylex.props(usageMeterGrid.column, styles.column, styles.moreColumn, styles.numeric)}><span title="All window evidence"><span aria-hidden="true">+N</span><VisuallyHidden><span data-quota-full-value>All window evidence</span></VisuallyHidden></span></Column>
+            <Column id="account" data-quota-column="account" textValue="Account" isRowHeader {...stylex.props(usageMeterGrid.column, styles.column, styles.accountColumn)}>Account</Column>
+            <Column id="primary" data-quota-column="primary" textValue="Governing usage" {...stylex.props(usageMeterGrid.column, styles.column, styles.primaryColumn)}><span aria-hidden="true">Usage</span><VisuallyHidden><span data-quota-full-value>Governing usage</span></VisuallyHidden></Column>
+            <Column id="reset" data-quota-column="reset" textValue="Reset" {...stylex.props(usageMeterGrid.column, styles.column, styles.resetColumn, styles.numeric)}>Reset</Column>
+            {displayColumns.map(column => <Column key={column.id} id={`window:${column.id}`} data-quota-column={`window:${column.id}`} textValue={column.label} {...stylex.props(usageMeterGrid.column, styles.column, styles.secondaryColumn)}>{column.label}</Column>)}
+            <Column id="amount" data-quota-column="amount" textValue={props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'} {...stylex.props(usageMeterGrid.column, styles.column, styles.amountColumn, styles.numeric)}><span aria-hidden="true">{props.unit === 'usd' ? '$ / tok' : 'Tokens'}</span><VisuallyHidden><span data-quota-full-value>{props.unit === 'usd' ? 'Cost in USD or tokens' : 'Tokens'}</span></VisuallyHidden></Column>
+            <Column id="more" data-quota-column="more" textValue="All window evidence" {...stylex.props(usageMeterGrid.column, styles.column, styles.moreColumn, styles.numeric)}><span aria-hidden="true">+N</span><VisuallyHidden><span data-quota-full-value>All window evidence</span></VisuallyHidden></Column>
           </TableHeader>
           <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <div data-quota-empty {...stylex.props(styles.empty)}>{props.accounts.length === 0 ? 'No quota accounts published' : 'No accounts match these filters'}<span {...stylex.props(styles.emptyNote)}>{props.accounts.length === 0 ? 'Accounts will appear when the source publishes inventory.' : 'Change provider, plan or state to see retained accounts.'}</span></div>}>
             {rows.map(row => {
@@ -159,11 +165,11 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
                 const parts = [subtotal.usdAccounts > 0 ? `${usdFormat.format(subtotal.usd)} (${subtotal.usdAccounts} accts)` : undefined, subtotal.tokenAccounts > 0 ? `${tokenFormat.format(subtotal.tokens)} tok (${subtotal.tokenAccounts} accts)` : undefined, subtotal.unknownAccounts > 0 ? `${subtotal.unknownAccounts} Unreported` : undefined].filter(part => part !== undefined)
                 const subtotalEvidence = `${subtotal.usd} USD across ${subtotal.usdAccounts} accounts; ${subtotal.tokens} tokens across ${subtotal.tokenAccounts} accounts; ${subtotal.unknownAccounts} Unreported accounts`
                 return <Row key={row.id} id={row.id} textValue={row.label} isDisabled data-quota-provider={row.label} {...stylex.props(usageMeterGrid.row, styles.groupRow)}>
-                  <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={`${row.label} · ${members.length} accounts · subtotal ${parts.join(' + ')}`} aria-label={`${row.label} reported subtotal: ${parts.join('; ')}`} {...stylex.props(usageMeterGrid.truncate, styles.groupLabel)}>{row.label} · {members.length}</span></Cell>
+                  <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><FullValueTooltip full={`${row.label} · ${members.length} accounts · reported subtotal ${parts.join(' + ')}`} style={[usageMeterGrid.truncate, styles.groupLabel]}>{row.label} · {members.length}</FullValueTooltip></Cell>
                   <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)} />
                   <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)} />
                   {displayColumns.map(column => <Cell key={column.id} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.secondaryColumn)} />)}
-                  <Cell textValue={subtotalEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.amountColumn, styles.numeric)}><span title={subtotalEvidence} {...stylex.props(usageMeterGrid.truncate, styles.amount)}><span aria-hidden="true">{parts.join(' + ')}</span><VisuallyHidden><span data-quota-full-value>{subtotalEvidence}</span></VisuallyHidden></span></Cell>
+                  <Cell textValue={subtotalEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.amountColumn, styles.numeric)}><FullValueTooltip full={subtotalEvidence} style={[usageMeterGrid.truncate, styles.amount]} valueData={{ 'data-quota-full-value': true }}>{parts.join(' + ')}</FullValueTooltip></Cell>
                   <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)} />
                 </Row>
               }
@@ -181,33 +187,33 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
               const moreEvidence = `Open all ${account.windows.length} windows, amount and reset evidence for ${account.label}`
               return <Row key={row.id} id={row.id} textValue={account.label} data-quota-row={account.id} data-quota-account-label={account.label} data-quota-state={account.state} {...stylex.props(usageMeterGrid.row, styles.row)}>
                 <Cell data-quota-cell="account" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
-                  <div {...stylex.props(styles.accountLine)} title={accountEvidence}>
-                    <Button aria-label={`Open usage for ${accountEvidence}`} onPress={() => props.onOpenUsage(account.id)} {...stylex.props(usageMeterGrid.truncate, styles.accountButton)}><span title={accountEvidence}><span data-quota-account-label>{account.label}</span><span {...stylex.props(styles.accountProvider)}> · {account.provider}</span></span></Button>
+                  <div {...stylex.props(styles.accountLine)}>
+                    <ValueTooltipTrigger label={accountEvidence}><Button aria-label={`Open usage for ${accountEvidence}`} onPress={() => props.onOpenUsage(account.id)} {...stylex.props(usageMeterGrid.truncate, styles.accountButton)}><span data-quota-account-label>{account.label}</span><span {...stylex.props(styles.accountProvider)}> · {account.provider}</span></Button></ValueTooltipTrigger>
                   </div>
                 </Cell>
                 <Cell data-quota-cell="primary" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
-                  {governing === undefined ? <span title="Governing usage Unreported">—</span> : <WindowMeter window={governing} stale={stale} />}
+                  {governing === undefined ? <FullValueTooltip full="Governing usage Unreported">—</FullValueTooltip> : <WindowMeter window={governing} stale={stale} />}
                 </Cell>
-                <Cell data-quota-cell="reset" textValue={resetEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.resetCell, styles.numeric)}><span title={resetEvidence} {...stylex.props(styles.resetToken)}><span aria-hidden="true" data-quota-reset-reading>{reset}</span><VisuallyHidden><span data-quota-full-value>{resetEvidence}</span></VisuallyHidden></span></Cell>
+                <Cell data-quota-cell="reset" textValue={resetEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.resetCell, styles.numeric)}><FullValueTooltip full={resetEvidence} style={styles.resetToken} valueData={{ 'data-quota-full-value': true }}><span data-quota-reset-reading>{reset}</span></FullValueTooltip></Cell>
                 {displayColumns.map(column => <Cell key={column.id} data-quota-cell={`window:${column.id}`} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.secondaryColumn)}>
                   <div {...stylex.props(styles.windowList, props.variant === 'stacked' && styles.stackedList, props.variant === 'chips' && styles.chipList)}>
                     {(props.variant === 'columns' ? secondary.filter(window => window.column === column.id) : secondary).map(window => <WindowMeter key={window.id} window={window} stale={stale} chip={props.variant === 'chips'} />)}
                   </div>
                 </Cell>)}
-                <Cell data-quota-cell="amount" textValue={amountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.amountColumn, styles.numeric)}><span title={amountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.amount)}><span aria-hidden="true">{amountText(amount.value, amount.unit)}</span><VisuallyHidden><span data-quota-full-value>{amountEvidence}</span></VisuallyHidden></span></Cell>
+                <Cell data-quota-cell="amount" textValue={amountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.amountColumn, styles.numeric)}><FullValueTooltip full={amountEvidence} style={[usageMeterGrid.truncate, styles.amount]} valueData={{ 'data-quota-full-value': true }}>{amountText(amount.value, amount.unit)}</FullValueTooltip></Cell>
                 <Cell data-quota-cell="more" {...stylex.props(usageMeterGrid.cell, styles.cell, styles.numeric)}>
-                  <Button onPress={() => props.onOpenUsage(account.id)} data-quota-more={omitted} {...stylex.props(styles.moreButton)}>
-                    <span title={moreEvidence} data-quota-more-count {...stylex.props(styles.fullCount)}>+{omitted}</span>
-                    <span title={moreEvidence} data-quota-more-count {...stylex.props(styles.foldedSecondaryCount)}>+{foldedCount}</span>
+                  <ValueTooltipTrigger label={moreEvidence}><Button onPress={() => props.onOpenUsage(account.id)} data-quota-more={omitted} {...stylex.props(styles.moreButton)}>
+                    <span data-quota-more-count {...stylex.props(styles.fullCount)}>+{omitted}</span>
+                    <span data-quota-more-count {...stylex.props(styles.foldedSecondaryCount)}>+{foldedCount}</span>
                     <VisuallyHidden><span data-quota-more-description>{` ${moreEvidence}`}</span></VisuallyHidden>
-                  </Button>
+                  </Button></ValueTooltipTrigger>
                 </Cell>
               </Row>
             })}
           </TableBody>
         </Table>
       </div>
-      <footer {...stylex.props(styles.shortcuts)} title="With focus inside quota: s cycles sort, Shift+s reverses direction, u toggles units, m collapses, Escape closes. Shortcuts do not intercept form fields.">s sort · S reverse · u unit · m collapse · Esc close</footer>
+      <footer {...stylex.props(styles.shortcuts)}><FullValueTooltip full="With focus inside quota: s cycles sort, Shift+s reverses direction, u toggles units, m collapses, Escape closes. Shortcuts do not intercept form fields.">s sort · S reverse · u unit · m collapse · Esc close</FullValueTooltip></footer>
     </>}
   </section>
 }
@@ -220,6 +226,7 @@ const styles = stylex.create({
   button: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: quotaGeometry.compactControlHeight, minWidth: 0, padding: `${space.xs2} ${space.sm}`, color: ink.fgSoft, backgroundColor: { default: surface.controlFill, ':hover': surface.rowHover, ':active': surface.rowActive }, border: quotaGeometry.strongHair, borderRadius: radius.keyboard, font: 'inherit', cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.focusOffset },
   pressed: { color: ink.fg, backgroundColor: surface.rowActive },
   statusSlot: { height: quotaGeometry.drawerStatusHeight, minHeight: quotaGeometry.drawerStatusHeight, maxHeight: quotaGeometry.drawerStatusHeight, boxSizing: 'border-box', padding: `0 ${space.md}`, flexShrink: 0, color: ink.fgSoft, overflow: 'hidden' },
+  statusTrigger: { display: 'block', minWidth: 0 },
   statusLine: { display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   statusNote: { display: 'block', color: ink.fgMuted, fontSize: type.microSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   filters: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: space.xs, padding: `0 ${space.md} ${space.sm}`, flexShrink: 0 },
@@ -230,10 +237,13 @@ const styles = stylex.create({
   filterOption: { padding: `${space.xs2} ${space.sm}`, cursor: 'pointer', borderRadius: radius.keyboard, outline: 'none', backgroundColor: { default: surface.transparent, ':is([data-focused])': surface.rowHover, ':is([data-selected])': surface.rowActive } },
   viewControls: { display: 'flex', flexWrap: 'wrap', gap: space.xs, padding: `0 ${space.md} ${space.md}`, flexShrink: 0 },
   scroll: { minHeight: 0, minWidth: 0, flexGrow: 1, overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin', scrollbarColor: `${status.scrollThumb} ${surface.transparent}`, scrollbarGutter: 'stable' },
-  sortHeader: { position: 'sticky', top: 0, zIndex: 3, display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: space.xs2, padding: `${space.xs} ${space.xs}`, backgroundColor: surface.raised, borderBottom: quotaGeometry.strongHair },
-  sortButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: space.xs2, minWidth: 0, minHeight: quotaGeometry.compactControlHeight, padding: `${space.xs2} 0`, color: ink.fgMuted, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover, ':active': surface.rowActive }, border: 0, font: 'inherit', fontSize: type.microSize, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
+  // Content-sized controls keep a full 8px between neighbours; leftover width is shared so hover and pressed fills stay even.
+  sortHeader: { position: 'sticky', top: 0, zIndex: 3, display: 'flex', gap: space.md, padding: `${space.xs} ${space.xs}`, backgroundColor: surface.raised, borderBottom: quotaGeometry.strongHair },
+  sortButton: { display: 'inline-flex', flex: '1 0 auto', alignItems: 'center', justifyContent: 'center', gap: space.xs2, minHeight: quotaGeometry.compactControlHeight, padding: `${space.xs2} 0`, color: ink.fgMuted, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover, ':active': surface.rowActive }, border: 0, font: 'inherit', fontSize: type.microSize, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
   activeSort: { color: ink.fg, backgroundColor: surface.rowActive },
-  sortArrow: { fontFamily: type.fontMono, fontSize: type.microSize },
+  sortArrow: { display: 'inline-flex', fontFamily: type.fontMono, fontSize: type.microSize },
+  // Below 18rem the labels alone fit with 8px gaps: inactive "sortable" glyphs fold, the active direction glyph stays.
+  inactiveSortArrow: { display: { default: 'inline-flex', '@container (max-width: 18rem)': 'none' } },
   table: { fontSize: type.denseSize, outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
   column: { top: quotaGeometry.stickyColumnOffset, zIndex: 2, color: ink.fgMuted, textAlign: 'left', fontSize: type.microSize, fontWeight: type.weightMedium },
   accountColumn: { width: 'auto' },
@@ -255,7 +265,8 @@ const styles = stylex.create({
   // Block/top-aligned so a smaller mono token never shifts the cell's 18px line box off its baseline (23px rows at 2x).
   resetToken: { display: 'block', color: ink.fgMuted, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums', lineHeight: usageMeterGridVars.lineHeight, whiteSpace: 'nowrap', overflow: 'visible', textOverflow: 'clip' },
   moreButton: { flexShrink: 0, verticalAlign: 'top', padding: 0, border: 0, backgroundColor: surface.transparent, color: ink.fgSoft, font: 'inherit', fontSize: type.microSize, lineHeight: usageMeterGridVars.lineHeight, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.inlineFocusOffset },
-  meter: { display: 'flex', flex: '1 1 0', flexDirection: 'row', alignItems: 'center', minWidth: 0, height: usageMeterGridVars.lineHeight, gap: space.xs2, overflow: 'hidden' },
+  meter: { display: 'flex', flex: '1 1 0', minWidth: 0, height: usageMeterGridVars.lineHeight, overflow: 'hidden' },
+  meterLine: { display: 'flex', flex: '1 1 0', flexDirection: 'row', alignItems: 'center', minWidth: 0, height: '100%', gap: space.xs2 },
   staleMeter: { opacity: quotaGeometry.retainedMeterOpacity },
   reading: { display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end', gap: space.xs2, flexShrink: 0, minWidth: quotaGeometry.readingWidth, color: ink.fgSoft, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums', lineHeight: usageMeterGridVars.lineHeight, whiteSpace: 'nowrap' },
   track: { display: 'block', flex: '1 1 0', minWidth: space.xs2, height: quotaGeometry.drawerMeterHeight, backgroundColor: surface.rowActive, overflow: 'hidden' },

@@ -200,14 +200,39 @@ Its accessible name includes that visible count and the full evidence descriptio
 The governing reset never folds or ellipsizes. The `quotaOverflowPolicy` constant
 is the single swap point for collapse/hide/truncate pending the overflow decision.
 Variant meters stay inside the same row rather than growing an account into a card.
-Unreported amounts and readings show `—`; titles and accessible names say Unreported.
+Unreported amounts and readings show `—`; their tooltips and accessible names say Unreported.
 The usage-meter table uses the same 22px rows and 8px gaps. From a 40rem
 container its window and reset tracks widen to fit a full reading and a reset
 with its count, and More shows its full header from 36rem. In narrower tracks
-the bar shrinks to its minimum before a reading ellipsizes, with the full text
-in its title. Reset glyphs stay on the text line, reset and +N
+the bar shrinks to its minimum before a reading ellipsizes. Reset glyphs stay on the text line, reset and +N
 align right, and the open row keeps the hover wash with an accent underline so
 muted and warning ink stay at AA contrast.
+
+Neither table uses native `title` attributes. A clipped or abbreviated value
+(account caption, compact meter, reset, amount, drawer window reading, status
+and shortcut footer) is a focusable trigger built from `FullValueTooltip`: a
+static `role="img"` element (the role React Aria requires of a non-interactive
+tooltip trigger) whose visible text is `aria-hidden` and whose name comes from
+a mounted `VisuallyHidden` copy of the full value. A React Aria tooltip with the
+same text opens on hover and on keyboard focus and is linked through
+`aria-describedby` while open. Account, sort and +N buttons use the same tooltip
+through `ValueTooltipTrigger`. Each meter-history bar is a roving-focus item
+(Arrow, Home, End) with its own tooltip. Each hover or focus shows exactly one
+tooltip; React Aria closes it when the pointer leaves, even if the trigger
+keeps focus. Drawer sort controls are content-sized flex items 8px apart; at
+18rem and below the inactive sort glyphs hide so the Gov, Cmp, Acct, Reset and
++N labels still fit, while the active direction stays an SVG glyph. The
+`NarrowFullValueTooltips` meter story and the Drawer S Priority stories assert
+that no non-empty `[title]` exists (React Aria's hidden form `<select>` carries
+an empty one), that the 200/240/320 sort controls keep 8px gaps, and that hover
+and then focus on a clipped value each show one `[role=tooltip]` with the full
+text.
+
+The usage-meter Sort and +N buttons take their accessible names from their
+visible text plus hidden context ("Cycle usage Sort", "+1 more: show all
+windows and evidence for …"), so the visible label is always part of the name.
+`landmarkContext` appends page context to the monitor, detail, window and
+history region names when several monitors share one page.
 
 Every Drawer S/M/L and drawer-variant story proves that all 11 fictional accounts
 fit the stated height without scrolling and that each cell's x-offset matches its
