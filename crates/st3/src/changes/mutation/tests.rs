@@ -91,6 +91,39 @@ mission "fixture-stage" state="ready" {
 }
 
 #[test]
+fn work_authority_sql_is_history_independent() {
+    use smallclaims::sqlite::work;
+    let (store, binding) = work_fixture();
+    let mut samples = Vec::new();
+    for ceiling in [100, 1000] {
+        for n in if ceiling == 100 { 0..100 } else { 100..1000 } {
+            store.append_claim(&ClaimInput {
+                subject: format!("message/authority-cost-{n}"), kind: "message.sent".into(),
+                actor: Some("agent/fixture/unrelated".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("agent/fixture/unrelated")),
+                    ("to".into(), json!("agent/fixture/reader")),
+                    ("content".into(), json!("Unrelated authority history")),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        store.git_change_work_binding(ACTOR, &binding.step, INCARNATION).unwrap();
+        let before = work::total();
+        let selected = store.git_change_work_binding(ACTOR, &binding.step, INCARNATION).unwrap();
+        store.validate_git_change_work(ACTOR, &selected).unwrap();
+        assert_eq!(selected.claim_id, binding.claim_id);
+        samples.push(work::total() - before);
+    }
+    eprintln!("authority SQL: {:?} -> {:?}", samples[0], samples[1]);
+    assert_eq!(samples[0].vm_steps, samples[1].vm_steps);
+    assert_eq!(samples[0].statements, samples[1].statements);
+    assert_eq!(samples[1].fullscan_steps, 0);
+    assert_eq!(samples[1].sorts, 0);
+}
+
+#[test]
 fn work_authority_checks_exact_claim_actor_attempt_and_live_incarnation() {
     let (store, binding) = work_fixture();
     store.validate_git_change_work(ACTOR, &binding).unwrap();

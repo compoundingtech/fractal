@@ -104,6 +104,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/internal/fleet/admission-residue",
         "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
     ),
+    (
+        "GET /v1/client/changes/work-binding",
+        "requires a live local agent and owner-runtime work lease; the exact Store binding/guard SQL is measured with growing history in changes::mutation::tests::work_authority_sql_is_history_independent",
+    ),
+    (
+        "POST /v1/client/changes/mutate",
+        "requires that live binding and an explicitly enabled Git owner; guard SQL has the history-independence control above, and real publication, cancellation, capacity and concurrent claims are exercised in changes::mutation::tests; network Git work is outside SQLite cost counters",
+    ),
     ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
     // A Claude permission hook's or Codex driver's approval poll: one indexed newest-claim read
     // and one operation lookup.
