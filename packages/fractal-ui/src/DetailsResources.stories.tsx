@@ -507,13 +507,14 @@ export const SharedResourceActionNames:Story={
     for(const name of ['Resource RC-3','Inline resource chip']){
       const section=within(root).getByRole('region',{name})
       const chip=within(section).getByRole('button',{name:label=>label.startsWith('rows.ts')&&label.includes('+1')&&label.includes('−1')})
-      const assertChip=()=>requireContract(within(section).queryByRole('button',{name:label=>label.startsWith('rows.ts')&&!label.includes('src/')&&label.includes('+1')&&label.includes('−1')})===chip&&chip.getAttribute('aria-description')==='src/rows.ts','File chip name or full-path description differs from painted basename')
+      const assertChip=()=>requireContract(within(section).queryByRole('button',{name:label=>label.startsWith('rows.ts')&&!label.includes('src/')&&label.includes('+1')&&label.includes('−1')})===chip&&chip.getAttribute('aria-describedby')?.split(/\s+/).some(id=>chip.ownerDocument.getElementById(id)?.textContent==='src/rows.ts'),'File chip name or full-path description differs from painted basename')
       assertChip();expect(chip).toHaveAccessibleDescription('src/rows.ts')
       chip.setAttribute('aria-label','Open src/rows.ts')
       try{await rejectsControl('File chip name or full-path description differs from painted basename',assertChip)}finally{chip.removeAttribute('aria-label')}
       assertChip()
-      chip.removeAttribute('aria-description')
-      try{await rejectsControl('File chip name or full-path description differs from painted basename',assertChip)}finally{chip.setAttribute('aria-description','src/rows.ts')}
+      const describedBy=chip.getAttribute('aria-describedby');requireContract(describedBy,'Missing chip description reference')
+      chip.removeAttribute('aria-describedby')
+      try{await rejectsControl('File chip name or full-path description differs from painted basename',assertChip)}finally{chip.setAttribute('aria-describedby',describedBy)}
       assertChip()
       await userEvent.click(chip);await waitFor(()=>requireContract(root.dataset.sharedOpened==='src/rows.ts','Shared chip open callback lost full file identity'))
       await userEvent.unhover(chip);chip.blur()
