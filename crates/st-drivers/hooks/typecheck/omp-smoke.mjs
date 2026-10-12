@@ -796,8 +796,14 @@ if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo
   assert.deepStrictEqual(todos().at(-1).phases, []);
   assert.deepStrictEqual(todos().at(-1).totals, totals());
   assert.strictEqual(todos().at(-1).truncated, false);
+  const todosBeforeRebinding = todos().length;
   await handlers.get("session_start")({}, todoCtx);
-  await pause(50);
+  // The producer has written to a pipe; the recorder still needs to consume it.
+  // Wait for a new receipt, then check its contents rather than a stale snapshot.
+  const rebindDeadline = Date.now() + 5000;
+  while (todos().length === todosBeforeRebinding && Date.now() < rebindDeadline) await pause(10);
+  assert.ok(todos().length > todosBeforeRebinding, "new binding emits a todo receipt");
+  assert.strictEqual(todos()[todosBeforeRebinding].source_op, "hydrate", "first rebind receipt is hydration");
   assert.strictEqual(todos().at(-1).source_op, "hydrate", "clear survives a new binding");
   assert.strictEqual(todos().at(-1).observed_at, sourceTime);
 
