@@ -205,8 +205,9 @@ export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.p
     await expect(preview).toHaveTextContent(index === 0 ? 'success' : index === 1 ? 'error' : 'running')
     await userEvent.click(within(preview).getByRole('button', { name: 'Show raw input/output' }))
     await expect(within(preview).getByTestId('tool-raw-input')).toHaveTextContent(`"note": "${rawMarker}:${id}"`)
-    // Only the input: no empty-output block or placeholder.
-    await expect(preview.querySelectorAll('pre')).toHaveLength(1)
+    // Exact input and any readable command, never an empty-output block.
+    await expect(preview.querySelectorAll('pre')).toHaveLength(index === 0 ? 1 : 2)
+    if (index !== 0) await expect(within(preview).getByTestId('tool-command')).toHaveTextContent('pnpm test rows')
     await expect(preview.textContent).not.toMatch(/No output/)
   }
   // Control: the whole-canvas absence probe that passed while collapsed now fails.
