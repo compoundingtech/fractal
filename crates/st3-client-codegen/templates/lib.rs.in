@@ -427,6 +427,19 @@ impl CollectionStream {
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit, "actor":actor, "status":status})).await
     }
+    /// Follow a usage report for a named period; an omitted end follows current usage.
+    pub async fn subscribe_usage(&mut self, id: &str, limit: usize, since_ms: Option<u64>, until_ms: Option<u64>) -> Result<(), ClientError> {
+        let mut command = serde_json::json!({"kind":"subscribe", "id":id, "collection":"usage", "limit":limit});
+        if let Some(since) = since_ms { command["since_ms"] = serde_json::json!(since); }
+        if let Some(until) = until_ms { command["until_ms"] = serde_json::json!(until); }
+        self.send(&command).await
+    }
+    /// Follow active devices for the session person or an explicitly authorized person.
+    pub async fn subscribe_devices(&mut self, id: &str, limit: usize, person: Option<&str>) -> Result<(), ClientError> {
+        let mut command = serde_json::json!({"kind":"subscribe", "id":id, "collection":"devices", "limit":limit});
+        if let Some(person) = person { command["person"] = serde_json::json!(person); }
+        self.send(&command).await
+    }
     /// Follow a terminal on this socket. `terminal.attach` returns the incarnation and the
     /// single-use capability; screens then arrive as [`CollectionEvent::Screen`], the latest
     /// only, and a `stale-fence` error ends only this subscription.

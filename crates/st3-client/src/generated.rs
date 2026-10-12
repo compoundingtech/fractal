@@ -1634,6 +1634,41 @@ pub struct SummaryMachines {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ConnectedClient {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    /// The session acting: `person/NAME`, `person/NAME/session/ID` for a paired device, or an agent.
+    pub actor: String,
+    /// The person or agent whose authority the session uses.
+    pub person: String,
+    /// The client's own `x-st3-client` name and build; absent when it sent none.
+    #[serde(default)]
+    pub client: Option<String>,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+    pub member: String,
+    /// `local`, `gateway` (a paired device over Tailscale or Fabric) or `tailscale`.
+    pub via: String,
+    /// An open stream right now.
+    pub connected: bool,
+    pub streams: u64,
+    pub since: String,
+    pub last_seen: String,
+    /// Windows, `conversation:ID` and `terminal:ID` it follows.
+    #[serde(default)]
+    pub follows: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Usage {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub value: UsagePeriod,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Summary {
     #[serde(flatten)]
     pub header: ResourceHeader,
@@ -1660,6 +1695,8 @@ pub struct SummaryAgentsAsOf {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Resource {
+    ConnectedClient(ConnectedClient),
+    Usage(Usage),
     Summary(Summary),
     Attention(Attention),
     Message(Message),
@@ -1691,6 +1728,8 @@ pub enum Resource {
 
 /// The resource kinds this client models; any other kind reads as [`Resource::Unknown`].
 pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
+    "connected-client",
+    "usage",
     "summary",
     "attention",
     "message",
@@ -1756,6 +1795,8 @@ impl<'de> Deserialize<'de> for UnknownResource {
 impl Resource {
     pub fn header(&self) -> &ResourceHeader {
         match self {
+            Self::ConnectedClient(v) => &v.header,
+            Self::Usage(v) => &v.header,
             Self::Summary(v) => &v.header,
             Self::Attention(v) => &v.header,
             Self::Message(v) => &v.header,

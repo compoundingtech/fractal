@@ -319,7 +319,14 @@ public struct SummaryResource: Codable, Sendable, Identifiable {
     public let agentsAsOf: SummaryAgentsAsOf?
     enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", personID = "person_id", needsYou = "needs_you", alerts, workingAgents = "working_agents", activeMissions = "active_missions", machines, agentsAsOf = "agents_as_of" }
 }
+public struct ConnectedClientResource: Codable, Sendable, Identifiable { public let id, kind, revision, updatedAt: String; public let actor, person, member, via, since, lastSeen: String; public let client, deviceID, deviceName: String?; public let connected: Bool; public let streams: UInt64; public let follows: [String]?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", actor, person, member, via, since, client, connected, streams, follows, lastSeen = "last_seen", deviceID = "device_id", deviceName = "device_name" } }
+public struct UsageResource: Codable, Sendable, Identifiable {
+    public let id, kind, revision, updatedAt: String
+    public let value: UsagePeriod
+    enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", value }
+}
 public enum Resource: Codable, Sendable, Identifiable {
+    case connectedClient(ConnectedClientResource), usage(UsageResource)
     case summary(SummaryResource)
     case attention(AttentionResource), message(MessageResource), launch(LaunchResource), launchVariant(LaunchVariantResource), launchDecision(LaunchDecisionResource), launchApproval(LaunchApprovalResource), mission(MissionResource), work(WorkResource), agent(AgentResource), runtime(RuntimeResource), observer(ObserverResource), subscription(SubscriptionResource), lane(LaneResource), machine(MachineResource), device(DeviceResource), operation(OperationResource), history(HistoryResource), session(SessionResource), glass(GlassResource), ownedSet(OwnedSetResource)
     /// A kind this client does not know, from a member newer than it: kept whole so an older
@@ -329,6 +336,8 @@ public enum Resource: Codable, Sendable, Identifiable {
     private struct Discriminator: Decodable { let kind: String }
     public init(from decoder: Decoder) throws {
         switch try Discriminator(from: decoder).kind {
+        case "connected-client": self = .connectedClient(try ConnectedClientResource(from: decoder))
+        case "usage": self = .usage(try UsageResource(from: decoder))
         case "summary": self = .summary(try SummaryResource(from: decoder))
         case "attention": self = .attention(try AttentionResource(from: decoder))
         case "message": self = .message(try MessageResource(from: decoder))
@@ -356,6 +365,8 @@ public enum Resource: Codable, Sendable, Identifiable {
     }
     public func encode(to encoder: Encoder) throws {
         switch self {
+        case .connectedClient(let v): try v.encode(to: encoder)
+        case .usage(let v): try v.encode(to: encoder)
         case .summary(let v): try v.encode(to: encoder)
         case .attention(let v): try v.encode(to: encoder)
         case .message(let v): try v.encode(to: encoder)
@@ -381,7 +392,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .unknown(let v): try v.encode(to: encoder)
         }
     }
-    public var id: String { switch self { case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
+    public var id: String { switch self { case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
 }
 /// A resource of a kind this client does not model: its header, and every field as sent.
 public struct UnknownResource: Codable, Sendable, Identifiable {
