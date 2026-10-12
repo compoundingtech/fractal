@@ -112,7 +112,11 @@ export const Wide: Story = { play: async ({ canvasElement }) => {
   dot.style.removeProperty('r')
   await expect(strokeProblems(root)).toEqual([])
 
-  // Size tokens. Control: a 16 glyph moved into the 12 column is rejected, then moved back.
+  // Size tokens. Controls: a 16 glyph rendered at the 12 width in its own column, then a 16 glyph moved into the 12 column.
+  await expect(sizeProblems(root)).toEqual([])
+  large.style.width = getComputedStyle(small).width
+  await expect(sizeProblems(root)).toEqual(['more@16 size'])
+  large.style.removeProperty('width')
   await expect(sizeProblems(root)).toEqual([])
   const home = large.parentElement!
   small.parentElement!.append(large)
