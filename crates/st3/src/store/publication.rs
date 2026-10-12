@@ -3,12 +3,13 @@ use super::*;
 use crate::model::MemberSpec;
 use crate::publication::{Interruption, interruption};
 
-pub(crate) type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error>;
+pub(crate) type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
 
 pub(crate) struct Check {
     pub incarnation: Option<String>,
     pub launched: Option<MemberSpec>,
     pub interruption: Interruption,
+    pub unknown_reason: Option<&'static str>,
 }
 
 pub(crate) fn launched_member(
@@ -19,14 +20,15 @@ pub(crate) fn launched_member(
     at: u64,
     local_origin: &str,
 ) -> Result<Option<MemberSpec>> {
+    if !publication_facts::ready(connection)? {
+        return Ok(None);
+    }
     let query = format!(
-        "SELECT claims.store_index, claims.body FROM claims INDEXED BY claims_seat_start_incarnation_index
-         JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND claims.origin=?2
-           AND json_extract(claims.body, '$.fields.incarnation_id')=?3
-           AND claims.kind='runtime.action.succeeded'
-           AND json_extract(claims.body, '$.fields.action')='start'
-           AND +claims.store_index<=?4 AND {UNREPAIRED_CLAIM} ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
+        "SELECT claims.store_index, claims.body FROM local_publication_claims AS facts INDEXED BY local_publication_claims_lookup
+         JOIN claims ON claims.id=facts.claim_id
+         WHERE facts.subject=?1 AND facts.origin=?2 AND facts.incarnation=?3
+           AND facts.kind='runtime.action.succeeded'
+           AND claims.store_index<=?4 AND {UNREPAIRED_CLAIM} ORDER BY facts.sort_key DESC LIMIT 1"
     );
     let shared: Option<(u64, String)> = connection
         .prepare_cached(&query)?
@@ -40,11 +42,12 @@ pub(crate) fn launched_member(
     let local: Option<(u64, String)> = if origin == local_origin {
         connection
             .prepare_cached(
-                "SELECT after_store_index, body FROM local_observations
-             INDEXED BY local_seat_start_incarnation_index
-             WHERE subject=?1 AND json_extract(body, '$.fields.incarnation_id')=?2
-               AND kind='runtime.action.succeeded' AND json_extract(body, '$.fields.action')='start'
-               AND after_store_index<=?3 ORDER BY id DESC LIMIT 1",
+                "SELECT local_observations.after_store_index, local_observations.body
+                 FROM local_publication_starts AS facts
+                 JOIN local_observations ON local_observations.id=facts.observation_id
+                 WHERE facts.subject=?1 AND facts.incarnation=?2
+                   AND local_observations.after_store_index<=?3
+                 ORDER BY facts.observation_id DESC LIMIT 1",
             )?
             .query_row(
                 params![subject, incarnation, at.min(i64::MAX as u64)],
@@ -82,25 +85,34 @@ pub(crate) fn check(
     local_origin: &str,
 ) -> Result<Check> {
     smallclaims::touched::note_read(|| proposed.subject.clone());
-    // DISTINCT walks the covering (subject, origin) prefix. Read one current runtime
-    // per origin so a stopped peer cannot hide another host's still-running incarnation.
+    if !publication_facts::ready(connection)? {
+        return Ok(Check {
+            incarnation: None,
+            launched: None,
+            interruption: Interruption::Unknown,
+            unknown_reason: Some("publication-evidence-incomplete"),
+        });
+    }
+    // DISTINCT skips the covering (subject, kind, origin) prefix. One runtime per
+    // origin prevents a stopped peer from hiding another host's running incarnation.
     let mut origins = connection.prepare_cached(
-        "SELECT DISTINCT origin FROM claims INDEXED BY claims_seat_runtime_origin_index
+        "SELECT DISTINCT origin FROM local_publication_claims INDEXED BY local_publication_runtime_lookup
          WHERE subject=?1 AND kind='runtime.observed'",
     )?;
     let origins = origins
         .query_map([&proposed.subject], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let query = format!(
-        "SELECT claims.body FROM claims INDEXED BY claims_seat_runtime_origin_index
-         JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND claims.origin=?2 AND claims.kind='runtime.observed'
-           AND +claims.store_index<=?3 AND {UNREPAIRED_CLAIM} ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
+        "SELECT claims.body FROM local_publication_claims AS facts
+         INDEXED BY local_publication_runtime_lookup JOIN claims ON claims.id=facts.claim_id
+         WHERE facts.subject=?1 AND facts.origin=?2 AND facts.kind='runtime.observed'
+           AND claims.store_index<=?3 AND {UNREPAIRED_CLAIM} ORDER BY facts.sort_key DESC LIMIT 1"
     );
     let mut unchanged = Check {
         incarnation: None,
         launched: None,
         interruption: Interruption::None,
+        unknown_reason: None,
     };
     for origin in origins {
         let body: Option<String> = connection
@@ -137,6 +149,8 @@ pub(crate) fn check(
         let check = Check {
             incarnation,
             launched,
+            unknown_reason: (interruption == Interruption::Unknown)
+                .then_some("publication-launch-unknown"),
             interruption,
         };
         if check.interruption != Interruption::None {
@@ -148,6 +162,19 @@ pub(crate) fn check(
 }
 
 impl Store {
+    pub(crate) fn publication_evidence_epoch(&self, subject: &str) -> Result<(u64, i64, bool)> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        Ok(self
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT (SELECT COALESCE(MAX(store_index),0) FROM claims WHERE subject=?1),
+                    (SELECT COALESCE(MAX(id),0) FROM local_observations WHERE subject=?1),
+                    (SELECT phase=3 FROM local_publication_bootstrap WHERE singleton=1)
+                        AND NOT EXISTS(SELECT 1 FROM local_publication_pending)",
+            )?
+            .query_row([subject], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?)
+    }
     pub(crate) fn publication_action(
         &self,
         proposed: &DesiredSubject,
@@ -174,7 +201,10 @@ impl Store {
             ),
             Interruption::Unknown => (
                 "observe-or-start",
-                "the running incarnation has no matching launch evidence".into(),
+                check
+                    .unknown_reason
+                    .unwrap_or("publication-launch-unknown")
+                    .into(),
             ),
         };
         Ok(Some(PlannedAction {
@@ -390,6 +420,72 @@ mod tests {
     }
 
     #[test]
+    fn publication_check_stopped_origin_cannot_hide_another_origins_running_seat() {
+        let local = Store::open_memory("node").unwrap();
+        let peer = Store::open_memory("peer").unwrap();
+        let original = declaration("true");
+        let applied = publish(&peer, &original, "peer-original");
+        peer.append_claim(&ClaimInput {
+            subject: "agent/example/worker".into(),
+            kind: "runtime.action.succeeded".into(),
+            actor: Some("agent/example/writer".into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!("start")),
+                ("incarnation_id".into(), json!("peer-inc")),
+                (
+                    "desired_token".into(),
+                    json!(applied.subject_tokens["agent/example/worker"][0]),
+                ),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+        peer.append_claim(&ClaimInput {
+            subject: "agent/example/worker".into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("incarnation_id".into(), json!("peer-inc")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+        local
+            .import_replication("peer", &peer.export_replication(0).unwrap())
+            .unwrap();
+        local
+            .append_claim(&ClaimInput {
+                subject: "agent/example/worker".into(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("status".into(), json!("stopped")),
+                    ("incarnation_id".into(), json!("node-inc")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        while !local.advance_publication_evidence().unwrap() {}
+        let proposed = declaration("false");
+        let judgment = check(
+            &local.readers.get(),
+            &proposed.subjects["agent/example/worker"],
+            u64::MAX,
+            "node",
+        )
+        .unwrap();
+        assert!(matches!(judgment.interruption, Interruption::Restart(_)));
+        assert_eq!(judgment.incarnation.as_deref(), Some("peer-inc"));
+    }
+
+    #[test]
     #[ignore = "process-wide SQL counters: run alone with --exact --ignored --test-threads=1"]
     fn publication_check_cost_is_independent_of_unrelated_and_old_incarnation_history() {
         use smallclaims::sqlite::work;
@@ -433,6 +529,9 @@ mod tests {
                     params![100000 + index, format!("noise-{index}"), subject, kind, body.to_string()]).unwrap();
             }
             tx.commit().unwrap();
+            drop(connection);
+            while !store.advance_publication_evidence().unwrap() {}
+            let connection = store.readers.get();
             let before = work::total();
             let started = std::time::Instant::now();
             let result = check(

@@ -115,6 +115,7 @@ impl SmalltalkRuntime {
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
@@ -255,6 +256,7 @@ impl Runtime for SmalltalkRuntime {
             views.initialize_empty(transaction, cut)?;
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
+        publication_facts::initialize(transaction)?;
         custom::open(transaction)?;
         resources::open(transaction)?;
         glass_heads::open(transaction)?;

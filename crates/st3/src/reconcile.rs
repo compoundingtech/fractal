@@ -822,6 +822,12 @@ fn reconcile_decision_admitted(subject: &str) -> bool {
     !subject.starts_with("gate-operation/")
 }
 
+struct LaunchEvidence {
+    member: Option<MemberSpec>,
+    epoch: (u64, i64, bool),
+    checked_at_ms: u128,
+}
+
 pub struct Reconciler<R = NativeRuntime> {
     store: Arc<Store>,
     runtime: Arc<R>,
@@ -877,6 +883,11 @@ pub struct Reconciler<R = NativeRuntime> {
     /// index of the subject's newest declaration it was read from.
     declared_checkouts: Mutex<HashMap<String, (u64, Option<(Checkout, String)>)>>,
     materialized_mission_generations: Mutex<BTreeSet<String>>,
+    /// Found launch evidence is immutable for one origin and incarnation. Missing evidence
+    /// is checked again on a subject change or the existing full-pass safety interval.
+    launched_members: Mutex<HashMap<(String, String, String), LaunchEvidence>>,
+    #[cfg(test)]
+    launch_evidence_reads: std::sync::atomic::AtomicUsize,
     retired_predecessor_generations: Mutex<BTreeSet<String>>,
     /// The person whose published launch geometry terminal seats start at.
     person: Option<String>,
@@ -1027,6 +1038,9 @@ impl Reconciler<NativeRuntime> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            launched_members: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
@@ -1110,6 +1124,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            launched_members: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
@@ -4762,12 +4779,58 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &DesiredSubject,
         observation: &RuntimeObservation,
     ) -> Result<Option<Vec<&'static str>>> {
-        let launched = observation
-            .incarnation_id
-            .as_deref()
-            .map(|incarnation| self.store.publication_launch(&subject.subject, incarnation))
-            .transpose()?
-            .flatten();
+        let preliminary = crate::publication::interruption(
+            subject,
+            observation.status == "running",
+            observation.incarnation_id.as_deref(),
+            None,
+        );
+        if preliminary != crate::publication::Interruption::Unknown {
+            return Ok(None);
+        }
+        let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            return Ok(None);
+        };
+        let key = (
+            subject.subject.clone(),
+            self.host.clone(),
+            incarnation.to_owned(),
+        );
+        let now = now_ms();
+        let mut cache = self
+            .launched_members
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let launched = match cache.get(&key) {
+            Some(known) if known.member.is_some() => known.member.clone(),
+            known => {
+                let epoch = self.store.publication_evidence_epoch(&subject.subject)?;
+                if let Some(known) = known
+                    && known.epoch == epoch
+                    && now.saturating_sub(known.checked_at_ms)
+                        < crate::incremental::FULL_PASS_INTERVAL_MS
+                {
+                    None
+                } else {
+                    #[cfg(test)]
+                    self.launch_evidence_reads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let member = self
+                        .store
+                        .publication_launch(&subject.subject, incarnation)?;
+                    cache.retain(|(seat, _, _), _| seat != &subject.subject);
+                    cache.insert(
+                        key,
+                        LaunchEvidence {
+                            member: member.clone(),
+                            epoch,
+                            checked_at_ms: now,
+                        },
+                    );
+                    member
+                }
+            }
+        };
         match crate::publication::interruption(
             subject,
             observation.status == "running",
@@ -19844,6 +19907,166 @@ mission "feedback-review" state="ready" {
     #[test]
     fn rejects_an_unstructured_usage_log() {
         assert_eq!(structured_token_usage("the gate finished"), None);
+    }
+
+    #[test]
+    fn publication_launch_evidence_is_read_once_for_repeated_running_seat_passes() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let count = 12;
+        let source = format!(
+            "version 2\n{}",
+            (0..count)
+                .map(|i| format!(
+                    "agent \"example/worker-{i}\" {{ workspace \"/tmp\"; command \"true\"; }}\n"
+                ))
+                .collect::<String>()
+        );
+        apply_source(&store, &source, "many-seats");
+        let runtime = Arc::new(FakeRuntime::default());
+        for (i, desired) in store.desired_subjects().unwrap().iter().enumerate() {
+            let incarnation = format!("incarnation-{i}");
+            let token = store
+                .selected_desired_token(&desired.subject)
+                .unwrap()
+                .unwrap();
+            store
+                .append_claim(&ClaimInput {
+                    subject: desired.subject.clone(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("action".into(), serde_json::json!("start")),
+                        ("incarnation_id".into(), serde_json::json!(incarnation)),
+                        ("desired_token".into(), serde_json::json!(token)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            let member = desired.member.as_ref().unwrap();
+            runtime.ptys.lock().unwrap().push(RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation),
+            });
+        }
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            count
+        );
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            count
+        );
+        let desired = store.desired_subjects().unwrap();
+        let observations = runtime.ptys.lock().unwrap().clone();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        for _ in 0..4 {
+            for (subject, observation) in desired.iter().zip(&observations) {
+                assert!(
+                    reconciler
+                        .declared_launch_changes(subject, observation)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        let cost = scope.finish();
+        assert_eq!(
+            cost.statements, 0,
+            "found evidence must use no SQLite statements on repeated passes: {cost:?}"
+        );
+        assert!(runtime.stops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn publication_absent_launch_evidence_rechecks_on_new_subject_evidence() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "seat",
+        );
+        let desired = store
+            .desired_subject_with_writer("agent/example/worker")
+            .unwrap()
+            .unwrap()
+            .0;
+        let token = store
+            .selected_desired_token(&desired.subject)
+            .unwrap()
+            .unwrap();
+        let observation = RuntimeObservation {
+            runtime_id: desired.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("one".into()),
+        };
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            assert!(
+                reconciler
+                    .declared_launch_changes(&desired, &observation)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), serde_json::json!("start")),
+                    ("incarnation_id".into(), serde_json::json!("one")),
+                    ("desired_token".into(), serde_json::json!(token)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        assert!(
+            reconciler
+                .declared_launch_changes(&desired, &observation)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
     }
 
     #[test]

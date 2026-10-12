@@ -2,31 +2,31 @@
   "version": 1,
   "summary": "Compare publication and reconcile launch changes against the running incarnation's start evidence.",
   "replay": {
-    "status": "none",
-    "detail": "No claim replay or derived-table version change. Existing start and runtime observations remain the evidence sources."
+    "status": "changed",
+    "detail": "Adds rebuildable local publication evidence. Existing stores bootstrap retained runtime observations and start-success evidence after API bind in durable, bounded writer pages. Explicit full replay resets this evidence to an incomplete bootstrap; no claim rewrite or derived-table version change."
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds three seek indexes for runtime observations by origin and start successes by incarnation, including locally retained successes. Existing stores create these additive indexes at open; numeric schema version and stored claim bodies are unchanged."
+    "detail": "Adds four local derived tables and lookup indexes over those small tables, plus exact source-delta triggers. No new index scans the claims or local_observations table at open. Numeric schema version and replicated claim bodies are unchanged."
   },
   "rules": {
     "status": "none",
-    "detail": "Checkpoint rules and digests are unchanged; no coordinated member upgrade is required. Members on earlier builds still use their earlier launch comparison."
+    "detail": "Checkpoint rules and replicated digests are unchanged. Publication fact tables, pending deltas and bootstrap progress are explicitly local derived state in the canonical audit and never participate in shared digests."
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Publication preview uses running-launch evidence and can report restart when the selected declaration already matches the file but the running incarnation has drifted. Reconcile no longer borrows start evidence from a different incarnation. Existing adopted runtimes without matching launch evidence keep running. No public CLI option or resource field is added in this slice; mixed-build clients and fleets have not been exercised."
+    "detail": "Publication preview and reconcile share a judgment against the checked origin and running incarnation, including declaration drift and distinct Unknown evidence. Incomplete bootstrap is fail-closed for the internal writer guard, with publication-evidence-incomplete visible in doctor. Default adopted runtimes continue running when launch evidence is missing. No public CLI option is added in this slice; mixed-build fleets have not been exercised."
   },
   "downtime": {
     "status": "unknown",
-    "detail": "No deliberate seat interruption is added. Index creation can delay API readiness when opening an existing store; restart-to-API and restart-to-health durations have not been measured on deployed store sizes."
+    "detail": "Source-table index builds were rejected after an estimated 71.26 seconds on the frozen production-size census. The replacement creates only empty derived tables at open and bootstraps after the API binds. Native page costs and bootstrap timings are under measurement; deployed restart-to-health is not yet measured. No deliberate seat interruption is added."
   },
   "manual": {
     "status": "none",
-    "detail": "No manual migration, identity change or operator action is required. Indexes install at normal store open."
+    "detail": "No manual migration is required; the daemon advances bootstrap from its durable cursor. A corrupt historical source stops bootstrap with a doctor warning; repair the source and restart the daemon to resume."
   },
   "recovery": {
-    "status": "none",
-    "detail": "Earlier binaries can reopen these stores and ignore the additive indexes. Reinstalling an earlier binary preserves claims but restores its earlier launch-evidence comparison."
+    "status": "changed",
+    "detail": "Earlier binaries ignore the additive local tables and retain their existing comparison. Persisted source triggers capture writes from earlier binaries; a later reopen drains exact pending deltas before evidence is treated as complete. Full replay rebuilds the local evidence asynchronously from retained claims; checkpoint-trimmed launch bodies remain Unknown."
   }
 }

@@ -30,6 +30,7 @@ pub mod git_changes;
 pub(crate) mod message_subscriptions;
 mod rollouts;
 pub(crate) mod publication;
+mod publication_facts;
 mod seat_status;
 mod card_fold;
 #[cfg(test)]
@@ -649,15 +650,6 @@ WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT N
 -- of other kinds plan as they did.
 CREATE INDEX IF NOT EXISTS claims_runtime_subject_index ON claims(subject, store_index)
 WHERE kind='runtime.observed';
-CREATE INDEX IF NOT EXISTS claims_seat_runtime_origin_index
-ON claims(subject, origin, length(accepted_at_unix_ms), accepted_at_unix_ms)
-WHERE kind='runtime.observed';
--- A launch comparison reads only the start of the checked incarnation, even when a
--- seat has years of action history. Match the JSON expressions in publication.rs.
-CREATE INDEX IF NOT EXISTS claims_seat_start_incarnation_index
-ON claims(subject, origin, json_extract(body, '$.fields.incarnation_id'),
-    length(accepted_at_unix_ms), accepted_at_unix_ms)
-WHERE kind='runtime.action.succeeded' AND json_extract(body, '$.fields.action')='start';
 -- An already-open raw stream revalidates the original paired actor, never a full graph scan.
 CREATE INDEX IF NOT EXISTS claims_client_pairing_actor_index
 ON claims(json_extract(body, '$.fields.session_actor'))
@@ -1042,9 +1034,6 @@ WHERE kind='harness.timeline';
 CREATE INDEX IF NOT EXISTS local_observations_roster_frontier_index
 ON local_observations(id, after_store_index)
 WHERE kind='harness.timeline' AND subject LIKE 'agent/%';
-CREATE INDEX IF NOT EXISTS local_seat_start_incarnation_index
-ON local_observations(subject, json_extract(body, '$.fields.incarnation_id'), id)
-WHERE kind='runtime.action.succeeded' AND json_extract(body, '$.fields.action')='start';
 -- A mission capacity retry is scheduling state owned by this reconciler. Replicating every
 -- backoff attempt makes every peer reconcile even though only this node can retry it.
 CREATE TABLE IF NOT EXISTS local_subscription_mission_deferrals (
@@ -3240,6 +3229,8 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.install_transaction_finalizer(publication_facts::flush)?;
         Ok(Self { graph, smalltalk })
     }
 
@@ -3252,6 +3243,8 @@ impl Store {
     ) -> Result<Self> {
         let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, smalltalk.clone())?;
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.install_transaction_finalizer(publication_facts::flush)?;
         Ok(Self { graph, smalltalk })
     }
 
@@ -3267,6 +3260,8 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.install_transaction_finalizer(publication_facts::flush)?;
         Ok(Self { graph, smalltalk })
     }
 
@@ -29873,6 +29868,7 @@ fn replay_graph_from_nothing_with_progress_tx(
     stage("full-replay/arrangements");
     arrangements::rebuild(transaction).map_err(internal)?;
     stage("full-replay/flush");
+    publication_facts::reset(transaction).map_err(internal)?;
     Ok(())
 }
 
