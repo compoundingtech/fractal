@@ -25,7 +25,7 @@ import threading
 import time
 
 
-FIRST_FRAME = b" working"  # The status bar's count is present even before st connects.
+FIRST_FRAME = b"$ usage"  # The top bar's usage slot is on the first frame, before and after st answers. (Its working count waits for the first state from st, so a placeholder never flips.)
 
 
 def plain(output: bytes) -> bytes:

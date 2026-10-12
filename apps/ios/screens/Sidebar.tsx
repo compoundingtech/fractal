@@ -8,7 +8,7 @@ import type { ArrangementOperation } from '../../../clients/typescript/st3-clien
 import { Banners, StatusLine, useListsOnFocus, useMissionsOnFocus } from '../chrome';
 import { agentGlyph, agentRows } from '../agentsView';
 import { missionTitle, missionWord, wordStyle } from '../missionsView';
-import type { RootScreen } from '../navigation';
+import { navigationRef, type RootScreen } from '../navigation';
 import { rememberResources, sidebarGroups, type SidebarChoices, type SidebarResource } from '../sidebarView';
 import { resourceRow, subjectToFile } from '../sidebarResources';
 import { folderCreate, folderName, folderLocation, moveFolder, placeResource, sidebarArrangement, uuid7 } from '../sidebarEdits';
@@ -33,7 +33,7 @@ function DragHandle({ title, onBegin, onEnd, onDrop }: { title: string; onBegin:
 }
 
 export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
-  const { data, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources, loadLists, sidebarSeen, url, caps, status, hasSynced, busy, actions, loadErrors, truncated, gatewayHost, error } = useStore();
+  const { data, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources, loadLists, sidebarSeen, url, caps, actor, status, hasSynced, busy, actions, loadErrors, truncated, gatewayHost, error } = useStore();
   useListsOnFocus(['machines', 'sessions']); useMissionsOnFocus();
   useFocusEffect(useCallback(() => { if (status === 'online') void loadSidebarTerminals(); }, [status, loadSidebarTerminals]));
   useFocusEffect(useCallback(() => { if (status === 'online') void loadSidebarResources(); }, [status, loadSidebarResources]));
@@ -45,7 +45,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
   const [filter, setFilter] = useState(''), [choices, setChoices] = useState<SidebarChoices>({}), [loadedKey, setLoadedKey] = useState('');
   const [form, setForm] = useState<Form | null>(null), [name, setName] = useState(''), [issue, setIssue] = useState(''), [dragging, setDragging] = useState(false);
   const scroll = useRef<ScrollView>(null), scrollY = useRef(0), screenY = useRef(0), positions = useRef(new Map<string, { y: number; height: number }>());
-  const storageKey = `st3.sidebar.collapse/${url}/${caps?.session_actor.match(/^person\/[^/]+/)?.[0] ?? ''}`;
+  const storageKey = `st3.sidebar.collapse/${url}/${actor.match(/^person\/[^/]+/)?.[0] ?? ''}`;
   useEffect(() => {
     let current = true; setChoices({}); setLoadedKey('');
     void AsyncStorage.getItem(storageKey).then(value => {
@@ -97,7 +97,7 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
     if (row.kind === 'Agents') navigation.navigate('Conversation', { target: row.target, title: row.title });
     else if (row.kind === 'Missions') navigation.navigate('Mission', { id: row.target, title: row.title });
     else if (row.kind === 'Terminals') navigation.navigate('Terminal', { terminalId: row.target, title: row.title });
-    else if (row.kind === 'Machines') navigation.navigate('FleetRoot');
+    else if (row.kind === 'Machines') navigationRef.navigate('Fleet', { screen: 'FleetRoot' });
     else navigation.navigate('Resource', { id: row.id, title: row.title });
   };
   const move = (row: SidebarResource) => {
@@ -155,6 +155,8 @@ export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
   return <Screen><Banners /><ScrollView ref={scroll} contentInsetAdjustmentBehavior="automatic" refreshControl={refresh} scrollEnabled={!dragging} onScroll={e => { scrollY.current = e.nativeEvent.contentOffset.y; }} scrollEventThrottle={16}>
     <View style={{ padding: 12 }}><Field accessibilityLabel="Filter sidebar" value={filter} onChangeText={setFilter} placeholder="Find a resource" /><Button label="New folder" disabled={!editable} onPress={() => openForm({ kind: 'new' })} /></View>
     <StatusLine />
+    <ListRow glyph="●" glyphColor={theme.idle} title="Agents" second="Search agents and conversations · list or tree" onPress={() => navigation.navigate('Agents')} />
+    <ListRow glyph="◇" glyphColor={theme.waiting} title="Missions" second="Search missions · steps, progress and launches" onPress={() => navigation.navigate('Missions')} />
     {issue ? <Note tone="warning">{issue}</Note> : null}
     {arrangementsIssue ? <Note tone="warning">{arrangementsIssue}</Note> : null}
     {sidebarResourcesIssue ? <Note tone="warning">{sidebarResourcesIssue}</Note> : null}

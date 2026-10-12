@@ -339,6 +339,9 @@ export function toolTitle(name: string, args: unknown): string {
   return ['Bash', 'bash', 'shell', 'exec_command'].includes(name) ? `$ ${first}` : `${name} ${first}`;
 }
 
+// Keep this line budget and marker in sync with st3-conversation-ui's tool_output.
+const PREVIEW_LINES = 400;
+
 export function toolOutput(content: unknown, full = false): string[] {
   let text: string;
   if (typeof content === 'string') text = content;
@@ -349,7 +352,11 @@ export function toolOutput(content: unknown, full = false): string[] {
   const lines = text ? text.split('\n') : [];
   while (lines.length && !lines[0]?.trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1]?.trim()) lines.pop();
-  return full ? lines : lines.slice(0, 400);
+  if (full || lines.length <= PREVIEW_LINES) return lines;
+  return [
+    ...lines.slice(0, PREVIEW_LINES),
+    `… ${lines.length - PREVIEW_LINES} more lines not shown in the timeline preview`,
+  ];
 }
 
 function contentText(body: unknown): string {
@@ -943,8 +950,10 @@ export function shownToolLines(body: Extract<Body, { kind: 'tool' }>, open: bool
   return { hidden: body.output.length - COLLAPSED_TOOL_LINES, lines: head ? body.output.slice(0, COLLAPSED_TOOL_LINES) : body.output.slice(-COLLAPSED_TOOL_LINES) };
 }
 
-/** What a problem means for what is shown: how old it is and that the phone keeps trying. */
-export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number): string {
+/** What a problem means for what is shown: how old it is and that the phone keeps trying, or,
+ * once st refused for good (`stopped`), that nothing retries until the person asks again. */
+export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number, stopped = false): string {
+  if (stopped) return `Could not load this conversation: ${issue} · tap to try again`;
   if (!loaded) return `Not loaded yet: ${issue}. Trying again.`;
   if (lastFrame === null) return `${issue} · trying again`;
   const seconds = Math.max(0, Math.round((now - lastFrame) / 1000));
