@@ -81,7 +81,7 @@ The composition controls are the shared React Aria surface implementation used b
 All kit focus outlines consume `interactionVars.focusRing`. The shared geometry tokens own ring width and offset. `Surface primitives` stories cover both schemes at 440 and 1440, selection, Escape focus restoration, label/shortcut disclosure and reduced motion.
 
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback — DELETE at contraction — https://www.notion.so/3f7e3d41f4a381839fa5f7b257ba8f3c -->
-Until every app control paints its own ring, `tokens.css` keeps a global fallback outline on React Aria `[data-focus-visible]` targets and workshop `:focus-visible`. It reads `--fractal-focus-ring`, a literal-name alias of `interactionVars.focusRing` that the light theme re-resolves. Kit controls override it with their own token-driven outline.
+Until every app control paints its own ring, `tokens.css` keeps a global fallback outline on React Aria `[data-focus-visible]` targets and workshop `:focus-visible`. It reads `--fractal-focus-ring`, a literal-name alias of `interactionVars.focusRing` that the light theme re-resolves, so the fallback and kit rings share one colour. The `Surface primitives` plays assert the fallback's width, style and colour in both schemes.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback -->
 
 
