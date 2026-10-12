@@ -46,6 +46,8 @@ function CardPair({ row }: { readonly row: Row }) {
   </div>
 }
 
+/** Hover intent opens after 150ms and closes after 300ms; a saturated strict host can stretch that past waitFor's 1s default. */
+const hoverSettleTimeout = 5_000
 const fixtureByRef = new Map<string, Row>([knownRow, unreportedRow, ...cohortRows, ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr1` })), ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr3` })), ...parentRow.children, parentRow].map(row => [row.ref, row]))
 
 /** The visible title is the exact name; the complete reported facts are the exact description, carried by a mounted hidden span rather than a native title or the unsupported aria-description. */
@@ -101,10 +103,10 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
     await expect(row.contains(target)).toBe(true)
     for (let node: HTMLElement | null = target; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
     await userEvent.hover(target)
-    await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1))
+    await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
   }
   await userEvent.unhover(row)
-  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(0))
+  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(0), { timeout: hoverSettleTimeout })
 }
 
 /** Card text a sighted user sees: the clone drops every hidden description carrier that an aria-describedby references. */
@@ -190,7 +192,7 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await userEvent.unhover(target)
   const third = rows[2]!.querySelector<HTMLButtonElement>(':scope > button')!
   third.focus()
-  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1))
+  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1), { timeout: hoverSettleTimeout })
   await userEvent.keyboard('{Enter}')
   await waitFor(() => expect(rows[2]!.querySelector('[aria-current="page"]')).not.toBeNull())
   await assertRowNames(canvasElement)
