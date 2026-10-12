@@ -389,6 +389,10 @@
                 exit 1
               fi
             done
+            # The evidence tests create executable Python stand-ins at runtime. Give
+            # their embedded shebangs the declared interpreter before compiling them.
+            substituteInPlace crates/st3/tests/git_evidence.rs \
+              --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3'
           '';
           # Stamp st3, its shared driver library, and stui from this declared flake source.
           CLI_BUILD_STAMP = buildStamp;
@@ -476,6 +480,8 @@
             pkgs.which
             pkgs.cargo-nextest
             pkgs.python3
+            # Evidence fixtures create and verify throwaway SSH signing keys.
+            pkgs.openssh
             # Boot cleanup fixtures query their isolated daemon with curl.
             pkgs.curl
             pkgs.nodejs
