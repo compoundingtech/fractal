@@ -3,6 +3,7 @@ import { readFile, stat, mkdir, writeFile } from 'node:fs/promises'
 import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
+import { availableParallelism } from 'node:os'
 
 // Own an ephemeral localhost server: missing assets remain real, standard 404s.
 const [buildDirectory, outputDirectory] = process.argv.slice(2)
@@ -32,13 +33,14 @@ await new Promise((accept, reject) => {
 const base = `http://127.0.0.1:${server.address().port}`
 const started = performance.now()
 const rows = []
+const workers = Math.min(6, availableParallelism())
 let ids = [], browser, fatalError
 await mkdir(outputDirectory, { recursive: true })
 const writeReceipt = async () => {
   const receipt = {
     pass: !fatalError && ids.length > 0 && rows.length === ids.length * 4 && rows.every(row => row.pass),
-    stories: ids.length, expectedCases: ids.length * 4, cases: rows.length,
-    elapsedSeconds: (performance.now() - started) / 1000, fatalError, rows,
+    stories: ids.length, expectedCases: ids.length * 4, cases: rows.length, workers,
+    elapsedSeconds: (performance.now() - started) / 1000, fatalError, rows: rows.toSorted((a, b) => a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width),
   }
   await writeFile(join(outputDirectory, 'receipt.json'), JSON.stringify(receipt, null, 2) + '\n')
   return receipt
@@ -51,7 +53,9 @@ try {
   if (!ids.length || new Set(ids).size !== ids.length) throw new Error('Storybook index must contain unique, nonempty story IDs')
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
   browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
-  for (const id of ids) for (const scheme of ['dark', 'light']) for (const width of [440, 1440]) {
+  const cases = ids.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width }))))
+  let nextCase = 0
+  const runCase = async ({ id, scheme, width }) => {
     const caseStarted = performance.now()
     const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme: scheme })
     const guard = await strictStoryGuard(page, base)
@@ -71,10 +75,14 @@ try {
       row.elapsedSeconds = (performance.now() - caseStarted) / 1000
       rows.push(row)
       await page.close()
-      await writeReceipt()
       console.log(JSON.stringify(row))
     }
   }
+  const results = await Promise.allSettled(Array.from({ length: workers }, async () => {
+    while (nextCase < cases.length) await runCase(cases[nextCase++])
+  }))
+  const rejected = results.filter(result => result.status === 'rejected')
+  if (rejected.length) throw new AggregateError(rejected.map(result => result.reason), 'Kit play workers failed')
 } catch (error) {
   fatalError = String(error)
 } finally {

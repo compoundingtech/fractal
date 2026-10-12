@@ -1,4 +1,4 @@
-/** Baseline SR-2 row coverage: known-only hover card facts, omitted unreported fields, an aligned known-vs-none time cohort, and the row hover quick Open action. */
+/** Baseline SR-2 row coverage: visible row labels remain in accessible names, known-only hover card facts, omitted unreported fields, an aligned known-vs-none time cohort, and the row hover quick Open action. */
 import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
@@ -41,7 +41,17 @@ function CardPair({ row }: { readonly row: Row }) {
   </div>
 }
 
+async function assertRowNames(canvasElement: HTMLElement) {
+  for (const row of within(canvasElement).getAllByTestId('taste-agent-row')) {
+    const button = row.querySelector<HTMLButtonElement>(':scope > button')!
+    const title = row.querySelector('[data-row-column="title-text"]')!.textContent!
+    await expect(button).toHaveAccessibleName(new RegExp(title))
+    await expect(button).toHaveAccessibleName(/host-1/)
+  }
+}
+
 async function assertCompactCard(canvasElement: HTMLElement) {
+  await assertRowNames(canvasElement)
   const cards = within(canvasElement).getAllByTestId('agent-hover-card')
   await expect(cards).toHaveLength(1)
   const card = cards[0]!
@@ -78,6 +88,7 @@ export const HoverCardUnknown: Story = { name: 'Hover card · unreported fields 
   for (const label of ['Spend', 'Duration', 'Last turn', 'Model', 'PR', 'Branch']) await expect(within(card).queryByText(label)).toBeNull()
 } }
 export const TimeCohort: Story = { name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
+  await assertRowNames(canvasElement)
   const rows = within(canvasElement).getAllByTestId('taste-agent-row')
   const child = rows.find(row => row.textContent?.includes('Check output'))!
   await expect(child).toBeDefined()
@@ -94,8 +105,9 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await userEvent.hover(target)
   await userEvent.click(within(target).getByRole('button', { name: /^Open / }))
   await expect(target.querySelector('[aria-current="page"]')).not.toBeNull()
+  await assertRowNames(canvasElement)
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main> }
+export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main>, play: async ({ canvasElement }) => assertRowNames(canvasElement) }
 
 const styles = stylex.create({
   root: { height: '100vh', minHeight: 0, overflowY: 'auto', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, display: 'flex', flexDirection: 'column', gap: s.xl },
