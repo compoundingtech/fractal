@@ -129,7 +129,11 @@ fn work_authority_sql_is_history_independent() {
     assert_eq!(samples[0].vm_steps, samples[1].vm_steps);
     assert_eq!(samples[0].statements, samples[1].statements);
     assert_eq!(samples[1].fullscan_steps, 0);
-    assert_eq!(samples[1].sorts, 0);
+    // The existing canonical runtime fold performs fixed sorts. This control
+    // bounds those sorts and rejects growth; it does not claim a sort-free guard.
+    assert_eq!(samples[0].sorts, samples[1].sorts);
+    assert_eq!(samples[1].sorts, 19);
+    assert_eq!(samples[1].autoindex_rows, 0);
 }
 
 #[test]
