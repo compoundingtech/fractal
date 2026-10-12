@@ -373,13 +373,13 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
   } else if (target === 'fold') {
     await waitFor(() => expect(getComputedStyle(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
     await userEvent.click(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }))
-    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }).getAttribute('aria-expanded'), detector).toBe('true')
-    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }), detector).toHaveAttribute('aria-expanded', 'true')
+    await waitFor(() => expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }).getAttribute('aria-expanded'), detector).toBe('true'))
+    await waitFor(() => expect(currentRow(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - top, detector).toBe(0))
     const expanded = currentRow(1300)!.getBoundingClientRect().height
     await waitFor(() => expect(getComputedStyle(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
     await userEvent.click(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }))
     await settle()
-    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }), detector).toHaveAttribute('aria-expanded', 'false')
+    await waitFor(() => expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }).getAttribute('aria-expanded'), detector).toBe('false'))
     await expect(currentRow(1300)!.getBoundingClientRect().height, detector).toBeLessThan(expanded)
   } else {
     const held = within(currentRow(1300)!).getByRole('button', { name: /Worked/ })
@@ -497,14 +497,15 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   const foldTop = row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top
   await waitFor(() => expect(getComputedStyle(within(row(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
   await userEvent.click(within(row(1300)!).getByRole('button', { name: /Worked/ }))
-  await expect(within(row(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'true')
+  await waitFor(() => expect(within(row(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'true'))
+  await waitFor(() => expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - foldTop).toBe(0))
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   const expandedHeight = row(1300)!.getBoundingClientRect().height
   await waitFor(() => expect(getComputedStyle(within(row(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
   await userEvent.click(within(row(1300)!).getByRole('button', { name: /Worked/ }))
-  await expect(within(row(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'false')
+  await waitFor(() => expect(within(row(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'false'))
   await waitFor(() => expect(row(1300)!.getBoundingClientRect().height).toBeLessThan(expandedHeight))
-  await expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - foldTop).toBe(0)
+  await waitFor(() => expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - foldTop).toBe(0))
   await mountedBound()
 
   // RAC row keyboard handling is exercised with real row focus, not a synthetic

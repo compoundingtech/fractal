@@ -265,9 +265,13 @@ export const MoreHistory: Story = { args: { history: { _tag: 'More', loadOlder }
   const canvas = within(canvasElement)
   await canvas.findByRole('button', { name: /Worked for 24s/ })
   const viewport = canvas.getByTestId('transcript-scroll')
-  viewport.focus()
-  await userEvent.keyboard('{PageUp}')
   await waitFor(() => expect(loadOlder).toHaveBeenCalledTimes(1))
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  const row = viewport.querySelector<HTMLElement>('[role="row"]')!
+  row.focus({ preventScroll: true })
+  await expect(document.activeElement).toBe(row)
+  await userEvent.keyboard('{Home}')
+  await waitFor(() => expect(loadOlder).toHaveBeenCalledTimes(2))
   await expect(canvas.queryByTestId('history-boundary')).toBeNull()
   await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
 } }
