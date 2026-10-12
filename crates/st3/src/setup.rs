@@ -401,7 +401,10 @@ fn confirm_expert(config: &Config, harness: &str, args: &SetupArgs) -> Result<bo
 
 /// Name what starting the expert created and how to stop it.
 fn print_expert_summary(config: &Config, harness: &str) -> Result<()> {
-    let person = config.person.as_deref().unwrap_or("person/you");
+    let person = config
+        .person
+        .as_deref()
+        .context("setup needs a person")?;
     println!(
         "Created: the agent agent/st/expert ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/expert --as {person}",
         crate::onboarding::workspace()?.display()
