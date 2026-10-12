@@ -106,15 +106,11 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
   React.useLayoutEffect(() => {
     const lane = root.current?.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')
     if (lane === null || lane === undefined) return
-    const offsetRegression = (failure === 'resize' && action === 'resize') || (failure === 'theme' && action === 'theme')
-    const applyOffset = () => {
-      const row = activeHistoryRow(lane, 1300)
-      if (offsetRegression && row !== null) row.style.translate = `0 ${s.lg}`
-    }
-    const observer = new MutationObserver(applyOffset)
-    if (offsetRegression) observer.observe(lane, { subtree: true, childList: true })
+    const geometryRegression = (failure === 'resize' && action === 'resize') || (failure === 'theme' && action === 'theme')
     const frame = requestAnimationFrame(() => {
-      applyOffset()
+      // Model losing reader mode during a geometry transition, rather than a
+      // cosmetic transform that the production anchor correctly compensates.
+      if (geometryRegression) setFollowKey(value => `${value ?? 'regression'}/lost-anchor`)
       if (failure === 'prepend-focus' && action === 'prepend') lane.focus()
       if (failure === 'empty-page' && action === 'empty') requestOlder()
       if (failure === 'unread' && action === 'append') {
@@ -129,7 +125,7 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
         if (row !== null) for (let index = 0; index < 250; index++) lane.append(row.cloneNode(true))
       }
     })
-    return () => { cancelAnimationFrame(frame); observer.disconnect() }
+    return () => { cancelAnimationFrame(frame) }
   }, [failure, revision, action, start])
   return <main ref={root} data-scheme={effectiveScheme} data-jump-result={jumpResult} data-requests={requests} data-loaded={loaded.length} data-start={start} data-page={page._tag} data-end={end} {...stylex.props(styles.root, (narrow !== resized) && styles.narrow, ...baselineTheme, effectiveScheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}>
