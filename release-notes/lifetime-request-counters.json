@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "An additive request_counters field on the existing performance report; existing fields, labels and ranking stay unchanged."
+    "detail": "An additive request_counters field on the existing performance report, bounded to 1024 pairs, 256 combined label bytes per pair and 64 KiB total retained label bytes, with explicit overflow. Existing fields, labels and ranking stay unchanged."
   },
   "downtime": {
     "status": "none",

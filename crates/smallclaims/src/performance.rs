@@ -11,7 +11,8 @@ const WINDOW: Duration = Duration::from_secs(300);
 const LABEL_LIMIT: usize = 256;
 /// Keep interval deltas independent of the rolling report without retaining an unbounded roster.
 const REQUEST_COUNTER_LABEL_LIMIT: usize = 1024;
-const REQUEST_COUNTER_LABEL_BYTES: usize = 1024;
+const REQUEST_COUNTER_LABEL_BYTES: usize = 256;
+const REQUEST_COUNTER_TOTAL_LABEL_BYTES: usize = 64 * 1024;
 static COUNTER_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 struct RequestCounters {
@@ -24,6 +25,7 @@ struct RequestCounters {
     overflow: u64,
     saturated: bool,
     by_client_route: BTreeMap<(Option<String>, String), u64>,
+    retained_label_bytes: usize,
 }
 impl Default for RequestCounters {
     fn default() -> Self {
@@ -39,6 +41,7 @@ impl Default for RequestCounters {
             overflow: 0,
             saturated: false,
             by_client_route: BTreeMap::new(),
+            retained_label_bytes: 0,
         }
     }
 }
@@ -58,17 +61,21 @@ impl RequestCounters {
         if client.is_none_or(|client| client.is_empty() || client == "(tcp)") {
             Self::increment(&mut self.unattributed, &mut self.saturated);
         }
-        if kind.len().saturating_add(client.map_or(0, str::len)) > REQUEST_COUNTER_LABEL_BYTES {
+        let label_bytes = kind.len().saturating_add(client.map_or(0, str::len));
+        if label_bytes > REQUEST_COUNTER_LABEL_BYTES {
             Self::increment(&mut self.overflow, &mut self.saturated);
             return;
         }
         let key = (client.map(str::to_owned), kind.to_owned());
-        let at_limit = self.by_client_route.len() >= REQUEST_COUNTER_LABEL_LIMIT;
+        let at_limit = self.by_client_route.len() >= REQUEST_COUNTER_LABEL_LIMIT
+            || self.retained_label_bytes.saturating_add(label_bytes)
+                > REQUEST_COUNTER_TOTAL_LABEL_BYTES;
         match self.by_client_route.entry(key) {
             std::collections::btree_map::Entry::Occupied(mut row) => {
                 Self::increment(row.get_mut(), &mut self.saturated);
             }
             std::collections::btree_map::Entry::Vacant(row) if !at_limit => {
+                self.retained_label_bytes += label_bytes;
                 row.insert(1);
             }
             std::collections::btree_map::Entry::Vacant(_) => {
@@ -93,6 +100,8 @@ impl RequestCounters {
             "attribution_complete_since_epoch":self.unattributed == 0 && self.overflow == 0 && !self.saturated,
             "label_limit":REQUEST_COUNTER_LABEL_LIMIT,
             "label_bytes_limit":REQUEST_COUNTER_LABEL_BYTES,
+            "total_label_bytes_limit":REQUEST_COUNTER_TOTAL_LABEL_BYTES,
+            "retained_label_bytes":self.retained_label_bytes,
             "rows":rows,
         })
     }
@@ -714,6 +723,32 @@ mod tests {
         counts.record("/v1/health", Some(&"x".repeat(REQUEST_COUNTER_LABEL_BYTES)));
         assert!(counts.saturated);
         assert_eq!(counts.overflow, u64::MAX);
+    }
+
+    #[test]
+    fn request_counter_payload_is_bounded_with_escaping_heavy_labels() {
+        let mut counts = RequestCounters::default();
+        let route = "/v1/health";
+        let padding = "\u{1}".repeat(REQUEST_COUNTER_LABEL_BYTES - route.len() - 4);
+        let pairs = REQUEST_COUNTER_TOTAL_LABEL_BYTES / REQUEST_COUNTER_LABEL_BYTES;
+        let first_client = format!("{padding}0000");
+        for client in 0..pairs {
+            counts.record(route, Some(&format!("{padding}{client:04}")));
+        }
+        assert_eq!(counts.retained_label_bytes, REQUEST_COUNTER_TOTAL_LABEL_BYTES);
+        assert_eq!(counts.by_client_route.len(), pairs);
+        // The total-byte budget refuses another row without evicting any retained label.
+        counts.record(route, Some("new-client"));
+        assert_eq!(counts.overflow, 1);
+        assert_eq!(counts.by_client_route.len(), pairs);
+        assert_eq!(counts.retained_label_bytes, REQUEST_COUNTER_TOTAL_LABEL_BYTES);
+        // Retained rows still count when the byte budget is full.
+        counts.record(route, Some(&first_client));
+        assert_eq!(counts.by_client_route[&(Some(first_client), route.into())], 2);
+        let report = counts.snapshot(Instant::now());
+        report_request_counter_payload_size("64KiB escaping-heavy fixture", &report);
+        assert_eq!(report["attribution_complete_since_epoch"], false);
+        assert!(serde_json::to_vec(&report).unwrap().len() <= 512 * 1024);
     }
 
     #[test]
