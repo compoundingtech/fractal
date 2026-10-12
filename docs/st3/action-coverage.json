@@ -2596,6 +2596,13 @@
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
     },
     {
+      "action": "ToggleTerminalFallback",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::terminal_fallback_defaults_on_and_the_palette_changes_it_locally"
+      ],
+      "verification": "device-local route preference; no daemon mutation, restart fence not applicable"
+    },
+    {
       "action": "Name",
       "tests": [
         "crates/stui/src/ui/glass.rs::what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that",

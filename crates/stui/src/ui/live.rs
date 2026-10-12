@@ -3635,7 +3635,7 @@ async fn attach_known_then_direct(
         // Once selected, keep this incarnation through every route failure. Rediscovery after
         // an error could silently attach a process that restarted in the meantime.
         return attach_terminal(
-            client, agent, name, &terminal, incarnation, owner, None, fallback,
+            client, agent, (name, incarnation), &terminal, owner, None, fallback,
         ).await;
     }
     attach_direct(client, agent, runtime_ids, None, owner, fallback).await
@@ -3699,9 +3699,8 @@ async fn attach_direct(
         match attach_terminal(
             client,
             subject,
-            name,
+            (name, incarnation),
             &terminal,
-            incarnation,
             owner.as_deref(),
             expected,
             fallback,
@@ -3721,13 +3720,13 @@ async fn attach_direct(
 async fn attach_terminal(
     client: &Client,
     subject: &str,
-    name: String,
+    identity: (String, String),
     terminal: &str,
-    incarnation: String,
     owner: Option<&str>,
     expected: Option<&str>,
     fallback: bool,
 ) -> Result<Direct, String> {
+    let (name, incarnation) = identity;
     let opened = direct::open(
         client,
         &direct::Terminal {
