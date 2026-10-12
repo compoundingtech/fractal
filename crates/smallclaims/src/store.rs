@@ -731,6 +731,8 @@ pub struct Store {
     pub readers: ReadPool,
     pub committed_index: Arc<AtomicU64>,
     pub seeded_batch_rowid: AtomicI64,
+    /// Check older writers' skipped batches once per open, before the first sealing pass.
+    sealing_recovery: Mutex<bool>,
     pub replica_generation: AtomicU64,
     pub replication_snapshot: Mutex<Option<Arc<ReplicationSnapshot>>>,
     /// Held while one thread builds the next replication snapshot, so concurrent callers reuse
@@ -943,8 +945,8 @@ impl Store {
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
         // leaves new local batches behind the frontier. Persist the allocation high water.
-        // Existing stores also rewind sealing once to recover batches an older build skipped;
-        // seal_local_batches processes that history in bounded writer loans with keys loaded.
+        // Preserve the sealing cursor here. With keys loaded, the first sealing pass searches
+        // for retained claims older writers skipped and rewinds only if recovery is necessary.
         let max_rowid = max_batch_rowid(&connection)?;
         let stored_cursor: i64 = connection
             .query_row(
@@ -955,19 +957,15 @@ impl Store {
             .optional()?
             .unwrap_or(0);
         let transaction = connection.unchecked_transaction()?;
-        let initialized = transaction.execute(
+        transaction.execute(
             "INSERT OR IGNORE INTO meta(key,value) VALUES('batch_rowid_high_water',?1)",
             [max_rowid.max(stored_cursor).to_string()],
         )?;
-        let seeded_batch_rowid = if initialized != 0 {
-            transaction.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid','0')",
-                [],
-            )?;
-            0
-        } else {
-            stored_cursor
-        };
+        transaction.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('seeded_batch_rowid',?1)",
+            [stored_cursor.to_string()],
+        )?;
+        let seeded_batch_rowid = stored_cursor;
         transaction.commit()?;
         let index = current_index(&connection)?;
         // Older stores have no admission watermark. Startup recovery projects this index
@@ -982,6 +980,7 @@ impl Store {
             readers,
             committed_index,
             seeded_batch_rowid: AtomicI64::new(seeded_batch_rowid),
+            sealing_recovery: Mutex::new(true),
             replica_generation: AtomicU64::new(0),
             replication_snapshot: Mutex::new(None),
             replication_snapshot_build: Mutex::new(()),
@@ -1035,6 +1034,8 @@ pub struct ReplicationSnapshot {
     pub store_index: u64,
     pub replica_generation: u64,
     pub max_envelope_rowid: i64,
+
+
     /// Held envelope rows at this snapshot, counted while loading or extending its inventory.
     pub envelope_rows: usize,
     /// Changes to an existing inventory prefix or its checkpoint tombstones.
@@ -1797,6 +1798,30 @@ impl Store {
             .member_key
             .write()
             .unwrap_or_else(PoisonError::into_inner) = key;
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        let signed = self.sign_own_envelopes_tx(&transaction, None)?;
+        transaction.commit()?;
+        Ok(signed)
+    }
+
+    /// Restore signing credentials before writes, without scanning retained history. Daemon
+    /// startup completes history activation after its API listeners bind.
+    pub fn load_member_key(&self, key: Option<Arc<crate::fleet::MemberKey>>) -> Result<()> {
+        if let Some(key) = &key {
+            self.set_node_key(key.clone())?;
+        }
+        *self
+            .member_key
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = key;
+        Ok(())
+    }
+
+    /// Seal retained work and sign envelopes written before this member key existed. Keys for
+    /// people and agents must have been restored before this operation.
+    pub fn complete_replication_activation(&self) -> Result<usize> {
+        self.replication_snapshot()?;
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         let signed = self.sign_own_envelopes_tx(&transaction, None)?;
@@ -2831,6 +2856,18 @@ impl Store {
 
     /// The anchor admits itself, once.
     pub fn admit_fleet_anchor(&self, fleet_id: &str, member_key: &str, mode: &str) -> Result<()> {
+        self.record_fleet_anchor(fleet_id, member_key, mode)?;
+        self.replication_snapshot()?;
+        Ok(())
+    }
+
+    /// Record the anchor before startup writes, with history sealing performed after binding.
+    pub(crate) fn record_fleet_anchor(
+        &self,
+        fleet_id: &str,
+        member_key: &str,
+        mode: &str,
+    ) -> Result<()> {
         self.append_claim(&ClaimInput {
             subject: format!("host/{}", self.origin),
             kind: "fleet.member-admitted".into(),
@@ -2846,7 +2883,6 @@ impl Store {
             idempotency_key: Some(format!("fleet-anchor:{member_key}")),
         })
         .map_err(anyhow::Error::from)?;
-        self.replication_snapshot()?;
         Ok(())
     }
 
@@ -5482,44 +5518,89 @@ impl Store {
     /// Seal this node's batches that have no envelope yet, and sign them. Only this takes the
     /// writer, and only when there are such batches.
     pub fn seal_local_batches(&self) -> Result<()> {
-        // A checkpoint on a standalone busy member can accumulate ten minutes of writes.
-        // Bound each writer loan, not just the scan range, so queued live writes run between
-        // chunks. Capture the target once; concurrent writes belong to the next pass.
-        const SEAL_CHUNK_BATCHES: usize = 64;
+        self.recover_sealing_frontier()?;
+        // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
-        while target > self.seeded_batch_rowid.load(Ordering::Acquire) {
+        while self.seal_local_batch_chunk(target)? {}
+        Ok(())
+    }
+
+    fn recover_sealing_frontier(&self) -> Result<()> {
+        let mut pending = self
+            .sealing_recovery
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !*pending {
+            return Ok(());
+        }
+        let cursor = self.seeded_batch_rowid.load(Ordering::Acquire);
+        // Batch-id order walks the envelope batch index sequentially. A rowid-ordered search
+        // instead performs random probes over the entire history. Headers with no retained
+        // untombstoned claim need no recovery after checkpoint adoption.
+        let missing: Option<i64> = self.readers.get().query_row(
+            "SELECT MIN(batches.rowid) FROM batches INDEXED BY sqlite_autoindex_batches_1
+             WHERE batches.rowid<=?1 AND NOT EXISTS (
+                 SELECT 1 FROM replica_envelopes WHERE replica_envelopes.batch_id=batches.id)
+               AND EXISTS (SELECT 1 FROM claims WHERE claims.batch_id=batches.id
+                 AND NOT EXISTS (SELECT 1 FROM checkpoint_claims WHERE checkpoint_claims.id=claims.id))",
+            [cursor], |row| row.get(0),
+        )?;
+        if let Some(missing) = missing {
             let mut connection = self.connection.write();
-            let _timing = time_stage(&self.replication_timers.snapshot);
-            let seeded_through = self.seeded_batch_rowid.load(Ordering::Acquire);
-            if seeded_through >= target {
-                break;
-            }
-            let through: i64 = connection.query_row(
-                "SELECT COALESCE(MAX(rowid), ?2) FROM (
-                    SELECT rowid FROM batches WHERE rowid>?1 AND rowid<=?2
-                    ORDER BY rowid LIMIT ?3)",
-                params![seeded_through, target, SEAL_CHUNK_BATCHES],
-                |row| row.get(0),
-            )?;
-            let transaction = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            seed_replica_envelopes_signed_tx(
-                &transaction,
-                &self.origin,
-                Some(seeded_through),
-                Some(through),
-                Some(&|claim: &principals::Unsealed<'_>| self.sign_unsealed(claim)),
-            )?;
-            self.sign_own_envelopes_range_tx(&transaction, Some(seeded_through), Some(through))?;
+            let transaction = connection.transaction()?;
+            let through = self
+                .seeded_batch_rowid
+                .load(Ordering::Acquire)
+                .min(missing - 1);
             transaction.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid', ?1)",
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid',?1)",
                 [through.to_string()],
             )?;
             transaction.commit()?;
             self.seeded_batch_rowid.store(through, Ordering::Release);
-            // The FIFO writer services any already queued request before the next loan.
         }
+        // Repeat this check on the next open, including after an older binary wrote batches
+        // behind the frontier during a downgrade. A failed search never consumes the check.
+        *pending = false;
         Ok(())
+    }
+
+    fn seal_local_batch_chunk(&self, target: i64) -> Result<bool> {
+        const SEAL_CHUNK_BATCHES: usize = 64;
+        if target <= self.seeded_batch_rowid.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let mut connection = self.connection.write();
+        let _timing = time_stage(&self.replication_timers.snapshot);
+        let seeded_through = self.seeded_batch_rowid.load(Ordering::Acquire);
+        if seeded_through >= target {
+            return Ok(false);
+        }
+        let through: i64 = connection.query_row(
+            "SELECT COALESCE(MAX(rowid), ?2) FROM (
+                SELECT rowid FROM batches WHERE rowid>?1 AND rowid<=?2
+                ORDER BY rowid LIMIT ?3)",
+            params![seeded_through, target, SEAL_CHUNK_BATCHES],
+            |row| row.get(0),
+        )?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        seed_replica_envelopes_signed_tx(
+            &transaction,
+            &self.origin,
+            Some(seeded_through),
+            Some(through),
+            Some(&|claim: &principals::Unsealed<'_>| self.sign_unsealed(claim)),
+        )?;
+        self.sign_own_envelopes_range_tx(&transaction, Some(seeded_through), Some(through))?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid', ?1)",
+            [through.to_string()],
+        )?;
+        transaction.commit()?;
+        self.seeded_batch_rowid.store(through, Ordering::Release);
+        // The FIFO writer services already queued requests before the next bounded loan.
+        Ok(true)
     }
 
     /// The replication snapshot of the envelopes already sealed, built on a read connection. A

@@ -675,3 +675,177 @@ fn an_old_sealing_frontier_recovers_skipped_batches_once_after_reopen() {
     let reopened = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
     assert_eq!(reopened.seeded_batch_rowid.load(Ordering::Acquire), cursor);
 }
+
+fn recovery_note(store: &Store, subject: &str) -> crate::claim::ClaimRecord {
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn sealing_recovery_ignores_trimmed_sources_and_preserves_a_complete_cursor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        let covered = recovery_note(&store, "note/covered");
+        let header_only = recovery_note(&store, "note/header-only");
+        store.seal_local_batches().unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute("INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
+            actor,predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
+            VALUES (?1,'cedar',1,'fixture-envelope',?2,'example.note',NULL,'[]',NULL,NULL,0,'checkpoint/fixture')",
+            params![covered.id, covered.subject]).unwrap();
+        tx.execute("DELETE FROM replica_envelopes", []).unwrap();
+        tx.execute("DELETE FROM claims WHERE id=?1", [&header_only.id])
+            .unwrap();
+        tx.execute("DELETE FROM meta WHERE key='batch_rowid_high_water'", [])
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 2);
+    store.recover_sealing_frontier().unwrap();
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 2);
+    store.seal_local_batches().unwrap();
+    assert_eq!(
+        store
+            .readers
+            .get()
+            .query_row("SELECT COUNT(*) FROM replica_envelopes", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .readers
+            .get()
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='batch_rowid_high_water'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn credential_loading_leaves_many_skipped_batches_for_resumable_history_activation() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        for i in 0..256 {
+            recovery_note(&store, &format!("note/skipped-{i}"));
+        }
+        store
+            .connection
+            .write()
+            .execute_batch(
+                "DELETE FROM meta WHERE key='batch_rowid_high_water';
+            INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid','400');",
+            )
+            .unwrap();
+    }
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.load_member_key(Some(key.clone())).unwrap();
+        // The pre-bind credential path neither scans history nor signs source envelopes.
+        assert!(*store.sealing_recovery.lock().unwrap());
+        assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 400);
+        assert_eq!(
+            store
+                .readers
+                .get()
+                .query_row("SELECT COUNT(*) FROM replica_envelopes", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+        store.recover_sealing_frontier().unwrap();
+        assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 0);
+        assert!(store.seal_local_batch_chunk(256).unwrap());
+        assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 64);
+    }
+    let resumed = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), 64);
+    resumed.load_member_key(Some(key.clone())).unwrap();
+    resumed.recover_sealing_frontier().unwrap();
+    assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), 64);
+    resumed.complete_replication_activation().unwrap();
+    assert_eq!(resumed.seeded_batch_rowid.load(Ordering::Acquire), 256);
+    assert_eq!(
+        resumed
+            .readers
+            .get()
+            .query_row("SELECT COUNT(*) FROM replica_envelopes", [], |r| r
+                .get::<_, u64>(0))
+            .unwrap(),
+        256
+    );
+    assert_eq!(
+        resumed
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) FROM replica_envelope_signatures WHERE member_key=?1",
+                [key.public()],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+        256
+    );
+}
+
+#[test]
+fn upgrading_again_recovers_a_batch_skipped_by_a_downgraded_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        let first = recovery_note(&store, "note/before-downgrade");
+        store.seal_local_batches().unwrap();
+        let connection = store.connection.write();
+        connection
+            .execute("DELETE FROM claims WHERE id=?1", [&first.id])
+            .unwrap();
+        connection
+            .execute("DELETE FROM batches WHERE id=?1", [&first.batch_id])
+            .unwrap();
+    }
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.recover_sealing_frontier().unwrap();
+        assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 1);
+        let later = recovery_note(&store, "note/during-downgrade");
+        // Emulate an older writer's default SQLite allocation and unchanged high-water meta.
+        let connection = store.connection.write();
+        connection
+            .execute("UPDATE batches SET rowid=1 WHERE id=?1", [&later.batch_id])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE meta SET value='1' WHERE key='batch_rowid_high_water'",
+                [],
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    store.recover_sealing_frontier().unwrap();
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 0);
+    store.seal_local_batches().unwrap();
+    assert_eq!(store.readers.get().query_row("SELECT COUNT(*) FROM replica_envelopes e JOIN batches b ON b.id=e.batch_id WHERE b.rowid=1", [], |r| r.get::<_,u64>(0)).unwrap(), 1);
+}
