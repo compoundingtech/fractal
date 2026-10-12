@@ -73,12 +73,23 @@ cleanup() {
   fi
   exit "$status"
 }
+# An install killed hard leaves its lock behind; say which lock it is and how to clear it.
+take_lock() {
+  if mkdir "$1" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -d $1 ]]; then
+    echo "st install: the lock $1 exists. Another install may be running. If none is, an earlier one was killed: remove the lock with rmdir '$1' and run the installer again." >&2
+    exit 1
+  fi
+  mkdir "$1"
+}
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Serialize command-file transactions as well as the helper's existing app lock.
-mkdir "$bin_dir/.smalltalk-install.lock"
+take_lock "$bin_dir/.smalltalk-install.lock"
 locked=true
 stage=$(mktemp -d "$bin_dir/.smalltalk-install.XXXXXX")
 mkdir "$stage/previous"
@@ -108,7 +119,7 @@ PY
   mkdir -p "$(dirname "$macos_app")"
   # Different bin directories can still install the same app. This is separate
   # from the helper's flock, so invoking the helper cannot deadlock on its own lock.
-  mkdir "$macos_lock"
+  take_lock "$macos_lock"
   macos_locked=true
   macos_state="$macos_home/.local/state/st3/macos-installs"
   mkdir -p "$macos_state"
