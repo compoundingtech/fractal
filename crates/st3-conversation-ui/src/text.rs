@@ -4,6 +4,7 @@
 //! character or an escape sequence that reaches the terminal moves its cursor, and the frame
 //! is then drawn in the wrong cells: the stray digits on the old stui's borders.
 
+pub use crate::pane::truncate;
 use crate::theme::{self, Theme};
 use ratatui::layout::Alignment;
 use ratatui::style::{Color, Modifier, Style};
@@ -58,28 +59,6 @@ pub fn sanitize(input: &str) -> String {
 
 pub fn width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
-}
-
-/// Cut to `max` columns, ending in `…` when anything was dropped.
-pub fn truncate(text: &str, max: usize) -> String {
-    if width(text) <= max {
-        return text.to_owned();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut output = String::new();
-    let mut used = 0;
-    for character in text.chars() {
-        let w = character.width().unwrap_or(0);
-        if used + w + 1 > max {
-            break;
-        }
-        used += w;
-        output.push(character);
-    }
-    output.push('…');
-    output
 }
 
 /// A run of text with one style: the unit the wrapper moves around.

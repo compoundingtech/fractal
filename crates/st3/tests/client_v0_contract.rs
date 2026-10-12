@@ -4064,6 +4064,18 @@ async fn client_structured_decision_carries_named_answers_both_ways() {
     );
 }
 
+#[test]
+fn a_dismissed_person_answer_conforms_and_an_unknown_outcome_does_not() {
+    let validator = contract_validator("PersonAnswer");
+    for answer in [
+        serde_json::json!({"type": "decision", "outcome": "dismissed"}),
+        serde_json::json!({"type": "choice", "outcome": "dismissed", "text": "Not now."}),
+    ] {
+        assert_conforms(&validator, "a dismissed answer", &answer);
+    }
+    assert!(!validator.is_valid(&serde_json::json!({"type": "decision", "outcome": "vanished"})));
+}
+
 #[tokio::test]
 async fn native_agent_person_asks_use_source_authority_and_reject_malformed_evidence() {
     let root = tempfile::tempdir().unwrap();

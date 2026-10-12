@@ -86,6 +86,30 @@ with tempfile.TemporaryDirectory() as tmp:
     victim.wait()
     assert not holder.exists()
 
+    # hetz2's cargo test runner starts the test binary with `systemd-run --user --scope`. A scope
+    # moves the process into a transient unit but keeps it in this process group, so killing the
+    # group kills it. Skipped where there is no user bus.
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    systemd_run = next((Path(d) / "systemd-run" for d in os.environ["PATH"].split(":") + ["/run/current-system/sw/bin", "/usr/bin"]
+                        if (Path(d) / "systemd-run").exists()), None)
+    if systemd_run and runtime and Path(runtime, "bus").exists():
+        scoped = root / "scoped"
+        script = "echo $BASHPID > %s; exec sleep 60" % scoped
+        victim = start(env, command=[str(systemd_run), "--user", "--scope", "--quiet", "--collect", "--",
+                                     "bash", "-c", script])
+        until(lambda: scoped.exists() and scoped.read_text().strip(), "scoped run started")
+        scoped_pid = int(scoped.read_text())
+        assert "scope" in Path("/proc/%d/cgroup" % scoped_pid).read_text(), "the run is in a transient scope unit"
+        victim.kill()
+        until(lambda: not alive(scoped_pid), "a killed run takes its systemd scope process with it")
+        victim.wait()
+        stopped = start(env, "--timeout", "1s", command=[str(systemd_run), "--user", "--scope", "--quiet", "--collect",
+                                                         "--", "bash", "-c", script])
+        assert stopped.wait(20) == 124
+        until(lambda: not alive(int(scoped.read_text())), "a timeout stops the scope process too")
+    else:
+        print("skipped: no systemd user bus for the scope case")
+
     # Ctrl-C and SIGTERM on the wrapper stop the run and free the slot too.
     for number in (signal.SIGINT, signal.SIGTERM):
         stopped = start(env, command=["sleep", "60"])
