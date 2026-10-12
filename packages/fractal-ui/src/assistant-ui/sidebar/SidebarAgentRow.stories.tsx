@@ -1,9 +1,9 @@
-/** Baseline SR-2 row coverage: visible row labels remain in accessible names, known-only hover card facts, omitted unreported fields, an aligned known-vs-none time cohort, and the row hover quick Open action. */
+/** Baseline row coverage: the visible title is the exact accessible name and the complete reported facts the exact description, the custom hover card is the only hover disclosure (no native titles), known-only hover card facts, omitted unreported fields, an aligned known-vs-none time cohort, and the row hover quick Open action. */
 import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
-import { expect, userEvent, within } from 'storybook/test'
-import { AgentHoverCard, SidebarAgentRow } from './SidebarAgentRow'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { AgentHoverCard, SidebarAgentRow, sidebarRowDescription, type RowVariant } from './SidebarAgentRow'
 import type { SidebarAgentRow as Row } from './model'
 import { spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
 
@@ -31,6 +31,11 @@ const cohortRows: readonly Row[] = [
   { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session' },
   { ...knownRow, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
 ]
+/** Synthetic parent with two subagents, for collapsed and expanded child rows. */
+const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, children: [
+  { ...knownRow, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
+  { ...unreportedRow, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
+] }
 
 function CardPair({ row }: { readonly row: Row }) {
   return <div {...stylex.props(styles.spread)}>
@@ -41,13 +46,55 @@ function CardPair({ row }: { readonly row: Row }) {
   </div>
 }
 
+const fixtureByRef = new Map<string, Row>([knownRow, unreportedRow, ...cohortRows, ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr1` })), ...cohortRows.map(row => ({ ...row, ref: `${row.ref}/sr3` })), ...parentRow.children, parentRow].map(row => [row.ref, row]))
+
+/** The visible title is the exact name; the complete reported facts are the exact description, carried by a mounted hidden span rather than a native title or the unsupported aria-description. */
 async function assertRowNames(canvasElement: HTMLElement) {
-  for (const row of within(canvasElement).getAllByTestId('taste-agent-row')) {
+  const rows = within(canvasElement).getAllByTestId('taste-agent-row')
+  await expect(rows.length).toBeGreaterThan(0)
+  for (const row of rows) {
+    const fixture = fixtureByRef.get(row.parentElement!.dataset.wfAgentRef!)!
+    await expect(fixture).toBeDefined()
     const button = row.querySelector<HTMLButtonElement>(':scope > button')!
     const title = row.querySelector('[data-row-column="title-text"]')!.textContent!
-    await expect(button).toHaveAccessibleName(new RegExp(title))
-    await expect(button).toHaveAccessibleName(/host-1/)
+    await expect(title).toBe(fixture.title)
+    await expect(button).toHaveAccessibleName(fixture.title)
+    await expect(button).toHaveAccessibleDescription(sidebarRowDescription(fixture))
+    await expect(button).toHaveAccessibleDescription(/Status: /)
+    if (fixture.needsMe === true) await expect(button).toHaveAccessibleDescription(/Needs your attention/)
+    const described = document.getElementById(button.getAttribute('aria-describedby')!)
+    await expect(described).not.toBeNull()
+    await expect(row.contains(described)).toBe(true)
+    await expect(described!.textContent).toBe(sidebarRowDescription(fixture))
+    await expect(row.parentElement!.querySelectorAll('[title]')).toHaveLength(0)
+    await expect(row.parentElement!.querySelectorAll('[aria-description]')).toHaveLength(0)
   }
+}
+
+/** Shared helpers keep each former native title string, exact to the millisecond and ISO instant, as the accessible description of their semantic element. */
+async function assertHelperDescriptions(canvasElement: HTMLElement) {
+  const wrapper = canvasElement.querySelector<HTMLElement>(`[data-wf-agent-ref="${knownRow.ref}"]`)!
+  await expect(within(wrapper).getAllByRole('img')[0]).toHaveAccessibleDescription(`Working. Observed status since ${new Date(knownRow.statusSince!).toISOString()}. Observation live.`)
+  await expect(wrapper.querySelector('[data-row-field="total-duration"] time')).toHaveAccessibleDescription('24h activity span: 3600000 milliseconds')
+  const lastTurn = knownRow.lastTurn._tag === 'Known' ? knownRow.lastTurn.at : 0
+  await expect(wrapper.querySelector('[data-row-field="last-turn"] time')).toHaveAccessibleDescription(`Last completed turn ${new Date(lastTurn).toISOString()}`)
+  await expect(wrapper.querySelectorAll('time[title], [role="img"][title]')).toHaveLength(0)
+}
+
+/** The custom hover card is the only hover disclosure: hovering any row field opens exactly one card and no native title exists on the field or its ancestors. */
+async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
+  const fields = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="taste-agent-row"] :is([data-row-column], [data-row-field], [data-row-signal])')]
+  await expect(fields.length).toBeGreaterThan(0)
+  for (const field of fields) {
+    for (let node: HTMLElement | null = field; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
+  }
+  const row = canvasElement.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
+  for (const field of [...row.querySelectorAll<HTMLElement>(':is([data-row-column], [data-row-field], [data-row-signal])')]) {
+    await userEvent.hover(field)
+    await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1))
+  }
+  await userEvent.unhover(row)
+  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(0))
 }
 
 async function assertCompactCard(canvasElement: HTMLElement) {
@@ -66,6 +113,17 @@ function CohortList() {
   return <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.map((row, index) => <SidebarAgentRow key={row.ref} item={row} now={storyNow} active={index === 0} />)}</div>
 }
 
+/** Every density with one fixture set; SR-1/SR-3 copies carry distinct refs so each row maps back to its fixture. */
+function DensityMatrix() {
+  const [expanded, setExpanded] = React.useState(false)
+  const toggle = React.useCallback(() => setExpanded(value => !value), [])
+  const variants: readonly [RowVariant, string][] = [['SR-1', '/sr1'], ['SR-2', ''], ['SR-3', '/sr3']]
+  return <div data-frame-rows {...stylex.props(styles.list)}>
+    {variants.flatMap(([variant, suffix]) => cohortRows.map(row => <SidebarAgentRow key={`${row.ref}${suffix}`} item={{ ...row, ref: `${row.ref}${suffix}` }} variant={variant} now={storyNow} />))}
+    <SidebarAgentRow item={parentRow} now={storyNow} treeExpanded={expanded} onToggleChildren={toggle} />
+  </div>
+}
+
 function QuickOpenCohort() {
   const [openedRef, setOpenedRef] = React.useState<string | undefined>()
   const open = React.useCallback((row: Row) => setOpenedRef(row.ref), [])
@@ -76,7 +134,8 @@ function QuickOpenCohort() {
 const meta = {
   title: 'Fractal UI/Sidebar/Agent Row',
   component: SidebarAgentRow,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
+  // label-content-name-mismatch is an experimental axe rule, so the strict a11y check enables it explicitly for every row story.
+  parameters: { layout: 'fullscreen', a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } }, docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
 } satisfies Meta
 export default meta
 type Story = StoryObj
@@ -106,8 +165,38 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await userEvent.click(within(target).getByRole('button', { name: /^Open / }))
   await expect(target.querySelector('[aria-current="page"]')).not.toBeNull()
   await assertRowNames(canvasElement)
+  // Keyboard focus still opens the custom card and Enter still opens the row.
+  await userEvent.unhover(target)
+  const third = rows[2]!.querySelector<HTMLButtonElement>(':scope > button')!
+  third.focus()
+  await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1))
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(rows[2]!.querySelector('[aria-current="page"]')).not.toBeNull())
+  await assertRowNames(canvasElement)
 } }
-export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main>, play: async ({ canvasElement }) => assertRowNames(canvasElement) }
+export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main>, play: async ({ canvasElement }) => {
+  await assertRowNames(canvasElement)
+  await assertHelperDescriptions(canvasElement)
+  await assertSingleHoverDisclosure(canvasElement)
+  // Negative control: an injected native title must be rejected, then the passing state is restored.
+  const probe = canvasElement.querySelector<HTMLElement>('[data-row-field="host"]')!
+  probe.setAttribute('title', 'injected')
+  await expect(assertRowNames(canvasElement)).rejects.toThrow()
+  probe.removeAttribute('title')
+  await assertRowNames(canvasElement)
+} }
+export const DensitiesAndChildren: Story = { name: 'Names and descriptions · SR-1/2/3, collapsed and expanded', render: () => <main {...stylex.props(styles.root)}><DensityMatrix /></main>, play: async ({ canvasElement }) => {
+  await assertRowNames(canvasElement)
+  await assertSingleHoverDisclosure(canvasElement)
+  const toggle = within(canvasElement).getByRole('button', { name: 'Expand 2 subagents' })
+  await userEvent.click(toggle)
+  await waitFor(() => expect(within(canvasElement).getByRole('button', { name: 'Collapse 2 subagents' })).toHaveAttribute('aria-expanded', 'true'))
+  await expect(within(canvasElement).getByRole('button', { name: 'Subagent two' })).toBeInTheDocument()
+  await assertRowNames(canvasElement)
+  await userEvent.click(within(canvasElement).getByRole('button', { name: 'Collapse 2 subagents' }))
+  await waitFor(() => expect(within(canvasElement).queryByRole('button', { name: 'Subagent two' })).toBeNull())
+  await assertRowNames(canvasElement)
+} }
 
 const styles = stylex.create({
   root: { height: '100vh', minHeight: 0, overflowY: 'auto', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, display: 'flex', flexDirection: 'column', gap: s.xl },
