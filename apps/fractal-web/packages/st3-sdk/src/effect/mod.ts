@@ -263,6 +263,8 @@ export interface UnrecognizedEntry {
 export interface ConversationChunk {
   /** The subscription wire id the gateway addressed this chunk to (one per subscribe generation). */
   readonly id?: string
+  /** Native session identity; history reads must not guess it from the agent ref. */
+  readonly sessionId?: string
   readonly replace: boolean
   readonly hasMore: boolean
   readonly entries: readonly (TimelineEntry | UnrecognizedEntry)[]
@@ -422,6 +424,7 @@ export const decodeConversationChunk = (
   frame: Extract<CollectionFrame, { kind: 'conversation' }>,
 ): ConversationChunk => ({
   id: frame.id,
+  sessionId: frame.session_id,
   replace: frame.replace,
   hasMore: frame.has_more ?? false,
   ...(frame.replace || frame.items.length > 0
