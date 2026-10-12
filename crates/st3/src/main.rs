@@ -26111,6 +26111,9 @@ mod tests {
                 format!("{}12", st3::silent::REMAINING_PREFIX),
             ],
             attachments: vec![],
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
         };
         let queued = native_queued_message(&view, "body".into(), &[]);
