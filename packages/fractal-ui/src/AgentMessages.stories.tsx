@@ -175,10 +175,16 @@ export const OutgoingSingle: Story = { render: () => <OutgoingMessageRow {...out
   const canvas = within(canvasElement)
   const trigger = canvas.getByRole('button', { name: /Review.*Please review the release report/ })
   await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  // No native titles: the full first line is the exact name tail and the send time the exact description.
+  await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
+  await expect(trigger).toHaveAccessibleName('To Review · Please review the release report.')
+  await expect(trigger).toHaveAccessibleDescription(outgoingMessage.at!)
+  await expect(canvasElement.contains(document.getElementById(trigger.getAttribute('aria-describedby')!))).toBe(true)
   await expect(canvas.queryByText('The patch keeps the existing protocol and updates the examples.')).toBeNull()
   await userEvent.click(trigger)
   await expect(trigger).toHaveAttribute('aria-expanded', 'true')
   await expect(canvas.getByText('The patch keeps the existing protocol and updates the examples.')).toBeVisible()
+  await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
   await expect(trigger).toHaveFocus()
   await userEvent.keyboard('{Enter}')
   await expect(trigger).toHaveAttribute('aria-expanded', 'false')
@@ -211,7 +217,13 @@ export const OutgoingFailed: Story = { render: () => <OutgoingMessageRow {...out
   const receipt = canvasElement.querySelector<HTMLElement>('[aria-label="Review · failed · Recipient retired before delivery"]')!
   receipt.focus()
   await expect(receipt).toHaveFocus()
-  await expect(receipt).toHaveAttribute('title', 'Recipient retired before delivery')
+  // The failure reason is the receipt's exact description, not a native title.
+  const noTitles = async () => expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
+  await noTitles()
+  await expect(receipt).toHaveAccessibleDescription('Recipient retired before delivery')
+  receipt.setAttribute('title', 'injected')
+  try { await expect(noTitles()).rejects.toThrow() } finally { receipt.removeAttribute('title') }
+  await noTitles()
   await expect(canvas.getByText('Review: Recipient retired before delivery')).toBeVisible()
   await expect(canvas.queryByText(/injected/)).toBeNull()
 } }

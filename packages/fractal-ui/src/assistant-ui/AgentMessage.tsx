@@ -135,16 +135,20 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
   const target = delivery._tag === 'Broadcast' ? recipientCount !== undefined ? `${recipientCount} seats` : 'Broadcast' : recipients[0]?.id
   const receiptCount = recipients.filter(recipient => recipient.receipt !== undefined).length
   const normalizedSubject = subject?.replace(/^(?:re:\s*)+/i, 'Re: ')
+  // No native titles: the send time is the trigger's description, the full first line is already in its name, and failed receipts describe their reason.
+  const atId = React.useId()
+  const receiptId = React.useId()
   return <Disclosure defaultExpanded={defaultExpanded}>
     {({ isExpanded }) => <article {...stylex.props(styles.message)} aria-label={`Message to ${target ?? ''}`} data-message-variant="outgoing" data-harness-weight="row" data-work-kind="messages-sent">
-      <header data-message-header {...stylex.props(styles.workHeader)} title={at}>
+      <header data-message-header {...stylex.props(styles.workHeader)}>
+        {at !== undefined ? <VisuallyHidden elementType="span"><span id={atId}>{at}</span></VisuallyHidden> : null}
         <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name="message" scale="status" /></span>
-        <Button slot="trigger" aria-label={`To ${target ?? ''} · ${firstLine}`} {...stylex.props(styles.trigger)}>
+        <Button slot="trigger" aria-label={`To ${target ?? ''} · ${firstLine}`} aria-describedby={at !== undefined ? atId : undefined} {...stylex.props(styles.trigger)}>
           <span {...stylex.props(styles.rowTitle)}>
           <span {...stylex.props(styles.meta)}>To </span>
           {target !== undefined ? <strong {...stylex.props(styles.sender)}>{delivery._tag === 'Broadcast' ? target : <AgentIdHierarchy id={target} />}</strong> : null}
           {' · '}
-          <span {...stylex.props(styles.excerpt)} title={firstLine}>{firstLine}</span>
+          <span {...stylex.props(styles.excerpt)}>{firstLine}</span>
           </span>
           <span data-message-disclosure aria-hidden="true" {...stylex.props(styles.disclosureGlyph)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span>
         </Button>
@@ -157,8 +161,8 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
         <div data-opened-body {...stylex.props(styles.openedBody)}>
           {normalizedSubject !== undefined ? <h2 data-message-subject {...stylex.props(styles.openedSubject)}>{normalizedSubject}</h2> : null}
           <div data-message-content {...stylex.props(styles.messageBody)} tabIndex={message.length > 4000 ? 0 : undefined} role="region" aria-label="Outgoing message body"><MessageBody text={message} /></div>
-          <div {...stylex.props(styles.controls)}>{recipients.map(recipient => <span key={recipient.id} role={recipient.receipt?._tag === 'Failed' ? 'note' : undefined} tabIndex={recipient.receipt?._tag === 'Failed' ? 0 : undefined} aria-label={recipient.receipt?._tag === 'Failed' ? `${recipient.id} · failed · ${recipient.receipt.reason}` : undefined} {...stylex.props(styles.receipt, recipient.receipt?._tag === 'Failed' && styles.danger)} title={recipient.receipt?._tag === 'Failed' ? recipient.receipt.reason : recipient.id}>
-            <AgentIdHierarchy id={recipient.id} />{recipient.receipt !== undefined ? ` · ${recipient.receipt._tag.toLowerCase()}` : ''}
+          <div {...stylex.props(styles.controls)}>{recipients.map(recipient => <span key={recipient.id} role={recipient.receipt?._tag === 'Failed' ? 'note' : undefined} tabIndex={recipient.receipt?._tag === 'Failed' ? 0 : undefined} aria-label={recipient.receipt?._tag === 'Failed' ? `${recipient.id} · failed · ${recipient.receipt.reason}` : undefined} aria-describedby={recipient.receipt?._tag === 'Failed' ? `${receiptId}-${recipient.id}` : undefined} {...stylex.props(styles.receipt, recipient.receipt?._tag === 'Failed' && styles.danger)}>
+            <AgentIdHierarchy id={recipient.id} />{recipient.receipt !== undefined ? ` · ${recipient.receipt._tag.toLowerCase()}` : ''}{recipient.receipt?._tag === 'Failed' ? <VisuallyHidden elementType="span"><span id={`${receiptId}-${recipient.id}`}>{recipient.receipt.reason}</span></VisuallyHidden> : null}
           </span>)}</div>
           {recipients.flatMap(recipient => recipient.receipt?._tag === 'Failed' ? [<p key={recipient.id} {...stylex.props(styles.danger)}>{recipient.id}: {recipient.receipt.reason}</p>] : [])}
         </div>

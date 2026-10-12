@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Promoted agent-message cards and folded outgoing delivery rows",
+  "summary": "Promoted agent-message cards and folded outgoing delivery rows. Outgoing rows use no native title tooltips: the send time is the row trigger's accessible description, and a failed receipt's reason is that receipt's description.",
   "replay": {"status": "none", "detail": "UI rendering changes do not alter replay or recovery triggers."},
   "schema": {"status": "none", "detail": "No database schema, tables, indexes or migrations change."},
   "rules": {"status": "none", "detail": "No checkpoint rules, digests or mixed-build coordination change."},
