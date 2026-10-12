@@ -267,7 +267,7 @@ export const ToolQuestions: Story = {
     await expect(canvas.getByText('Interrupted')).toBeVisible()
     await expect(canvas.queryByText('Answer details were not recorded.')).toBeNull()
     await expect(canvas.queryByText('Question closed')).toBeNull()
-    const original = within(canvas.getAllByRole('region', { name: 'Original question' })[1]!)
+    const original = within(canvas.getByRole('region', { name: /settled-unrecorded/ }))
     await expect(original.getByText('Four rows')).toBeVisible()
     await expect(original.getByText('Eight rows')).toBeVisible()
     await expect(original.queryByText('Left open')).toBeNull()
