@@ -59,8 +59,34 @@ const meta = {
 } satisfies Meta<typeof QuestionForm>
 export default meta
 type Story = StoryObj<typeof meta>
-export const ReadOnly: Story = { play: async ({ canvasElement, args }) => {
+export const ReadOnly: Story = { args: { request: { ...questionRequest, askedAt: '2026-10-11T16:56:11.082Z' }, now: Date.parse('2026-10-11T16:58:11.082Z') }, play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
+  const title = canvasElement.querySelector<HTMLElement>('header strong')!
+  const assertTitle = async () => expect(getComputedStyle(title).fontWeight).toBe('500')
+  await assertTitle()
+  title.style.fontWeight = '700'
+  try { await expect(assertTitle()).rejects.toThrow() } finally { title.style.fontWeight = '' }
+  await assertTitle()
+  const choice = canvasElement.querySelector<HTMLElement>('[data-choice-id="thread"]')!
+  const affordance = choice.querySelector<HTMLElement>('[aria-hidden="true"]')!
+  const assertAffordance = async () => {
+    await expect(affordance).toBeVisible()
+    await expect(affordance).toHaveTextContent('○')
+    await expect(canvas.getByRole('radio', { name: /This thread/ })).not.toBeChecked()
+  }
+  await assertAffordance()
+  affordance.style.visibility = 'hidden'
+  try { await expect(assertAffordance()).rejects.toThrow() } finally { affordance.style.visibility = '' }
+  await assertAffordance()
+  await userEvent.click(canvas.getByRole('radio', { name: /This thread/ }))
+  await expect(args.onDraftChange).not.toHaveBeenCalled()
+  await assertAffordance()
+  const assertNoRawDate = async () => expect(canvasElement.textContent).not.toContain(args.request.askedAt)
+  await assertNoRawDate()
+  const rawDateControl = document.createTextNode(args.request.askedAt)
+  canvasElement.append(rawDateControl)
+  try { await expect(assertNoRawDate()).rejects.toThrow() } finally { rawDateControl.remove() }
+  await assertNoRawDate()
   await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
   await expect(canvas.getByText('delivered after the question is answered')).toBeVisible()
   await userEvent.click(canvas.getByRole('button', { name: 'Open terminal' }))
@@ -380,3 +406,85 @@ export const AnsweredOriginalKeyboardLight440: Story = { ...AnsweredOriginalKeyb
 export const AnsweredOriginalKeyboardDark1440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'dark', width: 1440 } }
 export const AnsweredOriginalKeyboardLight1440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'light', width: 1440 } }
 const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, display: 'flex', flexDirection: 'column', gap: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading }, narrow: { width: g.specimenNarrow, maxWidth: '100%' }, wide: { width: g.specimenWide, maxWidth: '100%' }, scroll: { maxHeight: g.transcriptFrameHeight, overflowY: 'auto', maxWidth: g.lane }, scrollSpace: { height: '200vh' } })
+
+export const DockDimensions: Story = {
+  render: function DockDimensionsExample() {
+    const [expanded, setExpanded] = React.useState(false)
+    return <NeedsYouBar requests={[questionRequest]} expanded={expanded} onToggle={() => setExpanded(value => !value)}><QuestionForm request={questionRequest} variant="pinned" onOpenTerminal={fn()} /></NeedsYouBar>
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const dock = canvas.getByRole('complementary', { name: 'Needs you' })
+    const toggle = within(dock).getByRole('button', { name: /waiting on you/ })
+    const assertDockScale = async () => {
+      await expect(parseFloat(getComputedStyle(toggle).fontSize)).toBe(12)
+      await expect(getComputedStyle(toggle).fontWeight).toBe('500')
+      await expect(toggle.getBoundingClientRect().height).toBe(24)
+      for (const label of toggle.querySelectorAll('span')) await expect(parseFloat(getComputedStyle(label).fontSize)).toBe(12)
+    }
+    await assertDockScale()
+    const previousStyle = toggle.getAttribute('style')
+    try {
+      toggle.style.height = 'auto'
+      toggle.style.paddingBlock = '0.25rem'
+      await expect(assertDockScale()).rejects.toThrow()
+    } finally {
+      if (previousStyle === null) toggle.removeAttribute('style')
+      else toggle.setAttribute('style', previousStyle)
+    }
+    await assertDockScale()
+    await expect(canvas.queryByRole('button', { name: 'Open terminal' })).toBeNull()
+    await userEvent.click(toggle)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(canvas.getByRole('button', { name: 'Open terminal' })).toBeVisible()
+    await expect(toggle).toHaveFocus()
+    await assertDockScale()
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.queryByRole('button', { name: 'Open terminal' })).toBeNull()
+    await expect(toggle).toHaveFocus()
+  },
+}
+export const DockDimensionsLight440: Story = { ...DockDimensions, parameters: { scheme: 'light', width: 440 } }
+export const DockDimensionsDark1440: Story = { ...DockDimensions, parameters: { scheme: 'dark', width: 1440 } }
+export const DockDimensionsLight1440: Story = { ...DockDimensions, parameters: { scheme: 'light', width: 1440 } }
+export const ArchivedChoices: Story = {
+  args: { request: { ...questionRequest, state: { _tag: 'unrecorded', reason: '' } } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const choices = canvas.getByRole('list', { name: /Original choices/ })
+    const rows = within(choices).getAllByRole('listitem')
+    await expect(rows).toHaveLength(questionRequest.questions[0]!.options.length)
+    const affordance = rows[0]!.querySelector<HTMLElement>('[aria-hidden="true"]')!
+    const assertChoiceRow = async () => {
+      await expect(getComputedStyle(rows[0]!).display).toBe('flex')
+      await expect(affordance).toBeVisible()
+      await expect(affordance).toHaveTextContent('○ 1.')
+    }
+    await assertChoiceRow()
+    affordance.style.visibility = 'hidden'
+    try { await expect(assertChoiceRow()).rejects.toThrow() } finally { affordance.style.visibility = '' }
+    await assertChoiceRow()
+    await expect(canvas.queryByRole('radio')).toBeNull()
+    await expect(canvas.queryByText('Answer details were not recorded.')).toBeNull()
+  },
+}
+export const ArchivedChoicesLight440: Story = { ...ArchivedChoices, parameters: { scheme: 'light', width: 440 } }
+export const ArchivedChoicesDark1440: Story = { ...ArchivedChoices, parameters: { scheme: 'dark', width: 1440 } }
+export const ArchivedChoicesLight1440: Story = { ...ArchivedChoices, parameters: { scheme: 'light', width: 1440 } }
+export const SettledRelativeAge: Story = {
+  args: { request: { ...questionRequest, state: { _tag: 'answered-elsewhere', where: 'terminal', at: '2026-10-11T16:56:11.082Z', draftDiscarded: true } }, now: Date.parse('2026-10-11T16:58:11.082Z') },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('Answered in terminal · 2m · your unsent web draft was discarded')).toBeVisible()
+    const timestamp = 'at' in args.request.state ? args.request.state.at : ''
+    const assertNoRawDate = async () => expect(canvasElement.textContent).not.toContain(timestamp)
+    await assertNoRawDate()
+    const rawDateControl = document.createTextNode(timestamp)
+    canvasElement.append(rawDateControl)
+    try { await expect(assertNoRawDate()).rejects.toThrow() } finally { rawDateControl.remove() }
+    await assertNoRawDate()
+  },
+}
+export const SettledRelativeAgeLight440: Story = { ...SettledRelativeAge, parameters: { scheme: 'light', width: 440 } }
+export const SettledRelativeAgeDark1440: Story = { ...SettledRelativeAge, parameters: { scheme: 'dark', width: 1440 } }
+export const SettledRelativeAgeLight1440: Story = { ...SettledRelativeAge, parameters: { scheme: 'light', width: 1440 } }

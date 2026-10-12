@@ -156,7 +156,7 @@ const AnswerList = ({ request, answers }: { readonly request: QuestionRequestVie
   return <div key={q.id}><dt>{q.header ?? `Q${index + 1}`} · {q.prompt}</dt><dd>{answer === undefined ? 'Left open' : labels.join(', ') || (q.kind === 'multi' ? 'none' : 'Left open')}{answer?.autoSelected ? <span {...stylex.props(styles.meta)}> · auto-selected (timeout)</span> : null}{answer?.note ? <p>Note: {answer.note}</p> : null}{answer?.attachments?.map(attachment => <span key={attachment} {...stylex.props(styles.chip)}>{attachment}</span>)}</dd></div>
 })}</dl>
 
-const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}{q.options.map(option => <div key={option.id}><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div>)}</div>)}</>
+const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}<div role="list" aria-label={`Original choices: ${q.prompt}`} {...stylex.props(styles.body)}>{q.options.map((option, index) => <div role="listitem" data-original-choice key={option.id} {...stylex.props(styles.option, styles.originalChoice)}><span aria-hidden="true">{q.kind === 'multi' ? '☐' : '○'} {index + 1}.</span><div><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div></div>)}</div></div>)}</>
 
 export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly request: QuestionRequestView; readonly now?: number; readonly locale?: string; readonly timeZone?: string }) => {
   const absoluteFormat = React.useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: 'full', timeStyle: 'long', timeZone }), [locale, timeZone])
@@ -180,7 +180,8 @@ export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly r
     </section>
   }
   const answers = state._tag === 'answered-elsewhere' ? state.answers : state._tag === 'expired' ? state.autoAnswer : undefined
-  const footer = state._tag === 'answered-elsewhere' ? `Answered in ${state.where} · ${state.at}${state.draftDiscarded ? ' · your unsent web draft was discarded' : ''}` : state._tag === 'expired' ? `${state.at} · ${state.autoAnswer !== undefined ? 'auto-selected (timeout)' : 'continued without an answer'}` : state._tag === 'cancelled' ? [state.reason, state.at].filter(Boolean).join(' · ') : state._tag === 'chat-redirected' ? `${state.message} · ${state.at}` : ''
+  const age = 'at' in state ? compactQuestionAge(Date.parse(state.at), now, timeZone) : undefined
+  const footer = (state._tag === 'answered-elsewhere' ? [`Answered in ${state.where}`, age, state.draftDiscarded ? 'your unsent web draft was discarded' : undefined] : state._tag === 'expired' ? [age, state.autoAnswer !== undefined ? 'auto-selected (timeout)' : 'continued without an answer'] : state._tag === 'cancelled' ? [state.reason, age] : state._tag === 'chat-redirected' ? [state.message, age] : []).filter(Boolean).join(' · ')
   return <section {...stylex.props(styles.summary)} aria-label="Question outcome"><strong {...stylex.props(styles.sender)}>{stateLabel(request)}</strong>{answers !== undefined ? <AnswerList request={request} answers={answers} /> : request.questions.map(q => <p key={q.id}>{q.prompt}</p>)}
     {footer !== '' ? <p {...stylex.props(styles.meta)}>{footer}</p> : null}
     <details><summary>Original questions</summary><OriginalQuestions request={request} /></details>
@@ -191,7 +192,7 @@ export const NeedsYouBar = ({ requests, expanded, onToggle, transcriptVisibility
   const waiting = requests.filter(pending)
   const first = waiting[0]
   if (first === undefined || transcriptVisibility >= 0.6) return null
-  return <aside {...stylex.props(styles.card)} aria-label="Needs you"><Button {...stylex.props(styles.button)} aria-expanded={expanded} onPress={onToggle}>◌ {first.agentLabel} is waiting on you · {first.questions[0]?.prompt}{waiting.length > 1 ? ` · +${waiting.length - 1}` : ''} · {expanded ? 'Hide' : 'Answer'}</Button>{expanded ? children : null}</aside>
+  return <aside {...stylex.props(styles.card)} aria-label="Needs you"><Button {...stylex.props(styles.button, styles.dockButton)} aria-expanded={expanded} onPress={onToggle}><span {...stylex.props(styles.dockLabel)}>◌ {first.agentLabel} is waiting on you · {first.questions[0]?.prompt}{waiting.length > 1 ? ` · +${waiting.length - 1}` : ''}</span><span {...stylex.props(styles.dockAction)}>{expanded ? 'Hide' : 'Answer'}</span></Button>{expanded ? children : null}</aside>
 }
 export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <details key={request.id} {...stylex.props(styles.card)}><summary {...stylex.props(styles.inboxSummary)}>{request.agentLabel} · {request.questions[0]?.prompt}</summary><QuestionForm {...formProps?.(request.id)} request={request} variant="pinned" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} /></details>)}</section>
 
@@ -214,6 +215,10 @@ const styles = stylex.create({
   button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   danger: { color: statusVars.dangerFg },
   option: { padding: s.xs, borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, cursor: 'pointer' },
+  originalChoice: { display: 'flex', alignItems: 'flex-start', gap: s.md, cursor: 'default' },
+  dockButton: { display: 'flex', alignItems: 'center', gap: s.md, height: g.controlSm, minHeight: g.controlSm, maxWidth: '100%', boxSizing: 'border-box', paddingBlock: 0, fontWeight: t.weightMedium },
+  dockLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  dockAction: { flex: '0 0 auto' },
   selected: { backgroundColor: surfaceVars.rowActive }, focus: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accentVars.primary },
   field: { width: '100%', boxSizing: 'border-box', padding: s.md, backgroundColor: surfaceVars.rowActive, color: textVars.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   preview: { margin: 0, padding: s.md, backgroundColor: surfaceVars.rowActive, borderRadius: r.sm },
