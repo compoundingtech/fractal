@@ -110,6 +110,7 @@ export const LongCommandRow: Story = { render: args => <main {...stylex.props(st
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 4s/ }))
   const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
   await expect(rows).toHaveLength(2)
+  for (const row of rows) await expectNoOutputWithControl(row)
   const heights = () => rows.map(row => row.getBoundingClientRect().height)
   const tokenProbe = document.createElement('span')
   tokenProbe.style.height = g.toolRow
@@ -163,6 +164,7 @@ export const RawInputOnExpand: Story = { render: args => <main {...stylex.props(
   await expect(canvas.getAllByTestId('tool-detail-preview')).toHaveLength(1)
   await expect(canvas.queryAllByTestId('tool-raw-input')).toHaveLength(0)
   await expect(canvasElement.textContent).not.toContain(rawMarker)
+  for (const row of canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')) await expectNoOutputWithControl(row)
   await userEvent.click(canvas.getByRole('button', { name: /^read src\/rows\.ts/ }))
   await expect(canvas.queryAllByTestId('tool-raw-input')).toHaveLength(0)
   const readPreview = canvas.getAllByTestId('tool-detail-preview')[0]!
@@ -194,6 +196,7 @@ export const RawInputDefaultDetail: Story = { render: args => <main {...stylex.p
   await userEvent.click(canvas.getByRole('button', { name: 'Worked · 1 command' }))
   await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
   await expect(canvasElement.textContent).not.toContain(rawMarker)
+  await expectNoOutputWithControl(canvas.getByRole('button', { name: /^run/ }))
   await userEvent.click(canvas.getByRole('button', { name: /^run/ }))
   await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
   await expect(canvas.getByTestId('work-log')).toHaveTextContent('success')
