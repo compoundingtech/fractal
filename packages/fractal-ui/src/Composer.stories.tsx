@@ -171,12 +171,19 @@ export const Idle: Story = {
     await expect(guidance?.textContent).toMatch(/@.*\//)
     await expect(field.getAttribute('aria-describedby')?.split(' ')).toContain(guidance?.id)
     const form = field.closest('form')!
-    // C2 stays a column slab even for one line; the container, not the textbox, owns the focus ring.
+    // C2 stays a column slab even for one line; textarea focus changes only the frame border.
     await expect(getComputedStyle(form).flexDirection).toBe('column')
+    const borderBeforeFocus = getComputedStyle(form).borderColor
     await userEvent.click(field)
     await expect(getComputedStyle(field).outlineStyle).toBe('none')
-    await expect(getComputedStyle(form).outlineStyle).toBe('solid')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
+    await expect(getComputedStyle(form).borderColor).not.toBe(borderBeforeFocus)
+    const savedOutline = form.style.outlineStyle
+    form.style.outlineStyle = 'solid'
+    await expect(getComputedStyle(form).outlineStyle).not.toBe('none')
+    form.style.outlineStyle = savedOutline
     await userEvent.keyboard('Ship the composer')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-placeholder"]')).toBeNull())
     await expect(field.getAttribute('aria-describedby')?.split(' ')).not.toContain(guidance?.id)
     await userEvent.keyboard('{Enter}')
@@ -530,7 +537,7 @@ export const FooterWidthBudget: Story = {
 }
 export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
-/** C1 grows from a pill into a slab once the draft wraps or breaks lines; C3 becomes a slab while focused. */
+/** Adaptive drafts grow into a slab only when content wraps or breaks lines; focus alone preserves geometry. */
 export const LayoutShapes: Story = {
   beforeEach: clearDrafts,
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.geometryLane(768))}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
@@ -539,11 +546,19 @@ export const LayoutShapes: Story = {
     await expect(getComputedStyle(formOf('C1')).flexDirection).toBe('row')
     await expect(getComputedStyle(formOf('C2')).flexDirection).toBe('column')
     await expect(getComputedStyle(formOf('C3')).flexDirection).toBe('row')
+    const beforeFocus = formOf('C3').getBoundingClientRect()
     await userEvent.click(within(formOf('C3')).getByRole('textbox'))
-    await waitFor(() => expect(getComputedStyle(formOf('C3')).flexDirection).toBe('column'))
+    await expect(getComputedStyle(formOf('C3')).flexDirection).toBe('row')
+    await expect(formOf('C3').getBoundingClientRect().height).toBe(beforeFocus.height)
     await userEvent.click(within(formOf('C1')).getByRole('textbox'))
     await userEvent.keyboard('one{Shift>}{Enter}{/Shift}two')
     await waitFor(() => expect(getComputedStyle(formOf('C1')).flexDirection).toBe('column'))
+    const c3 = formOf('C3')
+    const savedDirection = c3.style.flexDirection
+    c3.style.flexDirection = 'column'
+    await expect(getComputedStyle(c3).flexDirection).not.toBe('row')
+    c3.style.flexDirection = savedDirection
+    await expect(getComputedStyle(c3).flexDirection).toBe('row')
   },
 }
 
