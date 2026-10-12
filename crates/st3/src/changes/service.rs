@@ -68,7 +68,7 @@ pub struct Entry {
     pub service_user: Option<String>,
     repository: Option<Repository>,
     unavailable: Option<String>,
-    indexing: tokio::sync::Mutex<()>,
+    indexing: Arc<tokio::sync::Mutex<()>>,
     pins: std::sync::Mutex<VecDeque<Pin>>,
 }
 
@@ -101,7 +101,7 @@ impl Registry {
                 service_user: None,
                 repository: None,
                 unavailable: None,
-                indexing: tokio::sync::Mutex::new(()),
+                indexing: Arc::new(tokio::sync::Mutex::new(())),
                 pins: std::sync::Mutex::new(VecDeque::new()),
             };
             if configured.reader_node != node {
@@ -224,16 +224,28 @@ impl Entry {
         if admission != SyncAdmission::Completed {
             return Ok(admission);
         }
-        let _indexing = self.indexing.lock().await;
         let repository = self
             .repository
             .clone()
             .context("Git repository unavailable")?;
         let configured = self.configuration.clone();
-        tokio::task::spawn_blocking(move || import_tracking(&store, &repository, &configured))
-            .await
-            .context("Git index importer stopped")??;
+        self.run_import(move || import_tracking(&store, &repository, &configured))
+            .await?;
         Ok(SyncAdmission::Completed)
+    }
+    async fn run_import(
+        &self,
+        operation: impl FnOnce() -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        let indexing = self.indexing.clone().lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            // Cancellation drops the join handle, but the blocking importer keeps
+            // its owned slot until it has actually finished.
+            let _indexing = indexing;
+            operation()
+        })
+        .await
+        .context("Git index importer stopped")?
     }
 }
 
@@ -519,5 +531,39 @@ mod tests {
                 .to_string()
                 .contains("authorized")
         );
+    }
+    #[tokio::test]
+    async fn canceled_import_keeps_its_slot_until_blocking_validation_finishes() {
+        let registry = Registry::new(&configured(), "fixture-other").unwrap();
+        let entry = registry.entry("fixture/garden").unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let client = tokio::spawn({
+            let entry = entry.clone();
+            let started = started.clone();
+            let gate = gate.clone();
+            async move {
+                entry
+                    .run_import(move || {
+                        started.notify_one();
+                        let (lock, condition) = &*gate;
+                        let mut released = lock.lock().unwrap();
+                        while !*released {
+                            released = condition.wait(released).unwrap();
+                        }
+                        Ok(())
+                    })
+                    .await
+            }
+        });
+        started.notified().await;
+        client.abort();
+        assert!(entry.indexing.try_lock().is_err());
+        let (lock, condition) = &*gate;
+        *lock.lock().unwrap() = true;
+        condition.notify_all();
+        let completed = entry.indexing.lock().await;
+        drop(completed);
+        assert!(entry.indexing.try_lock().is_ok());
     }
 }

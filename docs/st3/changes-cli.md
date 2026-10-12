@@ -45,7 +45,8 @@ join it; the minimum interval is ten seconds and explicit fetch shares the limit
 six remote reads a minute. `sync` reports in-flight or deferred admission rather
 than bypassing the budget. After a completed fetch, a finite importer validates
 otherwise unknown retained metadata chains, ancestor first, with a 10,000-record
-job limit. It holds no database snapshot or writer during Git operations. A larger
+job limit. It holds no database snapshot or writer during Git operations. A canceled client
+does not release the import slot while blocking validation is still running. A larger
 history requires a later resumable importer; the PR path stays available.
 
 List pages contain at most 50 changes. Their cursor pins the original observation
