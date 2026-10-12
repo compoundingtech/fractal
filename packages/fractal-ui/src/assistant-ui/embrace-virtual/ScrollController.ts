@@ -163,7 +163,8 @@ export class ScrollController {
       this.savePosition()
     }
     const onScrollEnd = () => {
-      if (this.userScrolling && !this.following) this.captureAnchor()
+      if (this.userScrolling && !this.following && this.pendingAnchor === undefined &&
+        this.pendingJump === undefined && this.pressed === undefined && !this.restoring) this.captureAnchor()
       this.userScrolling = false
     }
     let resizeFrame: number | undefined
@@ -227,6 +228,9 @@ export class ScrollController {
     const release = () => {
       if (this.pressed === undefined) return
       this.pressed = undefined
+      // The held gesture is finished. Measurement-generated scroll events must
+      // not replace its saved anchor before a new reader input takes ownership.
+      this.userScrolling = false
       if (this.following) {
         this.pendingAnchor = undefined
         element.scrollTop = element.scrollHeight
