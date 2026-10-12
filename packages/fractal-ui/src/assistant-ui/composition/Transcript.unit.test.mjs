@@ -30,7 +30,7 @@ for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length
 })
 
 test('live activity shares compact header durations and host-supplied waiting state', () => {
-  for (const [elapsed, duration] of [[12000, '12s'], [60000, '1m'], [185000, '3m 5s'], [16027000, '4h 27m']]) {
+  for (const [elapsed, duration] of [[12000, '12s'], [60000, '1m'], [185000, '3m 05s'], [3720000, '1h 02m'], [14820000, '4h 07m'], [16027000, '4h 27m']]) {
     for (const tag of ['Working', 'WaitingForAnswer']) {
       const markup = renderToStaticMarkup(React.createElement(LiveActivity, { state: { _tag: tag }, startedAt: new Date(now - elapsed).toISOString(), now }))
       assert.ok(markup.includes(tag === 'Working' ? `Working for ${duration}` : `Waiting for your answer · ${duration}`))
