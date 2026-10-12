@@ -402,3 +402,5 @@ drives the actual binary with `scripts/stui-test-client` and `STUI_TIMING_LOG`.
 Fleet and Usage each remain idle for 72 seconds; their first snapshots must occur
 once, every inventory HTTP read is forbidden, and no request follows ready frames
 for longer than the old 60-second interval.
+
+The usage inventory empty-graph socket test verifies that an open period uses the same wall-clock end as the HTTP read, then reconnects without a graph write.
