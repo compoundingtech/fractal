@@ -112,6 +112,8 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(first).toHaveAttribute('aria-checked', 'false')
   await expect(first.querySelector('svg')).toBeNull()
   const slot = first.querySelector<HTMLElement>('span[aria-hidden="true"]')!
+  // Measure after the entry scale settles; mid-animation boxes report the transformed width.
+  await waitFor(() => expect(canvas.getByTestId('menu-surface')).not.toHaveAttribute('data-entering'))
   await expect(slot.getBoundingClientRect().width).toBe(16)
   const surfaceStyle = getComputedStyle(canvas.getByTestId('menu-surface'))
   await expect(surfaceStyle.borderTopLeftRadius).toBe('8px')
