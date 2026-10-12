@@ -83,7 +83,11 @@ mod tests {
             .map(|subject| {
                 (
                     subject.clone(),
-                    intent_leaves_tx(&store.readers.get(), subject).unwrap(),
+                    store
+                        .selected_desired_token(subject)
+                        .unwrap()
+                        .into_iter()
+                        .collect(),
                 )
             })
             .collect();
@@ -225,7 +229,11 @@ mod tests {
                 .unwrap();
         let expected = BTreeMap::from([(
             "agent/example/root".into(),
-            intent_leaves_tx(&store.readers.get(), "agent/example/root").unwrap(),
+            store
+                .selected_desired_token("agent/example/root")
+                .unwrap()
+                .into_iter()
+                .collect(),
         )]);
         store
             .apply_as(&stopped, &expected, "retire-root", Some("person/avery"))
