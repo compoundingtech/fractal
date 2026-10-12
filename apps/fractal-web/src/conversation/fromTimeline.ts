@@ -471,6 +471,15 @@ export class LiveTimeline {
         this.reindex = true
       }
       if (this.reindex) continue
+      // An earlier result row also depends on whether its owner renders a visible call.
+      // Revisions can change that classification without changing invocation segmentation.
+      if (entry.type === 'tool_call' && previous?.type === 'tool_call'
+        && (previous.body.blocks !== entry.body.blocks || previous.degraded !== entry.degraded)) {
+        for (const result of this.results.get(entry.body.call_id) ?? []) {
+          if (result.at < at && this.callFor(result.entry) === at)
+            this.dirtyFrom = Math.min(this.dirtyFrom, result.at)
+        }
+      }
       if (entry.type === 'tool_call' && previous === undefined) {
         newCalls ??= new Map()
         const calls = newCalls.get(entry.body.call_id)
@@ -715,7 +724,9 @@ export class LiveTimeline {
         // A joined result still emits its own unsupported blocks at its entry position.
         const owner = this.callFor(entry)
         const call = owner === undefined ? undefined : this.ordered[owner]
-        const classification = call === undefined || call.type === 'truncation' ? undefined : this.cache.get(call.id)?.classified ?? blockItems(call)
+        const cachedCall = call === undefined ? undefined : this.cache.get(call.id)
+        const classification = call === undefined || call.type === 'truncation' ? undefined
+          : cachedCall?.entry === call ? cachedCall.classified : blockItems(call)
         const visibleCall = classification !== undefined && (!classification.native || classification.fallback || classification.primary?._tag === 'ToolCall')
         items.push(...(visibleCall ? projected.filter(item => item._tag === 'Unsupported') : projected))
         continue

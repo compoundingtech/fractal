@@ -59,6 +59,41 @@ describe('native closed transcript boundary', () => {
     expect(timeline.project().items).toMatchObject([{ _tag: 'ToolCall', callSeen: false, result: { content: 'Visible output' } }])
   })
   it.each([
+    ['internal', 'visible', 'call-only'],
+    ['visible', 'internal', 'call-only'],
+    ['internal', 'visible', 'result-first'],
+    ['visible', 'internal', 'result-first'],
+    ['internal', 'visible', 'call-first'],
+    ['visible', 'internal', 'call-first'],
+  ])('reprojects result-before-call rows when visibility changes %s → %s (%s)', (initial, next, delivery) => {
+    const timeline = new LiveTimeline()
+    const call = entry([], { type: 'tool_call', role: 'assistant', body: {
+      call_id: 'call/revised', name: 'bash', arguments: { command: 'Visible command' },
+      blocks: [block('tool_call', { visibility: initial })],
+    } })
+    const result = entry([], { id: 'timeline-entry/raw/revised-result', sequence: 2, type: 'tool_result', role: 'tool', body: {
+      call_id: 'call/revised', content: 'Visible output', media_type: 'text/plain', status: 'success',
+      blocks: [block('tool_output', { visibility: 'visible' })],
+    } })
+    timeline.apply(frame([result]))
+    expect(timeline.project().items).toMatchObject([{ _tag: 'ToolCall', callSeen: false }])
+    timeline.apply(frame([call], false))
+    expect(timeline.project().items).toMatchObject([{ _tag: 'ToolCall', callSeen: initial === 'visible', result: { content: 'Visible output' } }])
+    const revisedCall = { ...call, revision: 2, body: {
+      ...call.body, blocks: [block('tool_call', { visibility: next })],
+    } }
+    const revisedResult = { ...result, revision: 2, body: { ...result.body, content: 'Revised visible output' } }
+    const updates = delivery === 'call-only' ? [revisedCall]
+      : delivery === 'result-first' ? [revisedResult, revisedCall] : [revisedCall, revisedResult]
+    timeline.apply(frame(updates, false))
+    const items = timeline.project().items
+    expect(items).toHaveLength(1)
+    expect(items).toMatchObject([{ _tag: 'ToolCall', callSeen: next === 'visible',
+      result: { content: delivery === 'call-only' ? 'Visible output' : 'Revised visible output' } }])
+    expect(items[0]?.id).toBe(next === 'visible' ? call.id : result.id)
+    expect(timeline.project().items).toEqual(items)
+  })
+  it.each([
     [{ id: 'Impl2239-2', state: 'completed', duration_ms: 15 }, 'completed'],
     [{ id: 'process/1', name: 'Supervised process', state: 'failed', exit_code: 1 }, 'failed'],
   ])('uses typed single-job facts without a matching envelope', (job, state) => {

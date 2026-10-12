@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Native conversation blocks and typed views are authoritative when present; block-less fallback records remain supported. Internal and harness-hidden payloads cannot become readable transcript rows or visible tool results. No storage schema or replay change."
+    "detail": "Native conversation blocks and typed views are authoritative when present; block-less fallback records remain supported. Internal and harness-hidden payloads cannot become readable transcript rows or visible tool results. Result-before-call delivery remains correct when call visibility changes, including same-frame call/result revisions. No storage schema or replay change."
   },
   "downtime": {
     "status": "none",
