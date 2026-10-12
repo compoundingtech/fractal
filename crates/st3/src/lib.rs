@@ -1,5 +1,8 @@
 //! st3 claims graph, API, reconciliation, and CLI support.
 
+#[macro_use]
+pub mod cli_output;
+
 #[cfg(any(test, feature = "test-support"))]
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]

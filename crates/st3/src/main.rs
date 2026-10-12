@@ -1,3 +1,6 @@
+use st3::cli_output;
+use st3::{cli_print as print, cli_println as println};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal as _, Read as _, Write as _};
@@ -4760,6 +4763,10 @@ fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<b
 }
 
 fn main() -> ExitCode {
+    cli_output::finish(cli_main())
+}
+
+fn cli_main() -> ExitCode {
     // A recorder link starts st3 as `git` or `gh`. It must not build the async runtime.
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
@@ -4810,7 +4817,7 @@ fn main() -> ExitCode {
     if plain_ui_requested(
         arguments.len(),
         std::io::stdin().is_terminal(),
-        std::io::stdout().is_terminal(),
+        cli_output::stdout().is_terminal(),
         std::env::var_os("ST_AGENT").is_some(),
     ) {
         // setup-core adds st3::setup::prepare_plain_ui() here, before the TUI runtime.
@@ -5243,7 +5250,7 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Sekrets(args) = cli.command {
         let code = st3::sekrets::cli::run(args, cli.json).await?;
         use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        let _ = cli_output::stdout().flush();
         return Err(CommandExit(code as u8).into());
     }
     if let Command::Admission { command } = cli.command {
@@ -5450,7 +5457,7 @@ async fn run(cli: Cli) -> Result<()> {
                     "st",
                     "st",
                     "st",
-                    &mut std::io::stdout(),
+                    &mut cli_output::stdout(),
                 )?;
             Ok(())
         }
@@ -7744,14 +7751,14 @@ async fn follow_mission_run(
     json_output: bool,
     limit: usize,
 ) -> Result<()> {
-    let interactive = std::io::stdout().is_terminal();
+    let interactive = cli_output::stdout().is_terminal();
     let _screen = if !json_output && interactive {
         Some(TerminalScreen::open()?)
     } else {
         None
     };
     follow_mission_run_to(
-        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut std::io::stdout(),
+        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
     ).await
 }
 
@@ -8699,7 +8706,7 @@ async fn run_inspect(client: &Client, args: InspectArgs, json_output: bool) -> R
 }
 
 async fn run_trace(client: &Client, args: TraceArgs, json_output: bool) -> Result<()> {
-    run_trace_to(client, args, json_output, &mut std::io::stdout()).await
+    run_trace_to(client, args, json_output, &mut cli_output::stdout()).await
 }
 
 async fn run_trace_to(
@@ -9469,7 +9476,7 @@ async fn run_collection_watch(
                     "sync": null
                 }
             }))?;
-            if std::io::stdout().is_terminal() {
+            if cli_output::stdout().is_terminal() {
                 print!("\x1b[2J\x1b[H");
             }
             if collection == "agents" {
@@ -9485,7 +9492,7 @@ async fn run_collection_watch(
             } else {
                 print_product_page(title, &page, false, &format!("st {collection} ls --watch"))?;
             }
-            std::io::stdout().flush()?;
+            cli_output::stdout().flush()?;
         }
         // The socket ended (including daemon restart). Reopen and subscribe for
         // a fresh snapshot rather than attempting to resume a stale projection.
@@ -10286,8 +10293,7 @@ fn print_conversation_page(
     response: &ClientEnvelope<ClientTimelinePage>,
     simple: bool,
 ) -> Result<()> {
-    use std::io::IsTerminal as _;
-    let stdout = std::io::stdout();
+    let stdout = cli_output::stdout();
     let color = stdout.is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let width = terminal_columns().unwrap_or(100).clamp(40, 160);
     let mut output = conversation_text(
@@ -12448,7 +12454,7 @@ async fn run_blobs(
                 }
                 None => {
                     use std::io::Write as _;
-                    std::io::stdout().write_all(&bytes)?;
+                    cli_output::stdout().write_all(&bytes)?;
                 }
             }
             Ok(())
@@ -12667,14 +12673,14 @@ async fn run_doc(client: &Client, command: DocCommand, json_output: bool) -> Res
             if let Some(output) = output {
                 fs::write(&output, bytes)
                     .with_context(|| format!("write document {}", output.display()))?;
-            } else if let Some(rendered) = (!raw && std::io::stdout().is_terminal())
+            } else if let Some(rendered) = (!raw && cli_output::stdout().is_terminal())
                 .then(|| render_document(&bytes, terminal_columns().unwrap_or(100).clamp(20, 140)))
                 .flatten()
             {
                 println!("{rendered}");
             } else {
                 use std::io::Write as _;
-                std::io::stdout().write_all(&bytes)?;
+                cli_output::stdout().write_all(&bytes)?;
             }
             Ok(())
         }
@@ -17887,7 +17893,7 @@ struct TerminalScreen;
 impl TerminalScreen {
     fn open() -> Result<Self> {
         print!("\x1b[?25l");
-        std::io::stdout().flush()?;
+        cli_output::stdout().flush()?;
         Ok(Self)
     }
 }
@@ -17895,7 +17901,7 @@ impl TerminalScreen {
 impl Drop for TerminalScreen {
     fn drop(&mut self) {
         print!("\x1b[?25h");
-        let _ = std::io::stdout().flush();
+        let _ = cli_output::stdout().flush();
     }
 }
 
@@ -20856,7 +20862,7 @@ async fn run_pi_channel(
         }
         None => None,
     };
-    let mut stdout = tokio::io::stdout();
+    let mut stdout = cli_output::async_stdout();
     let mut state = match resumed {
         // The extension already has its hello; a second one would restate the session context.
         Some(state) => {
@@ -21669,7 +21675,7 @@ impl PiFamilyReports {
             }
             // Both transports retain the native receipt until the graph acknowledges it.
             use tokio::io::AsyncWriteExt as _;
-            let mut stdout = tokio::io::stdout();
+            let mut stdout = cli_output::async_stdout();
             stdout.write_all(format!("{}\n", json!({"type":"settled","meta":{"messageId":message}})).as_bytes()).await?;
             stdout.flush().await?;
             self.reads.remove(&message);
