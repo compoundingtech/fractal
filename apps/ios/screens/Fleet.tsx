@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { plainError, type ClientConnections } from '../../../clients/typescript/st3-client';
+import { plainError, type ClientConnection } from '../../../clients/typescript/st3-client';
 import { ActionSheetIOS, Alert, ScrollView, View } from 'react-native';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
@@ -21,39 +21,35 @@ function machineGlyph(state: string): { glyph: string; color: string } {
   return { glyph: '?', color: theme.quiet };
 }
 
-// Who is connected to the member this phone talks to. st keeps no stream of it, so it is read on
-// focus and again every few seconds while Fleet shows.
-const CLIENTS_EVERY_MS = 10_000;
+// Fleet holds the optional clients window while focused. Older daemons read on focus or pull.
 function useClients() {
-  const { client } = useStore();
-  const [clients, setClients] = useState<ClientConnections | null>(null);
+  const { client, feed, inventoryGranted } = useStore();
+  const [clients, setClients] = useState<ClientConnection[] | null>(null);
   const [issue, setIssue] = useState('');
+  const [hasMore, setHasMore] = useState(false);
   const read = useCallback(async () => {
-    if (!client) return;
-    try {
-      setClients((await client.clientsList()).value);
-      setIssue('');
-    } catch (error) {
+    if (!client || inventoryGranted !== false) return;
+    try { setClients((await client.clientsList()).value.items); setIssue(''); }
+    catch (error) {
       const text = plainError(error);
       setIssue(/404|not-found|it is gone/i.test(text) ? 'This st does not list its clients yet: its daemon needs an update.' : `Could not read connected clients: ${text}`);
     }
-  }, [client]);
+  }, [client, inventoryGranted]);
   useFocusEffect(useCallback(() => {
-    void read();
-    const timer = setInterval(() => void read(), CLIENTS_EVERY_MS);
-    return () => clearInterval(timer);
-  }, [read]));
-  return { clients, issue };
+    if (inventoryGranted && feed) return feed.watchInventory('clients', { onRows: (rows, more) => { setClients(rows); setHasMore(more); }, onIssue: setIssue });
+    if (inventoryGranted === false) void read();
+  }, [feed, inventoryGranted, read]));
+  return { clients, issue, read, hasMore };
 }
 
 // Fleet: machines, what runs where, this connection, who is connected, and the paired devices.
 export function FleetScreen() {
-  const { data, truncated, caps, url, gatewayMachineId, gatewayHost, order, actions, simpleOn, carrierInfo } = useStore();
+  const { data, truncated, caps, url, gatewayMachineId, gatewayHost, order, actions, simpleOn, carrierInfo, inventoryGranted } = useStore();
   useListsOnFocus(['machines', 'devices', 'sessions']);
-  const refresh = useRefresh(['machines', 'devices', 'sessions']);
+  const { clients, issue: clientsIssue, read: readClients, hasMore: clientsPartial } = useClients();
+  const refresh = useRefresh(['machines', 'devices', 'sessions'], readClients);
   const scroll = useRef<ScrollView>(null);
   useDebugScroll(scroll as never);
-  const { clients, issue: clientsIssue } = useClients();
   const now = Date.now();
   const undeclared = data.sessions.filter(session => session.state === 'running' && isUnmanaged(session));
   const gatewayListed = data.machines.some(machine => machine.id === gatewayMachineId);
@@ -65,6 +61,7 @@ export function FleetScreen() {
     <Banners />
     <ScrollView ref={scroll} contentInsetAdjustmentBehavior="automatic" refreshControl={refresh} contentContainerStyle={{ paddingBottom: 32 }}>
       <StatusLine />
+      {inventoryGranted === false ? <Note>This member’s inventories are read, not followed.</Note> : null}
       <UsageCard />
       <QualitySection />
       <SectionHeader title="machines" count={data.machines.length} />
@@ -99,11 +96,12 @@ export function FleetScreen() {
         <Button label="forget this device" color={theme.red} onPress={() => Alert.alert('Forget this device?', 'You will need to pair again.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Forget', style: 'destructive', onPress: () => void actions.forget() }])} />
       </View>
       <CarrierSection />
-      <SectionHeader title="connected clients" count={clients?.items.length} />
+      <SectionHeader title="connected clients" count={clients?.length} />
       {clientsIssue ? <Note tone="warning">{clientsIssue}</Note> : null}
+      {clientsPartial ? <Note>More connected clients exist beyond this window.</Note> : null}
       {!clients && !clientsIssue ? <Note>Loading connected clients…</Note> : null}
-      {clients && !clients.items.length ? <T dim style={{ paddingHorizontal: 12 }}>No clients connected.</T> : null}
-      {clients?.items.map(item => <ListRow
+      {clients && !clients.length ? <T dim style={{ paddingHorizontal: 12 }}>No clients connected.</T> : null}
+      {clients?.map(item => <ListRow
         key={`${item.actor} ${item.client ?? ''} ${item.via}`}
         glyph={item.connected ? '●' : '○'}
         glyphColor={item.connected ? theme.idle : theme.quiet}

@@ -8,3 +8,4 @@ export * from './clientName.ts';
 export * from './time.ts';
 export * from './conversationContent.ts';
 export * from './slo.ts';
+export * from './inventoryView.ts';

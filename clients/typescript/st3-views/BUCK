@@ -15,6 +15,7 @@ package_view(
         "deviceSigning.ts": "deviceSigning.ts",
         "homeView.ts": "homeView.ts",
         "index.ts": "index.ts",
+        "inventoryView.ts": "inventoryView.ts",
         "package.json": "package.json",
         "requestView.ts": "requestView.ts",
         "sessionView.ts": "sessionView.ts",
