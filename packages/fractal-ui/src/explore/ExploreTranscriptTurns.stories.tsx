@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
-import { expect, userEvent, waitFor } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button, Disclosure, DisclosurePanel, Tooltip, TooltipTrigger } from 'react-aria-components'
 import { ThreadPrimitive } from '@assistant-ui/react'
 import { AgentMessage } from '../assistant-ui/AgentMessage'
@@ -88,7 +88,7 @@ function WorkFold() {
 }
 
 function Lane({ args }: { args: ExploreArgs }) {
-  return <section data-lane data-meta-variant={args.meta} aria-label={`${args.turn} ${args.kind} ${args.meta} · ${args.scheme} · ${args.width}`} {...stylex.props(styles.lane)}>
+  return <section data-lane data-turn-variant={args.turn} data-kind-variant={args.kind} data-meta-variant={args.meta} data-scheme={args.scheme} data-width={args.width} aria-label={`${args.turn} ${args.kind} ${args.meta} · ${args.scheme} · ${args.width}`} {...stylex.props(styles.lane)}>
     <h2 {...stylex.props(styles.laneTitle)}>{args.turn} · {args.kind} · {args.meta} / {args.scheme} / {args.width}</h2>
     <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root {...stylex.props(styles.thread)}>{turnBlocks.map((block, index) => <React.Fragment key={block.id}><Block block={block} previous={turnBlocks[index - 1]} turn={args.turn} kind={args.kind} meta={args.meta} />{index === 7 ? <WorkFold /> : null}</React.Fragment>)}</ThreadPrimitive.Root></EmbraceRuntimeProvider>
   </section>
@@ -111,6 +111,7 @@ function Explorer(args: ExploreArgs) {
       <div data-control-owner {...stylex.props(styles.block)}><p>Owning reply.</p><time data-turn-time {...stylex.props(styles.wrongOwner)}>6:32 AM</time></div><div data-control-next {...stylex.props(styles.block)}><p>Next input.</p></div>
       <div data-control-focus {...stylex.props(styles.block)}><span data-affordance="reveal" {...stylex.props(styles.hoverOnly)}>Hover-only time</span><Button {...stylex.props(styles.control)}>Control copy</Button></div>
       <div data-control-style>Unstyled token probe</div>
+      <div data-control-transition data-turn-variant="T1" data-kind-variant="K1" data-meta-variant="M1" data-scheme="dark" data-width="1440" data-lane-count="1"><Button {...stylex.props(styles.control)}>Inert transition control</Button><Button aria-expanded={false} {...stylex.props(styles.control)}>Inert disclosure control</Button></div>
     </section>
   </main>
 }
@@ -174,42 +175,39 @@ function reservedMetaHeight(block: HTMLElement) {
   metadata.forEach((element, index) => { element.style.display = previous[index] ?? '' })
   return height - bare
 }
-const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
+async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTMLElement) {
   await waitFor(() => {
-    for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
+    const lanes = canvasElement.querySelectorAll('[data-lane]')
+    expect(lanes.length).toBeGreaterThan(0)
+    for (const lane of lanes) {
       expect(lane.querySelectorAll('[data-turn-content] [data-testid="agent-message"]')).toHaveLength(replyItems.length)
       if (lane.getAttribute('data-meta-variant') === 'M4') expect(lane.querySelectorAll('[data-meta-time]')).toHaveLength(turnBlocks.length)
     }
   })
-  await step('StyleX static CSS is present; unstyled control fails', async () => {
-    const styled = getComputedStyle(canvasElement.querySelector('[data-token-probe]')!)
-    const control = getComputedStyle(canvasElement.querySelector('[data-control-style]')!)
-    await expect(parseFloat(styled.paddingTop)).toBe(24)
-    await expect(parseFloat(control.paddingTop)).not.toBe(24)
-    await expect(styled.backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
-  })
-  await step('Every metadata placement reserves zero height; footer control fails', async () => {
-    const lanes = canvasElement.querySelectorAll<HTMLElement>('[data-lane]')
-    for (const lane of lanes) {
-      for (const block of lane.querySelectorAll<HTMLElement>('[data-turn-block]')) await expect(reservedMetaHeight(block)).toBe(0)
+  const styled = getComputedStyle(canvasElement.querySelector('[data-token-probe]')!)
+  const styleControl = getComputedStyle(canvasElement.querySelector('[data-control-style]')!)
+  await expect(parseFloat(styled.paddingTop)).toBe(24)
+  await expect(parseFloat(styleControl.paddingTop)).not.toBe(24)
+  await expect(styled.backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
+  for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
+    const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
+    for (const [index, block] of blocks.entries()) {
+      await expect(reservedMetaHeight(block)).toBe(0)
+      const next = blocks[index + 1]
+      if (next === undefined) continue
+      for (const label of block.querySelectorAll('time[data-turn-time]')) await expect(distance(label.getBoundingClientRect(), block.getBoundingClientRect())).toBeLessThanOrEqual(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
     }
-    await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-height]')!)).toBeGreaterThan(0)
-  })
-  await step('Time belongs geometrically to its block; next-input control fails', async () => {
-    for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
-      const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
-      for (const [index, block] of blocks.entries()) {
-        const next = blocks[index + 1]
-        if (next === undefined) continue
-        for (const label of block.querySelectorAll('time[data-turn-time]')) await expect(distance(label.getBoundingClientRect(), block.getBoundingClientRect())).toBeLessThanOrEqual(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
-      }
-    }
-    const owner = canvasElement.querySelector('[data-control-owner]')!, next = canvasElement.querySelector('[data-control-next]')!, label = owner.querySelector('time')!
-    await expect(distance(label.getBoundingClientRect(), owner.getBoundingClientRect())).toBeGreaterThan(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
-  })
-  await step('Focus-within equals hover and touch reveal; hover-only control fails', async () => {
-    const block = canvasElement.querySelector<HTMLElement>('[data-turn-kind="Seat"]')!
+  }
+  await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-height]')!)).toBeGreaterThan(0)
+  const owner = canvasElement.querySelector('[data-control-owner]')!, next = canvasElement.querySelector('[data-control-next]')!, label = owner.querySelector('time')!
+  await expect(distance(label.getBoundingClientRect(), owner.getBoundingClientRect())).toBeGreaterThan(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
+  const samples: HTMLElement[] = []
+  for (const lane of canvasElement.querySelectorAll('[data-lane]')) samples.push(lane.querySelector<HTMLElement>('[data-turn-kind="Seat"]')!)
+  if (expandedBlock !== undefined) samples.push(expandedBlock)
+  for (const block of samples) {
     const copy = block.querySelector<HTMLElement>('[data-copy]')!
+    const active = canvasElement.ownerDocument.activeElement
+    if (active instanceof HTMLElement) active.blur()
     await userEvent.unhover(block)
     await expect(getComputedStyle(copy).opacity).toBe('0')
     copy.focus()
@@ -221,11 +219,115 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
     await userEvent.unhover(block)
     block.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
     await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
-    const control = canvasElement.querySelector<HTMLElement>('[data-control-focus]')!
-    control.querySelector<HTMLElement>('button')!.focus()
-    await expect(getComputedStyle(control.querySelector('[data-affordance]')!).opacity).toBe('0')
-    const extraStops = Array.from(block.querySelectorAll<HTMLElement>('button, a[href], [tabindex]')).filter(element => element !== copy && element.tabIndex >= 0 && element.getClientRects().length > 0)
+    block.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
+    await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('0'))
+    const extraStops = Array.from(block.querySelectorAll<HTMLElement>('button, a[href], [tabindex]')).filter(element => element !== copy && !element.hasAttribute('aria-expanded') && element.tabIndex >= 0 && element.getClientRects().length > 0)
     await expect(extraStops).toHaveLength(0)
+  }
+  const focusControl = canvasElement.querySelector<HTMLElement>('[data-control-focus]')!
+  focusControl.querySelector<HTMLElement>('button')!.focus()
+  await expect(getComputedStyle(focusControl.querySelector('[data-affordance]')!).opacity).toBe('0')
+}
+const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
+  const canvas = within(canvasElement)
+  const inert = canvas.getByRole('button', { name: 'Inert transition control' })
+  const control = canvasElement.querySelector('[data-control-transition]')!
+  await step('Initial geometry and affordances reject footer, ownership, StyleX and hover-only controls', async () => {
+    await assertProjection(canvasElement)
+  })
+  await step('Pick turn structure; inert picker control cannot update the lane', async () => {
+    // Normalize comparison through the real controls, not updateArgs, so selected options
+    // must actually replace the lane rather than merely changing a selected button.
+    for (const name of ['Compare Turn structure', 'Compare Input kind', 'Compare Time and copy']) {
+      const toggle = canvas.getByRole('button', { name })
+      if (toggle.getAttribute('aria-pressed') === 'true') {
+        const before = canvasElement.querySelectorAll('[data-lane]').length
+        await userEvent.click(toggle)
+        await waitFor(() => expect(canvasElement.querySelectorAll('[data-lane]').length).toBeLessThan(before))
+        await assertProjection(canvasElement)
+      }
+    }
+    const turn = canvasElement.querySelector('[data-lane]')!.getAttribute('data-turn-variant') === 'T2' ? `T${3}` : 'T2'
+    await userEvent.click(inert)
+    await expect(control).not.toHaveAttribute('data-turn-variant', turn)
+    await userEvent.click(canvas.getByRole('button', { name: new RegExp(`^${turn}:`) }))
+    await waitFor(() => expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-turn-variant', turn))
+    await assertProjection(canvasElement)
+  })
+  await step('Pick K3 input-kind disclosure; inert kind control stays K1', async () => {
+    const selected = canvas.getByRole('button', { name: /^K3:/ })
+    if (selected.getAttribute('aria-pressed') === 'true') {
+      await userEvent.click(canvas.getByRole('button', { name: /^K2:/ }))
+      await waitFor(() => expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-kind-variant', 'K2'))
+      await assertProjection(canvasElement)
+    }
+    await userEvent.click(inert)
+    await expect(control).not.toHaveAttribute('data-kind-variant', 'K3')
+    await userEvent.click(selected)
+    await waitFor(() => expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-kind-variant', 'K3'))
+    await assertProjection(canvasElement)
+  })
+  await step('Pick M4 trailing metadata; inert metadata control stays M1', async () => {
+    const selected = canvas.getByRole('button', { name: /^M4:/ })
+    if (selected.getAttribute('aria-pressed') === 'true') {
+      await userEvent.click(canvas.getByRole('button', { name: /^M2:/ }))
+      await waitFor(() => expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-meta-variant', 'M2'))
+      await assertProjection(canvasElement)
+    }
+    await userEvent.click(inert)
+    await expect(control).not.toHaveAttribute('data-meta-variant', 'M4')
+    await userEvent.click(selected)
+    await waitFor(() => expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-meta-variant', 'M4'))
+    await assertProjection(canvasElement)
+  })
+  await step('Compare metadata creates four lanes; inert compare control stays one', async () => {
+    await userEvent.click(inert)
+    await expect(control).not.toHaveAttribute('data-lane-count', '4')
+    await userEvent.click(canvas.getByRole('button', { name: 'Compare Time and copy' }))
+    await waitFor(() => expect(canvasElement.querySelectorAll('[data-lane]')).toHaveLength(dimensions.M.length))
+    await assertProjection(canvasElement)
+  })
+  await step('Switch theme; inert theme control never changes paint', async () => {
+    const initial = canvasElement.querySelector('[data-lane]')!.getAttribute('data-scheme')
+    const scheme = initial === 'dark' ? 'light' : 'dark'
+    const paint = getComputedStyle(canvasElement.querySelector('[data-token-probe]')!).backgroundColor
+    const controlPaint = getComputedStyle(control).backgroundColor
+    await userEvent.click(inert)
+    await expect(getComputedStyle(control).backgroundColor).toBe(controlPaint)
+    await userEvent.click(canvas.getByRole('button', { name: scheme, exact: true }))
+    await waitFor(() => {
+      expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-scheme', scheme)
+      expect(getComputedStyle(canvasElement.querySelector('[data-token-probe]')!).backgroundColor).not.toBe(paint)
+    })
+    await assertProjection(canvasElement)
+  })
+  await step('Switch lane width; inert width control never resizes', async () => {
+    const width = canvasElement.querySelector('[data-lane]')!.getAttribute('data-width') === '1440' ? 900 : 1440
+    const controlWidth = control.getBoundingClientRect().width
+    await userEvent.click(inert)
+    await expect(control.getBoundingClientRect().width).toBe(controlWidth)
+    await userEvent.click(canvas.getByRole('button', { name: `${width} lane`, exact: true }))
+    await waitFor(() => {
+      expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-width', `${width}`)
+      expect(canvasElement.querySelector('[data-token-probe]')!.getBoundingClientRect().width).toBe(width)
+    })
+    await assertProjection(canvasElement)
+  })
+  await step('Expand K3 with M4 time inside its final paragraph; inert disclosure stays closed', async () => {
+    const disclosureControl = canvas.getByRole('button', { name: 'Inert disclosure control' })
+    await userEvent.click(disclosureControl)
+    await expect(disclosureControl).toHaveAttribute('aria-expanded', 'false')
+    await expect(control.querySelector('[data-turn-content]')).toBeNull()
+    const lane = canvasElement.querySelector('[data-lane][data-meta-variant="M4"]')!
+    const block = lane.querySelector<HTMLElement>('[data-turn-block="relay-hold"]')!
+    const trigger = block.querySelector<HTMLElement>('button[aria-expanded]')!
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(trigger)
+    await waitFor(() => {
+      expect(trigger).toHaveAttribute('aria-expanded', 'true')
+      expect(block.querySelector('[data-turn-content] p [data-meta-time] time[data-turn-time]')).not.toBeNull()
+    })
+    await assertProjection(canvasElement, block)
   })
 }
 export const Exploration: Story = { play }
