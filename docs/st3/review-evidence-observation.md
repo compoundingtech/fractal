@@ -19,14 +19,14 @@ and cites only records it actually reviewed. Until evidence exists, it keeps
 the current document/message workflow. A pending or absent typed citation is
 never silently filled from an unrelated successful CI link.
 
-The GitHub repository observer now reads `baseRefOid` beside `headRefOid` in
-the same query and retains it as `base_sha` in the PR resource snapshot. Its
-existing `base_branch` remains. Future signing derives the review's ancestor
-base and complete changed-path/blob map from those immutable Git identities,
-instead of resolving today's moving main branch.
+The protected review observer reads the PR head and base together when recording
+evidence. It must require that head to equal the immutable reviewed snapshot,
+derive the ancestor base and complete changed-path/blob map from Git, and retain
+the base in the evidence record. General PR snapshots do not record the moving
+base SHA, so an unrelated main advance adds no snapshot claims for dormant PRs.
 
 This change supplies inputs for the protected review adapter. It does not
 activate signing, change curator behavior or enforce a gate. Deploy the schema
 to participating daemons before intake publishes the new optional citation
-field. Historical snapshots lacking `base_sha` must be observed again; the
-signer must refuse to guess their base.
+field. If the live PR head differs from the reviewed snapshot, the signer refuses
+to guess applicability and a new review observation is required.

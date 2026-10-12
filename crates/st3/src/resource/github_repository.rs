@@ -585,7 +585,7 @@ const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after:
     pullRequests(states: OPEN, first: 100, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
-        id number title url isDraft headRefOid headRefName baseRefOid baseRefName createdAt
+        id number title url isDraft headRefOid headRefName baseRefName createdAt
         author { login }
         reviewDecision
         mergeQueueEntry { state position }
@@ -784,7 +784,6 @@ fn open_pull_request(
     insert(&mut facts, "head", node.get("headRefOid"));
     insert(&mut facts, "branch", node.get("headRefName"));
     insert(&mut facts, "base_branch", node.get("baseRefName"));
-    insert(&mut facts, "base_sha", node.get("baseRefOid"));
     facts.insert("state".into(), Value::String("open".into()));
     facts.insert(
         "draft".into(),
@@ -1896,24 +1895,6 @@ mod tests {
             ]}}}}]},
         })
     }
-
-    #[test]
-    fn pull_snapshot_retains_the_same_read_base_instead_of_resolving_main_later() {
-        let mut pull = open_pull(7, &"a".repeat(40), "SUCCESS");
-        pull["baseRefOid"] = json!("b".repeat(40));
-        pull["baseRefName"] = json!("main");
-        let first = open_pull_request(&pull, Some(&[]));
-        assert_eq!(first["base_sha"], "b".repeat(40));
-        assert_eq!(first["head"], "a".repeat(40));
-        pull["baseRefOid"] = json!("c".repeat(40));
-        let next = open_pull_request(&pull, Some(&[]));
-        assert_eq!(next["base_sha"], "c".repeat(40));
-        assert_eq!(first["base_sha"], "b".repeat(40));
-        assert_ne!(first, next);
-        pull.as_object_mut().unwrap().remove("baseRefOid");
-        assert!(!open_pull_request(&pull, Some(&[])).contains_key("base_sha"));
-    }
-
 
     fn issue(number: u64, updated_at: &str, extra: Value) -> Value {
         let mut issue = json!({

@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Retain structured review test citations and the observed PR base",
+  "summary": "Retain structured review test citations",
   "replay": {"status": "none", "detail": "Existing observations remain valid; no replay or checkpoint change."},
-  "schema": {"status": "changed", "detail": "Adds optional human.review evidence_tests array and vcs.pull-request base_sha string. No database DDL or storage version change."},
+  "schema": {"status": "changed", "detail": "Adds optional human.review evidence_tests array. No database DDL or storage version change."},
   "rules": {"status": "none", "detail": "No gate or curator rule change."},
-  "compatibility": {"status": "changed", "detail": "GitHub PR snapshots retain the base SHA from the same read as their head. Legacy observations without these optional fields remain valid, but do not supply them for signing."},
+  "compatibility": {"status": "changed", "detail": "Legacy review observations remain valid without test citations, but do not gain signed GO authority by omission. General PR snapshot behavior is unchanged."},
   "downtime": {"status": "none", "detail": "No downtime required."},
   "manual": {"status": "changed", "detail": "Deploy the updated schema to participating daemons before publishing new citation fields. Intake cites immutable records it considered; signing adapters follow separately."},
-  "recovery": {"status": "changed", "detail": "Re-observe historical snapshots missing the base SHA; never infer their reviewed base from a later main revision."}
+  "recovery": {"status": "changed", "detail": "The future protected observer must read head/base together, require the head to match the reviewed snapshot and bind its measured ancestor base into the record. A changed head requires a new review observation."}
 }

@@ -1029,7 +1029,6 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("author", string()),
                 ("head", reference()),
                 ("head_sha", string()),
-                ("base_sha", string()),
                 ("branch", string()),
                 ("opened_by", reference()),
                 ("opened_by_run", reference()),
@@ -4620,7 +4619,7 @@ mod tests {
     }
 
     #[test]
-    fn review_test_citations_and_pull_base_are_optional_typed_facts() {
+    fn review_test_citations_are_optional_array_facts() {
         let review = BTreeMap::from([
             (
                 "target".into(),
@@ -4650,22 +4649,7 @@ mod tests {
                 .validate_resource_facts("human.review", &cited)
                 .is_err()
         );
-        registry()
-            .validate_resource_facts(
-                "vcs.pull-request",
-                &BTreeMap::from([("base_sha".into(), Value::String("b".repeat(40)))]),
-            )
-            .unwrap();
-        assert!(
-            registry()
-                .validate_resource_facts(
-                    "vcs.pull-request",
-                    &BTreeMap::from([("base_sha".into(), serde_json::json!(7))])
-                )
-                .is_err()
-        );
     }
-
 
     #[test]
     fn custom_claims_need_both_custom_namespaces() {
