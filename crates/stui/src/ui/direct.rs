@@ -1076,7 +1076,8 @@ mod tests {
             ("peers) exit 0;; dial) exit 1;;", "no Fabric node"),
             ("peers) printf 'node\\towner-matrix-1\\tservice\\n';; dial) echo 'missing grant' >&2; exit 1;;", "missing grant"),
             ("peers) printf 'node\\towner-matrix-2\\tservice\\n';; dial) echo 'dial failed' >&2; exit 1;;", "dial failed"),
-            ("peers) printf 'node\\towner-matrix-3\\tservice\\n';; dial) sleep 8;;", "within 4 s"),
+            ("peers) printf 'node\\towner-matrix-3\\tservice\\n';; dial) echo 'tunnel failed' >&2; exit 1;;", "tunnel failed"),
+            ("peers) printf 'node\\towner-matrix-4\\tservice\\n';; dial) sleep 8;;", "within 4 s"),
         ].into_iter().enumerate() {
             let root = tempfile::tempdir().unwrap();
             let owner = format!("owner-matrix-{index}");
