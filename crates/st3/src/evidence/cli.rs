@@ -1,4 +1,4 @@
-//! Offline evidence commands: no daemon config, no signing key, no network dependency.
+//! Portable offline evidence commands and a protected selector-only CI observation command.
 use super::*;
 use clap::{Args, Subcommand};
 
@@ -10,6 +10,16 @@ pub struct EvidenceArgs {
 
 #[derive(Subcommand)]
 pub enum EvidenceCommand {
+    /// Installed observer for a protected profile; accepts authenticated CI selectors only.
+    #[command(hide = true)]
+    ObserveCi {
+        #[arg(long)]
+        run: u64,
+        #[arg(long)]
+        attempt: u64,
+        #[arg(long)]
+        artifact: u64,
+    },
     /// Import an observation: signed full/test, or explicitly unsigned degraded.
     Put {
         #[arg(long, default_value = ".")]
@@ -50,6 +60,11 @@ pub enum EvidenceCommand {
 
 pub fn run(args: EvidenceArgs) -> Result<()> {
     let value = match args.command {
+        EvidenceCommand::ObserveCi {
+            run,
+            attempt,
+            artifact,
+        } => ci_transport::observe_ci(run, attempt, artifact)?,
         EvidenceCommand::Put {
             repo,
             record,
