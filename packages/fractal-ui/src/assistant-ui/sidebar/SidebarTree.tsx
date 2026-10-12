@@ -1,16 +1,22 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useLocale } from 'react-aria'
-import { Button, Collection, DragAndDropContext, ListLayout, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
+import { Button, Collection, DragAndDropContext, ListLayout, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
-import { measuredListLayoutOptions, scrollToLayoutKey } from '../composition/virtual-layout'
+import { scrollToLayoutKey } from '../composition/virtual-layout'
 
 export interface SidebarTreeItem<T> {
   readonly id: Key
   readonly depth: number
   readonly children?: readonly T[]
-  /** Accessible label and RAC typeahead text. */
+  /** RAC typeahead text, and the row's accessible name unless `accessibleName` is given. */
   readonly textValue: string
+  /**
+   * The row's accessible name, when it should say more than `textValue`. Start it with the
+   * visible title so the name contains the label. RAC names the row from these item props,
+   * so the name holds while memoized row content skips rendering after a reposition.
+   */
+  readonly accessibleName?: string
 }
 export interface SidebarTreeHandle { reveal(key: Key, options?: { readonly anchor: false }): void }
 export interface SidebarTreeProps<T extends SidebarTreeItem<T>> {
@@ -33,13 +39,61 @@ type Snapshot<T> = { pins: readonly Pin<T>[]; height: number; width: number; top
 type DropTarget = NonNullable<React.ContextType<typeof DragAndDropContext>['dropState']>['target']
 /** Browsers repeat dragover roughly every 50ms while a drag hovers the window. */
 const dragLeaveGraceMs = 150
+/**
+ * Rows are never shorter than their `g.controlSm` (24px) min-height. Estimating unmeasured rows
+ * at that minimum lets RAC mount every row that can be visible in one layout pass, so measuring
+ * can only shrink the mounted range. A larger estimate mounts a few rows, measures them, and
+ * re-renders until the viewport fills, and filtering drops RAC's layout for hidden rows, so
+ * that cascade would repeat on every keystroke.
+ */
+const layoutOptions = { estimatedRowHeight: 24 } as const
 
-/** Keep RAC's own virtualized insertion indicators above the visual ancestor band. */
-class SidebarTreeLayout extends ListLayout<unknown> {
+interface SidebarTreeLayoutOptions extends ListLayoutOptions {
+  /** The host's `renderRow`. A new identity means row content, and so any measured height, may have changed. */
+  readonly rowContent: unknown
+}
+interface MeasuredRow { readonly width: number; readonly height: number; readonly rowContent: unknown }
+
+/**
+ * Keeps RAC's own virtualized insertion indicators above the visual ancestor band, and keeps
+ * each row's measured height across filtering. RAC drops the layout of every row a filter hides
+ * and re-estimates every row whose collection node changed, then re-measures each mounted one
+ * with a forced layout. A retained item object at the same width and `renderRow` instead reuses
+ * the height last measured for it.
+ */
+class SidebarTreeLayout extends ListLayout<unknown, SidebarTreeLayoutOptions> {
+  private rowContent: unknown
+  private readonly measured = new WeakMap<object, MeasuredRow>()
   override getDropTargetLayoutInfo(target: Parameters<ListLayout<unknown>['getDropTargetLayoutInfo']>[0]) {
     const info = super.getDropTargetLayoutInfo(target)
     info.zIndex = 2
     return info
+  }
+  override shouldInvalidateLayoutOptions(next: SidebarTreeLayoutOptions, previous: SidebarTreeLayoutOptions) {
+    return super.shouldInvalidateLayoutOptions(next, previous) || next.rowContent !== previous.rowContent
+  }
+  override update(invalidationContext: Parameters<ListLayout<unknown, SidebarTreeLayoutOptions>['update']>[0]) {
+    this.rowContent = invalidationContext.layoutOptions?.rowContent
+    super.update(invalidationContext)
+  }
+  protected override buildItem(...args: Parameters<ListLayout<unknown>['buildItem']>) {
+    const built = super.buildItem(...args)
+    const value = args[0].value
+    const known = typeof value === 'object' && value !== null ? this.measured.get(value) : undefined
+    const info = built.layoutInfo
+    if (info.estimatedSize && known !== undefined && known.rowContent === this.rowContent && known.width === info.rect.width) {
+      info.rect.height = known.height
+      info.estimatedSize = false
+      built.validRect = info.rect.intersection(this.requestedRect)
+    }
+    return built
+  }
+  override updateItemSize(key: Key, size: Size) {
+    const changed = super.updateItemSize(key, size)
+    const value = this.virtualizer?.collection.getItem(key)?.value
+    const info = this.layoutNodes.get(key)?.layoutInfo
+    if (typeof value === 'object' && value !== null && info !== undefined) this.measured.set(value, { width: info.rect.width, height: size.height, rowContent: this.rowContent })
+    return changed
   }
 }
 
@@ -69,7 +123,8 @@ const RowContent = React.memo(function RowContent<T extends SidebarTreeItem<T>>(
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
 export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProps<T>) {
   const { direction } = useLocale()
-  const layout = React.useMemo(() => new SidebarTreeLayout(measuredListLayoutOptions), [])
+  const layout = React.useMemo(() => new SidebarTreeLayout(layoutOptions), [])
+  const rowLayoutOptions = React.useMemo(() => ({ rowContent: props.renderRow }), [props.renderRow])
   const tree = React.useRef<HTMLDivElement>(null)
   const navigation = React.useRef<TreeItemRenderProps['state'] | undefined>(undefined)
   const frame = React.useRef<number | undefined>(undefined)
@@ -85,18 +140,20 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const [snapshot, setSnapshot] = React.useState<Snapshot<T>>({ pins: [], height: 0, width: 0, measurements: [] })
   const model = React.useMemo(() => {
     const all = new Map<Key, T>()
+    const domKeys = new Map<string, Key>()
     const parents = new Map<Key, readonly T[]>()
     const visible: T[] = []
     const walk = (items: readonly T[], ancestors: readonly T[], shown: boolean) => {
       for (const item of items) {
         all.set(item.id, item)
+        domKeys.set(String(item.id), item.id)
         parents.set(item.id, ancestors)
         if (shown) visible.push(item)
         walk(item.children ?? [], [...ancestors, item], shown && props.expandedKeys.has(item.id))
       }
     }
     walk(props.items, [], true)
-    return { all, parents, visible }
+    return { all, domKeys, parents, visible }
   }, [props.items, props.expandedKeys])
   // Reanchor before paint after RAC commits measured row positions. This path reads
   // only RAC geometry, never DOM geometry, including during observer delivery.
@@ -258,19 +315,36 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     schedule()
   })
   React.useImperativeHandle(props.ref, () => ({ reveal }), [])
+  // Mounted rows report their natural size here, after layout, so RAC never re-measures a
+  // mounted row by resetting its height inside a forced layout. A hidden tree reports zero
+  // heights; the last measurement stands until it is shown again.
+  const resizeRows = React.useEffectEvent((entries: readonly ResizeObserverEntry[]) => {
+    for (const entry of entries) {
+      const id = (entry.target as HTMLElement).dataset.sidebarTreeKey
+      const key = id === undefined ? undefined : model.domKeys.get(id)
+      const box = entry.borderBoxSize[0]
+      if (key !== undefined && box !== undefined && box.blockSize > 0) layout.virtualizer?.updateItemSize(key, new Size(box.inlineSize, box.blockSize))
+    }
+    schedule()
+  })
   React.useLayoutEffect(() => {
     schedule()
     const viewport = tree.current
     if (viewport === null) return
-    const observer = new ResizeObserver(schedule)
+    const observer = new ResizeObserver(entries => resizeRows(entries))
     observer.observe(viewport)
+    const rows = new Set<Element>()
+    const track = () => {
+      for (const row of rows) if (!row.isConnected) { observer.unobserve(row); rows.delete(row) }
+      for (const row of viewport.querySelectorAll('[data-sidebar-tree-key]')) if (!rows.has(row)) { observer.observe(row); rows.add(row) }
+    }
     const mutations = new MutationObserver(() => {
       applyMeasuredAnchor()
-      for (const row of viewport.querySelectorAll('[data-sidebar-tree-key]')) observer.observe(row)
+      track()
       schedule()
     })
     mutations.observe(viewport, { childList: true, attributes: true, attributeFilter: ['style'], subtree: true })
-    for (const row of viewport.querySelectorAll('[data-sidebar-tree-key]')) observer.observe(row)
+    track()
     return () => { observer.disconnect(); mutations.disconnect(); if (frame.current !== undefined) cancelAnimationFrame(frame.current); frame.current = undefined }
   }, [schedule])
   React.useLayoutEffect(() => {
@@ -333,7 +407,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
     {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
   </div>
-  const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
+  const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
     <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]}>{renderItem}</Collection>
   </TreeItem>
@@ -348,7 +422,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       schedule()
     }
   }}>
-    <Virtualizer layout={layout} shouldObserveItemSize><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} dragAndDropHooks={props.dragAndDropHooks} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
+    <Virtualizer layout={layout} layoutOptions={rowLayoutOptions}><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} dragAndDropHooks={props.dragAndDropHooks} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
     <div aria-hidden="true" data-sidebar-pinned-stack data-top-key={snapshot.top} {...stylex.props(styles.stack)} style={{ height: snapshot.height }}>
       {snapshot.pins.map(pin => <div key={pin.item.id} {...stylex.props(styles.pinSlot)} style={{ height: pin.height }}><div draggable={false} data-pinned-key={String(pin.item.id)} data-pinned-ancestors={(pin.breadcrumb ?? [pin.item]).map(item => item.id).join(',')} {...stylex.props(styles.pin, dragging && styles.dragPassthrough)} style={{ height: pin.height, transform: `translateY(calc(${pin.offset} * ${g.hairline}))` }} onClick={event => {
         const target = event.target as HTMLElement

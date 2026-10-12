@@ -4,6 +4,8 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import type { Key } from 'react-aria-components'
 import { SidebarTree, type SidebarTreeItem } from './SidebarTree'
+import { SidebarAgentRow, SidebarQueryContext } from './SidebarAgentRow'
+import { matchPositions, type SidebarAgentRow as Row } from './model'
 import { lightTheme } from '../composition-theme'
 import { borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { sidebarTreeStoryVars as sizes } from './sidebar-tree-story-tokens.stylex'
@@ -135,6 +137,53 @@ function FilterProbe({ light, narrow }: { readonly light: boolean; readonly narr
   </section>
 }
 
+interface AgentEntry extends SidebarTreeItem<AgentEntry> { readonly row: Row }
+const highlightNow = Date.UTC(2026, 9, 8, 12, 0, 0)
+/** Matches no fixture title: the control's context value, which the explicit row prop must override. */
+const decoyQuery = 'qqq'
+/** Every SidebarAgentRow render reads its item's title once (`sidebarRowTitle`); the getter counts those reads per ref. */
+const titleReads = new Map<string, number>()
+// Original synthetic agents reporting only the always-present facts. Names follow the
+// host's formula: the visible title first, then the status.
+const agentEntry = (title: string, slug: string): AgentEntry => {
+  const ref = `agent/${slug}`
+  const facts: Omit<Row, 'title'> = { ref, id: slug, status: 'idle', statusLabel: 'Idle', host: 'host-1', freshness: 'live', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, children: [] }
+  const row = Object.defineProperty(facts, 'title', { enumerable: true, get: () => { titleReads.set(ref, (titleReads.get(ref) ?? 0) + 1); return title } }) as Row
+  return { id: ref, depth: 0, textValue: title, accessibleName: `${title}, ${facts.statusLabel}`, row }
+}
+const highlightFixture: readonly AgentEntry[] = Array.from({ length: 24 }, (_, index) => agentEntry(`${['Brindle scout', 'Aster flux', 'Cobalt surveyor'][index % 3]} ${String(Math.floor(index / 3) + 1).padStart(2, '0')}`, `highlight-${index + 1}`))
+/** A reposition above the painted rows: a new agent arrives first and the first two fixture agents swap. */
+const insertedEntry = agentEntry('Dun courier 01', 'highlight-inserted')
+const repositionedFixture: readonly AgentEntry[] = [insertedEntry, highlightFixture[1]!, highlightFixture[0]!, ...highlightFixture.slice(2)]
+const entriesByKey = new Map(repositionedFixture.map(entry => [String(entry.id), entry] as const))
+
+/** A host that filters and repositions SidebarAgentRow rows, publishing its query through SidebarQueryContext with a stable renderRow. */
+function HighlightProbe() {
+  const [query, setQuery] = React.useState('')
+  const [rowProp, setRowProp] = React.useState(false)
+  const [repositioned, setRepositioned] = React.useState(false)
+  const items = React.useMemo(() => {
+    const source = repositioned ? repositionedFixture : highlightFixture
+    return query === '' ? source : source.filter(entry => entry.textValue.toLowerCase().includes(query.toLowerCase()))
+  }, [query, repositioned])
+  // Control: the per-row query prop of earlier call sites. The context then holds a decoy,
+  // so the highlights also prove that the explicit prop takes precedence.
+  const rowQuery = rowProp ? query : undefined
+  const renderRow = React.useCallback((entry: AgentEntry) => <SidebarAgentRow item={entry.row} now={highlightNow} inTree query={rowQuery} />, [rowQuery])
+  return <section data-testid="highlight-probe" {...stylex.props(styles.probe, styles.wide)}>
+    <div {...stylex.props(styles.toolbar)}>
+      <input aria-label="Filter highlighted agents" type="search" value={query} onChange={event => setQuery(event.currentTarget.value)} {...stylex.props(styles.input)} />
+      <label><input type="checkbox" checked={rowProp} onChange={event => setRowProp(event.currentTarget.checked)} /> Query as a row prop</label>
+      <button type="button" onClick={() => setRepositioned(true)}>Insert an agent above and swap the first two</button>
+    </div>
+    <SidebarQueryContext.Provider value={rowProp ? decoyQuery : query}>
+      <div {...stylex.props(styles.viewport)}>
+        <SidebarTree aria-label="Highlighted agents" items={items} expandedKeys={emptyExpanded} onExpandedChange={onExpandedChange} renderRow={renderRow} />
+      </div>
+    </SidebarQueryContext.Provider>
+  </section>
+}
+
 const meta = {
   title: 'Fractal UI/Sidebar tree',
   component: SidebarTree,
@@ -142,9 +191,9 @@ const meta = {
     layout: 'fullscreen',
     docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke and pooled over the phases before and after the controls; a busy-wait control making each filter keystroke wait 4x its paired reference keystroke must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
-} satisfies Meta<typeof SidebarTree>
+} satisfies Meta
 export default meta
-type Story = StoryObj<typeof meta>
+type Story = StoryObj
 
 const read = (root: HTMLElement, key: 'filterSamples' | 'referenceSamples'): readonly Sample[] => JSON.parse(root.dataset[key] ?? '[]') as Sample[]
 const p90 = (samples: readonly Sample[]) => [...samples].map(sample => sample.durationMs).sort((a, b) => a - b)[Math.ceil(samples.length * 0.9) - 1]!
@@ -235,6 +284,107 @@ export const FilterKeystrokeToPaint: Story = {
       root.dataset.pooledRatio = String(p90(filter) / p90(reference))
       await assertRatio(filter, reference)
     }
+  },
+}
+
+const titleText = (row: HTMLElement) => row.querySelector<HTMLElement>('[data-row-column="title-text"]')!
+/** The title as painted, each highlighted letter bracketed. */
+const paintedTitle = (row: HTMLElement) => Array.from(titleText(row).childNodes, node => node.nodeName === 'MARK' ? `[${node.textContent}]` : node.textContent).join('')
+const expectedTitle = (title: string, query: string) => {
+  const matched = matchPositions({ query, text: title })
+  return Array.from(title, (letter, index) => matched.has(index) ? `[${letter}]` : letter).join('')
+}
+
+// One keystroke: waits until every painted title carries the query's highlights, then reports,
+// for each row whose keyed DOM row survived the keystroke, its SidebarAgentRow renders and
+// whether its highlights changed.
+async function highlightKeystroke(root: HTMLElement, input: HTMLInputElement, key: string, query: string) {
+  const before = paintedRows(root)
+  const titlesBefore = new Map([...before].map(([ref, row]) => [ref, paintedTitle(row)] as const))
+  const reads = new Map(titleReads)
+  await userEvent.type(input, key)
+  await expect(input.value).toBe(query)
+  await waitFor(async () => {
+    for (const row of paintedRows(root).values()) await expect(paintedTitle(row)).toBe(expectedTitle(titleText(row).textContent!, query))
+  }, settled)
+  for (let index = 0; index < settleFrames; index++) await nextFrame()
+  const after = paintedRows(root)
+  const retained = [...after].filter(([ref, row]) => before.get(ref) === row).map(([ref, row]) => ({ ref, renders: (titleReads.get(ref) ?? 0) - (reads.get(ref) ?? 0), highlightChanged: paintedTitle(row) !== titlesBefore.get(ref) }))
+  return { painted: after.size, retained }
+}
+
+/**
+ * The host publishes its query through SidebarQueryContext. A keystroke re-renders only the
+ * highlighted titles: rows that stay painted keep their DOM row and never re-render. A control
+ * passing the query as a row prop must re-render them, with the prop overriding the context.
+ */
+export const FilterHighlightsWithoutRowRenders: Story = {
+  render: () => <main {...stylex.props(styles.matrix)}><HighlightProbe /></main>,
+  play: async ({ canvasElement }) => {
+    await document.fonts.ready
+    for (let index = 0; index < 6; index++) await nextFrame()
+    const root = within(canvasElement).getByTestId('highlight-probe')
+    const input = within(root).getByRole('searchbox') as HTMLInputElement
+    // '' to 's' keeps every row and highlights each; 'su' keeps only the Cobalt rows; the
+    // backspaces remount the others, and the last one clears every highlight.
+    const keep = await highlightKeystroke(root, input, 's', 's')
+    await expect(keep.retained.length).toBe(keep.painted)
+    for (const row of keep.retained) await expect(row).toEqual({ ref: row.ref, renders: 0, highlightChanged: true })
+    for (const [key, query] of [['u', 'su'], ['{Backspace}', 's'], ['{Backspace}', '']] as const) {
+      const step = await highlightKeystroke(root, input, key, query)
+      await expect(step.retained.length).toBeGreaterThan(0)
+      await expect(step.retained.some(row => row.highlightChanged)).toBe(true)
+      for (const row of step.retained) await expect(row.renders).toBe(0)
+    }
+    const control = within(root).getByRole('checkbox', { name: 'Query as a row prop' })
+    await userEvent.click(control)
+    try {
+      const step = await highlightKeystroke(root, input, 's', 's')
+      await expect(step.retained.length).toBe(step.painted)
+      for (const row of step.retained) await expect(row.renders).toBeGreaterThan(0)
+    } finally {
+      await userEvent.click(control)
+    }
+  },
+}
+
+// Every accessible row carries its item's exact name, and every description it references is mounted.
+async function assertAgentRowNames(tree: HTMLElement) {
+  const rows = within(tree).getAllByRole('row')
+  await expect(rows.length).toBeGreaterThan(0)
+  for (const row of rows) {
+    await expect(row).toHaveAccessibleName(entriesByKey.get(row.dataset.sidebarTreeKey!)!.accessibleName!)
+    for (const described of row.querySelectorAll('[aria-describedby]')) for (const id of described.getAttribute('aria-describedby')!.split(/\s+/)) await expect(document.getElementById(id)?.isConnected).toBe(true)
+  }
+}
+
+/**
+ * An agent arrives above the painted rows and the first two swap. Repositioned rows keep their
+ * keyed DOM row and their memoized content never re-renders, yet each row's accessible name is
+ * exactly its item's `accessibleName`, because RAC names rows from item props.
+ */
+export const AgentRowNamesSurviveReposition: Story = {
+  render: () => <main {...stylex.props(styles.matrix)}><HighlightProbe /></main>,
+  play: async ({ canvasElement }) => {
+    await document.fonts.ready
+    for (let index = 0; index < 6; index++) await nextFrame()
+    const root = within(canvasElement).getByTestId('highlight-probe')
+    const tree = within(root).getByRole('treegrid')
+    await assertAgentRowNames(tree)
+    const before = paintedRows(root)
+    const reads = new Map(titleReads)
+    await userEvent.click(within(root).getByRole('button', { name: 'Insert an agent above and swap the first two' }))
+    const top = (entry: AgentEntry) => paintedRows(root).get(String(entry.id))?.getBoundingClientRect().top ?? Number.NaN
+    await waitFor(async () => {
+      await expect(top(insertedEntry)).toBeLessThan(top(highlightFixture[1]!))
+      await expect(top(highlightFixture[1]!)).toBeLessThan(top(highlightFixture[0]!))
+      await assertAgentRowNames(tree)
+    }, settled)
+    for (let index = 0; index < settleFrames; index++) await nextFrame()
+    await assertAgentRowNames(tree)
+    const retained = [...paintedRows(root)].filter(([key, row]) => before.get(key) === row).map(([key]) => key)
+    await expect(retained).toEqual(expect.arrayContaining([String(highlightFixture[0]!.id), String(highlightFixture[1]!.id)]))
+    for (const key of retained) await expect((titleReads.get(key) ?? 0) - (reads.get(key) ?? 0)).toBe(0)
   },
 }
 

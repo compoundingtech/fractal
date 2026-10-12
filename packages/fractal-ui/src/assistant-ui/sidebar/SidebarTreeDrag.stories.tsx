@@ -52,9 +52,9 @@ function FilingTree({ deep = false }: { readonly deep?: boolean }) {
     <div {...stylex.props(styles.viewport)}><SidebarTree aria-label="Filing folders" items={items} expandedKeys={expanded} onExpandedChange={onExpandedChange} dragAndDropHooks={dragAndDropHooks} renderRow={renderRow} /></div>
   </main>
 }
-const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'Host-owned RAC drag hooks and drag-slot content on the production SidebarTree. Pinned visuals are pointer-transparent during any drag session, including external drags with no local dragstart; drop targets and autoscroll belong to the real tree. Local-drag plays disable filing, prove the same move check rejects, restore it, and perform a real RAC move; the external play first proves the pinned copy owns the band outside a drag session.' } } } } satisfies Meta<typeof SidebarTree>
+const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'Host-owned RAC drag hooks and drag-slot content on the production SidebarTree. Pinned visuals are pointer-transparent during any drag session, including external drags with no local dragstart; drop targets and autoscroll belong to the real tree. Local-drag plays disable filing, prove the same move check rejects, restore it, and perform a real RAC move; the external play first proves the pinned copy owns the band outside a drag session.' } } } } satisfies Meta
 export default meta
-type Story = StoryObj<typeof meta>
+type Story = StoryObj
 const frames = async (count = 6) => { for (let index = 0; index < count; index++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
 /** Asynchronous settling on a contended CI host; assertions are unchanged. */
 const settled = { timeout: 10_000 }

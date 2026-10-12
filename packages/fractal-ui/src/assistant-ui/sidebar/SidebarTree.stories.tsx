@@ -54,9 +54,9 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
   </section>
 }
 function Pair({ cold = false, width = 440, light = false }: { readonly cold?: boolean; readonly width?: number; readonly light?: boolean }) { return <main {...stylex.props(styles.matrix)}><Example cold={cold} width={width} light={light} /><Example sticky={false} noSettle={cold} cold={cold} width={width} light={light} /></main> }
-const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta<typeof SidebarTree>
+const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta
 export default meta
-type Story = StoryObj<typeof meta>
+type Story = StoryObj
 const frames = async () => { await document.fonts.ready; for (let i = 0; i < 6; i++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
 /** Asynchronous settling (reveal retries, ResizeObserver delivery) on a contended CI host; assertions are unchanged. */
 const settled = { timeout: 10_000 }
