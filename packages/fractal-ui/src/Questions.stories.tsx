@@ -46,17 +46,36 @@ function SharedQuestionDraft({ scrollDriven = false }: { readonly scrollDriven?:
   </>
 }
 
+const assertQuestionComposition = async (root: HTMLElement) => {
+  await expect(root.querySelector('[data-fractal-card] [data-fractal-card]')).toBeNull()
+  for (const header of root.querySelectorAll<HTMLElement>('[data-question-header]')) {
+    await expect(header.querySelector('svg[data-icon="question"]')).not.toBeNull()
+    await expect(parseFloat(getComputedStyle(header).minHeight)).toBe(24)
+    await expect(getComputedStyle(header.querySelector('strong')!).fontWeight).toBe('500')
+  }
+}
 const meta = {
   title: 'Fractal UI/Questions',
   component: QuestionForm,
   parameters: { layout: 'fullscreen' },
+  argTypes: { scheme: { control: 'select', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } },
+  play: async ({ canvasElement }) => {
+    await assertQuestionComposition(canvasElement)
+    const outer = document.createElement('div')
+    outer.dataset.fractalCard = ''
+    const inner = document.createElement('div')
+    inner.dataset.fractalCard = ''
+    outer.append(inner)
+    canvasElement.append(outer)
+    try { await expect(assertQuestionComposition(canvasElement)).rejects.toThrow() } finally { outer.remove() }
+  },
   args: { request: questionRequest, onOpenTerminal: fn(), onDecline: fn(), onSubmit: fn(), onDraftChange: fn(), composerTyping: true, locale: 'en-US', timeZone: 'America/New_York' },
   render: function ControlledQuestion(args) {
     const [draft, setDraft] = React.useState(args.draft)
     return <QuestionForm {...args} draft={draft} onDraftChange={next => { setDraft(next); args.onDraftChange?.(next) }} />
   },
-  decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' && lightTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>],
-} satisfies Meta<typeof QuestionForm>
+  decorators: [(Story, context) => <main data-scheme={context.args.scheme ?? context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, (context.args.scheme ?? context.parameters.scheme) === 'light' && lightTheme, (context.args.width ?? context.parameters.width) === 1440 ? styles.wide : styles.narrow)}><Story /></main>],
+} satisfies Meta<QuestionFormProps & { readonly scheme?: 'dark' | 'light'; readonly width?: 440 | 1440 }>
 export default meta
 type Story = StoryObj<typeof meta>
 export const ReadOnly: Story = { args: { request: { ...questionRequest, askedAt: '2026-10-11T16:56:11.082Z' }, now: Date.parse('2026-10-11T16:58:11.082Z') }, play: async ({ canvasElement, args }) => {
@@ -64,6 +83,7 @@ export const ReadOnly: Story = { args: { request: { ...questionRequest, askedAt:
   const title = canvasElement.querySelector<HTMLElement>('header strong')!
   const assertTitle = async () => expect(getComputedStyle(title).fontWeight).toBe('500')
   await assertTitle()
+  await assertQuestionComposition(canvasElement)
   title.style.fontWeight = '700'
   try { await expect(assertTitle()).rejects.toThrow() } finally { title.style.fontWeight = '' }
   await assertTitle()
@@ -71,7 +91,7 @@ export const ReadOnly: Story = { args: { request: { ...questionRequest, askedAt:
   const affordance = choice.querySelector<HTMLElement>('[aria-hidden="true"]')!
   const assertAffordance = async () => {
     await expect(affordance).toBeVisible()
-    await expect(affordance).toHaveTextContent('○')
+    await expect(affordance.querySelector('svg[data-icon="radio"]')).not.toBeNull()
     await expect(canvas.getByRole('radio', { name: /This thread/ })).not.toBeChecked()
   }
   await assertAffordance()
@@ -297,6 +317,22 @@ export const SharedDraft: Story = { render: () => <SharedQuestionDraft />, play:
   await userEvent.click(inbox.querySelector('summary')!)
   await expect(within(inbox).getByRole('radio', { name: /Team inbox/ })).toBeChecked()
 } }
+export const CompositionFrames: Story = { render: () => <SharedQuestionDraft />, play: async ({ canvasElement }) => {
+  await assertQuestionComposition(canvasElement)
+  const cards = canvasElement.querySelectorAll<HTMLElement>('[data-fractal-card]')
+  await expect(cards).toHaveLength(3)
+  const nested = cards[0]!.cloneNode(false) as HTMLElement
+  cards[0]!.append(nested)
+  try { await expect(assertQuestionComposition(canvasElement)).rejects.toThrow() } finally { nested.remove() }
+  const header = canvasElement.querySelector<HTMLElement>('[data-question-header]')!
+  const glyph = header.querySelector('svg')!
+  glyph.remove()
+  try { await expect(assertQuestionComposition(canvasElement)).rejects.toThrow() } finally { header.firstElementChild!.append(glyph) }
+  await assertQuestionComposition(canvasElement)
+} }
+export const CompositionFramesLight440: Story = { ...CompositionFrames, parameters: { scheme: 'light', width: 440 } }
+export const CompositionFramesDark1440: Story = { ...CompositionFrames, parameters: { scheme: 'dark', width: 1440 } }
+export const CompositionFramesLight1440: Story = { ...CompositionFrames, parameters: { scheme: 'light', width: 1440 } }
 export const ScrollAttention: Story = { render: () => <SharedQuestionDraft scrollDriven />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const scroll = canvasElement.querySelector<HTMLElement>('[data-question-scroll]')!
@@ -458,7 +494,8 @@ export const ArchivedChoices: Story = {
     const assertChoiceRow = async () => {
       await expect(getComputedStyle(rows[0]!).display).toBe('flex')
       await expect(affordance).toBeVisible()
-      await expect(affordance).toHaveTextContent('○ 1.')
+      await expect(affordance.querySelector('svg[data-icon="radio"]')).not.toBeNull()
+      await expect(affordance).toHaveTextContent('1.')
     }
     await assertChoiceRow()
     affordance.style.visibility = 'hidden'
