@@ -106,6 +106,7 @@ export const geometryVars = stylex.defineVars({
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
   modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
+  detailsValueMin: '120px',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
   emptyMark: '36px', avatar: '32px', fileMax: '192px', emptyHintMax: '288px',
@@ -138,6 +139,9 @@ export const geometryNumbers = {
   estimatedMessageHeight: 160,
   threadViewportMin: 96,
 } as const
+
+/** Panel-local responsive geometry: label, readable value, gap and section insets. */
+export const detailsNarrowQuery = '@container details-pane (width < 360px)'
 
 export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',

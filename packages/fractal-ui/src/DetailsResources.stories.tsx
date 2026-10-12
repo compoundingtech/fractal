@@ -352,7 +352,12 @@ export const Interactions: Story = { play: async ({ canvasElement }) => {
   context.focus(); await userEvent.keyboard(' '); await waitFor(() => requireContract(context.checked && writes() === before + 2 && pane.querySelector('section[aria-label="Context"]'), 'Keyboard restore does not commit exactly one visibility intent'))
   await userEvent.keyboard('{Escape}')
   const events = () => JSON.parse(root.dataset.openEvents!) as { key: string; split: boolean }[]
-  const terminal = within(pane).getByRole('button', { name: 'Open Session terminal' })
+  const terminal = within(pane).getByRole('button', { name: 'Open Session terminal terminal' })
+  const assertTerminalName=()=>requireContract(terminal.getAttribute('aria-label')==='Open Session terminal terminal','Resource action name omits its visible metadata')
+  assertTerminalName()
+  const terminalName=terminal.getAttribute('aria-label')
+  try{terminal.setAttribute('aria-label','Open Session terminal');await rejectsControl('Resource action name omits its visible metadata',assertTerminalName)}finally{requireContract(terminalName,'Missing terminal name');terminal.setAttribute('aria-label',terminalName)}
+  assertTerminalName()
   await userEvent.click(terminal); await waitFor(() => requireContract(events().at(-1)?.key === 'terminal:sample/1' && !events().at(-1)?.split, 'Details terminal callback loses exact session identity'))
   await userEvent.click(terminal); requireContract(events().length === 2 && writes() === before + 2, 'Repeated terminal request alters layout intent or fails to reattach')
   const file = within(pane).getAllByRole('button', { name: /^Open src\// })[0]!

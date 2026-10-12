@@ -304,9 +304,9 @@ function DenseRow({ resource, now, open }: { resource: DetailsResource; now: num
     : resource.card.detail
   const isSubagent = resource.agent !== undefined || resource.uri.startsWith('session:')
   return <div data-resource-card role="listitem" {...dragProps} {...stylex.props(styles.denseEntry)}><TooltipTrigger delay={150}>
-    <AriaButton data-details-resource-row aria-label={`Open ${resource.card.label}`} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow)}>
+    <AriaButton data-details-resource-row aria-label={`Open ${resource.card.label}${meta ? ` ${meta}` : ''}`} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow)}>
       <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
-      <span data-details-resource-title data-resource-title-lines={wrapsIdentity(resource) ? 'wrap' : 1} {...stylex.props(styles.denseLabel, wrapsIdentity(resource) && styles.wrappedLabel)}>{resource.card.label}</span>
+      <span data-details-resource-title data-resource-title-lines={wrapsIdentity(resource) ? 'wrap' : 1} {...stylex.props(styles.denseLabel, wrapsIdentity(resource) && styles.wrappedLabel)}>{resource.card.label}</span>{' '}
       <WholeResourceMeta numeric={resource.file !== undefined} styles={styles.denseMeta}>{meta}</WholeResourceMeta>
     </AriaButton>
     <AriaTooltip placement="left" {...stylex.props(styles.tooltip)}><HoverContent resource={resource} now={now} /></AriaTooltip>

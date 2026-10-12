@@ -128,9 +128,9 @@ export function PaneSlot({ pane, path, onClose }: { pane: WorkbenchPane; path: s
 }
 
 /** Pane content contributes status and controls to its group's header row; the row's height never changes. */
-export function PaneHeaderAccessory({ children }: { children: React.ReactNode }) {
+export function PaneHeaderAccessory({ children, inlineFallback = false }: { children: React.ReactNode; inlineFallback?: boolean }) {
   const host = React.useContext(PaneHeaderContext)
-  return host === undefined ? null : createPortal(children, host)
+  return host === undefined ? (inlineFallback ? children : null) : createPortal(children, host)
 }
 
 /** The active pane's header accessory host, attached like its content host. */

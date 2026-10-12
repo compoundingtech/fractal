@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex'
 import type { ReactNode } from 'react'
-import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex.ts'
+import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type, detailsNarrowQuery } from '../composition-tokens.stylex.ts'
 import type { TraceSeries, TraceUnknownReason } from './trace-series.ts'
 import { contextPercent, traceCoverageState, type TraceAccumulationWindow, type TraceCoverage, type TraceCoverageState, type TraceFact, type TraceSpendScope } from './trace-series.ts'
 import { Button, Tooltip, TooltipTrigger } from 'react-aria-components'
@@ -296,11 +296,11 @@ const styles = stylex.create({
   track: { height: geometry.progressMd, backgroundColor: surface.rowActive, borderRadius: radius.full, overflow: 'hidden' },
   fill: (width: string) => ({ height: '100%', width, backgroundColor: accent.primary, borderRadius: radius.full }),
   spendSnapshot: { display: 'flex', flexDirection: 'column', gap: space.xs, margin: 0 },
-  spendRow: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) max-content', alignItems: 'baseline', gap: space.md, fontVariantNumeric: 'tabular-nums' },
-  label: { color: text.fgMuted, overflowWrap: 'anywhere' },
+  spendRow: { display: 'grid', gridTemplateColumns: { default: `minmax(0, 1fr) minmax(${geometry.detailsValueMin}, max-content)`, [detailsNarrowQuery]: 'minmax(0, 1fr)' }, alignItems: 'baseline', gap: space.md, fontVariantNumeric: 'tabular-nums' },
+  label: { color: text.fgMuted, overflowWrap: 'normal' },
   tokenWindow: { display: 'block', color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
   windowPart: { whiteSpace: 'nowrap', overflowWrap: 'normal' },
   pendingText: { color: surface.transparent, backgroundImage: `linear-gradient(${border.borderStrong}, ${border.borderStrong})`, backgroundSize: `100% ${space.md}`, backgroundPosition: 'center', backgroundRepeat: 'no-repeat', boxDecorationBreak: 'clone' },
-  amount: { margin: 0, textAlign: 'right' },
-  tokens: { margin: 0, color: text.fgMuted },
+  amount: { margin: 0, textAlign: { default: 'right', [detailsNarrowQuery]: 'left' }, overflowWrap: 'normal' },
+  tokens: { margin: 0, color: text.fgMuted, overflowWrap: 'normal' },
 })

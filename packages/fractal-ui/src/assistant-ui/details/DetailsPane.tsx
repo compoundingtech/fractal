@@ -11,7 +11,7 @@ import type { SyncStatus } from '../st3-views/sync-status'
 import { canRetrySyncFailure, syncFailureRecovery } from '../st3-views/sync-line'
 import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
-import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, detailsNarrowQuery } from '../composition-tokens.stylex'
 import { MissingDetailsValue } from './DetailsUnavailable'
 
 export interface DetailsVariants {
@@ -116,15 +116,14 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const pendingContext=pendingTrace.meters.context
   const pendingOverviewLine=[pendingOverview.harness,pendingOverview.age].filter(Boolean).join(' · ')+(pendingSpend._tag==='Known'?` · ${pendingTrace.meters.spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}$${pendingSpend.value.toFixed(2)}`:'')
   const pendingContextLine=`Context ${Math.round(contextPercent(pendingContext)??0)}%`
+  const headerAccessory=<PaneHeaderAccessory inlineFallback={onClose!==undefined}>
+    <PaneSyncStatus status={syncStatus} label="agent details" now={now} observedAt={observedAt} detailsOpen={detailsOpen} onDetailsOpenChange={setDetailsOpen} onRetry={retry}/>
+    {/* Without settled content the control's slot stays reserved, so the header's action group never resizes. */}
+    {sectionControlsVisible?<DialogTrigger><Button aria-label="Visible sections" data-details-visible-sections {...stylex.props(styles.iconButton)}><Icon name="gear"/></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Dialog aria-label="Visible sections" {...stylex.props(styles.sectionSettings)}>{sectionNames.map(title=><Checkbox key={title} isSelected={!intent.hiddenSections.includes(title)} onChange={visible=>onIntentChange({hiddenSections:visible?intent.hiddenSections.filter(section=>section!==title):[...intent.hiddenSections,title]})} {...stylex.props(styles.sectionOption)}>{({isSelected})=><><span aria-hidden="true" {...stylex.props(styles.checkBox)}>{isSelected&&<Icon name="check"/>}</span>{title}</>}</Checkbox>)}</Dialog></Popover></DialogTrigger>:<span aria-hidden="true" {...stylex.props(styles.iconSlot)}/>}
+  </PaneHeaderAccessory>
   // First-load failure overlays the unchanged pending footprint with a human reason and a direct recovery action.
   return <div ref={paneRef} data-testid="details-pane" data-details-pane-state={state} data-details-sync-state={syncStatus._tag} data-details-has-prior-content={hasPriorContent} aria-label="Agent details" role={noPriorFailure?'group':undefined} onKeyDown={event=>{if(onClose&&event.key==='Escape'&&!event.defaultPrevented&&!detailsOpen){event.preventDefault();event.stopPropagation();close()}}} {...stylex.props(styles.root)}>
-    {onClose&&<div data-details-tab-band {...stylex.props(styles.tabBand)}><span {...stylex.props(styles.bandLabel)}><Icon name="panel"/>Details</span><Button ref={closeButtonRef} aria-label="Close details" onPress={close} {...stylex.props(styles.iconButton)}><Icon name="x"/></Button></div>}
-    {/* Status and section visibility live in the pane's fixed header row; Overview starts at the top of the pane. */}
-    <PaneHeaderAccessory>
-      <PaneSyncStatus status={syncStatus} label="agent details" now={now} observedAt={observedAt} detailsOpen={detailsOpen} onDetailsOpenChange={setDetailsOpen} onRetry={retry}/>
-      {/* Without settled content the control's slot stays reserved, so the header's action group never resizes. */}
-      {sectionControlsVisible?<DialogTrigger><Button aria-label="Visible sections" data-details-visible-sections {...stylex.props(styles.iconButton)}><Icon name="gear"/></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Dialog aria-label="Visible sections" {...stylex.props(styles.sectionSettings)}>{sectionNames.map(title=><Checkbox key={title} isSelected={!intent.hiddenSections.includes(title)} onChange={visible=>onIntentChange({hiddenSections:visible?intent.hiddenSections.filter(section=>section!==title):[...intent.hiddenSections,title]})} {...stylex.props(styles.sectionOption)}>{({isSelected})=><><span aria-hidden="true" {...stylex.props(styles.checkBox)}>{isSelected&&<Icon name="check"/>}</span>{title}</>}</Checkbox>)}</Dialog></Popover></DialogTrigger>:<span aria-hidden="true" {...stylex.props(styles.iconSlot)}/>}
-    </PaneHeaderAccessory>
+    {onClose?<div data-details-tab-band {...stylex.props(styles.tabBand)}><span {...stylex.props(styles.bandLabel)}><Icon name="panel"/>Details</span><div {...stylex.props(styles.bandActions)}>{headerAccessory}<Button ref={closeButtonRef} aria-label="Close details" onPress={close} {...stylex.props(styles.iconButton)}><Icon name="x"/></Button></div></div>:headerAccessory}
     <div data-details-content-slot {...stylex.props(styles.contentSlot)}>
     <div aria-hidden={noPriorFailure||undefined} inert={noPriorFailure} {...stylex.props(noPriorFailure&&styles.hiddenPending)}>
     <Section title="Overview" hidden={intent.hiddenSections.includes('Overview')}>
@@ -174,9 +173,10 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   </div>
 }
 const styles=stylex.create({
-  root:{height:'100%',minHeight:0,minWidth:0,overflowY:'auto',overflowX:'hidden',backgroundColor:sf.raised,color:tx.fg,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
-  tabBand:{position:'sticky',top:0,zIndex:1,display:'flex',alignItems:'center',justifyContent:'space-between',height:g.band,boxSizing:'border-box',paddingInline:s.md,backgroundColor:sf.raised,borderBottomWidth:g.hairline,borderBottomStyle:'solid',borderBottomColor:bd.border},
+  root:{height:'100%',minHeight:0,minWidth:0,containerType:'inline-size',containerName:'details-pane pane-mount',overflowY:'auto',overflowX:'hidden',backgroundColor:sf.raised,color:tx.fg,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
+  tabBand:{position:'sticky',top:0,zIndex:1,display:'flex',alignItems:'center',justifyContent:'space-between',containerType:'inline-size',containerName:'pane-header',height:g.band,boxSizing:'border-box',paddingInline:s.md,backgroundColor:sf.raised,borderBottomWidth:g.hairline,borderBottomStyle:'solid',borderBottomColor:bd.border},
   bandLabel:{display:'inline-flex',alignItems:'center',gap:s.sm,color:tx.fgMuted},
+  bandActions:{display:'inline-flex',alignItems:'center',gap:s.xs2,minWidth:0},
   name:{fontSize:t.bodySize,fontWeight:t.weightMedium},
   shortLabel:{flexShrink:0,color:tx.fgMuted},
   durationLabel:{maxWidth:'45%',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
@@ -194,10 +194,13 @@ const styles=stylex.create({
   sectionOption:{display:'inline-flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,cursor:'pointer',':focus-within':{outline:`2px solid ${ac.primary}`}},
   checkBox:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:g.icon,height:g.icon,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},
   overview:{display:'flex',flexDirection:'column',gap:s.xs,paddingBlock:s.sm,minWidth:0},
-  line:{display:'flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,minWidth:0,whiteSpace:'nowrap',overflow:'hidden'},grid:{display:'grid',gridTemplateColumns:g.descriptionColumns,gap:s.xs,margin:s.zero},muted:{color:tx.fgMuted},value:{display:'flex',margin:s.zero,minWidth:0,overflow:'hidden',whiteSpace:'nowrap'},
-  orientation:{margin:s.zero,paddingInline:s.zero,paddingBlock:s.sm,color:tx.fgSoft,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'anywhere'},
+  line:{display:'flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,minWidth:0,whiteSpace:'nowrap',overflow:'hidden'},
+  grid:{display:'grid',gridTemplateColumns:{default:`minmax(90px, 1fr) minmax(${g.detailsValueMin}, 1fr)`,[detailsNarrowQuery]:'minmax(0, 1fr)'},gap:s.xs,margin:s.zero},
+  muted:{color:tx.fgMuted,overflowWrap:'normal'},
+  value:{display:'flex',margin:s.zero,minWidth:0,overflow:'hidden',whiteSpace:'normal',overflowWrap:'normal'},
+  orientation:{margin:s.zero,paddingInline:s.zero,paddingBlock:s.sm,color:tx.fgSoft,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
   errorBlock:{position:'absolute',inset:s.zero,boxSizing:'border-box',display:'flex',flexDirection:'column',alignItems:'flex-start',gap:s.sm,padding:s.md,overflowY:'auto',overflowX:'hidden'},
-  errorText:{margin:s.zero,color:tx.fgMuted,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'anywhere'},
+  errorText:{margin:s.zero,color:tx.fgMuted,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
   errorHeading:{margin:s.zero,color:tx.fg,fontSize:t.metaSize,lineHeight:t.metaLeading,fontWeight:t.weightSemibold},
   errorCause:{display:'-webkit-box',WebkitBoxOrient:'vertical',WebkitLineClamp:2,maxWidth:'100%',minWidth:0,overflow:'hidden'},
   retrySlot:{minHeight:g.controlMd},

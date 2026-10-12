@@ -118,3 +118,77 @@ export const AllStates:Story={
     await userEvent.click(within(canvasElement).getByRole('button',{name:'Restore all states'}));await waitFor(()=>assertCombined(canvasElement,combinedStates))
   },
 }
+
+export const NarrowValueColumns:Story={
+  render:function Render({scheme}){
+    const inputs=detailsStoryInputs('busy')
+    const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
+    const overview={...inputs.overview,status:'Awaiting attribution',machine:'Observed host',harness:'Claude Code',model:'Reported model',since:'Awaiting report',age:'Awaiting report'}
+    return <div {...stylex.props(styles.comparison,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{[240,320].map(width=><div key={width} data-details-narrow-width={width} {...stylex.props(styles.frame(width))}><DetailsPane {...inputs} overview={overview} state="busy" variants={{overview:'O3',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}}/></div>)}</ThemePortal></div>
+  },
+  play:async({canvasElement})=>{
+    const assertStacked=(grid:HTMLElement)=>{
+      const labels=[...grid.querySelectorAll<HTMLElement>('dt')],values=[...grid.querySelectorAll<HTMLElement>('dd')]
+      requireContract(labels.length===values.length&&labels.length>0,'Missing narrow label/value rows')
+      labels.forEach((label,index)=>{const value=values[index];requireContract(value,'Missing narrow value');const a=label.getBoundingClientRect(),b=value.getBoundingClientRect();requireContract(b.top>=a.bottom-0.5&&Math.abs(b.left-a.left)<0.5&&b.width>=120,'Narrow values did not stack at a readable width');requireContract(getComputedStyle(value).overflowWrap==='normal','Narrow value can break mid-word')})
+    }
+    for(const host of canvasElement.querySelectorAll<HTMLElement>('[data-details-narrow-width]')){
+      const pane=host.querySelector<HTMLElement>('[data-testid="details-pane"]'),grid=pane?.querySelector<HTMLElement>('section[aria-label="Overview"] dl');requireContract(pane&&grid,'Missing production narrow Details pane')
+      requireContract(Math.abs(pane.getBoundingClientRect().width-Number(host.dataset.detailsNarrowWidth))<0.5,'Narrow case follows viewport instead of panel width')
+      await waitFor(()=>assertStacked(grid))
+      const original=grid.style.gridTemplateColumns
+      try{grid.style.gridTemplateColumns='minmax(0, 1fr) 30px';await rejectsControl('Narrow values did not stack at a readable width',()=>assertStacked(grid))}finally{grid.style.gridTemplateColumns=original}
+      assertStacked(grid)
+      const value=grid.querySelector<HTMLElement>('dd');requireContract(value,'Missing word-wrap control value');const wrap=value.style.overflowWrap
+      try{value.style.overflowWrap='anywhere';await rejectsControl('Narrow value can break mid-word',()=>assertStacked(grid))}finally{value.style.overflowWrap=wrap}
+      assertStacked(grid)
+      const spendRows=[...pane.querySelectorAll<HTMLElement>('dl[aria-label="Trace spend meters"] > div')];requireContract(spendRows.length===4,'Missing narrow spend scopes')
+      for(const row of spendRows)assertStacked(row)
+      const spendRow=spendRows[0];requireContract(spendRow,'Missing spend layout control');const columns=spendRow.style.gridTemplateColumns
+      try{spendRow.style.gridTemplateColumns='minmax(0, 1fr) 30px';await rejectsControl('Narrow values did not stack at a readable width',()=>assertStacked(spendRow))}finally{spendRow.style.gridTemplateColumns=columns}
+      assertStacked(spendRow)
+    }
+  },
+}
+
+export const StandaloneRetainedFailure:Story={
+  render:function Render({scheme,width}){
+    const inputs=detailsStoryInputs('busy')
+    const [failed,setFailed]=React.useState(true),[open,setOpen]=React.useState(true)
+    const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
+    return <div {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{open&&<DetailsPane {...inputs} state="busy" variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} syncStatus={failed?{_tag:'Failed',cause:{_tag:'Server',code:'timeout',message:'The retained observation request timed out.'}}:{_tag:'Live',since:inputs.now}} hasPriorContent intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>setFailed(false)} onClose={()=>setOpen(false)} opening={{_tag:'Restored'}}/>}</ThemePortal></div>
+  },
+  play:async({canvasElement})=>{
+    const canvas=within(canvasElement),pane=await canvas.findByTestId('details-pane'),band=pane.querySelector<HTMLElement>('[data-details-tab-band]');requireContract(band,'Missing standalone band')
+    const assertFailure=()=>requireContract(band.querySelector('[data-sync-state="Failed"]')&&band.querySelector('[data-pane-sync-word]')&&band.querySelector('[data-pane-sync-announcer]')?.textContent==="Couldn't load agent details: the request did not complete. Retry to load details.",'Standalone retained failure lost its indicator or announcement')
+    await waitFor(assertFailure)
+    const announcer=band.querySelector<HTMLElement>('[data-pane-sync-announcer] span');requireContract(announcer,'Missing failure announcement control');const announcement=announcer.textContent
+    try{announcer.textContent='';await rejectsControl('Standalone retained failure lost its indicator or announcement',assertFailure)}finally{announcer.textContent=announcement}
+    assertFailure()
+    await userEvent.click(within(band).getByRole('button',{name:'Details for agent details'}))
+    const retry=await within(canvasElement.ownerDocument.body).findByRole('button',{name:'Retry'})
+    const assertRecovered=()=>requireContract(pane.getAttribute('data-details-sync-state')==='Live'&&band.querySelector('[data-pane-sync-announcer]')?.textContent==='Agent details loaded.','Standalone Retry did not recover and announce')
+    const block=(event:Event)=>{event.preventDefault();event.stopImmediatePropagation()}
+    retry.addEventListener('click',block,{capture:true})
+    try{await userEvent.click(retry);await rejectsControl('Standalone Retry did not recover and announce',assertRecovered)}finally{retry.removeEventListener('click',block,{capture:true})}
+    await userEvent.click(retry);await waitFor(assertRecovered)
+    requireContract(canvas.queryByTestId('details-pane')===pane,'Standalone Retry removed retained content')
+  },
+}
+
+export const StandaloneSectionVisibility:Story={
+  play:async({canvasElement})=>{
+    const canvas=within(canvasElement);await userEvent.click(canvas.getByRole('button',{name:'Open details'}))
+    const pane=await canvas.findByTestId('details-pane'),band=pane.querySelector<HTMLElement>('[data-details-tab-band]');requireContract(band,'Missing standalone visibility band')
+    await userEvent.click(within(band).getByRole('button',{name:'Visible sections'}))
+    const checkbox=await within(canvasElement.ownerDocument.body).findByRole('checkbox',{name:'Spend'})
+    const assertHidden=()=>requireContract(!pane.querySelector('section[aria-label="Spend"]'),'Standalone section visibility did not change host intent')
+    const block=(event:Event)=>{event.preventDefault();event.stopImmediatePropagation()}
+    checkbox.addEventListener('click',block,{capture:true})
+    try{await userEvent.click(checkbox);await rejectsControl('Standalone section visibility did not change host intent',assertHidden)}finally{checkbox.removeEventListener('click',block,{capture:true})}
+    await userEvent.click(checkbox);await waitFor(assertHidden)
+    await userEvent.click(checkbox);await waitFor(()=>requireContract(pane.querySelector('section[aria-label="Spend"]'),'Standalone section did not restore'))
+    await userEvent.keyboard('{Escape}')
+    requireContract(canvas.queryByTestId('details-pane')===pane,'Section dialog Escape closed the standalone pane')
+  },
+}
