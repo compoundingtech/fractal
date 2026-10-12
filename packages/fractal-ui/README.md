@@ -266,12 +266,16 @@ This note records provenance practice. It is not legal clearance or an independe
 
 ## Quota priority exploration
 
-`Fractal UI/Explore/QuotaPriority` compares truncation, suffix hiding and a
-React Aria `+N` readings popover. Account information precedes primary usage,
-then the primary reset, then secondary and additional windows. The matrix
-shows 200/240/320 sidebars in both themes inside 1440/900 host frames.
-`Exploration` has no play and supports deep-linked `variant`, `sidebar`,
-`scheme`, `viewport` and `compare` args. `QuotaPriorityProbe` drives the real
-controls and reasserts prefix visibility and one-line geometry after rerenders.
-The explorer reuses `UsageMeterReading` and `UsageMeterRowDetail`; production
-table policy is unchanged.
+`Fractal UI/Explore/QuotaPriority` has one live `Exploration` and a separate
+passing `QuotaPriorityProbe`. Pickers share URL args: `D` chooses truncate,
+hide or a secondary-only `+N` popover; `T` chooses the real ARIA table with
+or without headers; `G` chooses token gaps 8/12/16; `W` chooses 200/240/320.
+The scheme toggle selects light/dark, and Compare shows all three D policies
+at the current T/G/W. A host-width control retains 1440/900 previews.
+Account, primary usage and its untruncated reset stay visible at every width.
+Eleven synthetic accounts include a long identifier and exhausted usage.
+Rows use the production 22px row token and shared grid tracks via subgrid.
+The probe drives real controls and checks column alignment, token gaps,
+one-line geometry, priority-prefix visibility and secondary-only counts
+after rerenders. Production `UsageMeterReading` and `UsageMeterRowDetail`
+are reused; production table policy is unchanged.
