@@ -4588,6 +4588,7 @@ dependencies = [
 name = "st3-schema"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hex",
  "regex",
  "serde",
@@ -4685,6 +4686,7 @@ dependencies = [
  "st3-client",
  "st3-conversation-ui",
  "st3-feed",
+ "st3-schema",
  "st3-terminal-direct",
  "st3-ui-model",
  "tempfile",

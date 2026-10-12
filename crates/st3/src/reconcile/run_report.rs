@@ -20,6 +20,7 @@ pub(super) struct RunReport {
     pub to: String,
     pub stalled_after_ms: u64,
     pub completed: bool,
+    pub stalls: bool,
 }
 
 /// What happened to a run that its reporter is told.
@@ -86,10 +87,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             },
         };
         Ok(crate::store::run_report_fields(&claim.body).map(
-            |(to, stalled_after_ms, completed)| RunReport {
+            |(to, stalled_after_ms, completed, stalls)| RunReport {
                 to,
                 stalled_after_ms,
                 completed,
+                stalls,
             },
         ))
     }
@@ -112,7 +114,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.tell_reporter(run, report, event)?;
             return Ok(None);
         }
-        if !can_stall(run) {
+        if !report.stalls || !can_stall(run) {
             return Ok(None);
         }
         let since = run_activity(run);

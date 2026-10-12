@@ -163,6 +163,9 @@ pub fn install(mut config: Config) -> Result<()> {
         crate::peer::FleetAuth::load(fleet_id, secret)?;
     }
     let spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    if spec.config.access_mode.is_some() {
+        spec.config.initialize_install_config(&Config::default_path())?;
+    }
     install_native_service(&spec)?;
     println!("installed");
     Ok(())
@@ -1029,6 +1032,7 @@ mod tests {
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config {
             node: "node-a".into(),
+            access_mode: None,
             person: None,
             fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
             shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),

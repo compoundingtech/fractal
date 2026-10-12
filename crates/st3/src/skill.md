@@ -5,7 +5,7 @@ description: How to use st from an st agent seat. Applies only when the ST_AGENT
 
 # st
 
-This applies only to a session st started: `printenv ST_AGENT` prints this seat's identity. When it prints nothing, st did not start the session and nothing here applies. `ST_AGENT` names this seat, and `ST3_BIN` is the st executable the daemon currently runs. `"$ST3_BIN" --help` lists every command; each subcommand has its own `--help`.
+This applies only to a session st started: `printenv ST_AGENT` prints this seat's identity. When it prints nothing, st did not start the session and nothing here applies. `ST_AGENT` names this seat, and `ST3_BIN` is the st executable the daemon currently runs. `"$ST3_BIN" --help` lists every command; each subcommand has its own `--help`. `"$ST3_BIN" note` explicitly reads current notes from people this seat works for or who own it, using this seat's identity. Notes have an author, time, revision and optional expiry; they inform work but do not assign it, answer an ask, approve a gate or grant permission. Only a person outside an agent seat writes their own note.
 
 ## Messages
 
@@ -49,7 +49,7 @@ A fault arrives as a message to the agent that owns it, which retries, revises o
 
 ## GitHub
 
-`"$ST3_BIN" gh watch OWNER/REPO#N --as "$ST_AGENT"` wakes this seat once for each new comment or review on that issue or pull request, each time the required checks on its current head turn pass or fail, and when it closes or merges, which ends the watch; `--until 4h` ends it sooner. `gh ls` lists this seat's watches and `gh unwatch OWNER/REPO#N` ends one. A comment posted with `gh comment OWNER/REPO#N --body-file FILE --as "$ST_AGENT"` (or a review, with `--review approve|request-changes|comment`) is recorded as this seat's by its GitHub ID, so it wakes no watch of this seat, and the thread is watched; `gh own URL` records one posted another way.
+`"$ST3_BIN" gh watch OWNER/REPO#N --as "$ST_AGENT"` wakes this seat once for each new comment or review on that issue or pull request, each time the required checks on its current head turn pass or fail, changes to an open PR's head, draft state or queue membership, and when it closes or merges, which ends the watch; `--until 4h` ends it sooner. `gh ls` lists this seat's watches and `gh unwatch OWNER/REPO#N` ends one. A comment posted with `gh comment OWNER/REPO#N --body-file FILE --as "$ST_AGENT"` (or a review, with `--review approve|request-changes|comment`) is recorded as this seat's by its GitHub ID, so it wakes no watch of this seat, and the thread is watched; `gh own URL` records one posted another way.
 
 ## Other agents' terminals
 

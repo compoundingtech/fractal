@@ -46,8 +46,9 @@ export type ConversationFrame = { replace: boolean; items: TimelineEntry[]; hasM
 export type ConversationHandlers = {
   /** `replace` carries the newest page; otherwise the entries changed since the last frame. */
   onEntries: (frame: ConversationFrame) => void;
-  /** A problem to show; an empty string clears it. */
-  onIssue: (issue: string) => void;
+  /** A problem to show; an empty string clears it. `stopped`: st refused for good, so nothing
+   * asks again until the person follows the conversation again. */
+  onIssue: (issue: string, stopped?: boolean) => void;
 };
 
 type Client = Pick<St3Client, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'> & Partial<Pick<St3Client, 'capabilities'>>;
@@ -417,7 +418,7 @@ export class Feed {
         // once and stop, as stui does.
         if (!conversationMayClear(frame.code)) {
           clearTimeout(follow.timer);
-          follow.handlers.onIssue(plainMessage(frame.code, frame.message));
+          follow.handlers.onIssue(plainMessage(frame.code, frame.message), true);
           return;
         }
         // The subscription ended. Whatever stopped it may clear (a busy store moved under the

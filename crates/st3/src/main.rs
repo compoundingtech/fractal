@@ -56,6 +56,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod directive_note;
 mod completion;
 #[cfg(test)]
 mod follow_tests;
@@ -114,6 +115,8 @@ enum Command {
     Up(UpArgs),
     /// Understand what needs action now.
     Now(NowArgs),
+    /// Read current person notes; notes inform but never assign work or grant authority.
+    Note(directive_note::NoteArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
     /// Inspect and control missions.
@@ -1957,6 +1960,9 @@ struct MissionReportToArgs {
     #[arg(long, value_name = "DURATION", requires = "agent", conflicts_with = "clear")]
     #[arg(value_parser = parse_stalled_after)]
     stalled_after: Option<u64>,
+    /// Report stalls (true or false). Defaults to the mission's policy, else true.
+    #[arg(long, requires = "agent", conflicts_with = "clear", action = clap::ArgAction::Set)]
+    report_stalls: Option<bool>,
     /// Also tell the agent when the run completes.
     #[arg(long, requires = "agent", conflicts_with = "clear")]
     report_completed: bool,
@@ -3570,8 +3576,9 @@ struct AgentRestartArgs {
 #[derive(Subcommand)]
 enum GhCommand {
     /// Watch an issue or pull request. Each new comment or review that this seat did not post,
-    /// each time the required checks on its current head turn pass or fail, and its close or
-    /// merge wake this seat once; the close or merge, or the deadline, ends the watch. Watching
+    /// each time the required checks on its current head turn pass or fail, changes to its
+    /// head, draft state or queue membership, and its close or merge wake this seat once;
+    /// the close or merge, or the deadline, ends the watch. Watching
     /// it again keeps the watch and takes the new deadline.
     #[command(
         after_help = "Examples:\n  st gh watch acme/garden#12\n  st gh watch https://github.com/acme/garden/pull/12 --until 4h"
@@ -5169,6 +5176,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Admission { .. } => unreachable!(),
         Command::ReplicationWorker(_) => unreachable!(),
         Command::Now(args) => run_now(&endpoint, config.person.as_deref(), args, cli.json).await,
+        Command::Note(args) => {
+            directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
+        }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Launch { command } => {
             run_launch(&client, &endpoint, command, &config.planner, cli.json).await
@@ -6158,7 +6168,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1}),
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,
+                    "harness_access_auto": u8::from(config.active_access_mode() == st_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -6235,7 +6246,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup.phase("start-services");
@@ -7290,6 +7301,7 @@ async fn set_mission_run_report(
                 actor: args.actor,
                 report_to: args.agent,
                 stalled_after_ms: args.stalled_after,
+                report_stalls: args.report_stalls,
                 report_completed: args.report_completed,
                 idempotency_key: format!("mission-report-to:{subject}:{nonce}"),
             },
@@ -7301,9 +7313,16 @@ async fn set_mission_run_report(
     let unchanged = if report.changed { "" } else { " (unchanged)" };
     match &report.report_to {
         Some(agent) => println!(
-            "{} reports to {agent}: failed, cancelled, stalled after {}{}{unchanged}",
+            "{} reports to {agent}: failed, cancelled{}{}{unchanged}",
             report.run,
-            whole_duration(report.stalled_after_ms.unwrap_or_default()),
+            if report.report_stalls {
+                format!(
+                    ", stalled after {}",
+                    whole_duration(report.stalled_after_ms.unwrap_or_default())
+                )
+            } else {
+                String::new()
+            },
             if report.report_completed {
                 ", completed"
             } else {
@@ -9944,6 +9963,10 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                     ""
                 },
             );
+            if limit["stale"].as_bool() == Some(true) {
+                output.truncate(output.trim_end().len());
+                output.push_str("  stale\n");
+            }
         }
         let names = |key: &str| {
             report["limits_policy"][key]
@@ -16063,6 +16086,9 @@ fn render_client_work_detail(work: &st3_client::Work) -> String {
     if let Some(incarnation) = &work.claim_incarnation {
         let _ = writeln!(output, "Incarnation: {incarnation}");
     }
+    if let Some(incarnation) = &work.submitted_incarnation {
+        let _ = writeln!(output, "Submitted incarnation: {incarnation}");
+    }
     if let Some(nudged) = work
         .nudged_at_unix_ms
         .and_then(|at| chrono::DateTime::from_timestamp_millis(i64::try_from(at).ok()?))
@@ -16279,24 +16305,44 @@ async fn post_work(
 ) -> Result<()> {
     let actor = args.actor.context("a work action needs explicit --as")?;
     reject_foreign_agent_actor(&actor)?;
-    let incarnation = match args.incarnation {
-        Some(incarnation) => Some(incarnation),
-        None => current_agent_incarnation(client, &actor).await?,
-    };
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let response: StepRunView = client
-        .post(
-            &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
-            &WorkRequest {
-                actor: Some(actor.clone()),
-                incarnation,
-                summary: args.summary,
-                reason: args.reason,
-                evidence: args.evidence,
-                idempotency_key: format!("work:{action}:{}:{actor}:{nonce}", args.subject),
-            },
-        )
-        .await?;
+    let subject = if args.subject.starts_with("step-run/") { args.subject.clone() }
+        else { format!("step-run/{}", args.subject) };
+    let started_at_unix_ms = st_drivers::message::now_ms();
+    let response: Result<StepRunView> = async {
+        let incarnation = match args.incarnation {
+            Some(incarnation) => Some(incarnation),
+            None => current_agent_incarnation(client, &actor).await?,
+        };
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        client
+            .post(
+                &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
+                &WorkRequest {
+                    actor: Some(actor.clone()),
+                    incarnation,
+                    summary: args.summary,
+                    reason: args.reason,
+                    evidence: args.evidence,
+                    idempotency_key: format!("work:{action}:{}:{actor}:{nonce}", args.subject),
+                },
+            )
+            .await
+    }.await;
+    let response = response.inspect_err(|error| {
+        if action == "claim" && let Some(outage) = st3::client::daemon_unreachable(error)
+            && let Some(os_error) = outage.socket_os_error()
+        {
+            let receipt = st_drivers::work_claim_failure::Receipt {
+                actor: actor.clone(), step_run: subject.clone(),
+                socket: outage.endpoint().into(), os_error, started_at_unix_ms,
+                observed_at_unix_ms: st_drivers::message::now_ms(),
+            };
+            if receipt.valid() {
+                eprintln!("{}{}", st_drivers::work_claim_failure::PREFIX,
+                    serde_json::to_string(&receipt).expect("socket receipt serializes"));
+            }
+        }
+    })?;
     if json_output {
         print_value(&response, true)
     } else {
@@ -19511,23 +19557,12 @@ impl NativeObservations {
                 "harness-timeline" => {
                     let operation: st_drivers::harness_timeline::Operation =
                         serde_json::from_slice(&raw)?;
-
-                    let fields = timeline_claim_fields(operation, &event.runtime_incarnation);
-                    let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
+                    let claim = native_timeline_claim(client, subject,
+                        &event.runtime_incarnation, operation).await?;
                     let _: ClaimRecord = publisher
                         .post(
                             "/v1/claims",
-                            &ClaimInput {
-                                subject: subject.into(),
-                                kind: "harness.timeline".into(),
-                                actor: Some(subject.into()),
-                                fields,
-                                evidence: Vec::new(),
-                                expected_subject: None,
-                                idempotency_key: Some(format!(
-                                    "harness-timeline:{subject}:{digest}"
-                                )),
-                            },
+                            &claim,
                         )
                         .await?;
                 }
@@ -19573,12 +19608,17 @@ impl ObservationClient<'_> {
                     .and_then(Value::as_str)
                     .unwrap_or(if claim.kind == "harness.todo.observed" { "normalized" } else { "" })
             );
-            let claim = serde_json::from_value(st_drivers::harness_events::prepare_publication(
+            let claim: ClaimInput = serde_json::from_value(st_drivers::harness_events::prepare_publication(
                 dir,
                 sequence,
                 &slot,
                 &serde_json::to_value(&claim)?,
             )?)?;
+            // Diagnostics are retained graph facts, not local observation slots. Preserve
+            // their episode key; /harness-events replaces keys with its observation slot.
+            if claim.kind == "harness.diagnostic" {
+                return self.client.post(path, &claim).await;
+            }
             self.client
                 .post(
                     "/v1/harness-events",
@@ -19991,20 +20031,11 @@ async fn publish_harness_timeline(
         // Usage ownership is graph state, not a driver fact. Persist no placeholder/null owner
         // fields here; the client projection joins the exact desired owner run/generation/step at
         // its snapshot index and overwrites attribution on every explicit usage entry.
-        let fields = timeline_claim_fields(operation, incarnation);
-        let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
+        let claim = native_timeline_claim(client, subject, incarnation, operation).await?;
         let _: ClaimRecord = ObservationClient { client, event: None }
             .post(
                 "/v1/claims",
-                &ClaimInput {
-                    subject: subject.into(),
-                    kind: "harness.timeline".into(),
-                    actor: Some(subject.into()),
-                    fields,
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: Some(format!("harness-timeline:{subject}:{digest}")),
-                },
+                &claim,
             )
             .await?;
         published.insert(publication);
@@ -20024,6 +20055,57 @@ fn timeline_record_is_current(
     provider_incarnation: Option<&str>,
 ) -> bool {
     record.driver == driver && provider_incarnation == Some(record.incarnation_id.as_str())
+}
+
+/// Bind a reported failure to the current ready wake before promoting it to a diagnostic.
+/// The CLI cannot report through the socket it was denied; the native driver can.
+async fn native_timeline_claim(
+    client: &Client, subject: &str, incarnation: &str,
+    operation: st_drivers::harness_timeline::Operation,
+) -> Result<ClaimInput> {
+    let mut failure = None;
+    if operation.entry_type == "error"
+        && operation.body["code"] == st_drivers::work_claim_failure::CODE
+        && let Ok(receipt) = serde_json::from_value::<st_drivers::work_claim_failure::Receipt>(operation.body["details"].clone())
+        && receipt.valid() && receipt.actor == subject
+    {
+        let work: Vec<StepRunView> = client.get(&format!(
+            "/v1/work?actor={}", urlencoding::encode(subject))).await?;
+        if let Some(step) = work.into_iter().find(|step| {
+            step.subject == receipt.step_run && step.status == "ready"
+                && step.wake.as_ref().is_some_and(|wake| {
+                    wake.incarnation_id == incarnation && wake.attempts > 0
+                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| receipt.follows_wake(sent, operation.observed_at_unix_ms))
+                })
+        }) {
+            failure = Some((receipt, step));
+        }
+    }
+    if let Some((receipt, step)) = failure {
+        return Ok(ClaimInput {
+            subject: subject.into(), kind: "harness.diagnostic".into(), actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("code".into(), st_drivers::work_claim_failure::CODE.into()),
+                ("status".into(), "failed".into()), ("severity".into(), "error".into()),
+                ("reason".into(), receipt.reason().into()),
+                ("incarnation_id".into(), incarnation.into()),
+                ("step_run".into(), step.subject.clone().into()),
+                ("attempt".into(), step.attempt.into()),
+                ("readiness_epoch".into(), step.readiness_epoch.into()),
+                ("matched_line".into(), serde_json::to_string(&receipt)?.into()),
+                ("observed_since_ms".into(), receipt.observed_at_unix_ms.into()),
+                ("driver".into(), operation.driver.into()),
+            ]), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(st_drivers::work_claim_failure::key(subject, &step.subject,
+                step.attempt, step.readiness_epoch, incarnation)),
+        });
+    }
+    let fields = timeline_claim_fields(operation, incarnation);
+    let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
+    Ok(ClaimInput { subject: subject.into(), kind: "harness.timeline".into(),
+        actor: Some(subject.into()), fields, evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some(format!("harness-timeline:{subject}:{digest}")),
+    })
 }
 
 fn timeline_claim_fields(
@@ -25922,6 +26004,19 @@ mod tests {
     }
 
     #[test]
+    fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
+        let report = json!({"rows": [], "limits": [
+            {"account": "claude/aaaa", "account_ref": "ada/claude-1", "weekly_percent": 84.0, "stale": true,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+            {"account": "claude/bbbb", "weekly_percent": 50.0, "stale": false,
+             "measured_at_unix_ms": 1_799_000_000_000_u64},
+        ]});
+        let output = render_usage_report(&report, 24, None);
+        assert!(output.contains("  ada/claude-1 (claude/aaaa)  stale\n"), "{output}");
+        assert!(output.contains("  claude/bbbb\n"), "{output}");
+    }
+
+    #[test]
     fn usage_names_a_declared_account_beside_the_providers_label() {
         let report = json!({
             "rows": [
@@ -28666,6 +28761,8 @@ mod tests {
             "--stalled-after",
             "1h",
             "--report-completed",
+            "--report-stalls",
+            "false",
         ])
         .unwrap()
         .command
@@ -28675,12 +28772,21 @@ mod tests {
         assert_eq!(args.agent.as_deref(), Some("agent/ops/watcher"));
         assert_eq!(args.stalled_after, Some(3_600_000));
         assert!(args.report_completed);
+        assert_eq!(args.report_stalls, Some(false));
         assert!(!args.clear);
         assert_eq!(whole_duration(3_600_000), "1h");
         assert_eq!(whole_duration(45 * 60_000), "45m");
         assert!(parse(&["--clear"]).is_ok());
         for (extra, why) in [
             (&[][..], "it names an agent or clears"),
+            (
+                &["--clear", "--report-stalls", "false"][..],
+                "stall policy needs an agent",
+            ),
+            (
+                &["--agent", "agent/ops/watcher", "--report-stalls", "no"][..],
+                "stall policy is boolean",
+            ),
             (&["--agent", "agent/ops/watcher", "--clear"][..], "not both"),
             (
                 &["--clear", "--stalled-after", "1h"][..],
@@ -29883,8 +29989,7 @@ mod tests {
             "--channels plugin:st-channel@st",
             "--model claude-opus-5-5",
             "--effort high",
-            "--dangerously-skip-permissions",
-            CLAUDE_SEAT_SETTINGS,
+
         ] {
             assert!(
                 joined.contains(expected),
@@ -29939,7 +30044,6 @@ mod tests {
         for expected in [
             "--model gpt-example",
             "-c model_reasoning_effort=medium",
-            "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
         ] {
             assert!(
                 joined.contains(expected),

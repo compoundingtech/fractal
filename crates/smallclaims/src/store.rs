@@ -56,6 +56,7 @@ pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
 mod checkpoint_completion;
+pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 pub mod heal;
@@ -70,7 +71,7 @@ pub use checkpoint::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
     CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView,
     CheckpointProof, ClaimTombstone, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone,
-    SealedSet, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
+    SealedSet, StoreCopy, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
     verify_checkpoint_manifest,
 };
 pub use checkpoint_agreement::write_time;
@@ -6386,6 +6387,15 @@ impl Store {
     /// Whether admitted replicated claims wait for a deferred projection.
     pub fn replication_projection_deferred(&self) -> bool {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
+    }
+
+    /// An opaque process/Store-lifetime observation token plus its deferred flag, sampled
+    /// together. A changed token can invalidate cached consumers even if they missed the
+    /// pending interval. This is not a persisted cut or a certificate for replay/heal,
+    /// physical removal, OLD images or every projection path. Its existing generation wraps.
+    pub fn replication_projection_observation(&self) -> (u64, bool) {
+        let state = self.replication_projection_state.load(Ordering::Acquire);
+        (state, state & 1 != 0)
     }
 
     pub fn projection_contention_generation(&self) -> u64 {
