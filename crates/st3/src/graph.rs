@@ -5397,7 +5397,7 @@ pub fn parse_duration(value: &str, positive: bool) -> Result<u64, St3Error> {
     Ok(duration)
 }
 
-fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
+pub(crate) fn validate_name(value: &str, full: bool) -> Result<(), St3Error> {
     if value.is_empty() || value.len() > 512 || !value.is_ascii() {
         return Err(St3Error::new(
             "invalid-subject-name",

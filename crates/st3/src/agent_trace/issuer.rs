@@ -178,7 +178,12 @@ pub fn resolve_principal(reduced: Option<String>, declared: Option<&str>) -> Opt
         );
         return None;
     }
-    match AgentTraceRuntimeV1WhoPrincipal::validate(declared) {
+    let admission = (|| -> Result<()> {
+        crate::graph::validate_name(declared, true)?;
+        AgentTraceRuntimeV1WhoPrincipal::validate(declared)?;
+        Ok(())
+    })();
+    match admission {
         Ok(()) => Some(declared.to_owned()),
         Err(error) => {
             tracing::warn!(
@@ -246,16 +251,25 @@ mod tests {
 
     #[test]
     fn declared_principal_is_only_a_validated_fallback_for_missing_reduction() {
+        let reduced = "person/reduced";
+        assert!(reduced.starts_with("person/"));
+        assert!(crate::graph::validate_name(reduced, true).is_ok());
+        assert!(AgentTraceRuntimeV1WhoPrincipal::validate(reduced).is_ok());
         for declared in [None, Some("person/fallback"), Some("agent/not-a-human")] {
             assert_eq!(resolve_principal(Some("person/reduced".into()), declared),
                 Some("person/reduced".into()));
         }
-        assert_eq!(resolve_principal(None, Some("person/fallback")), Some("person/fallback".into()));
+        for declared in ["person/fallback", "person/Team/User@Role", "person/user.name"] {
+            assert!(crate::graph::validate_name(declared, true).is_ok());
+            assert_eq!(resolve_principal(None, Some(declared)), Some(declared.to_owned()));
+        }
         assert_eq!(resolve_principal(None, None), None);
-        for invalid in ["agent/not-a-human", "person/",
+        for invalid in ["agent/not-a-human", "person/", "person/a:b", "person/../human",
+            "person/a b", "person/é", "person//human",
             " person/fallback", "person/fallback\n", "person/fallback "] {
             assert_eq!(resolve_principal(None, Some(invalid)), None, "{invalid:?}");
         }
+        assert_eq!(resolve_principal(None, Some(&format!("person/{}", "x".repeat(512)))), None);
     }
 
     const MISSION: &str = "0123456789abcdef0123456789abcdef";

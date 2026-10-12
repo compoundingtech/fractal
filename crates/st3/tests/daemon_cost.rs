@@ -1385,7 +1385,12 @@ agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
                 .body(Body::empty()).unwrap()).await.unwrap();
             assert_eq!(response.status(), axum::http::StatusCode::OK);
             let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/requester"));
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let principal = body["value"].as_str().unwrap();
+            assert_eq!(principal, "person/requester");
+            assert!(principal.starts_with("person/"));
+            assert_eq!(st3::agent_trace::issuer::resolve_principal(None, Some(principal)),
+                Some(principal.to_owned()), "reduction must yield an admitted full person subject");
             samples.push(work::total() - before);
         }
         measurements.push(samples.into_iter().skip(1).min_by_key(|work| work.vm_steps).unwrap());
