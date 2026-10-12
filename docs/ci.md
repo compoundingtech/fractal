@@ -711,6 +711,34 @@ cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads
 ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
 
+#### Measuring a change on hetz2: the perf slot
+
+A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
+hetz2 that takes the perf slot first (`scripts/ci-perf-slot`; its `--help` repeats this page's
+flow), so nobody has to remember to. One run holds the slot at a time. Others wait in line, oldest
+first, and are told who holds it, since when, and for which branch; `scripts/ci-perf-slot --status`
+shows the same. Outside CI the report summary goes to `$RUNNER_TEMP/perf-summary.md`
+(`/var/tmp/st-perf-UID` by default, where generated stores also stay between runs); `cost` is not slotted, since its counts do not depend on
+the machine.
+
+- The slot is the kernel's `flock` on `/var/tmp/perf-slot/slot.lock`, held by a watchdog that
+  lives as long as the run. A run killed at any point, even with SIGKILL, has its process
+  group killed and the slot freed at once. Cargo's test runner on hetz2 starts the test binary
+  with `systemd-run --user --scope`, which moves the process into a transient unit but keeps it in
+  the group; `scripts/ci-perf-slot-test` proves that case.
+- A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
+  timeout is two hours unless the run asks for less with `--timeout`; time in line does not
+  count. A run stopped by it exits 124.
+- Only `load` is slotted, and only on hetz2. Anywhere else nothing shares the machine.
+  `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
+
+The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
+2-core ceiling for the daemon, with no baseline to compare. Main's relative gate (twice the worst
+of its last five reports) runs on the PR in Performance. Put on the PR the report table the run
+printed, the branch and commit, and one line saying it ran alone in the slot. For a change meant to
+make a path cheaper, put main's table beside it. Intake reviews that evidence and the merge queue
+checks the change; the slot gates nothing.
+
 ### Cache coverage across workflows
 
 Every job declares its cache coverage. Jobs that select runners, collect checks, run
