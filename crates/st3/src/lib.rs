@@ -23,6 +23,8 @@ pub(crate) mod disk;
 pub mod delivery_hold;
 pub mod driver_hook;
 pub mod environment;
+/// Offline signed gate observations in immutable git notes refs.
+pub mod evidence;
 pub(crate) mod external_sessions;
 pub(crate) mod native_views;
 pub(crate) mod conversation_header;
@@ -45,6 +47,7 @@ pub mod hooks;
 pub mod incremental;
 pub mod lane;
 pub mod mailbox;
+pub mod message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
 pub mod maintenance;
 pub(crate) mod memory;

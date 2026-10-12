@@ -1177,6 +1177,14 @@ const ACTUAL_STATE_CLAIM: &str = "(claims.kind<'harness.' OR claims.kind>='harne
      AND claims.kind NOT IN ('intent.desired', 'runtime.readiness-deadline-reached',
                              'reconcile.fault')";
 
+// Repaired originals are not live actual-state sources, even if a node retains their
+// claim rows or has trimmed the admission receipt. The digest's repaired-ID set survives
+// receipt cleanup and is maintained transactionally by repair claims. Keep this separate
+// from ACTUAL_STATE_CLAIM, which is also a SQLite partial-index predicate.
+const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
+    SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id
+)";
+
 // Both discovery and index installation share the actual fold's open-ended kind predicate.
 // Custom actual-state kinds can also supply a runtime id; a fixed kind allowlist is incomplete.
 const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
@@ -1471,7 +1479,8 @@ fn runtime_only_authority(
 ) -> Result<Option<(Value, String)>> {
     let mut sources = connection.prepare_cached(&format!(
         "SELECT DISTINCT claims.kind, claims.origin FROM claims INDEXED BY claims_subject_kind_index
-         WHERE claims.subject=?1 AND claims.store_index<=?2 AND {ACTUAL_STATE_CLAIM} LIMIT 2"
+         WHERE claims.subject=?1 AND claims.store_index<=?2 AND {ACTUAL_STATE_CLAIM}
+           AND {UNREPAIRED_CLAIM} LIMIT 2"
     ))?;
     let mut rows = sources.query(params![subject, through])?;
     let Some(row) = rows.next()? else { return Ok(None); };
@@ -1491,6 +1500,7 @@ fn runtime_only_authority(
         "SELECT claims.body FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='runtime.observed' AND claims.store_index<=?4
+           AND {UNREPAIRED_CLAIM}
            AND json_type(claims.body, CASE WHEN json_type(claims.body, '$.fields') IS NULL
                          THEN ?2 ELSE ?3 END) IS NOT NULL
          ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
@@ -14922,14 +14932,14 @@ impl Store {
         }
         connection
             .query_row(
-                &canonical_sql(
+                &canonical_sql(&format!(
                     "SELECT origin FROM claims
                  WHERE subject=?1 AND kind!='intent.desired'
                    AND kind NOT LIKE 'harness.%'
                    AND kind!='runtime.readiness-deadline-reached'
-                   AND kind!='reconcile.fault'
+                   AND kind!='reconcile.fault' AND {UNREPAIRED_CLAIM}
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-                ),
+                )),
                 [subject],
                 |row| row.get(0),
             )
@@ -22462,6 +22472,9 @@ fn message_view_tx(
             .unwrap_or_else(|| "requester".into()),
     );
     let to = normalize_message_party(&field("to").or_else(|| child("to")).unwrap_or_default());
+    // A replicated claim is another member's word: keep only references a file name can be
+    // built from, so a hostile hash never reaches a path or a URL.
+    let (attachments, body) = crate::message_body::split_attachments(actual.get("attachments"));
     Ok(MessageView {
         subject: subject.into(),
         from,
@@ -22495,23 +22508,10 @@ fn message_view_tx(
                     })
                     .unwrap_or_default()
             }),
-        // A replicated claim is another member's word: keep only references a file name can be
-        // built from, so a hostile hash never reaches a path or a URL.
-        attachments: actual
-            .get("attachments")
-            .cloned()
-            .and_then(|value| {
-                serde_json::from_value::<Vec<crate::model::MessageAttachment>>(value).ok()
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|attachment| {
-                crate::blobs::is_sha256(&attachment.sha256)
-                    && attachment.origin.starts_with("host/")
-                    && crate::blobs::MEDIA_TYPES.contains(&attachment.media_type.as_str())
-            })
-            .take(crate::blobs::MAX_ATTACHMENTS)
-            .collect(),
+        attachments,
+        body_ref: body.as_ref().map(|body| crate::message_body::reference(&body.sha256)),
+        body_bytes: body.as_ref().map(|body| body.size),
+        body_origin: body.map(|body| body.origin),
         created_index,
     })
 }
@@ -22539,6 +22539,7 @@ fn selected_actual_source_at(
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2
+           AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
     let rows = statement
@@ -22702,7 +22703,7 @@ fn latest_actual_at(
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
            AND claims.kind NOT LIKE 'harness.%'
-           AND claims.store_index<=?2
+           AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
     let rows = statement
@@ -22801,11 +22802,19 @@ fn harness_observations_without_incarnation_query() -> String {
 }
 
 fn newest_claims_of_kind_query(columns: &str, kind: &str) -> String {
+    // Runtime observations supply live authority and its epoch. Harness observations keep
+    // their existing canonical-history contract, including retained repaired originals.
+    let membership = if kind == "runtime.observed" {
+        UNREPAIRED_CLAIM
+    } else {
+        "1"
+    };
     format!(
         "SELECT {columns}
          FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='{kind}' AND +claims.store_index<=?2
+           AND {membership}
          ORDER BY {CANONICAL_ORDER_DESC}"
     )
 }
@@ -34691,6 +34700,11 @@ mod tests {
         include!("store/canonical_audit.rs");
     }
 
+    mod actual_purity_tests {
+        use super::*;
+        include!("store/actual_purity_tests.rs");
+    }
+
     mod activity_purity_tests {
         use super::*;
         include!("store/activity_purity_tests.rs");
@@ -44935,8 +44949,8 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                 })
                 .unwrap()
         };
-        let original = observation("original", "original");
         let replacement = observation("replacement", "replacement");
+        let original = observation("original", "original");
         receive_and_project(
             &target,
             "alder",
@@ -45009,6 +45023,22 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
         );
         assert!(source.claim_by_id(&original.id).unwrap().is_some());
         assert!(target.claim_by_id(&original.id).unwrap().is_none());
+        assert_eq!(
+            source.latest_actual_value("daemon/alder").unwrap(),
+            target.latest_actual_value("daemon/alder").unwrap(),
+            "retaining a repaired original must not change actual state"
+        );
+        for store in [&source, &target] {
+            let index = store.index().unwrap();
+            let connection = store.readers.get();
+            assert_eq!(
+                selected_actual_source_at(&connection, "daemon/alder", Some(index), None)
+                    .unwrap().0,
+                Some(replacement.id.clone()),
+                "actual provenance must select the replacement's surviving claim"
+            );
+        }
+        let expected_actual = target.latest_actual_value("daemon/alder").unwrap();
         // Receipt cleanup must not make a repaired original a source again.
         source
             .connection
@@ -45027,6 +45057,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             projection_digest::oracle(&source.readers.get()).unwrap(),
             expected
         );
+        assert_eq!(source.latest_actual_value("daemon/alder").unwrap(), expected_actual);
         // Registry rebuilds and restart retain the repair meaning after receipts were trimmed.
         source
             .connection
@@ -45039,6 +45070,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             .unwrap();
         drop(source);
         let source = Store::open(&path, "alder").unwrap();
+        assert_eq!(source.latest_actual_value("daemon/alder").unwrap(), expected_actual);
         assert_eq!(
             projection_digest::tables(&source.readers.get()).unwrap(),
             expected

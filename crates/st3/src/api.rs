@@ -27,6 +27,7 @@ use tower::ServiceExt as _;
 
 use crate::archive::hydrate_eval;
 use crate::graph::{parse_intent, resolve_document_references};
+use crate::message_body;
 #[cfg(test)]
 use crate::model::AttentionRequest;
 use crate::model::ClientReplicated;
@@ -62,6 +63,7 @@ use crate::store::Store;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
+mod message_bodies;
 mod client_adapters;
 mod client_presence;
 mod client_v0;
@@ -540,6 +542,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/alerts/{*id}", get(client_attention_detail))
         .route("/v1/client/messages", get(client_messages))
         .route("/v1/client/messages/{*id}", get(client_messages_detail))
+        .route("/v1/client/message-bodies/{*id}", get(message_bodies::client_body))
         .route("/v1/client/launches", get(client_launches))
         .route(
             "/v1/client/launches/{id}/variants",
@@ -760,6 +763,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
         .route("/v1/messages/{message_id}/claims", post(post_message_claim))
         .route("/v1/messages/read/{*subject}", get(read_message))
+        .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(message_delivery))
         .route("/v1/messages/by-key", get(message_by_key))
         .route("/v1/status", get(status))
@@ -1729,6 +1733,9 @@ fn client_error_code(code: Option<&str>) -> String {
         | "transcript-unavailable"
         | "terminal-ended"
         | "blob-too-large"
+        | "message-too-large"
+        | "message-store-full"
+        | "long-message-signature-unsupported"
         | "unsupported-media-type"
         | "blob-content-mismatch"
         | "blob-quota-exceeded"
@@ -2153,6 +2160,8 @@ async fn client_capabilities(
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
     let capabilities = client_v0::capabilities(&session);
+    // The longest message body this daemon takes, so a composer shows a limit only when told.
+    let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
         "kind": "capabilities",
         "machine_version": st_drivers::version::machine_version(),
@@ -2164,6 +2173,7 @@ async fn client_capabilities(
             "max_event_items": 500,
             "max_response_bytes": CLIENT_MAX_RESPONSE_BYTES,
             "max_wait_ms": 30_000,
+            "max_message_bytes": max_message_bytes,
             "max_glass_body_bytes": st3_schema::glasses::MAX_BODY_BYTES,
             "max_glasses": st3_schema::glasses::MAX_GLASSES,
             "max_glass_depth": st3_schema::glasses::MAX_DEPTH,
@@ -3905,7 +3915,7 @@ fn client_message_resources(
             reasons.push("superseded");
         }
         let current = reasons.is_empty();
-        resources.push(json!({
+        let mut resource = json!({
             "id": message.subject,
             "kind": "message",
             "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
@@ -3922,7 +3932,13 @@ fn client_message_resources(
             "tags": message.tags,
             "attachments": message.attachments.iter().map(client_attachment).collect::<Vec<_>>(),
             "operational": { "layer": if current { "current" } else { "history" }, "actionable": current, "reasons": reasons }
-        }));
+        });
+        // Only a long message names its body, so every other resource reads as it always has.
+        if let (Some(reference), Some(bytes)) = (&message.body_ref, message.body_bytes) {
+            resource["body_ref"] = json!(reference);
+            resource["body_bytes"] = json!(bytes);
+        }
+        resources.push(resource);
     }
     resources.sort_by(|left, right| {
         right["sent_at"]
@@ -8443,9 +8459,10 @@ async fn repair_replication_record(
 /// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
 async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
     let store = state.store.clone();
+    let bodies = message_body::bodies(&state.state_dir);
     let file = blocking_store(move || {
         let mut file = tempfile::tempfile()?;
-        store.write_backup(&mut file)?;
+        store.write_backup_with_bodies(&mut file, Some(&bodies))?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
@@ -12742,6 +12759,22 @@ pub const SIGNED_MESSAGE_FIELDS: &[&str] = &[
     "to",
 ];
 
+/// The fields a device signs on a message past 8 KiB. The claim holds a preview, so it signs
+/// that: `content` is the preview, cut as [`message_body::preview`] cuts it, and `body_sha256`
+/// and `body_bytes` are the hash and length of the whole text, which every member reads from the
+/// claim's `text/plain` `attachments` entry. Sorted, as the check compares them.
+pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
+    "body_bytes",
+    "body_sha256",
+    "content",
+    "from",
+    "in_reply_to",
+    "session_id",
+    "tags",
+    "title",
+    "to",
+];
+
 /// How far a device's signing time may be from this daemon's clock when it first accepts the
 /// message. Members that receive it later check the signature, never the time.
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
@@ -12758,16 +12791,17 @@ fn check_device_signature(
     subject: &str,
     from: &str,
     fields: &BTreeMap<String, Value>,
+    expected: &[&str],
 ) -> Result<(), ApiError> {
     use smallclaims::principal::{FIELDS_FORMAT, Judged, KeyGrant};
     let mut signed = signature.signed_fields.clone();
     signed.sort();
-    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != SIGNED_MESSAGE_FIELDS {
+    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != expected {
         return Err(device_signature_error(
             "device-signature-format",
             format!(
                 "a device signs a message in {FIELDS_FORMAT} over {}",
-                SIGNED_MESSAGE_FIELDS.join(", ")
+                expected.join(", ")
             ),
         ));
     }
@@ -12885,10 +12919,16 @@ fn accept_message_receipt_with_upload_owner(
             "a message needs nonempty content",
         )));
     }
-    if request.content.len() > 4096 && !request.content.starts_with("doc/") {
+    let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
+        && !request.content.starts_with("doc/");
+    if long_body && request.content.len() > message_body::MAX_BYTES {
         return Err(ApiError::bad(St3Error::new(
             "message-too-large",
-            "an inline message cannot exceed 4 KiB; post a document first",
+            format!(
+                "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
+                message_body::MAX_BYTES / 1024,
+                request.content.len().div_ceil(1024)
+            ),
         )));
     }
     if request.content.starts_with("doc/") {
@@ -12993,7 +13033,14 @@ fn accept_message_receipt_with_upload_owner(
     let mut fields = BTreeMap::from([
         ("from".into(), Value::String(from.clone())),
         ("to".into(), Value::String(to.clone())),
-        ("content".into(), Value::String(request.content.clone())),
+        (
+            "content".into(),
+            Value::String(if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content.clone()
+            }),
+        ),
         ("status".into(), Value::String("sent".into())),
         (
             "title".into(),
@@ -13019,15 +13066,65 @@ fn accept_message_receipt_with_upload_owner(
     if let Some(session_id) = session_id {
         fields.insert("session_id".into(), Value::String(session_id));
     }
-    if !attachments.is_empty() {
+    // A long body is a file on this member, named in the claim like an image: nothing of it but
+    // the preview and this reference enters the database or replication. The file is staged
+    // under a temporary name before the claim, so a failed write never leaves a claim without
+    // its text, and renamed into place once the claim has landed, so a refusal or a failed
+    // append leaves no stray file. A repeat of the same send finishes a rename that did not
+    // happen, which heals a crash between the two.
+    let mut body = None;
+    let mut claim_attachments = attachments.clone();
+    if long_body {
+        message_body::bodies(&state.state_dir)
+            .ensure_room(&from, &subject, request.content.len())
+            .map_err(ApiError::bad)?;
+        let entry = crate::model::MessageAttachment {
+            sha256: hex::encode(Sha256::digest(request.content.as_bytes())),
+            media_type: message_body::MEDIA_TYPE.into(),
+            name: None,
+            size: request.content.len() as u64,
+            origin: client_host_id(&state.node),
+        };
+        claim_attachments.push(entry.clone());
+        body = Some(entry);
+    }
+    if !claim_attachments.is_empty() {
         fields.insert(
             "attachments".into(),
-            serde_json::to_value(&attachments).map_err(ApiError::internal)?,
+            serde_json::to_value(&claim_attachments).map_err(ApiError::internal)?,
         );
     }
     if let Some(signature) = &device_signature {
-        check_device_signature(state, signature, &request, &subject, &from, &fields)?;
+        let mut signed = fields.clone();
+        let mut expected = SIGNED_MESSAGE_FIELDS;
+        if let Some(body) = &body {
+            // The claim holds a preview, so the signature must cover the preview, the hash and
+            // the length, which every member can read from the claim. A device that signs the
+            // whole text, as it does under 8 KiB, signs something no other member can check.
+            let mut names = signature.signed_fields.clone();
+            names.sort();
+            if names == SIGNED_MESSAGE_FIELDS {
+                return Err(ApiError::bad(St3Error::new(
+                    "long-message-signature-unsupported",
+                    format!(
+                        "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
+                        message_body::INLINE_MAX_BYTES / 1024
+                    ),
+                )));
+            }
+            signed.insert("body_sha256".into(), Value::String(body.sha256.clone()));
+            signed.insert("body_bytes".into(), json!(body.size));
+            expected = SIGNED_LONG_MESSAGE_FIELDS;
+        }
+        check_device_signature(state, signature, &request, &subject, &from, &signed, expected)?;
     }
+    let staged = if body.is_some() {
+        message_body::bodies(&state.state_dir)
+            .stage(&from, &subject, request.content.as_bytes())
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
     let input = ClaimInput {
         subject: subject.clone(),
         kind: "message.sent".into(),
@@ -13042,7 +13139,21 @@ fn accept_message_receipt_with_upload_owner(
         Some(signature) => state.store.append_signed_message(&input, signature),
         None => state.store.append_claim_outcome(&input),
     }
-    .map_err(ApiError::bad)?;
+    .map_err(|error| {
+        if let Some(staged) = staged.as_ref() {
+            staged.discard();
+        }
+        ApiError::bad(error)
+    })?;
+    if let Some(staged) = staged {
+        // The claim is in. If the text cannot be put in place, the message exists with its
+        // preview: say so as an unconfirmed send, which a repeat of the same send finishes.
+        staged.commit().map_err(|error| {
+            ApiError::internal(anyhow::anyhow!(
+                "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
+            ))
+        })?;
+    }
     // A concurrent sender may have accepted this key first with the same canonical input.
     // Return its accepted classification, rather than this attempt's speculative tags.
     let tags = record.body["fields"]["tags"]
@@ -13075,13 +13186,20 @@ fn accept_message_receipt_with_upload_owner(
             subject,
             from,
             to,
-            content: request.content,
+            content: if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content
+            },
             status: "sent".into(),
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
             created_index: record.store_index,
             attachments,
+            body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
+            body_bytes: body.as_ref().map(|body| body.size),
+            body_origin: body.map(|body| body.origin),
         },
         idempotency_key: request.idempotency_key,
         already_sent: !appended,
@@ -27756,3 +27874,5 @@ agent "seat" { workspace "/tmp"; command "true" }
 
 #[cfg(test)]
 mod work_incarnation_tests;
+#[cfg(test)]
+mod message_bodies_tests;
