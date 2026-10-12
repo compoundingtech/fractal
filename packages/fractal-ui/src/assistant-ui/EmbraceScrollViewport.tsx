@@ -428,61 +428,78 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     element.current = viewport
     if (viewport === null) return
     const cleanup = controller.attach(viewport)
-    let top = viewport.scrollTop
     let contentHeight = viewport.scrollHeight
     let viewportHeight = viewport.clientHeight
-    let keyboardFrame: number | undefined
+    // Intent is independent of scroll events: at the top edge there may be
+    // nothing left to scroll, but the reader can still request the next page.
+    const olderGesture = () => prefetch(true, true)
     let draggingScrollbar = false
-    let freshTouch = false
+    let pointerY = 0
+    let dragRequested = false
+    let touchY: number | undefined
+    let touchRequested = false
     const onPointerDown = (event: PointerEvent) => {
       draggingScrollbar = event.target === viewport && event.pointerType !== 'touch'
-      if (event.pointerType === 'touch') freshTouch = true
+      pointerY = event.clientY
+      dragRequested = false
     }
-    const onTouchStart = () => { freshTouch = true }
+    const onPointerMove = (event: PointerEvent) => {
+      if (draggingScrollbar && !dragRequested && event.clientY < pointerY) {
+        dragRequested = true
+        olderGesture()
+      }
+      pointerY = event.clientY
+    }
     const onPointerUp = () => { draggingScrollbar = false }
-    const onScrollEnd = () => { freshTouch = false }
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches[0]?.clientY
+      touchRequested = false
+    }
+    const onTouchMove = (event: TouchEvent) => {
+      const y = event.touches[0]?.clientY
+      if (y !== undefined && touchY !== undefined && y > touchY && !touchRequested) {
+        touchRequested = true
+        olderGesture()
+      }
+      touchY = y
+    }
+    const onTouchEnd = () => { touchY = undefined }
     const onScroll = () => {
-      const up = viewport.scrollTop < top
-      top = viewport.scrollTop
       const geometryChanged = contentHeight !== viewport.scrollHeight || viewportHeight !== viewport.clientHeight
       contentHeight = viewport.scrollHeight
       viewportHeight = viewport.clientHeight
-      const touchScroll = up && freshTouch && !geometryChanged
-      prefetch(up, up && draggingScrollbar && !geometryChanged || touchScroll, !geometryChanged)
-      // A swipe authorizes one new request, not every inertial scroll event.
-      if (touchScroll) freshTouch = false
+      // Scroll events observe only boundary entry. Reflow is never a gesture.
+      prefetch(false, false, !geometryChanged)
     }
-    const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) prefetch(true, true) }
+    const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) olderGesture() }
     const onKey = (event: KeyboardEvent) => {
       if (!(event.target instanceof HTMLElement) || event.target.closest('input,textarea,[contenteditable="true"]')) return
-      if (event.key !== 'PageUp' && event.key !== 'Home' && event.key !== 'ArrowUp') return
-      // Let the platform/RAC perform navigation. Observe its resulting position,
-      // without writing scrollTop or competing with the collection's focus.
-      if (keyboardFrame !== undefined) cancelAnimationFrame(keyboardFrame)
-      keyboardFrame = requestAnimationFrame(() => {
-        keyboardFrame = undefined
-        prefetch(true, true)
-      })
+      if (event.key === 'PageUp' || event.key === 'Home' || event.key === 'ArrowUp') olderGesture()
     }
     viewport.addEventListener('scroll', onScroll, { passive: true })
-    viewport.addEventListener('scrollend', onScrollEnd, { passive: true })
     viewport.addEventListener('touchstart', onTouchStart, { passive: true })
+    viewport.addEventListener('touchmove', onTouchMove, { passive: true })
+    viewport.addEventListener('touchend', onTouchEnd, { passive: true })
+    viewport.addEventListener('touchcancel', onTouchEnd, { passive: true })
     viewport.addEventListener('wheel', onWheel, { passive: true })
     viewport.addEventListener('keydown', onKey)
     viewport.addEventListener('pointerdown', onPointerDown)
+    viewport.ownerDocument.addEventListener('pointermove', onPointerMove, { passive: true })
     viewport.ownerDocument.addEventListener('pointerup', onPointerUp)
     viewport.ownerDocument.addEventListener('pointercancel', onPointerUp)
     return () => {
       cleanup?.()
       viewport.removeEventListener('scroll', onScroll)
-      viewport.removeEventListener('scrollend', onScrollEnd)
       viewport.removeEventListener('touchstart', onTouchStart)
+      viewport.removeEventListener('touchmove', onTouchMove)
+      viewport.removeEventListener('touchend', onTouchEnd)
+      viewport.removeEventListener('touchcancel', onTouchEnd)
       viewport.removeEventListener('wheel', onWheel)
       viewport.removeEventListener('keydown', onKey)
       viewport.removeEventListener('pointerdown', onPointerDown)
+      viewport.ownerDocument.removeEventListener('pointermove', onPointerMove)
       viewport.ownerDocument.removeEventListener('pointerup', onPointerUp)
       viewport.ownerDocument.removeEventListener('pointercancel', onPointerUp)
-      if (keyboardFrame !== undefined) cancelAnimationFrame(keyboardFrame)
       element.current = null
     }
   }, [controller, prefetch])
