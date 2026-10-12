@@ -71,6 +71,23 @@ impl BandRow {
     }
 }
 
+/// A dim note under an alert's title, wrapped to the pane instead of cut at its edge.
+fn note_rows(note: &str, width: usize) -> Vec<BandRow> {
+    text::wrap(
+        &[text::run(note.to_owned(), theme::dim())],
+        width,
+        &[text::run("   ", theme::dim())],
+        &[text::run("   ", theme::dim())],
+        None,
+    )
+    .into_iter()
+    .map(|line| BandRow {
+        line,
+        hits: Vec::new(),
+    })
+    .collect()
+}
+
 impl Ui {
     /// The open alerts that show in `agent`'s conversation, in the order Now lists them.
     pub(super) fn alerts_in(&self, agent: &str) -> Vec<&Attention> {
@@ -160,13 +177,17 @@ impl Ui {
         let full = width;
         let width = width.saturating_sub(2).max(10);
         let count = alerts.len();
+        // The pane's title bar, filled across the width so the cards below read as one block
+        // that belongs to the box under it; the whole bar hides it again.
+        let left = format!(" ◆ {count} alert{} ", if count == 1 { "" } else { "s" });
+        let right = " ▾ hide ";
+        let gap = full.saturating_sub(text::width(&left) + text::width(right));
+        let bar = |style: Style| style.bg(theme::SURFACE0);
         let mut rows = vec![BandRow {
             line: Line::from(vec![
-                Span::styled(
-                    format!(" ◆ {count} alert{} ", if count == 1 { "" } else { "s" }),
-                    theme::strong(theme::PERSON),
-                ),
-                Span::styled(" ▾ hide ", theme::dim()),
+                Span::styled(left, bar(theme::strong(theme::PERSON))),
+                Span::styled(" ".repeat(gap), bar(Style::default())),
+                Span::styled(right, bar(theme::dim())),
             ]),
             hits: vec![(
                 0,
@@ -174,7 +195,15 @@ impl Ui {
                 Hit::Alert(agent.to_owned(), AlertTap::Toggle),
             )],
         }];
-        for item in alerts.iter().take(SHOWN) {
+        for (index, item) in alerts.iter().take(SHOWN).enumerate() {
+            // A thin rule between alerts, so where one ends and the next begins is plain.
+            if index > 0 {
+                rows.push(BandRow::text(vec![Span::styled(
+                    format!(" {}", "┄".repeat(full.saturating_sub(2))),
+                    theme::fg(theme::SURFACE1),
+                )]));
+            }
+            let first_row = rows.len();
             let (glyph, color) = screens::attention_style(&item.kind);
             let mut head = vec![
                 text::run(format!(" {glyph} "), theme::fg(color)),
@@ -207,13 +236,13 @@ impl Ui {
                         // Several calls are unanswered and the prompt names none: show them all
                         // and offer only deny. Allowing the wrong one is not undoable.
                         [_, _, ..] => {
-                            rows.push(BandRow::text(vec![Span::styled(
-                                format!(
-                                    "   {} calls are unanswered and st cannot tell which one Claude asks about; allow it in the terminal (Ctrl+]):",
+                            rows.extend(note_rows(
+                                &format!(
+                                    "{} calls are unanswered and st cannot tell which one Claude asks about; allow it in the terminal (Ctrl+]):",
                                     calls.len()
                                 ),
-                                theme::soft(),
-                            )]));
+                                width,
+                            ));
                             for call in calls.iter().take(CALL_LINES) {
                                 rows.push(BandRow::text(vec![
                                     Span::styled("   · ", theme::dim()),
@@ -274,10 +303,10 @@ impl Ui {
                                 .map(|line| BandRow { line, hits: Vec::new() }),
                             );
                         }
-                        [] => rows.push(BandRow::text(vec![Span::styled(
-                            "   the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Now",
-                            theme::dim(),
-                        )])),
+                        [] => rows.extend(note_rows(
+                            "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Now",
+                            width,
+                        )),
                     }
                     if answers.iter().any(|answer| answer == "deny") {
                         buttons.push((
@@ -348,6 +377,15 @@ impl Ui {
                 Hit::Alert(item.id.clone(), AlertTap::Open),
             ));
             rows.extend(BandRow::button_rows(buttons, width));
+            // Each alert carries a bar down its left side in its own colour.
+            for row in &mut rows[first_row..] {
+                row.line
+                    .spans
+                    .insert(0, Span::styled("▌", theme::fg(color)));
+                for hit in &mut row.hits {
+                    hit.0 += 1;
+                }
+            }
         }
         if count > SHOWN {
             rows.push(BandRow {

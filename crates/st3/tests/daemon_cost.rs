@@ -421,6 +421,19 @@ const fn post(
     }
 }
 
+const fn put(
+    route: &'static str,
+    path: &'static str,
+    body: fn(&Fixture, usize) -> Value,
+) -> Probe {
+    Probe {
+        route,
+        path,
+        body: Some(body),
+        direct: None,
+    }
+}
+
 const fn direct(route: &'static str, call: Direct) -> Probe {
     Probe {
         route,
@@ -431,6 +444,11 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    put("PUT /v1/notes", "/v1/notes", |_, attempt| json!({
+        "person":"person/bench-operator", "actor":"person/bench-operator",
+        "text":format!("Invented current person context {attempt}"),
+    })),
+    get("GET /v1/client/notes", "/v1/client/notes"),
     get(
         "GET /v1/client/adapter/deliveries",
         "/v1/client/adapter/deliveries?after={adapter_frontier}&wait_ms=0",
@@ -587,7 +605,7 @@ const PROBES: &[Probe] = &[
     ),
     get(
         "GET /v1/client/publication-definition",
-        "/v1/client/publication-definition?subject={seat}",
+        "/v1/client/publication-definition?subject=agent%2Fbench%2Fcost%2Fmover",
     ),
     get("GET /v1/client/now", "/v1/client/now"),
     get("GET /v1/client/machines", "/v1/client/machines"),
@@ -606,6 +624,10 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/client/messages/{*id}",
         "/v1/client/messages/{message}",
+    ),
+    get(
+        "GET /v1/client/message-bodies/{*id}",
+        "/v1/client/message-bodies/{message}",
     ),
     get("GET /v1/client/launches", "/v1/client/launches"),
     get(
@@ -737,6 +759,10 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/messages/page",
         "/v1/messages/page?include_closed=false&limit=100&to={seat}",
+    ),
+    get(
+        "GET /v1/messages/body/{*subject}",
+        "/v1/messages/body/{message}",
     ),
     get(
         "GET /v1/messages/read/{*subject}",
@@ -1746,11 +1772,28 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     let store = Arc::new(Store::open(&database, NODE).unwrap());
     store.bind_fleet(FLEET).ok();
     let peer = Arc::new(Store::open(&peer_database, PEER).unwrap());
+    // Notes publish only after the real fleet admission/advertisement barrier.
+    let anchor = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+    let peer_key = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+    store.pin_fleet_anchor(anchor.public()).unwrap();
+    store.set_member_key(Some(anchor.clone())).unwrap();
+    store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:format!("host/{PEER}"), kind:"fleet.member-admitted".into(), actor:None,
+        fields:serde_json::from_value(json!({
+            "fleet_id":FLEET, "member_key":peer_key.public(), "via":"invite",
+            "sponsor":format!("host/{NODE}"), "mode":"listening",
+        })).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    peer.pin_fleet_anchor(anchor.public()).unwrap();
+    peer.set_member_key(Some(peer_key)).unwrap();
+    sync(&store, NODE, &peer);
     for (daemon, name) in [(&store, NODE), (&peer, PEER)] {
         let mut started = claim_input("daemon.started", "cost-owned-set-support", 0, "");
         started.subject = format!("daemon/{name}");
         started.fields = serde_json::from_value(json!({
-            "status":"running", "features":{"owned_sets":1},
+            "status":"running", "features":{"owned_sets":1,"person_directive_note":1},
         }))
         .unwrap();
         daemon.append_claim(&started).unwrap();
@@ -1791,6 +1834,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     let client = Client::unix(&socket);
     // Client reads come from a person, as stui and the app make them.
     let person = Client::unix_as(&socket, "person/bench-operator").unwrap();
+    let seeded: Value = person.request("PUT", "/v1/notes", Some(&json!({
+        "person":"person/bench-operator", "actor":"person/bench-operator",
+        "text":"Invented current person context",
+    }))).await.expect("the note write probe must pass the real feature barrier");
+    assert_eq!(seeded["note"]["person"], "person/bench-operator");
+    let notes: Value = person.get("/v1/client/notes").await.unwrap();
+    assert_eq!(notes["notes"], json!([seeded["note"]]));
     let arrangement_person = Client::unix_as(&socket, ARRANGEMENT_OWNER).unwrap();
     let subjects = {
         let store = store.clone();
@@ -1851,12 +1901,20 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     assert_eq!(delivery["items"][0]["in_reply_to"], incoming["subject"]);
     // An offline source needs no live runtime: publish its exact departure before measuring
     // the operator's recorded exception, against both generated store sizes.
+    let mut expected_publication = None;
+    let mut expected_publication_revision = None;
     for host in ["amber", "cobalt"] {
         let kdl = format!(
             "version 2\nagent \"bench/cost/mover\" {{\n host \"{host}\"\n workspace {:?}\n command \"sleep 1000\"\n restart always\n}}\n",
             root.to_str().unwrap()
         );
         let intent = st3::parse_intent(&kdl, NODE).unwrap();
+        if host == "cobalt" {
+            expected_publication = Some(
+                serde_json::to_value(intent.subjects.get("agent/bench/cost/mover").unwrap())
+                    .unwrap(),
+            );
+        }
         let preview = store
             .mission(
                 &intent,
@@ -1866,6 +1924,17 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
                 },
             )
             .unwrap();
+        if host == "cobalt" {
+            expected_publication_revision = Some(
+                preview
+                    .changes
+                    .iter()
+                    .find(|change| change.subject == "agent/bench/cost/mover")
+                    .expect("the cobalt declaration must change the desired revision")
+                    .new_revision
+                    .clone(),
+            );
+        }
         store
             .apply_as(
                 &intent,
@@ -1881,6 +1950,21 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
             .selected_desired_token("agent/bench/cost/mover")
             .unwrap()
             .unwrap(),
+    );
+    let publication: Value = person
+        .get("/v1/client/publication-definition?subject=agent%2Fbench%2Fcost%2Fmover")
+        .await
+        .expect("the publication definition cost probe must read the applied fixture");
+    assert_eq!(publication["kind"], "publication-definition");
+    assert_eq!(publication["subject"], "agent/bench/cost/mover");
+    assert_eq!(publication["declaration"], expected_publication.unwrap());
+    assert_eq!(
+        publication["token"].as_str(),
+        Some(fixture.items["placement_token"].as_str())
+    );
+    assert_eq!(
+        publication["revision"].as_str(),
+        Some(expected_publication_revision.as_deref().unwrap())
     );
     client
         .post::<_, Value>("/v1/sets/apply", &owned_set_request("fixture"))
@@ -1949,16 +2033,27 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") {
+                } else if path.starts_with("/v1/client/") || path == "/v1/notes" {
                     person.clone()
                 } else {
                     client.clone()
                 };
+                let expected_publication = &publication;
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
-                        Some(body) => client.post::<_, Value>(&path, body).await,
+                        Some(body) => {
+                            let method = probe.route.split_once(' ').unwrap().0;
+                            client.request::<_, Value>(method, &path, Some(body)).await
+                        }
                     };
+                    if probe.route == "GET /v1/client/publication-definition" {
+                        assert_eq!(
+                            answer.as_ref().expect("the measured publication read must succeed"),
+                            expected_publication,
+                            "the measured publication must retain the exact selected definition"
+                        );
+                    }
                     answer.map_err(|error| error.to_string().chars().take(200).collect())
                 })
                 .await

@@ -16,8 +16,8 @@ import { theme } from '../theme';
 import { Button, Legend, ListRow, Markdown, Note, Screen, SectionHeader, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
-// Home: what needs the person, as stui's Home lists it.
-export function HomeScreen() {
+// Now: what needs the person, as stui's Home lists it.
+export function NowScreen() {
   const { data, caps, hasSynced, truncated, loadErrors, busy, status, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
@@ -44,7 +44,7 @@ export function HomeScreen() {
   // the person to do (after a confirm), an update or a message is read. A decision has none.
   const dismiss = (row: HomeRow): (() => void) | undefined => {
     const item = row.item;
-    // Closed elsewhere: only clearing it takes it off Home.
+    // Closed elsewhere: only clearing it takes it off Now.
     if (item.closedElsewhere) return () => actions.clearClosed(item.id);
     if (item.update && item.actions.includes('work.done')) return () => void actions.done(item, 'Read', 'read');
     if (isRequest(item.attention_kind) && item.actions.includes('work.done')) {
@@ -98,7 +98,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const { data, busy, status, actions } = useStore();
   useMissionsOnFocus();
   const found = data.attention.find(candidate => candidate.id === route.params.id);
-  // Nothing leaves Home by itself: an update is read when the person says so, never by opening it.
+  // Nothing leaves Now by itself: an update is read when the person says so, never by opening it.
   const kept = useRef(found);
   if (found) kept.current = found;
   const item = found ?? kept.current;
@@ -117,7 +117,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
-        <Button label="clear from Home" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
+        <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
       </ScrollView>
     </Screen>;
@@ -135,9 +135,9 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         {item.update.subjects?.map((subject, index) => subject.url
           ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
           : <T key={index} dim>↗ {subject.label}  {subject.ref ?? ''}</T>)}
-        <T dim>{item.closedElsewhere ? 'This was closed. It stays under Recently closed until you clear it.' : 'Nothing waits on this. It stays on Home until you mark it read.'}</T>
+        <T dim>{item.closedElsewhere ? 'This was closed. It stays under Recently closed until you clear it.' : 'Nothing waits on this. It stays on Now until you mark it read.'}</T>
         {item.closedElsewhere
-          ? <Button label="clear from Home" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
+          ? <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
           : item.actions.includes('work.done') ? <Button label="mark read" disabled={busy || status !== 'online'} onPress={() => void actions.done(item, 'Read', 'read').then(done => { if (done) navigation.goBack(); })} /> : null}
         {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
         <T dim selectable>{item.id}</T>
