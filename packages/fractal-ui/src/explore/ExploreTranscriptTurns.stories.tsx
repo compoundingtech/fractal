@@ -137,6 +137,7 @@ function Explorer(initialArgs: ExploreArgs) {
       <div data-control-missing-time>Reply without its own timestamp.</div>
       <div data-control-nested-card data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Projected sender/time</header><article data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Duplicate card header</header>Nested input.</article></div>
       <div data-control-covered-line {...stylex.props(styles.block)}><p>First line under a toolbar.</p><div data-seat-meta-overlay {...stylex.props(styles.seatMeta, styles.coveredLine)}>Covering metadata</div></div>
+      <div data-control-overhang {...stylex.props(styles.overhangControl)}><div {...stylex.props(styles.block)}><p {...stylex.props(styles.controlLine)}>Previous last line.</p></div><div {...stylex.props(styles.block)}><p {...stylex.props(styles.controlLine)}>Reply.</p><div data-seat-meta-overlay {...stylex.props(styles.seatMeta, styles.noOverhang)}>Meta</div></div></div>
       <span data-control-unicode-glyph>↪</span>
       <strong data-control-heavy-sender>Heavy sender</strong>
     </section> : null}
@@ -157,7 +158,7 @@ const projectionCss = `
 @media (prefers-reduced-motion: reduce) { [data-turns-explorer] [data-input-chevron] svg { transition: none; } }
 `
 const styles = stylex.create({
-  root: { padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, boxSizing: 'border-box' },
+  root: { padding: s.section, maxWidth: '100%', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, boxSizing: 'border-box' },
   wide: { width: g.polishWide }, narrow: { width: geometry.narrow },
   title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, explanation: { color: ink.fgMuted, marginBlock: s.md },
   controls: { display: 'flex', gap: s.md, marginBlock: s.md }, control: { padding: s.xs, color: ink.fg, backgroundColor: surface.rowActive, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, cursor: 'pointer', fontFamily: t.fontSans, ':focus-visible': { outlineColor: accent.primary, outlineStyle: 'solid', outlineWidth: g.focusRing } },
@@ -179,8 +180,11 @@ const styles = stylex.create({
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
-  seatMeta: { position: 'absolute', bottom: '100%', right: 0, height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  seatMeta: { position: 'absolute', bottom: '100%', right: `calc(-1 * clamp(${s.zero}, calc((100vw - ${g.lane}) / 2 - ${s.section}), ${s.panel}))`, height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
   coveredLine: { top: 0, bottom: 'auto', left: 0, right: 'auto' },
+  noOverhang: { right: 0 },
+  overhangControl: { width: g.previewMax, maxWidth: '100%', display: 'flex', flexDirection: 'column', gap: s.md },
+  controlLine: { margin: 0, paddingRight: s.section, textAlign: 'right' },
   collapsedMeta: { position: 'absolute', right: 0, top: 0, display: 'flex', gap: s.md, alignItems: 'center', height: g.toolRow },
   divider: { position: 'absolute', bottom: '100%', left: 0, right: 0, textAlign: 'center', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   summary: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, lineHeight: g.toolRow, whiteSpace: 'nowrap', borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { flex: '1 1 auto', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
@@ -200,7 +204,7 @@ export default meta
 type Story = StoryObj<typeof meta>
 const distance = (label: DOMRect, block: DOMRect) => Math.max(block.top - label.bottom, label.top - block.bottom, 0)
 const intersects = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
-function lastLineRects(block: HTMLElement) {
+function visibleTextRects(block: HTMLElement) {
   const content = Array.from(block.querySelectorAll<HTMLElement>('[data-message-content], [data-testid="agent-message"], [data-input-title], p')).find(element => element.getClientRects().length > 0) ?? block
   const bounds = content.getBoundingClientRect()
   const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT)
@@ -216,6 +220,10 @@ function lastLineRects(block: HTMLElement) {
       if (right > left && bottom > top) rects.push(new DOMRect(left, top, right - left, bottom - top))
     }
   }
+  return rects
+}
+function lastLineRects(block: HTMLElement) {
+  const rects = visibleTextRects(block)
   const bottom = Math.max(...rects.map(rect => rect.bottom))
   return rects.filter(rect => rect.bottom > bottom - 1)
 }
@@ -262,7 +270,9 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         await expect(block.getBoundingClientRect().top - previous.getBoundingClientRect().bottom).toBe(8)
         const previousLastLine = lastLineRects(previous)
         await expect(previousLastLine.length).toBeGreaterThan(0)
-        for (const line of previousLastLine) await expect(intersects(overlay.getBoundingClientRect(), line)).toBe(false)
+        for (const line of visibleTextRects(previous)) await expect(intersects(overlay.getBoundingClientRect(), line)).toBe(false)
+        await expect(overlay.getBoundingClientRect().right).toBeLessThanOrEqual(lane.getBoundingClientRect().right)
+        await expect(overlay.getBoundingClientRect().left).toBeGreaterThanOrEqual(lane.getBoundingClientRect().left)
       }
     }
     if (lane.hasAttribute('data-recommended')) {
@@ -303,6 +313,21 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   const coveredControl = canvasElement.querySelector('[data-control-covered-line]')!
   await expect(coveredControl.querySelector('[data-seat-meta-overlay]')!.getBoundingClientRect().bottom).toBeGreaterThan(coveredControl.querySelector('p')!.getBoundingClientRect().top)
   await expect(lastLineRects(coveredControl as HTMLElement).some(line => intersects(coveredControl.querySelector('[data-seat-meta-overlay]')!.getBoundingClientRect(), line))).toBe(true)
+  const overhangControl = canvasElement.querySelector<HTMLElement>('[data-control-overhang]')!
+  const overhangOverlay = overhangControl.querySelector<HTMLElement>('[data-seat-meta-overlay]')!
+  const preceding = overhangControl.firstElementChild as HTMLElement
+  const overlapsControl = () => visibleTextRects(preceding).some(line => intersects(overhangOverlay.getBoundingClientRect(), line))
+  await expect(overlapsControl()).toBe(true)
+  overhangOverlay.style.right = `calc(-1 * ${s.panel})`
+  await expect(overlapsControl()).toBe(false)
+  overhangOverlay.style.right = '0'
+  await expect(overlapsControl()).toBe(true)
+  overhangOverlay.style.right = '-100vw'
+  await expect(overhangOverlay.getBoundingClientRect().right).toBeGreaterThan(overhangControl.getBoundingClientRect().right)
+  overhangOverlay.style.right = ''
+  if (canvasElement.ownerDocument.defaultView!.innerWidth <= 440) {
+    await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
+  }
   await expect(canvasElement.querySelector('[data-control-unicode-glyph] svg')).toBeNull()
   for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
     const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))

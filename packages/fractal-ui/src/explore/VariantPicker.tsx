@@ -27,7 +27,7 @@ export function VariantPicker({ label, choices, value, multiple = false, compare
   </div>
 }
 const styles = stylex.create({
-  row: { display: 'flex', alignItems: 'center', gap: space.sm, minHeight: geometry.controlSm, minWidth: 0, borderBottomWidth: geometry.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  row: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: space.sm, minHeight: geometry.controlSm, minWidth: 0, borderBottomWidth: geometry.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   label: { width: 'max-content', flexShrink: 0, whiteSpace: 'nowrap', color: text.fgSoft, fontWeight: type.weightMedium },
   choices: { display: 'flex', alignItems: 'center', gap: space.xs, flexShrink: 0 },
   choice: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: geometry.controlSm, paddingInline: space.md, borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.sm, backgroundColor: surface.controlFill, color: text.fgSoft, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'pointer', whiteSpace: 'nowrap', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: geometry.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: space.xs2 } },
