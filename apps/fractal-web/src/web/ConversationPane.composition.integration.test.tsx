@@ -38,6 +38,9 @@ const source = vi.hoisted(() => ({
   sync: undefined as FeedSyncObservation | undefined,
   now: 1000,
   sendEnabled: false,
+  send: vi.fn(),
+  capabilities: vi.fn(),
+  runtimeOptions: undefined as ConversationRuntimeOptions | undefined,
   staticWorkLog: false,
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
   transcriptHistories: [] as React.ComponentProps<typeof Kit.Transcript>['history'][],
@@ -59,7 +62,7 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
-  useDataSource: () => ({ agents, conversationInterest: undefined, attachments: source.sendEnabled ? { send: vi.fn() } : undefined }),
+  useDataSource: () => ({ agents, conversationInterest: undefined, attachments: source.sendEnabled ? { send: source.send, capabilities: source.capabilities } : undefined }),
   useFeedInterest: () => {},
   useNow: () => source.now,
   useGrants: () => ({ actions: 'ungranted', messageSend: source.sendEnabled ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
@@ -78,6 +81,7 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', a
     ...kit,
     EmbraceRuntimeProvider: (props: React.ComponentProps<typeof Kit.EmbraceRuntimeProvider>) => {
       source.runtimeItems.push(props.options.messages ?? [])
+      source.runtimeOptions = props.options
       return <kit.EmbraceRuntimeProvider {...props}><DraftProbe />{props.children}</kit.EmbraceRuntimeProvider>
     },
   }
@@ -144,6 +148,9 @@ const container = document.createElement('div')
 beforeEach(() => {
   source.now = 1000
   source.sendEnabled = false
+  source.send.mockReset()
+  source.capabilities.mockReset()
+  source.runtimeOptions = undefined
   source.staticWorkLog = false
   source.runtimeItems = []
   source.transcriptTurns = []
@@ -879,6 +886,29 @@ describe('ConversationPane composition activation', () => {
     await mount()
     expect(source.composerProps.at(-1)?.targetLabel).toBe('Example Agent (agent/selected) · Session session/active')
     expect(container.querySelector('textarea')?.getAttribute('aria-label')).toBe('Message to Example Agent (agent/selected) · Session session/active')
+  })
+
+  it.each([401, 403])('recovers sending access after %s without losing the draft or automatically sending', async status => {
+    source.sendEnabled = true
+    source.send.mockResolvedValue({ _tag: 'Refused', status, reason: 'ungranted' })
+    source.capabilities.mockResolvedValue({ _tag: 'Success', value: { send: 'granted' } })
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    await mount()
+    await act(async () => { source.setDraft!('Keep this recovery draft') })
+    await act(async () => {
+      await source.runtimeOptions!.onNew!({ role: 'user', content: [{ type: 'text', text: 'Refused submission' }], attachments: [], parentId: null, sourceId: null, runConfig: {} })
+    })
+    expect(source.composerProps.at(-1)?.sendDisabled).toBe(true)
+    expect(text()).toContain('This device credential was revoked.')
+    const recovery = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Check sending access')!
+    expect(recovery).toBeDefined()
+    expect(container.querySelector('textarea')?.value).toBe('Keep this recovery draft')
+    await act(async () => { recovery.click() })
+    expect(source.capabilities).toHaveBeenCalledTimes(1)
+    expect(source.send).toHaveBeenCalledTimes(1)
+    expect(source.composerProps.at(-1)?.sendDisabled).toBe(false)
+    expect(container.querySelector('textarea')?.value).toBe('Keep this recovery draft')
+    expect(text()).not.toContain('This device credential was revoked.')
   })
 
   it.each(['running', 'completed'] as const)('renders no unavailable cancel control or raw state text while %s', async status => {
