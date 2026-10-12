@@ -48,13 +48,13 @@ export interface AgentMessageProps {
 
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels.
  * The path is one non-wrapping run that containers truncate. With `tooltip`, the run is one focus stop
- * named by the full identity and the kit tooltip shows that identity on hover and keyboard focus. */
+ * whose content names it: hidden dots join the visible parts, so the name is the full identity and
+ * contains the visible text; the kit tooltip shows that identity on hover and keyboard focus. */
 export const AgentIdHierarchy = ({ id, tooltip = false }: { readonly id: string; readonly tooltip?: boolean }) => {
-  const nameId = React.useId()
   if (!id.includes('.')) return <span data-agent-id={id}>{id}</span>
-  const path = <span aria-hidden="true" {...stylex.props(styles.agentPath)}>{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span>
-  if (!tooltip) return <span data-agent-id={id}>{path}<VisuallyHidden>{id}</VisuallyHidden></span>
-  return <span data-agent-id={id}><Tooltip label={id}><Button aria-labelledby={nameId} data-agent-id-trigger {...stylex.props(styles.agentTrigger)}>{path}</Button></Tooltip><VisuallyHidden id={nameId}>{id}</VisuallyHidden></span>
+  const parts = id.split('.')
+  if (!tooltip) return <span data-agent-id={id}><span aria-hidden="true" {...stylex.props(styles.agentPath)}>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></span>
+  return <span data-agent-id={id}><Tooltip label={id}><Button data-agent-id-trigger {...stylex.props(styles.agentTrigger)}><span {...stylex.props(styles.agentPath)}>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? <><Icon name="chevron-right" scale="disclosure" /><VisuallyHidden>.</VisuallyHidden></> : null}{part}</React.Fragment>)}</span></Button></Tooltip></span>
 }
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
