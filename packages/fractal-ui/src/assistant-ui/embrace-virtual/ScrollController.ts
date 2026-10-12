@@ -39,6 +39,9 @@ export class ScrollController {
   private pendingJump: string | undefined
 
   readonly jumpTo = (key: string) => {
+    if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
+    this.restoreFrame = undefined
+    this.pressed = undefined
     this.pendingJump = key
     this.following = false
     this.restoring = false
@@ -66,6 +69,8 @@ export class ScrollController {
   }
 
   readonly jump = () => {
+    this.pendingJump = undefined
+    this.pressed = undefined
     this.following = true
     this.restoring = false
     this.pendingAnchor = undefined
@@ -266,6 +271,15 @@ export class ScrollController {
       this.rowKeys.clear()
       for (const row of rows) this.rowKeys.add(row.id)
     }
+    // News survives a held row action. Pinning affects geometry, not delivery.
+    if (previous.length > 0 && previous !== rows && !this.restoring) {
+      const start = rows.findIndex(row => row.id === previous[0]?.id)
+      if (start < 0 || rows.length - start !== previous.length ||
+        previous.some((row, index) => row.id !== rows[start + index]?.id ||
+          (row.version === undefined ? row !== rows[start + index] : row.version !== rows[start + index]?.version))) {
+        if (!this.following || this.pressed !== undefined) this.options.setUnread(true)
+      }
+    }
     if (this.restoring && this.element !== null && rows.length > 0) this.restore()
     if (this.pendingJump !== undefined) {
       this.pendingAnchor = { key: this.pendingJump, offset: 0 }
@@ -296,13 +310,6 @@ export class ScrollController {
     } else if (this.pendingAnchor !== undefined) {
       this.restore()
     }
-    if (previous.length === 0 || previous === rows || this.restoring) return
-    const start = rows.findIndex((row) => row.id === previous[0]?.id)
-    if (
-      start < 0 ||
-      rows.length - start !== previous.length ||
-      previous.some((row, index) => row.id !== rows[start + index]?.id || (row.version === undefined ? row !== rows[start + index] : row.version !== rows[start + index]?.version))
-    ) this.options.setUnread(true)
   }
 }
 
