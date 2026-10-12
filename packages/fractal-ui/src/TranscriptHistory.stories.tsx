@@ -342,7 +342,11 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   const focusedBeforePrepend = within(row(1300)!).getByRole('button', { name: /Worked/ })
   focusedBeforePrepend.focus()
   await deliver(200)
-  await waitFor(() => expect(row(1300)?.getBoundingClientRect().top - readingTop).toBe(0))
+  await waitFor(() => {
+    const readingRow = row(1300)
+    if (readingRow === null) throw new Error('Reading anchor row is not mounted after prepend')
+    expect(readingRow.getBoundingClientRect().top - readingTop).toBe(0)
+  })
   await expect(document.activeElement).toBe(focusedBeforePrepend)
   await mountedBound()
 
