@@ -95,7 +95,7 @@ Vendored third-party data with no package dependency is recorded too, in the inv
 starts with a generated `// Source: name@version (license), origin` header and embeds the upstream
 license text. Both guards fail when a header is missing, its license is missing, or the list
 drifts from the headers. The kit icon glyphs
-(`packages/fractal-ui/src/assistant-ui/composition/icon-glyphs.generated.ts`, Lucide, ISC) are
+(`packages/fractal-ui/src/assistant-ui/composition/icon-glyphs.generated.ts`, Lucide, ISC AND MIT) are
 the one entry. Regenerate them with `python3 packages/fractal-ui/scripts/vendor-icon-glyphs.py`.
 That script pins the npm tarball and its SHA-512 integrity; `--check` fails on a stale file.
 

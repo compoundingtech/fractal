@@ -101,7 +101,7 @@ export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & Sideba
   return <div data-testid="agent-hover-card" {...stylex.props(styles.card)}>
     <strong {...stylex.props(styles.cardTitle)}>{row.title}</strong>
     <div {...stylex.props(styles.cardSummary)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} variant="SG-1" freshness={row.freshness} iconOnly /><span>{row.statusLabel}</span><span>·</span><Icon name="host" size={12} /><span>{row.host}</span></div>
-    {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><Icon name="work" size={12} />{row.description}</p>}
+    {row.description !== undefined && <p {...stylex.props(styles.cardWork)}><span {...stylex.props(styles.cardWorkGlyph)}><Icon name="work" size={12} /></span>{row.description}</p>}
     <dl {...stylex.props(styles.details)}>
       {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="spend" size={12} />Spend</dt><dd {...stylex.props(styles.detailValue)}>{spendCount.format(row.usage.usd)} · {tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : 'Lifetime · includes subagents'}</div></dd></>}
       {row.duration._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="duration" size={12} />Duration</dt><dd {...stylex.props(styles.detailValue)}><SidebarDuration duration={row.duration} /></dd></>}
@@ -219,7 +219,9 @@ const styles = stylex.create({
   card: { display: 'flex', flexDirection: 'column', gap: s.md, width: g.specimenAside, maxWidth: '100%', boxSizing: 'border-box', overflowWrap: 'anywhere' },
   cardTitle: { fontSize: t.uiSize, lineHeight: t.uiLeading },
   cardSummary: { display: 'flex', alignItems: 'center', gap: s.sm, color: ink.sidebarFgMuted },
-  cardWork: { display: 'flex', alignItems: 'start', gap: s.sm, margin: s.zero, paddingBlock: s.sm, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
+  cardWork: { display: 'flex', alignItems: 'start', gap: s.sm, margin: s.zero, paddingBlock: s.sm, lineHeight: t.metaLeading, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
+  // A line-tall slot centres the glyph on the first text line when the description wraps.
+  cardWorkGlyph: { display: 'inline-flex', alignItems: 'center', flexShrink: 0, height: t.metaLeading },
   cardScope: { color: ink.sidebarFgMuted, fontSize: t.denseSize },
   cardLabel: { display: 'flex', alignItems: 'center', gap: s.sm, margin: s.zero, color: ink.sidebarFgMuted },
   cardChildren: { margin: s.zero, padding: s.zero, listStyleType: 'none', color: ink.sidebarFgMuted },

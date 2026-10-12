@@ -885,7 +885,7 @@ const AgentFolderRow = React.memo(
                   <div {...stylex.props(styles.line)}>
                     <SidebarStatus
                       status={status}
-                      variant="SG-3"
+                      variant="SG-1"
                       statusSince={agent?.statusSince}
                       now={now}
                       freshness={feed._tag === 'Observed' ? feed.freshness : 'unobserved'}

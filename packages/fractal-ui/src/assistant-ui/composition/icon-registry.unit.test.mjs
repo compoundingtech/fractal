@@ -8,7 +8,8 @@ const { glyphCollisions, glyphs, iconGroups, iconNames, iconRegistry, iconSizes,
 const { lucideGlyphs } = await server.ssrLoadModule('/src/assistant-ui/composition/icon-glyphs.generated.ts')
 
 test('the registry names every meaning in the spec once, in kebab case', () => {
-  assert.equal(iconNames.length, 102)
+  // The spec's 102 meanings, plus `job` split from `wait` (visual language E25 vs E28).
+  assert.equal(iconNames.length, 103)
   assert.equal(new Set(iconNames).size, iconNames.length)
   for (const name of iconNames) assert.match(name, /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/, name)
 })

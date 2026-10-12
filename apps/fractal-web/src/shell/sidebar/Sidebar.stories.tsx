@@ -22,6 +22,7 @@ import { createWindow, projectWorkspaces, reduceWindow, type WindowAction } from
 import { defaultFilters, fixtureSidebarState, type SidebarFilters } from './state.ts'
 import { statuses, type AgentStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { SidebarStatus } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
+import { Icon } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 
 const styles = stylex.create({
   sidebar: {
@@ -173,12 +174,32 @@ export const AllStates: Story = {
       <div {...stylex.props(styles.statusGrid)}>
         {(Object.keys(statuses) as AgentStatus[]).map((status) => (
           <div key={status} {...stylex.props(styles.status)}>
-            <SidebarStatus status={status} variant="SG-3" freshness="live" iconOnly />
+            <SidebarStatus status={status} variant="SG-1" freshness="live" iconOnly />
             {statuses[status].label}
           </div>
         ))}
       </div>
       <FolderTree />
     </>
+  ),
+}
+
+// The ended mark is still Johannes's open choice: the ratified neutral disc, the outline stop circle, or a finish flag.
+export const EndedOptions: Story = {
+  render: () => (
+    <div {...stylex.props(styles.statusGrid)}>
+      <div {...stylex.props(styles.status)}>
+        <SidebarStatus status="ended" variant="SG-1" freshness="live" iconOnly />
+        Neutral disc · ended (in use)
+      </div>
+      <div {...stylex.props(styles.status)}>
+        <SidebarStatus status="ended" variant="SG-3" freshness="live" iconOnly />
+        Stop circle · ended
+      </div>
+      <div {...stylex.props(styles.status)}>
+        <Icon name="mission" size={12} />
+        Finish flag · ended (the mission mark today)
+      </div>
+    </div>
   ),
 }

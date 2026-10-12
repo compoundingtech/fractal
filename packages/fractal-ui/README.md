@@ -31,7 +31,7 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
-- **Fractal UI / Icons**: all 102 registry meanings at 12, 14 and 16, grouped, at 440 and 1440 in dark and light. The play checks one glyph per meaning (apart from the allowed pairs), a 1.5 stroke and 2 dots on screen at every size, and that each glyph renders at its size token. Each check also injects a fault, expects the rejection, restores the page and passes again.
+- **Fractal UI / Icons**: all 103 registry meanings at 12, 14 and 16, grouped, at 440 and 1440 in dark and light. The play checks one glyph per meaning (apart from the allowed pairs), a 1.5 stroke and 2 dots on screen at every size, and that each glyph renders at its size token. Each check also injects a fault, expects the rejection, restores the page and passes again.
 
 ## Families
 
@@ -75,9 +75,11 @@ Every foreground/background pair used for text meets WCAG AA (≥ 4.5:1) in all 
 
 ### Icons
 
-`Icon` (exported as `CompositionIcon`) takes a semantic `name`, an optional `size` (12, 14 or 16; the registry default otherwise) and an optional `label`. Without a label it is decorative and hidden from assistive technology. Call sites name the meaning (`more`, `view-options`, `stop-run`), never the drawing. `composition/icon-registry.ts` maps each of the 102 meanings to one glyph, size and paint. Only six pairs may share a glyph: send/sort-asc, scroll-end/sort-desc, run/terminal, question/open-request, delivery/inbox and irc/thread. `test:icons` fails on any other reuse, an unused vendored glyph or a size outside the tokens.
+`Icon` (exported as `CompositionIcon`) takes a semantic `name`, an optional `size` (12, 14 or 16; the registry default otherwise) and an optional `label`. Without a label it is decorative and hidden from assistive technology. Call sites name the meaning (`more`, `view-options`, `stop-run`), never the drawing. `composition/icon-registry.ts` maps each of the 103 meanings to one glyph, size and paint: the spec's 102, with background jobs (`job`) split from `wait` as their own work kind. Only six pairs may share a glyph: send/sort-asc, scroll-end/sort-desc, run/terminal, question/open-request, delivery/inbox and irc/thread. `test:icons` fails on any other reuse, an unused vendored glyph or a size outside the tokens.
 
-Glyphs draw on a 24-unit grid. The `iconVars` tokens hold the sizes and keep the stroke at 1.5 and dots at 2 on screen, whatever the size. The geometry is Lucide (ISC), vendored as path data into `composition/icon-glyphs.generated.ts` by `scripts/vendor-icon-glyphs.py`. That file is pinned to an exact npm archive and integrity, and carries the license text. There is no runtime dependency. The dependency license inventory records it under `vendored`.
+Agent status is not an icon meaning. Surfaces show it with the ratified SG-1 discs (`SidebarStatus`), whose tone is the status: running and needs-you carry colour, and everything else, including a stale observation, stays neutral. The outline SG-3 shapes remain only as an exploration variant: some of them read as registry glyphs (the idle moon as `theme-dark`, the pending hourglass as `wait`), so no product surface uses them. The `Status ink` story checks that stale keeps the neutral ink.
+
+Glyphs draw on a 24-unit grid. The `iconVars` tokens hold the sizes and keep the stroke at 1.5 and dots at 2 on screen, whatever the size. The geometry is Lucide (ISC, with the Feather MIT notice for its Feather-derived glyphs), vendored as path data into `composition/icon-glyphs.generated.ts` by `scripts/vendor-icon-glyphs.py`. That file is pinned to an exact npm archive and integrity, and carries both license texts. There is no runtime dependency. The dependency license inventory records it under `vendored` as `ISC AND MIT`.
 
 ### Gated transcript and work log
 

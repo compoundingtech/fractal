@@ -5044,7 +5044,7 @@
     {
       "name": "lucide-static",
       "version": "1.55.0",
-      "license": "ISC",
+      "license": "ISC AND MIT",
       "path": "packages/fractal-ui/src/assistant-ui/composition/icon-glyphs.generated.ts"
     }
   ]

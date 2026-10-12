@@ -4,8 +4,9 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
 import { expect, userEvent, within } from 'storybook/test'
 import { AgentHoverCard, SidebarAgentRow } from './SidebarAgentRow'
-import type { SidebarAgentRow as Row } from './model'
-import { spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
+import { SidebarStatus } from './SidebarStatus'
+import { statuses, type AgentStatus, type SidebarAgentRow as Row } from './model'
+import { spaceVars as s, surfaceVars as surface, statusVars as tone, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
 
 const storyNow = Date.UTC(2026, 9, 8, 12, 0, 0)
 /** Fully reported synthetic identity; every optional fact the card can render is present. */
@@ -96,10 +97,34 @@ export const QuickOpenAction: Story = { name: 'Row hover · quick Open', render:
   await expect(target.querySelector('[aria-current="page"]')).not.toBeNull()
 } }
 export const AllStates: Story = { render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /><CardPair row={unreportedRow} /><CohortList /></main> }
+/** Only running and needs-you carry tone. A stale observation is a neutral fact: it must match idle ink, never the danger ink. */
+const neutralInkProblems = (root: HTMLElement) => {
+  const ink = (status: AgentStatus) => getComputedStyle(root.querySelector(`[data-status="${status}"]`)!).color
+  const danger = getComputedStyle(root.querySelector('[data-ink-reference="danger"]')!).color
+  return [...(ink('stale') === ink('idle') ? [] : ['stale is not neutral']), ...(ink('stale') === danger ? ['stale uses danger ink'] : []), ...(ink('working') === ink('idle') ? ['working lost its tone'] : [])]
+}
+export const StatusInk: Story = { name: 'Status ink · stale stays neutral', render: () => <main {...stylex.props(styles.root)}>
+  <span aria-hidden data-ink-reference="danger" {...stylex.props(styles.dangerReference)} />
+  <ul data-status-list {...stylex.props(styles.list)}>{(Object.keys(statuses) as AgentStatus[]).map(status => <li key={status} {...stylex.props(styles.statusRow)}><SidebarStatus status={status} statusSince={storyNow - 5 * 60_000} now={storyNow} freshness={status === 'stale' ? 'stale' : 'live'} iconOnly /><span>{statuses[status].label}</span></li>)}</ul>
+</main>, play: async ({ canvasElement }) => {
+  const root = canvasElement.querySelector<HTMLElement>('main')!
+  await expect(neutralInkProblems(root)).toEqual([])
+  // Control: stale painted with the danger ink is rejected, then restored.
+  const stale = root.querySelector<HTMLElement>('[data-status="stale"]')!
+  stale.style.color = getComputedStyle(root.querySelector('[data-ink-reference="danger"]')!).color
+  await expect(neutralInkProblems(root)).toEqual(['stale is not neutral', 'stale uses danger ink'])
+  stale.style.removeProperty('color')
+  await expect(neutralInkProblems(root)).toEqual([])
+  // The tooltip names local time and time in status, not a raw UTC stamp.
+  await expect(stale.title).toContain('· 5m in status')
+  await expect(stale.title).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/)
+} }
 
 const styles = stylex.create({
   root: { height: '100vh', minHeight: 0, overflowY: 'auto', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, display: 'flex', flexDirection: 'column', gap: s.xl },
   spread: { display: 'flex', alignItems: 'flex-start', flexWrap: 'wrap', gap: s.xl },
   list: { display: 'flex', flexDirection: 'column', gap: s.xs, width: g.specimenAside, minWidth: 0 },
   aside: { width: g.specimenAside, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.raised, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, boxShadow: elevation.popover },
+  statusRow: { display: 'flex', alignItems: 'center', gap: s.sm, listStyleType: 'none' },
+  dangerReference: { display: 'none', color: tone.dangerFg },
 })
