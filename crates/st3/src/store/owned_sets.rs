@@ -1279,9 +1279,24 @@ impl Store {
         intent: &NormalizedIntent,
         options: &Options,
     ) -> Result<Preview, St3Error> {
-        self.connection
+        let mut preview = self.connection
             .batched(|tx| plan_tx(tx, intent, options).map(|p| p.preview))
-            .map_err(|e| St3Error::new("internal", e))?
+            .map_err(|e| St3Error::new("internal", e))??;
+        // Operational annotations belong to preview only. Publication keeps its existing
+        // transaction reads and suspension follows the shared launch-lineage comparator.
+        for (subject, effect) in &mut preview.effects {
+            let Some(next) = intent.subjects.get(subject) else { continue; };
+            if let Some(action) = crate::suspension::publication_action(
+                self, next, true, || {
+                    Ok(self.desired_subject_with_writer(subject)?
+                        .and_then(|(desired, _)| desired.member))
+                },
+            ).map_err(internal)? {
+                effect.push_str("; ");
+                effect.push_str(&action.reason);
+            }
+        }
+        Ok(preview)
     }
     pub fn owned_member_guard(&self, s: &str) -> Result<(), St3Error> {
         guard_member(&self.readers.get(), s)
