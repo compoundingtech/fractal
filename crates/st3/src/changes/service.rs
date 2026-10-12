@@ -347,16 +347,16 @@ fn import_tracking(
         let mut seen = BTreeSet::new();
         let mut cursor = Some(current);
         while let Some(object) = cursor {
-            if let Some(actual_id) = mismatched_objects.get(&object) {
-                if actual_id != &expected_id {
-                    report.skip(ImportIssue {
-                        ref_change_id: Some(expected_id),
-                        record_change_id: Some(actual_id.clone()),
-                        object_id: object,
-                        reason: "change_id_mismatch",
-                    });
-                    continue 'currents;
-                }
+            if let Some(actual_id) = mismatched_objects.get(&object)
+                && actual_id != &expected_id
+            {
+                report.skip(ImportIssue {
+                    ref_change_id: Some(expected_id),
+                    record_change_id: Some(actual_id.clone()),
+                    object_id: object,
+                    reason: "change_id_mismatch",
+                });
+                continue 'currents;
             }
             let known =
                 store.indexed_git_changes(&configuration.name, std::slice::from_ref(&object))?;
