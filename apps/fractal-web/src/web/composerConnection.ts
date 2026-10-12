@@ -28,7 +28,7 @@ export const composerConnectionProps = ({ network, observation, now, gateway, re
     connectionNotice: {
       tone: offline ? 'offline' : 'reconnecting',
       text: offline ? 'You are offline' : gateway === undefined ? 'Connection lost · reconnecting' : `${gateway} connection lost · reconnecting`,
-      ...(reconnect === undefined ? {} : { action: { label: 'Reconnect now', onPress: reconnect } }),
+      ...(reconnect === undefined ? {} : { action: { label: 'Reconnect', onPress: reconnect } }),
     },
   }
 }
