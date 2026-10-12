@@ -29,8 +29,7 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
   const items = reverse ? [...filteredItems].reverse() : filteredItems
   React.useLayoutEffect(() => {
     if (!cold) return
-    if (noSettle) { setKeys(new Set(expanded)); root.current?.querySelector<HTMLElement>(`[data-sidebar-tree-key="${deepKey}"]`)?.scrollIntoView({ block: 'nearest' }) }
-    else handle.current?.reveal(deepKey)
+    handle.current?.reveal(deepKey, noSettle ? { anchor: false } : undefined)
     const frame = requestAnimationFrame(() => setResized(true))
     let probeFrame: number | undefined
     if (!noSettle) {
@@ -97,6 +96,35 @@ export const DepthCap: Story = { render: pair, play: async ({ canvasElement }) =
 export const AccessibleRows: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); for (const example of [yes, no]) { await expect(within(example as HTMLElement).getAllByRole('treegrid')).toHaveLength(1); await expect(within(example as HTMLElement).getAllByRole('row')).toHaveLength(example.querySelectorAll('[data-sidebar-tree-key]').length); await expect(stack(example).querySelectorAll('[role="row"]')).toHaveLength(0); await expect(stack(example).getAttribute('aria-hidden')).toBe('true') } await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0) } }
 export const PinnedClick: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const pin = [...yes.querySelectorAll('[data-pinned-key]')].at(-1) as HTMLElement; const key = pin.dataset.pinnedKey!; await userEvent.click(pin); await waitFor(() => expect(document.activeElement).toBe(real(yes, key))); await frames(); await expect(clear(yes, real(yes, key)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
 export const FocusAndReveal: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const top = stack(yes).dataset.topKey!; real(yes, top)!.focus(); await frames(); await expect(clear(yes, real(yes, top)!)).toBe(true); await userEvent.keyboard('{ArrowDown}'); await frames(); await expect(clear(yes, document.activeElement as HTMLElement)).toBe(true); await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal review' })); await waitFor(() => expect(real(yes, deepKey)).not.toBeNull()); await frames(); await expect(clear(yes, real(yes, deepKey)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
+export const VisibleFocusDoesNotJump: Story = { render: pair, play: async ({ canvasElement }) => {
+  const [yes, no] = examples(canvasElement)
+  await frames()
+  await scroll(yes)
+  await scroll(no)
+  for (const example of [yes, no]) {
+    const view = viewport(example)
+    const bounds = view.getBoundingClientRect()
+    const inset = stack(example).getBoundingClientRect().height
+    const row = [...view.querySelectorAll<HTMLElement>('[data-sidebar-tree-key]')].find(row => {
+      const rect = row.getBoundingClientRect()
+      return rect.top > bounds.top + inset + rect.height && rect.bottom < bounds.bottom - rect.height
+    })!
+    await expect(row).toBeDefined()
+    const before = view.scrollTop
+    // The disabled-stickiness control deliberately reproduces the previous exact
+    // focus alignment, so this assertion has a genuinely failing comparison.
+    const naiveFocus = () => row.scrollIntoView({ block: 'start' })
+    if (example === no) view.addEventListener('focusin', naiveFocus)
+    try {
+      row.focus()
+      await frames()
+      if (example === yes) await expect(view.scrollTop).toBe(before)
+      else await expect(Math.abs(view.scrollTop - before)).toBeGreaterThan(1)
+    } finally {
+      view.removeEventListener('focusin', naiveFocus)
+    }
+  }
+} }
 export const CollapseFilterReorder: Story = { render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   await frames()

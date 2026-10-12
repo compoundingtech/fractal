@@ -12,7 +12,7 @@ export interface SidebarTreeItem<T> {
   /** Accessible label and RAC typeahead text. */
   readonly textValue: string
 }
-export interface SidebarTreeHandle { reveal(key: Key): void }
+export interface SidebarTreeHandle { reveal(key: Key, options?: { readonly anchor: false }): void }
 export interface SidebarTreeProps<T extends SidebarTreeItem<T>> {
   readonly items: readonly T[]
   readonly renderRow: (item: T, state: { depth: number; expanded: boolean; pinned: boolean }) => React.ReactNode
@@ -37,6 +37,8 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const navigation = React.useRef<TreeItemRenderProps['state'] | undefined>(undefined)
   const frame = React.useRef<number | undefined>(undefined)
   const pending = React.useRef<Key | undefined>(undefined)
+  const anchorMode = React.useRef<'reveal' | 'focus' | 'once'>('focus')
+  const stickyInset = React.useRef(0)
   const awaitingExpansion = React.useRef(false)
   const settlingAttempts = React.useRef(0)
   const measurementBank = React.useRef<HTMLDivElement>(null)
@@ -65,13 +67,26 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     if (key === undefined || viewport === null || virtualizer === null || virtualizer.visibleRect.height <= 0) return false
     const ancestors = model.parents.get(key)
     if (ancestors === undefined || ancestors.some(item => !props.expandedKeys.has(item.id))) return false
-    const infos = ancestors.map(item => layout.getLayoutInfo(item.id))
-    if (infos.some(info => info == null || info.estimatedSize)) return false
     const info = layout.getLayoutInfo(key)
     if (info == null) return false
-    const inset = props.stickyAncestors === false ? 0 : Math.min(virtualizer.visibleRect.height * 0.4, infos.reduce((sum, info) => sum + info!.rect.height, 0))
-    const offset = Math.max(0, info.rect.y - inset)
-    if (Math.abs(virtualizer.visibleRect.y - offset) > 0.5) scrollToLayoutKey(layout, key, viewport, inset)
+    if (anchorMode.current === 'once') {
+      scrollToLayoutKey(layout, key, viewport)
+      pending.current = undefined
+      return true
+    }
+    const rect = virtualizer.visibleRect
+    let offset = rect.y
+    if (anchorMode.current === 'reveal') {
+      const infos = ancestors.map(item => layout.getLayoutInfo(item.id))
+      if (infos.some(info => info == null || info.estimatedSize)) return false
+      const inset = props.stickyAncestors === false ? 0 : Math.min(rect.height * 0.4, infos.reduce((sum, info) => sum + info!.rect.height, 0))
+      offset = Math.max(0, info.rect.y - inset)
+    } else {
+      const inset = props.stickyAncestors === false ? 0 : stickyInset.current
+      if (info.rect.y < rect.y + inset) offset = Math.max(0, info.rect.y - inset)
+      else if (info.rect.maxY > rect.maxY) offset = info.rect.maxY - rect.height
+    }
+    if (Math.abs(rect.y - offset) > 0.5) scrollToLayoutKey(layout, key, viewport, info.rect.y - offset)
     return true
   })
 
@@ -118,6 +133,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     })
     const measurements = [...measurementCandidates.values()]
     const next = { pins, height: pins.reduce((sum, pin) => sum + pin.height, 0), width, top: top?.item.id, measurements }
+    stickyInset.current = next.height
     setSnapshot(previous => previous.top === next.top && previous.height === next.height && previous.width === width && previous.measurements.length === measurements.length && previous.measurements.every((item, index) => item === measurements[index]) && previous.pins.length === pins.length && previous.pins.every((pin, index) => pin.item === pins[index]!.item && pin.height === pins[index]!.height && pin.offset === pins[index]!.offset && pin.breadcrumb?.map(item => item.id).join(',') === pins[index]!.breadcrumb?.map(item => item.id).join(',')) ? previous : next)
     const key = pending.current
     if (key !== undefined && model.all.has(key)) {
@@ -147,8 +163,9 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     if (frame.current !== undefined) return
     frame.current = requestAnimationFrame(() => { frame.current = undefined; measure() })
   }, [])
-  const reveal = React.useEffectEvent((key: Key) => {
+  const reveal = React.useEffectEvent((key: Key, options?: { readonly anchor: false }) => {
     pending.current = key
+    anchorMode.current = options?.anchor === false ? 'once' : 'reveal'
     awaitingExpansion.current = true
     settlingAttempts.current = 0
     const expanded = new Set(props.expandedKeys)
@@ -239,7 +256,12 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     const target = (event.target as HTMLElement).closest('[data-sidebar-tree-key]')
     const key = target?.getAttribute('data-sidebar-tree-key')
     const item = model.visible.find(item => String(item.id) === key)
-    if (item !== undefined) { pending.current = item.id; awaitingExpansion.current = false; schedule() }
+    if (item !== undefined) {
+      if (pending.current !== item.id) anchorMode.current = 'focus'
+      pending.current = item.id
+      awaitingExpansion.current = false
+      schedule()
+    }
   }}>
     <Virtualizer layout={layout} shouldObserveItemSize><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
     <div aria-hidden="true" data-sidebar-pinned-stack data-top-key={snapshot.top} {...stylex.props(styles.stack)} style={{ height: snapshot.height }}>
