@@ -83,7 +83,8 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   await expect(canvasElement.querySelector('[data-testid="work-log"] hr')).toBeNull()
   await expect(canvas.getByTestId('work-log-children')).toContainElement(canvas.getByTestId('thinking-entry'))
   await expect(canvas.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'false')
-  const empty = canvasElement.querySelector('[data-tool-status="success"]:last-child')!
+  // E18/C3: Thinking shares the fold scroller, so the final tool row is no longer its last child.
+  const empty = Array.from(canvasElement.querySelectorAll('[data-tool-status="success"]')).at(-1)!
   await expect(empty.querySelector('button')).toBeNull()
   await expect(empty).not.toHaveTextContent('No output')
   await userEvent.click(canvas.getByRole('button', { name: 'Open read tool detail' }))
