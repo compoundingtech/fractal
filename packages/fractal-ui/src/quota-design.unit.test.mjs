@@ -48,3 +48,11 @@ test('every matching native window is visible; chips count actual undisplayed in
   assert.equal(quotaOmittedWindowCount(row, { ...view, variant: 'stacked' }), 0)
   assert.equal(quotaOmittedWindowCount(row, { ...view, variant: 'chips' }), 2)
 })
+test('More sorting excludes the always-visible governing window outside supplied columns', () => {
+  const outside = { ...account('north'), id: 'outside', windows: [{ ...account('north').windows[0], column: 'outside' }] }
+  const secondary = { ...outside, id: 'secondary', windows: [...outside.windows, { ...outside.windows[0], id: 'omitted', governing: false }] }
+  assert.equal(quotaOmittedWindowCount(outside, view), 0)
+  assert.equal(quotaOmittedWindowCount(secondary, view), 1)
+  assert.deepEqual(sortQuotaAccounts([outside, secondary], { key: 'more', direction: 'descending' }, view).map(value => value.id), ['secondary', 'outside'])
+  assert.deepEqual(sortQuotaAccounts([secondary, outside], { key: 'more', direction: 'ascending' }, view).map(value => value.id), ['outside', 'secondary'])
+})

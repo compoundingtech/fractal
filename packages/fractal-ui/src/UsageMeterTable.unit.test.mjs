@@ -304,7 +304,7 @@ test('quota drawer exposes exact cost/token and reset values with a missing-disc
     assert.equal(amount.title, '1234567 tokens')
     assert.match(amount.querySelector('[aria-hidden="true"]').textContent, /1\.2M/)
     await render('usd', [{ ...supplied, usd: undefined, tokens: undefined, usdCoverage: false }])
-    assert.equal(container.querySelector('[data-quota-cell="amount"] > [title]').title, 'Tokens unreported')
+    assert.equal(container.querySelector('[data-quota-cell="amount"] > [title]').title, 'Tokens Unreported')
     assert.equal(events.length, 0, 'Reading disclosure values does not trigger an account action')
   } finally { await act(async () => root.unmount()); container.remove() }
 })

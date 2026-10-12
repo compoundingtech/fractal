@@ -15,19 +15,17 @@ export const quotaRoleWindow = (account: QuotaAccount, role: 'governing' | 'comp
 
 type QuotaView = Pick<QuotaDrawerProps, 'variant' | 'columns'>
 
-/** Every matching window is rendered in columns, including shared-column windows. */
+/** The governing window is always visible; matching secondary windows share columns. */
 export const quotaVisibleWindows = (account: QuotaAccount, view: QuotaView): readonly QuotaWindow[] => {
   if (view.variant === 'stacked') return account.windows
-  if (view.variant === 'columns') return account.windows.filter(window => view.columns.some(column => column.id === window.column))
   const governing = quotaRoleWindow(account, 'governing')
+  if (view.variant === 'columns') return account.windows.filter(window => window.id === governing?.id || view.columns.some(column => column.id === window.column))
   const chips = account.windows.filter(window => window.id !== governing?.id).slice(0, 2)
   return governing === undefined ? chips : [governing, ...chips]
 }
 
-export const quotaOmittedWindowCount = (account: QuotaAccount, view: QuotaView): number => {
-  const visible = new Set(quotaVisibleWindows(account, view).map(window => window.id))
-  return account.windows.filter(window => !visible.has(window.id)).length
-}
+export const quotaOmittedWindowCount = (account: QuotaAccount, view: QuotaView, visible: readonly QuotaWindow[] = quotaVisibleWindows(account, view)): number =>
+  account.windows.length - visible.length
 
 /** Reset sorting and display are anchored to the governing window, not inventory minima. */
 export const quotaGoverningResetAt = (account: QuotaAccount): number | undefined => {

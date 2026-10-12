@@ -5,7 +5,7 @@ import { Icon } from './assistant-ui/composition/Icons.tsx'
 import { Button, Cell, Column, Label, ListBox, ListBoxItem, Popover, Row, Select, SelectValue, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex.ts'
 import type { QuotaAccount, QuotaDrawerProps, QuotaSortKey, QuotaWindow } from './quota-design-types.ts'
-import { filterQuotaAccounts, quotaAccountAmount, quotaGoverningResetAt, quotaProviderSubtotal, quotaRoleWindow, quotaSortKeys, quotaVisibleWindows, quotaWindowFraction, sortQuotaAccounts } from './quota-design-sort.ts'
+import { filterQuotaAccounts, quotaAccountAmount, quotaGoverningResetAt, quotaOmittedWindowCount, quotaProviderSubtotal, quotaRoleWindow, quotaSortKeys, quotaVisibleWindows, quotaWindowFraction, sortQuotaAccounts } from './quota-design-sort.ts'
 import { usageMeterGrid, usageMeterGridVars } from './UsageMeterGrid.stylex.ts'
 import { quotaStateLabels } from './quota-design-copy.ts'
 
@@ -115,7 +115,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
     <header {...stylex.props(styles.toolbar)}>
       <h2 {...stylex.props(styles.title)}>Quota <span {...stylex.props(styles.count)}>{accounts.length}/{props.accounts.length}</span></h2>
       <Button aria-label={`Toggle unit: ${props.unit === 'usd' ? '$ / tok' : 'tok / $'}`} aria-keyshortcuts="u" onPress={toggleUnit} {...stylex.props(styles.button)}>{props.unit === 'usd' ? '$ / tok' : 'tok / $'}</Button>
-      <Button aria-label={props.collapsed ? 'Expand quota' : 'Collapse quota'} aria-expanded={!props.collapsed} aria-keyshortcuts="m" onPress={() => props.onCollapsed(!props.collapsed)} {...stylex.props(styles.button)}>{props.collapsed ? '+' : '−'}</Button>
+      <Button aria-label={props.collapsed ? 'Expand quota' : 'Collapse quota'} aria-expanded={!props.collapsed} aria-keyshortcuts="m" onPress={() => props.onCollapsed(!props.collapsed)} {...stylex.props(styles.button)}><Icon name={props.collapsed ? 'chevron-right' : 'chevron-down'} size={12} /></Button>
     </header>
     <div role="status" aria-live="polite" data-quota-status={props.status.kind} title={`${props.status.text}${retained ? ' · Last-good accounts retained' : ''}`} {...stylex.props(styles.statusSlot, (props.status.kind === 'failed' || props.status.kind === 'incompatible') && styles.danger)}>
       <span {...stylex.props(styles.statusLine)}>{props.status.text}</span>
@@ -168,7 +168,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
               const visible = quotaVisibleWindows(account, props)
               const governing = quotaRoleWindow(account, 'governing')
               const secondary = visible.filter(window => window.id !== governing?.id)
-              const omitted = account.windows.length - secondary.length - (governing === undefined ? 0 : 1)
+              const omitted = quotaOmittedWindowCount(account, props, visible)
               const foldedCount = omitted + (quotaOverflowPolicy === 'collapse' ? secondary.length : 0)
               const stale = retained || account.state === 'stale' || account.state === 'failed'
               const reset = resetText(account, props.now)
@@ -245,7 +245,6 @@ const styles = stylex.create({
   row: { backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
   accountLine: { display: 'flex', alignItems: 'center', minWidth: 0, height: usageMeterGridVars.lineHeight },
   accountButton: { flex: '1 1 0', padding: 0, textAlign: 'left', border: 0, backgroundColor: surface.transparent, color: ink.fg, font: 'inherit', lineHeight: usageMeterGridVars.lineHeight, fontWeight: type.weightMedium, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.inlineFocusOffset },
-  metadata: { color: ink.fgMuted, fontSize: type.microSize },
   amount: { color: ink.fgSoft, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums' },
   resetToken: { display: 'inline-block', color: ink.fgMuted, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', overflow: 'visible', textOverflow: 'clip' },
   moreButton: { flexShrink: 0, padding: 0, border: 0, backgroundColor: surface.transparent, color: ink.fgSoft, font: 'inherit', fontSize: type.microSize, lineHeight: usageMeterGridVars.lineHeight, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.inlineFocusOffset },

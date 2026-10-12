@@ -230,7 +230,7 @@ export const quotaFilterPlay = async ({ canvasElement }: { canvasElement: HTMLEl
   await waitFor(() => expect(root.dataset.plan).toBe('Team'))
   await expect(root.dataset.provider).toBe('Cedar')
   await userEvent.click(canvas.getByRole('button', { name: /Filter state/ }))
-  await userEvent.click(canvas.getByRole('option', { name: 'stale' }))
+  await userEvent.click(canvas.getByRole('option', { name: 'Stale', exact: true }))
   await waitFor(() => expect(root.dataset.state).toBe('stale'))
   await waitFor(() => expect(ids(canvasElement)).toEqual(['elm']))
   await userEvent.click(canvas.getByRole('button', { name: 'Clear quota filters' }))
