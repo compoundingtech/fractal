@@ -8,11 +8,10 @@ import { SwitchingLane, variants, scenarios, type SwitchingArgs } from './Subage
 import { baselineTheme } from '../assistant-ui/neutral-theme'
 import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g, borderVars as border, accentVars as accent } from '../assistant-ui/composition-tokens.stylex'
 
-function Explorer(initial: SwitchingArgs & { probe: boolean }) {
-  const [, updateStory] = useArgs<SwitchingArgs>()
+function Explorer(initial: SwitchingArgs & { probe: boolean; onUpdate?: (patch: Partial<SwitchingArgs>) => void }) {
   const [local, updateLocal] = React.useState(initial)
   const args = initial.probe ? local : initial
-  const update = (patch: Partial<SwitchingArgs>) => initial.probe ? updateLocal(current => ({ ...current, ...patch })) : updateStory(patch)
+  const update = (patch: Partial<SwitchingArgs>) => initial.probe ? updateLocal(current => ({ ...current, ...patch })) : initial.onUpdate!(patch)
   const choices = args.compare ? variants : [args.variant]
   const states = args.allStates ? scenarios : [args.state]
   const schemes = args.allLanes ? ['dark', 'light'] as const : [args.scheme]
@@ -22,7 +21,17 @@ function Explorer(initial: SwitchingArgs & { probe: boolean }) {
     <div {...stylex.props(styles.matrix)}>{states.map(state => <section key={state}><h2>{state}</h2>{schemes.flatMap(scheme => widths.map(width => <div key={`${scheme}/${width}`} {...stylex.props(styles.row)}>{choices.map(variant => <SwitchingLane key={`${variant}/${state}/${scheme}/${width}`} variant={variant} state={state} scheme={scheme} width={width} />)}</div>))}</section>)}</div>
   </main>
 }
-const meta = { title: 'Fractal UI/Explore/SubagentSwitching', component: Explorer, parameters: { layout: 'fullscreen' }, args: { variant: 'A', state: 'running', compare: true, allStates: false, allLanes: true, scheme: 'dark', width: 1440, probe: false }, argTypes: { variant: { options: variants, control: 'radio' }, state: { options: scenarios, control: 'select' }, compare: { control: 'boolean' }, allStates: { control: 'boolean' }, allLanes: { control: 'boolean' }, scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [1440, 900], control: 'radio' }, probe: { table: { disable: true } } } } satisfies Meta<typeof Explorer>
+const meta = {
+  title: 'Fractal UI/Explore/SubagentSwitching',
+  component: Explorer,
+  render: args => {
+    const [, updateStory] = useArgs<SwitchingArgs>()
+    return <Explorer {...args} onUpdate={updateStory} />
+  },
+  parameters: { layout: 'fullscreen' },
+  args: { variant: 'A', state: 'running', compare: true, allStates: false, allLanes: true, scheme: 'dark', width: 1440, probe: false },
+  argTypes: { variant: { options: variants, control: 'radio' }, state: { options: scenarios, control: 'select' }, compare: { control: 'boolean' }, allStates: { control: 'boolean' }, allLanes: { control: 'boolean' }, scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [1440, 900], control: 'radio' }, probe: { table: { disable: true } }, onUpdate: { table: { disable: true } } },
+} satisfies Meta<typeof Explorer>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Exploration: Story = {}
