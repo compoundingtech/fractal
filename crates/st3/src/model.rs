@@ -297,18 +297,25 @@ pub struct DesiredSubject {
 // before decoding DesiredSubject, and therefore retains the new field as unknown.
 impl Serialize for DesiredSubject {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("subject", &self.subject)?;
-        map.serialize_entry("kind", &self.kind)?;
-        map.serialize_entry("desired", &self.desired)?;
-        if let Some(member) = &self.member { map.serialize_entry("member", member)?; }
-        if let Some(run) = &self.owner_run { map.serialize_entry("owner_run", run)?; }
-        if let Some(generation) = &self.owner_generation { map.serialize_entry("owner_generation", generation)?; }
-        if let Some(step) = &self.owner_step { map.serialize_entry("owner_step", step)?; }
+        use serde::ser::SerializeStruct;
+        // Desired revisions hash CBOR directly. Preserve the derived struct's
+        // definite map length as well as its field order for existing declarations.
+        let len = 3 + usize::from(self.member.is_some())
+            + usize::from(self.owner_run.is_some())
+            + usize::from(self.owner_generation.is_some())
+            + usize::from(self.owner_step.is_some())
+            + 2 * usize::from(self.accountable.is_some());
+        let mut map = serializer.serialize_struct("DesiredSubject", len)?;
+        map.serialize_field("subject", &self.subject)?;
+        map.serialize_field("kind", &self.kind)?;
+        map.serialize_field("desired", &self.desired)?;
+        if let Some(member) = &self.member { map.serialize_field("member", member)?; }
+        if let Some(run) = &self.owner_run { map.serialize_field("owner_run", run)?; }
+        if let Some(generation) = &self.owner_generation { map.serialize_field("owner_generation", generation)?; }
+        if let Some(step) = &self.owner_step { map.serialize_field("owner_step", step)?; }
         if let Some(person) = &self.accountable {
-            map.serialize_entry("accountable", person)?;
-            map.serialize_entry("fields", &serde_json::json!({
+            map.serialize_field("accountable", person)?;
+            map.serialize_field("fields", &serde_json::json!({
                 "kind": self.kind, "desired": self.desired, "accountable": person,
             }))?;
         }
