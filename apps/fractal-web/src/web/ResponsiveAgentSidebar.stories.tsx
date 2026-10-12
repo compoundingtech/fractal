@@ -7,7 +7,6 @@ import { SidebarAgentRow, ThreadHeader, assistantDarkTheme, type SidebarAgentRow
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
-import { SidebarMonitorHeader } from '../monitor/SidebarMonitorHost.tsx'
 import { ResponsiveAgentSidebar, sidebarDrawerBreakpoint, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
 
 const storyNow = Date.UTC(2026, 9, 8, 12)
@@ -16,9 +15,8 @@ const rows: readonly SidebarAgentRowData[] = ['Builder', 'Reviewer'].map(title =
   children: [], usage: { _tag: 'Known', scope: '24h-root-and-subagents', usd: 4.2, tokens: 2_300_000 }, duration: { _tag: 'Known', scope: '24h-activity-span', ms: 3_600_000 }, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 180_000 },
 }))
 const tree: readonly SidebarNode[] = [{ _tag: 'Folder', id: 'product', label: 'Product', collapsed: false, children: rows.map(row => ({ _tag: 'Agent', id: row.ref, subject: row.ref, label: row.title })) }]
-const monitorTabs = [{ id: 'quota', label: 'Quota' }, { id: 'limits', label: 'Account usage and limits' }]
 
-/** Fixture data surrounds the same sidebar frame, tree, row, monitor header and thread header as live. */
+/** Fixture data surrounds the same sidebar frame, tree, row and thread header as live. */
 const ResponsiveSidebarSurface = ({ viewport, shortcut = true }: { readonly viewport: number; readonly shortcut?: boolean }) => {
   const [collapsed, setCollapsed] = React.useState(false)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
@@ -39,7 +37,6 @@ const ResponsiveSidebarSurface = ({ viewport, shortcut = true }: { readonly view
       <nav aria-label="Agent roster" {...stylex.props(styles.roster)}>
         <AgentFolders tree={tree} canDrop={() => ({ refused: 'Read-only layout fixture' })} onMove={() => undefined} onCreateFolder={() => undefined} onRenameFolder={() => undefined} onDeleteFolder={() => undefined} onToggleCollapsed={() => undefined} onSelect={select} renderAgent={node => <SidebarAgentRow inTree item={rows.find(row => row.ref === node.id)!} now={storyNow} active={selected === node.id} onOpen={() => select(node.id)} />} />
       </nav>
-      <Aria.Tabs><SidebarMonitorHeader tabs={monitorTabs} collapsed={false} onToggleCollapsed={() => undefined} /><Aria.TabPanel id="quota"><p {...stylex.props(styles.note)}>Reported account usage</p></Aria.TabPanel><Aria.TabPanel id="limits"><p {...stylex.props(styles.note)}>Reported limits</p></Aria.TabPanel></Aria.Tabs>
     </ResponsiveAgentSidebar>
     <section aria-label="Agent workspace" data-sidebar-thread="" {...stylex.props(styles.thread)}>
       <ThreadHeader title={rows.find(row => row.ref === selected)!.title} folder="local" now={storyNow} sidebarCollapsed={narrow || collapsed} sidebarToggleRef={opener} onToggleSidebar={toggle} panelOpen={false} drawerOpen={false} onTogglePanel={() => undefined} onToggleDrawer={() => undefined} />
@@ -99,10 +96,6 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
     }
     assertModalIsolation(dialog, thread)
     await expect(canvas.getByRole('complementary', { name: 'Agents' }).getBoundingClientRect().width).toBeGreaterThanOrEqual(sidebarMinimumWidth)
-    const quota = within(dialog).getByRole('tab', { name: 'Quota' })
-    await expect(quota.querySelector('[title]')).toHaveAttribute('title', 'Quota')
-    await expect(getComputedStyle(quota).whiteSpace).toBe('nowrap')
-    await expect(getComputedStyle(quota).textOverflow).toBe('ellipsis')
     await expect(rect()).toEqual(before)
     await userEvent.keyboard('{Shift>}{Tab}{/Shift}')
     await expect(dialog.contains(document.activeElement)).toBe(true)
@@ -155,7 +148,6 @@ const styles = stylex.create({
   search: { margin: s.md, padding: s.md, border: `1px solid ${c.border}`, borderRadius: 8 },
   input: { width: '100%', minWidth: 0, borderWidth: 0, outline: 'none', backgroundColor: 'transparent', color: c.fg },
   roster: { display: 'flex', flexDirection: 'column', padding: s.md, flexGrow: 1, minHeight: 0, overflow: 'hidden' },
-  note: { paddingInline: s.md, fontSize: t.metaSize, color: c.fgMuted },
   button: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.borderStrong}`, borderRadius: 6, padding: s.md },
   matrix: { display: 'grid', gap: s.lg, overflow: 'auto', padding: s.lg },
 })
