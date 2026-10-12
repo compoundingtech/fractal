@@ -135,7 +135,9 @@ always continue through the existing PR path.
 State and next-lane publication is restricted to the actor in the current metadata
 record. Generation 1 assigns that actor to the authenticated creator; state edits
 preserve it. An accepted claim transfers scheduling ownership to its claimant,
-and voluntary release keeps that actor. Other live agents cannot flip the state
+and voluntary release keeps that actor. Claiming and then releasing ready work is
+how another live agent takes scheduling ownership in this cooperative model.
+Other live agents cannot flip the state
 or next marker using an unrelated work lease. Any live local agent may claim a
 ready change in build/review, independently of its step's role in this initial
 adapter; release remains restricted to its exact claimant/work/nonce. Lane-to-step
