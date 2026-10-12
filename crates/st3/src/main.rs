@@ -17670,10 +17670,10 @@ async fn wait_for_reply(
         .as_u64()
         .context("the daemon health response has no store index")?;
     let floor = after.unwrap_or(started);
-    if after.is_some() {
-        if let Some(message) = unread_replies(client, actor, sender, floor).await? {
-            return Ok(Some(message));
-        }
+    if after.is_some()
+        && let Some(message) = unread_replies(client, actor, sender, floor).await?
+    {
+        return Ok(Some(message));
     }
     let mut cursor = started;
     let mut event_feed = LocalEventFeed::default();
