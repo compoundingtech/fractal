@@ -316,7 +316,9 @@ const failurePlay = (narrow: boolean): Story['play'] => async ({ canvasElement }
     await userEvent.click(within(body).getByRole('button', { name: 'Full output' }))
     await waitFor(() => expect(output()).toHaveTextContent(/^resolving recipients/))
   }, async () => {
-    await userEvent.click(within(body).getByRole('button', { name: 'Last lines' }))
+    const toggle = within(body).getByRole('button', { name: 'Last lines' })
+    await expect(toggle).toHaveFocus()
+    await userEvent.click(toggle)
     await waitFor(() => expect(output()).toHaveTextContent(/^sent reviewer/))
   })
 

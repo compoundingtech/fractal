@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add the WorkBlock kit component: a collapsed summary row over one aligned work table with plan phases on demand, a fold that always opens with a partial-history tag, and auto-open only for the failure that ended the turn.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "changed", "detail": "WorkKind gains 'eval' and 'agent'; exhaustive host switches must handle them. WorkLogCall gains optional intent, phase, exitCode and agents, and eval calls carry their code as the command. workLogTurnFromItems accepts an optional callFacts lookup that supplies the plan phase, exit code and delegated agents per call. IconName gains eval, agent and subagents. Existing WorkLogV1 rendering is unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

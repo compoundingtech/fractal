@@ -191,8 +191,12 @@ function TerminalTail({ text }: { readonly text: string }) {
   const copy = () => { void navigator.clipboard?.writeText(text).then(() => setCopied(true), () => setCopied(false)) }
   return <div data-terminal-tail>
     <div {...stylex.props(styles.tailMeta)}>
-      {hidden > 0 && <><span data-tail-hidden>… {counted(hidden, 'earlier line')}</span><span aria-hidden="true">·</span><Button onPress={() => setFull(true)} {...stylex.props(styles.tailAction)}>Full output</Button><span aria-hidden="true">·</span></>}
-      {full && lines.length > TAIL_LINES && <><Button onPress={() => setFull(false)} {...stylex.props(styles.tailAction)}>Last lines</Button><span aria-hidden="true">·</span></>}
+      {lines.length > TAIL_LINES && <>
+        {hidden > 0 && <><span data-tail-hidden>… {counted(hidden, 'earlier line')}</span><span aria-hidden="true">·</span></>}
+        {/* One toggle that stays mounted, so keyboard focus survives the switch. */}
+        <Button onPress={() => setFull(value => !value)} {...stylex.props(styles.tailAction)}>{full ? 'Last lines' : 'Full output'}</Button>
+        <span aria-hidden="true">·</span>
+      </>}
       <Button onPress={copy} data-copied={copied || undefined} {...stylex.props(styles.tailAction)}>{copied ? 'Copied' : 'Copy'}</Button>
     </div>
     <pre data-testid="work-step-output" {...stylex.props(styles.tailLines)}><code>{lines.slice(hidden).join('\n')}</code></pre>
