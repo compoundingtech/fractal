@@ -2,7 +2,8 @@
  * Built-Storybook dt10 gates (the server is owned by the caller):
  *   node scripts/details-run-gates.mjs <base-url> <output-dir> [canonical|painted|raw0] [story-id ...]
  * With no IDs, each mode runs its complete dt10 matrix at 1440x900 and 1280x720,
- * in dark and light. Receipts contain strict storyFinished evidence and controls.
+ * in dark and light. Presentation stories additionally use their 440/1440 matrix.
+ * Receipts contain strict storyFinished evidence and controls.
  * PLAYWRIGHT_MODULE / CHROMIUM_PATH select the managed browser, matching the
  * repository's browser proof scripts; otherwise resolve the installed playwright.
  * DETAILS_EXTRA_ARGS appends Storybook args to canonical/raw0 navigations.
@@ -36,14 +37,16 @@ const paintedIds = [
 const rawIds = ['raw-stability', 'raw-stability-159', 'raw-stability-160'].map(storyId)
 const preservedIds = mode === 'canonical' && requestedIds.length === 0
   ? Object.values((await (await fetch(`${base}/index.json`)).json()).entries)
-    .filter(entry => entry.type === 'story' && /^(fractal-ui-details-(recovery|resources|data)|fractal-ui-tab-strip-ancestors)--/.test(entry.id))
+    .filter(entry => entry.type === 'story' && /^(fractal-ui-details-(recovery|resources|data|presentation)|fractal-ui-tab-strip-ancestors)--/.test(entry.id))
     .map(entry => entry.id)
   : []
 const ids = requestedIds.length ? requestedIds : mode === 'painted' ? paintedIds : mode === 'raw0' ? rawIds : [...canonicalIds, ...preservedIds]
 const viewports = [{ width: 1440, height: 900 }, { width: 1280, height: 720 }]
-const caseViewports = id => mode === 'canonical' && /^fractal-ui-details-(recovery|resources)--/.test(id)
-  ? [...viewports, { width: 2980, height: 1744 }]
-  : viewports
+const caseViewports = id => mode === 'canonical' && /^fractal-ui-details-presentation--/.test(id)
+  ? [{ width: 440, height: 900 }, { width: 1440, height: 900 }]
+  : mode === 'canonical' && /^fractal-ui-details-(recovery|resources)--/.test(id)
+    ? [...viewports, { width: 2980, height: 1744 }]
+    : viewports
 const rows = []
 const expectedCases = ids.reduce((count, id) => count + caseViewports(id).length * 2, 0)
 const writeReceipt = () => {
