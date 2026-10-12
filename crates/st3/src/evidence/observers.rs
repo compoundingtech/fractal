@@ -22,6 +22,7 @@ pub struct SourceReceipt {
 }
 
 /// Operator-owned binding. Its recipe digest and check list never come from the target tree.
+#[derive(Clone)]
 pub struct CiBinding {
     pub repository: String,
     pub run: u64,
@@ -86,6 +87,26 @@ pub fn produce_ci(
     jobs: &[Value],
     signer: &ObserverSigner<'_>,
 ) -> Result<Vec<Produced>> {
+    produce_ci_linked(
+        repo,
+        binding,
+        run,
+        receipt,
+        jobs,
+        signer,
+        &ci_reattest::Links::default(),
+    )
+}
+
+pub(crate) fn produce_ci_linked(
+    repo: &Path,
+    binding: &CiBinding,
+    run: &Value,
+    receipt: &SourceReceipt,
+    jobs: &[Value],
+    signer: &ObserverSigner<'_>,
+    links: &ci_reattest::Links,
+) -> Result<Vec<Produced>> {
     let statements = ci_statements(repo, binding, run, receipt, jobs)?;
     if matches!(signer, ObserverSigner::Full { .. }) {
         ensure!(
@@ -116,10 +137,17 @@ pub fn produce_ci(
             let Fact::Tests { ref runner, .. } = statement.predicate.fact else {
                 unreachable!();
             };
+            if matches!(signer, ObserverSigner::Full { .. }) {
+                statement.predicate.re_attests = links.for_runner(runner).cloned();
+            }
             let identity = hex::encode(Sha256::digest(runner.as_bytes()));
             let observed_ref = format!("refs/evidence-observed/ci/{identity}");
             if let Some(record) = reference(repo, &observed_ref)? {
                 let old = show(repo, &record)?;
+                if old.predicate.tier == TrustTier::Full && statement.predicate.re_attests.is_some() {
+                    ensure!(old.predicate.re_attests == statement.predicate.re_attests,
+                        "completed job already has a different re-attestation link; use a fresh run/attempt");
+                }
                 if old.predicate.tier == TrustTier::Full {
                     ensure!(
                         binding.full_eligible(repo, receipt, run)?,
@@ -166,6 +194,7 @@ pub fn produce_ci(
                 Some(Err(_)) | None => {
                     statement.predicate.tier = TrustTier::Degraded;
                     statement.predicate.signer = None;
+                    statement.predicate.re_attests = None;
                     record_degraded(repo, &statement)?
                 }
             };
