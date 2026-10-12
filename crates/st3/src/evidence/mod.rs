@@ -1,6 +1,6 @@
 //! Portable gate observations. Every immutable notes commit has its own ref and explicit trust tier.
-//! This module never accepts a signing request from a seat: trusted observers construct
-//! statements from their own observations and call `sign_observation` in their account.
+//! No CLI accepts a caller-authored statement or signing key: protected observers construct
+//! statements from authenticated observations and call `sign_observation` in their account.
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,8 @@ use std::{
 };
 
 pub mod cli;
+mod ci_transport;
+pub mod observers;
 #[cfg(test)]
 mod tests;
 
