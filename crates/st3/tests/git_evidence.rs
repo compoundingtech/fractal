@@ -5,9 +5,67 @@ use st3::evidence::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Command, Stdio},
 };
+
+/// The evidence API also invokes Git in this process. Run the entire test in a child with
+/// explicit tools and private home/state instead of changing the parallel harness's environment.
+fn isolated(test: &str) -> bool {
+    const CHILD: &str = "ST3_GIT_EVIDENCE_ISOLATED_TEST";
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return false;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let tools = root.path().join("tools");
+    let home = root.path().join("home");
+    let state = root.path().join("state");
+    let config = root.path().join("config");
+    let tmp = root.path().join("tmp");
+    for path in [&tools, &home, &state, &config, &tmp] {
+        std::fs::create_dir(path).unwrap();
+    }
+    for program in ["git", "ssh-keygen", "python3", "which"] {
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .filter(|directory| !directory.join("st3-recorder.json").exists())
+            .filter_map(|directory| std::fs::canonicalize(directory.join(program)).ok())
+            .filter(|path| {
+                !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("st3" | "st" | "st3-fixture")
+                )
+            })
+            .find(|path| {
+                std::fs::metadata(path)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+            .unwrap_or_else(|| {
+                panic!("a real {program} must be available outside recorder directories")
+            });
+        std::os::unix::fs::symlink(real, tools.join(program)).unwrap();
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env_clear()
+        .env(CHILD, test)
+        .env("PATH", &tools)
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_CONFIG_HOME", &config)
+        .env("TMPDIR", &tmp)
+        .env("NEXTEST_BIN_EXE_st3", test_bin!("st3"))
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
 
 fn git(repo: &Path, args: &[&str], input: &[u8]) -> String {
     let mut child = Command::new("git")
@@ -62,6 +120,11 @@ fn success(output: std::process::Output) -> serde_json::Value {
 
 #[test]
 fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
+    if isolated(
+        "git_evidence::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier",
+    ) {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let repo = root.path();
     git(repo, &["init", "-q"], b"");
@@ -296,6 +359,11 @@ fn put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier() {
 #[cfg(unix)]
 #[test]
 fn protected_ci_cli_fetches_selectors_and_exports_verified_objects_without_a_key() {
+    if isolated(
+        "git_evidence::protected_ci_cli_fetches_selectors_and_exports_verified_objects_without_a_key",
+    ) {
+        return;
+    }
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt as _;
@@ -497,6 +565,8 @@ os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
             .args(extra)
             .current_dir(&caller)
             .env("HOME", &private)
+            .env("XDG_CONFIG_HOME", private.join(".config"))
+            .env("XDG_STATE_HOME", private.join(".local/state"))
             .env("FIXTURE_API", &fixtures)
             .env("FIXTURE_SOURCE", &caller)
             .env("FIXTURE_REAL_GIT", &real_git)
