@@ -2,7 +2,7 @@
 
 The inventory covers every offered CLI command, every typed client action, every stui daemon effect, and the palette and local controls. It distinguishes real CLI/Unix transport tests, the live stui adapter, local reducer tests, and shared implementations. A test reference describes its actual layer; a shared implementation test alone is not a claim that the entire interactive UI was driven.
 
-`action-coverage.json` is the machine-readable source. Tests compare its 226 CLI rows with Clap's offered command tree, its 55 typed actions with the generated client contract and real dispatch builders, and its 18 stui effects and 13 palette actions with their declarations. Every row must reference an existing test. Hidden driver/replication worker commands and help aliases are internal or alternate spellings, rather than additional person or agent actions.
+`action-coverage.json` is the machine-readable source. Tests compare its 228 CLI rows with Clap's offered command tree, its 55 typed actions with the generated client contract and real dispatch builders, and its 18 stui effects and 13 palette actions with their declarations. Every row must reference an existing test. Hidden driver/replication worker commands and help aliases are internal or alternate spellings, rather than additional person or agent actions.
 
 ## Restart and stale-state model
 
@@ -171,6 +171,9 @@ edits and removes retired subjects without changing unfiltered reads.
 | `st documents get` | real CLI over private Unix socket; disk store reopened between actions | [`cli_metadata_documents_blobs_and_rules_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st documents ls` | real CLI over private Unix socket; disk store reopened between actions | [`cli_reads_preserve_operational_views_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st documents put` | real CLI over private Unix socket; disk store reopened between actions | [`cli_metadata_documents_blobs_and_rules_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
+| `st evidence put` | real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression | [`put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/git_evidence.rs) |
+| `st evidence show` | real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression | [`put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/git_evidence.rs) |
+| `st evidence verify` | real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression | [`put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/git_evidence.rs) |
 | `st fleet create` | existing CLI integration | [`invite_and_join_sync_full_history`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/fleet.rs) |
 | `st fleet invite` | existing CLI integration | [`invite_and_join_sync_full_history`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/fleet.rs) |
 | `st fleet invites` | real CLI over private Unix socket; disk store reopened between actions | [`cli_reads_preserve_operational_views_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
