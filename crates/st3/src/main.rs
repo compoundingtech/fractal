@@ -56,6 +56,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod directive_note;
 mod completion;
 #[cfg(test)]
 mod follow_tests;
@@ -114,6 +115,8 @@ enum Command {
     Up(UpArgs),
     /// Understand what needs action now.
     Now(NowArgs),
+    /// Read current person notes; notes inform but never assign work or grant authority.
+    Note(directive_note::NoteArgs),
     /// Show token spend over a period, with the largest spenders first.
     Usage(UsageArgs),
     /// Inspect and control missions.
@@ -246,6 +249,8 @@ enum Command {
         #[command(subcommand)]
         command: SchemaCommand,
     },
+    /// Import, inspect, and verify signed gate observations stored in git notes.
+    Evidence(st3::evidence::cli::EvidenceArgs),
     /// Store or read immutable documents.
     Documents {
         #[command(subcommand)]
@@ -5109,6 +5114,10 @@ async fn run(cli: Cli) -> Result<()> {
     if let Command::Skill(args) = cli.command {
         return run_skill(args);
     }
+    // Evidence is portable: repository objects and a caller trust list suffice.
+    if let Command::Evidence(args) = cli.command {
+        return st3::evidence::cli::run(args);
+    }
     // The gateway runs as the sekrets user, which has no st configuration.
     if let Command::Sekrets(args) = cli.command {
         let code = st3::sekrets::cli::run(args, cli.json).await?;
@@ -5169,10 +5178,14 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Up(_) => unreachable!(),
         Command::Skill(_) => unreachable!(),
+        Command::Evidence(_) => unreachable!(),
         Command::Sekrets(_) => unreachable!(),
         Command::Admission { .. } => unreachable!(),
         Command::ReplicationWorker(_) => unreachable!(),
         Command::Now(args) => run_now(&endpoint, config.person.as_deref(), args, cli.json).await,
+        Command::Note(args) => {
+            directive_note::run(&endpoint, config.person.as_deref(), args, cli.json).await
+        }
         Command::Usage(args) => run_usage(&immediate, args, cli.json).await,
         Command::Launch { command } => {
             run_launch(&client, &endpoint, command, &config.planner, cli.json).await
@@ -6162,7 +6175,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == st_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -6207,6 +6220,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if let Some(person) = &config.person {
         let _ = st3::sekrets::daemon::PERSON.set(person.clone());
     }
+    // Long message bodies this machine owns that no claim names any longer are removed.
+    st3::message_body::spawn_reconciler(store.clone(), config.state_dir.clone());
     // Sekrets is opt-in: this records a gateway's calls once one listens on this host.
     st3::sekrets::daemon::spawn_importer(
         store.clone(),
@@ -16691,6 +16706,10 @@ async fn run_message(
                 let mut shown = Vec::with_capacity(messages.len());
                 for message in &messages {
                     let mut value = serde_json::to_value(message)?;
+                    if message.body_ref.is_some() {
+                        // `content` is only the preview; `text` is the whole message.
+                        value["text"] = st3::message_body::full_text(client, message).await?.into();
+                    }
                     if let Some(provenance) = message_provenance(client, &message.subject).await {
                         value["provenance"] = provenance;
                     }
@@ -16706,9 +16725,10 @@ async fn run_message(
                     if index > 0 && !args.raw {
                         println!("\n---\n");
                     }
+                    let text = st3::message_body::full_text(client, message).await?;
                     if args.raw {
-                        print!("{}", message.content);
-                        if index + 1 < messages.len() && !message.content.ends_with('\n') {
+                        print!("{text}");
+                        if index + 1 < messages.len() && !text.ends_with('\n') {
                             println!();
                         }
                     } else {
@@ -16722,7 +16742,7 @@ async fn run_message(
                             println!("Subject: {title}");
                         }
                         println!();
-                        println!("{}", message.content);
+                        println!("{text}");
                         for attachment in &message.attachments {
                             println!(
                                 "Attachment: blob/{} ({}, {} bytes{}); read it with `st blobs get blob/{} --message {} -o FILE`",
@@ -21451,7 +21471,9 @@ async fn latest_document_text(client: &Client, name: &str) -> Result<Option<Stri
 }
 
 async fn message_content(client: &Client, message: &MessageView) -> Result<String> {
-    if message.content.starts_with("doc/") {
+    if message.body_ref.is_some() {
+        st3::message_body::full_text(client, message).await
+    } else if message.content.starts_with("doc/") {
         let value: Value = client
             .get(&format!(
                 "/v1/documents/content?reference={}",
@@ -23727,7 +23749,9 @@ async fn forward_projected_messages_reporting(
                 let filename = if let Some(filename) = present.get(&message.subject) {
                     filename.clone()
                 } else {
-                    let content = if message.content.starts_with("doc/") {
+                    let content = if message.body_ref.is_some() {
+                        st3::message_body::full_text(client, &message).await?
+                    } else if message.content.starts_with("doc/") {
                         let value: Value = client
                             .get(&format!(
                                 "/v1/documents/content?reference={}",
@@ -26064,6 +26088,9 @@ mod tests {
             title: Some("Cross-harness consensus: idle".into()),
             in_reply_to: None,
             tags: vec![],
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
             attachments: Vec::new(),
         };
@@ -26097,6 +26124,9 @@ mod tests {
                 format!("{}12", st3::silent::REMAINING_PREFIX),
             ],
             attachments: vec![],
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
         };
         let queued = native_queued_message(&view, "body".into(), &[]);
@@ -26361,6 +26391,9 @@ mod tests {
                 title: None,
                 in_reply_to: None,
                 tags: Vec::new(),
+                body_ref: None,
+                body_bytes: None,
+                body_origin: None,
                 created_index: 1,
                 attachments: Vec::new(),
             };
@@ -29479,6 +29512,9 @@ mod tests {
             title: Some("Greeting".into()),
             in_reply_to: None,
             tags: Vec::new(),
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
             attachments: Vec::new(),
         };

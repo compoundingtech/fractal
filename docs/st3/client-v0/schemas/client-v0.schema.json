@@ -14,13 +14,29 @@
     { "$ref": "#/$defs/PairingAdvertisement" }
   ],
   "$defs": {
+    "DirectiveNote": {
+      "description": "A person's current advisory note. It never assigns work, grants authority or satisfies a gate.",
+      "type": "object", "additionalProperties": false,
+      "required": ["person", "author", "time", "text", "revision"],
+      "properties": {
+        "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "author": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "time": {"$ref": "#/$defs/Timestamp"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 4096, "description": "At most 4096 UTF-8 bytes; whitespace-only text is refused."},
+        "expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "revision": {"type": "string"}
+      }
+    },
+    "DirectiveNotes": {
+      "type": "object", "additionalProperties": false, "required": ["notes"],
+      "properties": {"notes": {"type": "array", "items": {"$ref": "#/$defs/DirectiveNote"}}}
+    },
     "ObservationLatency": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "count", "over_target", "max_ms", "buckets"], "properties": {"target": {"enum": ["ios-open-to-live", "ios-connect", "ios-message-ack", "ios-conversation-open", "ios-terminal-open", "ios-recover"]}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "latency"}, "count": {"type": "integer", "minimum": 1, "maximum": 1000000}, "over_target": {"type": "integer", "minimum": 0, "maximum": 1000000}, "max_ms": {"type": "integer", "minimum": 0, "maximum": 3600000}, "buckets": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 0, "maximum": 3670015}, {"type": "integer", "minimum": 1, "maximum": 1000000}], "minItems": 2, "maxItems": 2}}}},
     "ObservationLiveShare": {"type": "object", "additionalProperties": false, "required": ["target", "carrier", "interval_start", "interval_end", "kind", "foreground_ms", "live_ms"], "properties": {"target": {"const": "ios-live-share"}, "carrier": {"enum": ["fabric", "tailscale", "lan"]}, "path": {"enum": ["direct", "relay"]}, "interval_start": {"type": "string", "format": "date-time", "maxLength": 32}, "interval_end": {"type": "string", "format": "date-time", "maxLength": 32}, "kind": {"const": "live-share"}, "foreground_ms": {"type": "integer", "minimum": 1, "maximum": 60000}, "live_ms": {"type": "integer", "minimum": 0, "maximum": 60000}}},
     "ObservationSample": {"oneOf": [{"$ref": "#/$defs/ObservationLatency"}, {"$ref": "#/$defs/ObservationLiveShare"}]},
     "ObservationReport": {"type": "object", "additionalProperties": false, "required": ["report_id", "samples"], "properties": {"report_id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "minLength": 36, "maxLength": 36}, "samples": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/ObservationSample"}}}},
     "ObservationAccepted": {"type": "object", "additionalProperties": false, "required": ["accepted"], "properties": {"accepted": {"const": true}}},
     "ObservationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"const": "st3.client.v0"}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/ObservationAccepted"}}},
-
     "PairingAdvertisement": {
       "description": "Static unauthenticated pairing preflight; no envelope, presence update or graph information.",
       "type": "object", "additionalProperties": false,
@@ -58,8 +74,8 @@
     "AgentLifecycle": {"anyOf": [{"enum": ["standing", "owner", "bounded"]}, {"type": "string"}], "description": "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown."},
     "AgentReachability": {"anyOf": [{"enum": ["local", "remote", "unreachable", "unknown", "reachable", "indeterminate"]}, {"type": "string"}], "description": "Whether the daemon can currently reach the agent runtime."},
     "TimelineStatus": {"anyOf": [{"enum": ["queued", "running", "waiting", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Run status reported in a timeline `status` entry."},
-    "ErrorCode": {"anyOf": [{"enum": ["attention-migrated", "arrangement-exists", "arrangement-folder-exists", "arrangement-retired", "arrangement-limit", "arrangement-folder-deleted", "arrangement-cycle", "arrangement-body-too-large", "arrangement-owner-forbidden", "invalid-arrangement-subject", "invalid-arrangement-action", "invalid-arrangement-operations", "invalid-arrangement-folder", "invalid-arrangement-name", "invalid-arrangement-key", "invalid-subject-reference", "not-found", "forbidden", "unsupported-capability", "validation-failed", "idempotency-conflict", "issuer-required", "stale-fence", "cursor-gap", "page-cursor-expired", "rate-limited", "runtime-not-local", "runtime-authority-indeterminate", "remote-unavailable", "terminal-unavailable", "terminal-ended", "timeline-history-incomplete", "projection-detail-too-large", "projection-detail-invalid-source", "conversation-content-invalidated", "transcript-unavailable", "blob-too-large", "unsupported-media-type", "blob-content-mismatch", "blob-quota-exceeded", "blob-not-found", "blob-expired", "internal"]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer."},
-    "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": ["attention", "message", "launch", "launch-variant", "launch-decision", "launch-approval", "mission", "work", "agent", "runtime", "observer", "subscription", "lane", "machine", "device", "operation", "history", "session", "glass", "arrangement", "owned-set", "summary"]}}}}]},
+    "ErrorCode": {"anyOf": [{"enum": ["attention-migrated", "arrangement-exists", "arrangement-folder-exists", "arrangement-retired", "arrangement-limit", "arrangement-folder-deleted", "arrangement-cycle", "arrangement-body-too-large", "arrangement-owner-forbidden", "invalid-arrangement-subject", "invalid-arrangement-action", "invalid-arrangement-operations", "invalid-arrangement-folder", "invalid-arrangement-name", "invalid-arrangement-key", "invalid-subject-reference", "not-found", "forbidden", "unsupported-capability", "validation-failed", "idempotency-conflict", "issuer-required", "stale-fence", "cursor-gap", "page-cursor-expired", "rate-limited", "runtime-not-local", "runtime-authority-indeterminate", "remote-unavailable", "terminal-unavailable", "terminal-ended", "timeline-history-incomplete", "projection-detail-too-large", "projection-detail-invalid-source", "conversation-content-invalidated", "transcript-unavailable", "blob-too-large", "unsupported-media-type", "blob-content-mismatch", "blob-quota-exceeded", "blob-not-found", "blob-expired", "message-too-large", "message-store-full", "long-message-signature-unsupported", "internal"]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer."},
+    "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": ["attention", "message", "launch", "launch-variant", "launch-decision", "launch-approval", "mission", "work", "agent", "runtime", "observer", "subscription", "lane", "machine", "device", "operation", "history", "session", "glass", "arrangement", "owned-set", "summary", "connected-client", "usage"]}}}}]},
     "OwnedSet": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "claim", "receipt", "blockers", "members_status", "visibility"], "properties": {"kind": {"const": "owned-set"}, "claim": {"type": "string"}, "receipt": {"type": "object"}, "blockers": {"type": "array", "items": {"type": "string"}}, "members_status": {"type": "array", "items": {"type": "object"}}, "visibility": {"type": "object"}, "commit_status": {"type": ["object", "null"]}}}]},
     "GlassLayout": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["tabs"], "properties": {"tabs": {"type": "array", "maxItems": 1024, "items": {"$ref": "#/$defs/GlassTab"}}}}, {"type": "object", "additionalProperties": false, "required": ["split", "children"], "properties": {"split": {"enum": ["right", "below"]}, "ratio": {"type": "number", "minimum": 0.1, "maximum": 0.9, "description": "First child share; absent means 0.5. Requires glasses capability version 2."}, "children": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/GlassLayout"}}}}]},
     "GlassTab": {"type": "object", "additionalProperties": false, "required": ["pane"], "properties": {"title": {"type": "string"}, "pane": {"type": "string", "minLength": 1}}},
@@ -152,6 +168,7 @@
         "snapshot": { "$ref": "#/$defs/Snapshot" },
         "value": {
           "oneOf": [
+            { "$ref": "#/$defs/DirectiveNotes" },
             { "$ref": "#/$defs/Capabilities" },
             { "$ref": "#/$defs/DocumentContent" },
             { "$ref": "#/$defs/SubjectDefinition" },
@@ -205,6 +222,7 @@
             "max_event_items": { "type": "integer", "minimum": 1 },
             "max_response_bytes": { "type": "integer", "minimum": 1024 },
             "max_wait_ms": { "type": "integer", "minimum": 0 },
+            "max_message_bytes": { "type": "integer", "minimum": 1, "description": "The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096." },
             "max_glass_body_bytes": { "type": "integer", "minimum": 1 },
             "max_glasses": { "type": "integer", "minimum": 1 },
             "max_glass_depth": { "type": "integer", "minimum": 1 },
@@ -242,7 +260,7 @@
       "required": ["id", "kind", "revision", "updated_at"],
       "properties": {
         "id": { "$ref": "#/$defs/Id" },
-        "kind": {"anyOf": [{"enum": ["attention", "message", "launch", "launch-variant", "launch-decision", "launch-approval", "mission", "work", "agent", "runtime", "observer", "subscription", "lane", "machine", "device", "operation", "history", "session", "glass", "arrangement", "summary"]}, {"type": "string"}], "description": "Resource family."},
+        "kind": {"anyOf": [{"enum": ["attention", "message", "launch", "launch-variant", "launch-decision", "launch-approval", "mission", "work", "agent", "runtime", "observer", "subscription", "lane", "machine", "device", "operation", "history", "session", "glass", "arrangement", "summary", "connected-client", "usage"]}, {"type": "string"}], "description": "Resource family."},
         "revision": { "$ref": "#/$defs/Revision" },
         "updated_at": { "$ref": "#/$defs/Timestamp" },
         "operational": { "$ref": "#/$defs/Operational" }
@@ -341,10 +359,22 @@
             "session_id": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
             "in_reply_to": { "oneOf": [{ "$ref": "#/$defs/Id" }, { "type": "null" }] },
             "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-            "attachments": { "type": "array", "items": { "$ref": "#/$defs/Attachment" } }
+            "attachments": { "type": "array", "items": { "$ref": "#/$defs/Attachment" } },
+            "body_ref": { "type": "string", "pattern": "^blob/[0-9a-f]{64}$", "description": "Present when content is only the start of a longer message; read the whole text with message-body.get." },
+            "body_bytes": { "type": "integer", "minimum": 0, "description": "The length in UTF-8 bytes of the whole text, with body_ref." }
           }
         }
       ]
+    },
+    "MessageBody": {
+      "type": "object", "additionalProperties": false,
+      "required": ["message", "bytes", "text"],
+      "properties": {
+        "message": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "text": { "type": "string" },
+        "complete": { "type": "boolean", "description": "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }
+      }
     },
     "BlobUpload": {
       "type": "object", "required": ["blob", "sha256", "size", "media_type"],
@@ -635,6 +665,8 @@
         "cleanup_command": { "type": "string" }
       }
     },
+    "ConnectedClient": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["actor", "person", "member", "via", "connected", "streams", "since", "last_seen", "follows", "kind"], "properties": {"actor": {"type": "string"}, "person": {"type": "string"}, "client": {"type": ["string", "null"]}, "device_id": {"type": "string"}, "device_name": {"type": "string"}, "member": {"type": "string"}, "via": {"enum": ["local", "gateway", "tailscale"]}, "connected": {"type": "boolean"}, "streams": {"type": "integer", "minimum": 0}, "since": {"$ref": "#/$defs/Timestamp"}, "last_seen": {"$ref": "#/$defs/Timestamp"}, "follows": {"type": "array", "items": {"type": "string"}}, "kind": {"const": "connected-client"}}}]},
+    "Usage": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "required": ["kind", "value"], "properties": {"kind": {"const": "usage"}, "value": {"$ref": "#/$defs/UsagePeriod"}}}]},
     "UsagePeriod": {
       "type": "object", "additionalProperties": false,
       "required": ["since_ms", "until_ms", "rows"],
@@ -1644,7 +1676,7 @@
       }
     },
     "Resource": {
-      "oneOf": [{"$ref": "#/$defs/Summary"}, {"$ref": "#/$defs/Attention"}, {"$ref": "#/$defs/Message"}, {"$ref": "#/$defs/Launch"}, {"$ref": "#/$defs/LaunchVariant"}, {"$ref": "#/$defs/LaunchDecision"}, {"$ref": "#/$defs/LaunchApproval"}, {"$ref": "#/$defs/Mission"}, {"$ref": "#/$defs/Work"}, {"$ref": "#/$defs/Agent"}, {"$ref": "#/$defs/Runtime"}, {"$ref": "#/$defs/Observer"}, {"$ref": "#/$defs/Subscription"}, {"$ref": "#/$defs/Lane"}, {"$ref": "#/$defs/Machine"}, {"$ref": "#/$defs/Device"}, {"$ref": "#/$defs/Operation"}, {"$ref": "#/$defs/History"}, {"$ref": "#/$defs/Session"}, {"$ref": "#/$defs/Glass"}, {"$ref": "#/$defs/Arrangement"}, {"$ref": "#/$defs/OwnedSet"}, {"$ref": "#/$defs/UnknownResource"}]
+      "oneOf": [{"$ref": "#/$defs/ConnectedClient"}, {"$ref": "#/$defs/Usage"}, {"$ref": "#/$defs/Summary"}, {"$ref": "#/$defs/Attention"}, {"$ref": "#/$defs/Message"}, {"$ref": "#/$defs/Launch"}, {"$ref": "#/$defs/LaunchVariant"}, {"$ref": "#/$defs/LaunchDecision"}, {"$ref": "#/$defs/LaunchApproval"}, {"$ref": "#/$defs/Mission"}, {"$ref": "#/$defs/Work"}, {"$ref": "#/$defs/Agent"}, {"$ref": "#/$defs/Runtime"}, {"$ref": "#/$defs/Observer"}, {"$ref": "#/$defs/Subscription"}, {"$ref": "#/$defs/Lane"}, {"$ref": "#/$defs/Machine"}, {"$ref": "#/$defs/Device"}, {"$ref": "#/$defs/Operation"}, {"$ref": "#/$defs/History"}, {"$ref": "#/$defs/Session"}, {"$ref": "#/$defs/Glass"}, {"$ref": "#/$defs/Arrangement"}, {"$ref": "#/$defs/OwnedSet"}, {"$ref": "#/$defs/UnknownResource"}]
     },
     "GoldenResourceSet": {
       "type": "array",
@@ -1785,7 +1817,7 @@
         { "if": { "properties": { "type": { "const": "truncation" } } }, "then": { "properties": { "body": { "$ref": "#/$defs/TimelineTruncationBody" } } } }
       ]
     },
-    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/ParticipantRef"}, "to": {"$ref": "#/$defs/ParticipantRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
+    "TimelineMessageBody": {"type": "object", "additionalProperties": false, "required": ["message_id"], "properties": {"message_id": {"type": "string"}, "reply_to": {"type": ["string", "null"]}, "from": {"$ref": "#/$defs/ParticipantRef"}, "to": {"$ref": "#/$defs/ParticipantRef"}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}}, "body_bytes": {"type": "integer", "minimum": 0}, "provenance": {"$ref": "#/$defs/MessageProvenance"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "MessageProvenance": {
       "type": "object", "additionalProperties": false, "required": ["verdict"],
       "description": "Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not.",
@@ -2487,9 +2519,10 @@
         "details": { "type": "object" }
       }
     },
-    "CollectionName": { "enum": ["missions", "attention", "agents", "work", "glasses", "arrangements", "summary"] },
+    "CollectionName": { "enum": ["missions", "attention", "agents", "work", "glasses", "arrangements", "summary", "clients", "usage", "machines", "devices", "sessions", "terminals"] },
     "CollectionCommand": {
       "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
           "type": "object",
           "additionalProperties": false,
