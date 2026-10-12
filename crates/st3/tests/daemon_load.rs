@@ -2211,6 +2211,7 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             let (agent, step, incarnation) =
                 context.subjects.held[turn % context.subjects.held.len()].clone();
             let request = WorkRequest {
+                wait_ms: None,
                 actor: Some(agent),
                 incarnation: Some(incarnation),
                 summary: None,

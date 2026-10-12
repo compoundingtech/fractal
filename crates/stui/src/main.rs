@@ -1487,6 +1487,7 @@ mission "release" state="ready" {
                     &gate.step,
                     action,
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(worker.clone()),
                         incarnation: Some("worker-one".into()),
                         summary: Some("Drafted".into()),

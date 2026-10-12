@@ -3207,6 +3207,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     &step.subject,
                     "claim",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: None,
@@ -3222,6 +3223,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     &step.subject,
                     "progress",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: Some("Building the release".into()),
@@ -3351,6 +3353,7 @@ mission "ios-proof" state="ready" {
     let subject = run.steps[0].subject.clone();
     state.store.set_step_state(&subject, "ready", None).unwrap();
     let request = |key: &str, reason: Option<&str>| st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some("agent/client-v0-baseline.ios-owner".into()),
         incarnation: Some("ios-owner-one".into()),
         summary: None,
@@ -3468,6 +3471,7 @@ mission "release-proof" state="ready" {
             &subject,
             "claim",
             &st3::model::WorkRequest {
+                wait_ms: None,
                 actor: Some(actor.into()),
                 incarnation: Some("release-owner-one".into()),
                 summary: None,
@@ -4335,6 +4339,7 @@ mission "timing/run" state="ready" {
     state.store.set_step_state(ready, "ready", None).unwrap();
     state.store.set_step_state(held, "ready", None).unwrap();
     state.store.work_action(held, "claim", &st3::model::WorkRequest {
+        wait_ms: None,
         actor: Some("agent/timing/worker".into()),
         incarnation: Some("timing-worker-one".into()),
         summary: None,
