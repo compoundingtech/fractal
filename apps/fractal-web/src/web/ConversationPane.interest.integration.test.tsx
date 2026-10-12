@@ -684,7 +684,9 @@ describe('ConversationPane composer/send binding', () => {
       { ...entry(1, ''), id: 'timeline-entry/echo/0123456789abcdef-message', type: 'message', role: 'user', body: { message_id: echoId, from: 'person/operator', to: scratchSeat } },
       { ...entry(2, 'Acknowledged hello'), id: 'timeline-entry/echo/0123456789abcdef-content', type: 'content', role: 'user', body: { text: 'Acknowledged hello', media_type: 'text/plain' } },
     ])
-    await until(() => userRows()[0]?.textContent === 'Acknowledged hello')
+    // The row's message text, not its disclosure: the mocked 2000/400 lane geometry also makes the
+    // kit's user-row overflow probe show "Show full message".
+    await until(() => userRows()[0]?.firstElementChild?.textContent === 'Acknowledged hello')
     expect(userRows()[0]).toBe(pendingRow)
     expect(userRows()[0]!.getAttribute('data-item-id')).toBe(itemId)
     expect(userRows()[0]!.closest('[data-testid="transcript-turn"]')).toBe(turn)
