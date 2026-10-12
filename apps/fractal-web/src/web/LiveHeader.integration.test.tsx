@@ -61,7 +61,7 @@ describe('live header parity', () => {
   it('keeps title and status flexible while native actions align to the trailing edge', () => {
     const style = document.createElement('style')
     // Vitest disables CSS imports; load the production stylesheet rather than its empty module stub.
-    style.textContent = readFileSync(new URL('./app.css', import.meta.url), 'utf8')
+    style.textContent = readFileSync('src/web/app.css', 'utf8')
     document.head.append(style)
     try {
       const titleStatus = host.querySelector<HTMLElement>("[data-workspace-header] [data-testid='thread-header'] > nav + div")!
