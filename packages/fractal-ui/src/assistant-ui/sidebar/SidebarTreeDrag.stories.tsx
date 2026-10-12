@@ -184,26 +184,24 @@ export const DragThroughPinnedBand: Story = { render: () => <FilingTree deep />,
   await expect(stack.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0)
   y = bounds.top + Math.min(12, stack.getBoundingClientRect().height / 2)
   const target = over(drag.transfer, x, y)
-  const real = target.closest<HTMLElement>('[data-sidebar-tree-key]')!
-  await expect(real).not.toBeNull()
-  const key = real.dataset.sidebarTreeKey!
-  await expect(key).toMatch(/^bucket-/)
   await expect(target.closest('[data-pinned-key]')).toBeNull()
+  await expect(target.closest('[role="treegrid"]')).toBe(tree)
   await frames()
+  // RAC resolves the keyed drop target from the point; the hit may be a row or the treegrid gap
+  // opened for its insertion indicator, never the visual copy.
   const indicator = root.querySelector<HTMLElement>('[data-sidebar-drop-indicator]')!
   await expect(indicator).not.toBeNull()
-  await expect(indicator.dataset.dropKey).toBe(key)
+  const key = indicator.dataset.dropKey!
+  await expect(key).toMatch(/^bucket-/)
   await expect(Number(getComputedStyle(indicator).zIndex)).toBeGreaterThan(Number(getComputedStyle(stack).zIndex))
   await finishPointer(drag.source, drag.transfer, target, x, y)
   await waitFor(() => assertFiled(root, key), settled)
 } }
-// Hit-test one point over the pinned band: passes only when the real row, not a pinned copy, is on top.
-const realRowAt = async (x: number, y: number) => {
+// Hit-test one point over the pinned band: passes only when the tree scroller, not a pinned copy, is on top.
+const treeAt = async (tree: HTMLElement, x: number, y: number) => {
   const hit = document.elementFromPoint(x, y)!
   await expect(hit.closest('[data-pinned-key]')).toBeNull()
-  const real = hit.closest<HTMLElement>('[data-sidebar-tree-key]')
-  await expect(real).not.toBeNull()
-  return real!.dataset.sidebarTreeKey!
+  await expect(hit.closest('[role="treegrid"]')).toBe(tree)
 }
 // A file-manager style external source offers copy or move and sets no in-page dragstart.
 const externalTransfer = () => {
@@ -228,30 +226,31 @@ export const ExternalDragOverPinnedBand: Story = { render: () => <FilingTree dee
   const bounds = tree.getBoundingClientRect()
   const x = bounds.left + bounds.width / 2
   const y = bounds.top + Math.min(12, stack.getBoundingClientRect().height / 2)
-  // Control: with no drag session the pinned copy owns the point, so the real-row check rejects.
-  await expect(realRowAt(x, y)).rejects.toThrow()
+  // Control: with no drag session the pinned copy owns the point, so the tree check rejects.
+  await expect(treeAt(tree, x, y)).rejects.toThrow()
   // An external drag (no local dragstart) that leaves the window restores the band.
   const probe = externalTransfer()
   await expect(externalEnter(probe, x, y).closest('[data-pinned-key]')).not.toBeNull()
   await frames()
-  const probeKey = await realRowAt(x, y)
+  await treeAt(tree, x, y)
   const probeTarget = over(probe, x, y)
-  await expect(probeTarget.closest('[data-sidebar-tree-key]')?.getAttribute('data-sidebar-tree-key')).toBe(probeKey)
+  await frames()
+  await expect(root.querySelector<HTMLElement>('[data-sidebar-drop-indicator]')?.dataset.dropKey).toMatch(/^bucket-/)
   probeTarget.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, dataTransfer: probe, relatedTarget: null, clientX: -1, clientY: -1 }))
-  await waitFor(() => expect(realRowAt(x, y)).rejects.toThrow(), settled)
+  await waitFor(() => expect(treeAt(tree, x, y)).rejects.toThrow(), settled)
+  await waitFor(() => expect(root.querySelector('[data-sidebar-drop-indicator]')).toBeNull(), settled)
   await expect(root.dataset.parentKey).toBe('origin')
   // A second external drag enters over the band and drops on the real row underneath.
   const transfer = externalTransfer()
   await expect(externalEnter(transfer, x, y).closest('[data-pinned-key]')).not.toBeNull()
   await frames()
-  const key = await realRowAt(x, y)
-  await expect(key).toMatch(/^bucket-/)
+  await treeAt(tree, x, y)
   const target = over(transfer, x, y)
-  await expect(target.closest('[data-pinned-key]')).toBeNull()
   await frames()
   const indicator = root.querySelector<HTMLElement>('[data-sidebar-drop-indicator]')!
   await expect(indicator).not.toBeNull()
-  await expect(indicator.dataset.dropKey).toBe(key)
+  const key = indicator.dataset.dropKey!
+  await expect(key).toMatch(/^bucket-/)
   target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: x, clientY: y }))
   await waitFor(() => assertFiled(root, key), settled)
 } }

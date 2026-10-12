@@ -35,13 +35,14 @@ interface Sample {
   readonly value: string
   readonly count: number
   readonly retainedIdentity: boolean
-  readonly paintedBefore: readonly string[]
   readonly paintedKeys: readonly string[]
+  /** Painted rows whose keyed DOM row is new for this keystroke: newly mounted, or a reused RAC view rebound to the key. */
+  readonly changedKeys: readonly string[]
   readonly renders?: readonly RenderCall[]
 }
-interface PendingInput { readonly start: number; readonly value: string; readonly paintedBefore: readonly string[] }
+interface PendingInput { readonly start: number; readonly value: string; readonly rowsBefore: ReadonlyMap<string, Element> }
 
-const paintedKeys = (element: HTMLElement) => [...element.querySelectorAll<HTMLElement>('[data-sidebar-tree-key]')].map(row => row.dataset.sidebarTreeKey!)
+const paintedRows = (element: HTMLElement) => new Map([...element.querySelectorAll<HTMLElement>('[data-sidebar-tree-key]')].map(row => [row.dataset.sidebarTreeKey!, row] as const))
 const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
 
 /**
@@ -91,7 +92,7 @@ function FilterProbe({ light, narrow }: { readonly light: boolean; readonly narr
   const capture = (pending: React.RefObject<PendingInput | undefined>) => (event: React.FormEvent<HTMLInputElement>) => {
     // Start at input capture, BEFORE onChange's synchronous work and React's commit.
     renders.current = []
-    pending.current = { start: performance.now(), value: event.currentTarget.value, paintedBefore: root.current === null ? [] : paintedKeys(root.current) }
+    pending.current = { start: performance.now(), value: event.currentTarget.value, rowsBefore: root.current === null ? new Map() : paintedRows(root.current) }
   }
   const publish = () => {
     const element = root.current!
@@ -99,7 +100,9 @@ function FilterProbe({ light, narrow }: { readonly light: boolean; readonly narr
     element.dataset.referenceSamples = JSON.stringify(referenceSamples.current)
   }
   const recordInto = (samples: React.RefObject<Sample[]>, count: number) => (input: PendingInput, durationMs: number) => {
-    const sample: Sample = { durationMs, value: input.value, count, retainedIdentity: items.every(item => fixture.includes(item)), paintedBefore: input.paintedBefore, paintedKeys: paintedKeys(root.current!) }
+    const rows = paintedRows(root.current!)
+    const changedKeys = [...rows].filter(([key, row]) => input.rowsBefore.get(key) !== row).map(([key]) => key)
+    const sample: Sample = { durationMs, value: input.value, count, retainedIdentity: items.every(item => fixture.includes(item)), paintedKeys: [...rows.keys()], changedKeys }
     samples.current.push(sample)
     return sample
   }
@@ -136,7 +139,7 @@ const meta = {
   component: SidebarTree,
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only rows that newly became painted, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke typed into the same page just before it; a busy-wait control of 4x that reference p90 must reject. This kit-only probe does not measure application agent-search latency.' } },
+    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke typed into the same page just before it; a busy-wait control of 4x that reference p90 must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
 } satisfies Meta<typeof SidebarTree>
 export default meta
@@ -157,8 +160,8 @@ async function collect(root: HTMLElement, input: HTMLInputElement, key: 'filterS
   return read(root, key).slice(before)
 }
 
-// Primary check. Every keystroke renders only rows that newly became painted, never an
-// unpainted row, and every rendered item is the retained fixture object.
+// Primary check. Every keystroke renders only painted rows whose keyed DOM row changed
+// (newly mounted or a rebound RAC view), and every rendered item is the retained fixture object.
 async function assertWork(samples: readonly Sample[]) {
   await expect(samples).toHaveLength(sampleCount)
   for (const [index, sample] of samples.entries()) {
@@ -169,9 +172,8 @@ async function assertWork(samples: readonly Sample[]) {
     await expect(sample.retainedIdentity).toBe(true)
     const renders = sample.renders!
     await expect(renders.every(call => call.retained)).toBe(true)
-    for (const call of renders) await expect(sample.paintedKeys).toContain(call.key)
-    const changed = sample.paintedKeys.filter(key => !sample.paintedBefore.includes(key)).length
-    await expect(renders.length).toBeLessThanOrEqual(changed)
+    for (const call of renders) await expect(sample.changedKeys).toContain(call.key)
+    await expect(renders.length).toBeLessThanOrEqual(sample.changedKeys.length)
   }
 }
 
