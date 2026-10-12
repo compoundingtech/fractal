@@ -52,17 +52,17 @@ export interface AgentMessageProps {
  * ancestors collapse from the root into one '…', and the leaf truncates only once every ancestor is collapsed
  * ('Work… › Review', '… › Mirror › Review'). Visually hidden text keeps collapsed ancestors and the joining dots,
  * so the name carries the full identity; the kit tooltip shows it on hover, keyboard focus and touch tap. */
-export const AgentIdHierarchy = ({ id, tooltip = false }: { readonly id: string; readonly tooltip?: boolean }) => {
+export const AgentIdHierarchy = ({ id, tooltip = false, onFoldChange }: { readonly id: string; readonly tooltip?: boolean; readonly onFoldChange?: (folded: boolean) => void }) => {
   if (!id.includes('.')) return <span data-agent-id={id} {...stylex.props(styles.agentPlain)}>{id}</span>
   const parts = id.split('.')
   if (!tooltip) return <span data-agent-id={id}><span aria-hidden="true" {...stylex.props(styles.agentPath)}>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></span>
-  return <AgentIdTrigger key={id} id={id} parts={parts} />
+  return <AgentIdTrigger key={id} id={id} parts={parts} onFoldChange={onFoldChange} />
 }
 
 /** React Aria closes tooltips on scroll, so a keyboard focus that scrolls its trigger into view would close the
  * tooltip it just opened; a close inside that settle window is ignored while the trigger keeps visible focus. */
 const focusScrollSettleMs = 500
-const AgentIdTrigger = ({ id, parts }: { readonly id: string; readonly parts: readonly string[] }) => {
+const AgentIdTrigger = ({ id, parts, onFoldChange }: { readonly id: string; readonly parts: readonly string[]; readonly onFoldChange?: (folded: boolean) => void }) => {
   const trigger = React.useRef<HTMLButtonElement>(null)
   const openedAt = React.useRef(0)
   const [isOpen, setOpen] = React.useState(false)
@@ -95,6 +95,12 @@ const AgentIdTrigger = ({ id, parts }: { readonly id: string; readonly parts: re
     const run = trigger.current
     if (run !== null && collapsed < leaf && run.scrollWidth > run.clientWidth) setCollapsed(collapsed + 1)
   }, [collapsed, fit, leaf])
+  // The header drops its channel while ancestors are folded: the channel yields before any identity segment.
+  const folded = collapsed > 0
+  React.useLayoutEffect(() => {
+    onFoldChange?.(folded)
+    return () => onFoldChange?.(false)
+  }, [folded, onFoldChange])
   const track = (part: string, index: number) => index === leaf ? (collapsed === leaf ? 'minmax(4ch, max-content)' : 'max-content') : part.length <= 3 ? 'max-content' : 'minmax(3ch, max-content)'
   const shown = parts.slice(collapsed)
   const columns = [...(collapsed > 0 ? ['max-content'] : []), ...shown.map((part, offset) => `${collapsed > 0 || offset > 0 ? 'max-content ' : ''}${track(part, collapsed + offset)}`)].join(' ')
@@ -149,9 +155,12 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
   const loaded = loadRequested && body._tag === 'Full'
   const preview = body.markdown.slice(0, 4000)
   const counterpart = variant._tag === 'Outgoing' ? to : from
+  const [folded, setFolded] = React.useState({ counterpart: false, recipient: false })
+  const onCounterpartFold = React.useCallback((value: boolean) => setFolded(state => state.counterpart === value ? state : { ...state, counterpart: value }), [])
+  const onRecipientFold = React.useCallback((value: boolean) => setFolded(state => state.recipient === value ? state : { ...state, recipient: value }), [])
   return <MessageFrame variant={variant} frameStyles={frameStyles} label={variant._tag === 'Outgoing' ? `Message to ${to ?? ''}` : `Message from ${from}`} subject={subject} header={<>
     {headerGlyph?._tag !== 'Hidden' ? <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name={headerGlyph?._tag === 'Icon' ? headerGlyph.name : variant._tag === 'Human' ? 'person' : 'message'} scale="status" /></span> : null}
-    <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta, styles.fixed)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span>{counterpart !== undefined ? <strong {...stylex.props(styles.sender, styles.senderSlot)}><AgentIdHierarchy id={counterpart} tooltip /></strong> : null}{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta, styles.senderSlot)}><span {...stylex.props(styles.fixed)}> → </span><AgentIdHierarchy id={to} tooltip /></span> : null}{via !== undefined ? <span data-message-channel {...stylex.props(styles.meta, styles.channel)}> · {({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span> : null}</span>
+    <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta, styles.fixed)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span>{counterpart !== undefined ? <strong {...stylex.props(styles.sender, styles.senderSlot)}><AgentIdHierarchy id={counterpart} tooltip onFoldChange={onCounterpartFold} /></strong> : null}{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta, styles.senderSlot)}><span {...stylex.props(styles.fixed)}> → </span><AgentIdHierarchy id={to} tooltip onFoldChange={onRecipientFold} /></span> : null}{via !== undefined && !folded.counterpart && !folded.recipient ? <span data-message-channel {...stylex.props(styles.meta, styles.channel)}> · {({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span> : null}</span>
     {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <Tooltip label={`Reply to ${replyTo}`}><Button aria-label={`Reply to ${replyTo}`} {...stylex.props(styles.agentTrigger, styles.meta)}><Icon name="arrow-left" scale="status" /></Button></Tooltip> : null}
     {delivery?._tag === 'BroadcastCopy' ? <span {...stylex.props(styles.chip)}>broadcast · {delivery.recipients} seats</span> : arrivedWhileWorking ? <span {...stylex.props(styles.chip)}>arrived while working</span> : null}
     {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label={`Copy id`} {...stylex.props(styles.headerAction, styles.copy)} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}

@@ -320,6 +320,8 @@ function headerFaults(header: HTMLElement) {
     const box = item.getBoundingClientRect()
     if (box.width > 0 && (box.left < edge.left - 0.5 || box.right > edge.right + 0.5)) faults.push('item past the card text edge')
   }
+  // The channel yields before any identity segment, so it is gone once an ancestor folds.
+  if (header.querySelector('[data-agent-id-trigger]:not([data-collapsed="0"])') !== null && header.querySelector('[data-message-channel]') !== null) faults.push('channel beside a folded identity')
   for (const trigger of header.querySelectorAll<HTMLElement>('[data-agent-id-trigger]')) faults.push(...identityFaults(trigger, header))
   return faults
 }
