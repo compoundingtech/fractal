@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Trace principal resolution follows declaring seats to an explicitly accountable fleet root",
+  "replay": {
+    "status": "none",
+    "detail": "Read-only resolver; no history rewrite or projection change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No registry, wire, generated-client or database layout change. Uses the separately introduced accountable root declaration field."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The internal trace_principal resolver walks declaration authors in one read snapshot and returns only an explicitly declared accountable person. Missing roots, cycles, retired roots and person authors without a root declaration return none. It never infers account owners or mission requesters. agent_person and directive_note_people remain unchanged, with their existing ask routing, own-ask authority and directive-note attribution."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration; normal binary restart."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "The Agent Trace runtime writer outside this repository must adopt the resolver and delete its issue #2440 host-level reviewed-principal fallback. This PR does not modify that external issuer or add an authorization input."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting removes the internal resolver. The root declaration contract remains available independently."
+  }
+}

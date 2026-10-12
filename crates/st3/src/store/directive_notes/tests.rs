@@ -557,3 +557,112 @@ fn directive_note_signed_wire_admission_rejects_wrong_writer_bounds_and_expiry()
         assert!(target.directive_notes("person/avery").unwrap().is_empty());
     }
 }
+
+#[test]
+fn accountable_trace_fact_preserves_ask_routing_own_ask_authority_and_directive_notes() {
+    let store = store();
+    for person in ["person/avery", "person/robin", "person/other"] {
+        store
+            .set_directive_note(person, person, Some(person), None)
+            .unwrap();
+    }
+    let source = |field: &str| {
+        format!(
+            r#"version 2
+agent "example/root" {{ {field} harness "claude" {{ account-pool "person/robin"; }} }}"#
+        )
+    };
+    declare(&store, &source(""), "person/avery", "without-principal");
+    let seat = "agent/example/root";
+    let before_notes = store.directive_notes(seat).unwrap();
+    assert_eq!(
+        before_notes
+            .iter()
+            .map(|n| n.person.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["person/avery", "person/robin"])
+    );
+    assert_eq!(
+        store.agent_person(seat).unwrap().as_deref(),
+        Some("person/robin")
+    );
+    assert_eq!(store.trace_principal(seat).unwrap(), None);
+    claim(
+        &store,
+        seat,
+        "runtime.observed",
+        Some(seat),
+        json!({"status":"running", "incarnation_id":"one"}),
+    );
+    let asked = claim(
+        &store,
+        seat,
+        "harness.observed",
+        Some(seat),
+        json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+            "blocked_on":"human", "ask":"permission", "reason":"Bash",
+            "ownership_sequence":1, "transition_sequence":3}),
+    );
+    let routes = || {
+        ["person/avery", "person/robin", "person/other"]
+            .into_iter()
+            .map(|person| {
+                (
+                    person,
+                    store
+                        .attention_items(Some(person))
+                        .unwrap()
+                        .into_iter()
+                        .filter(|item| item.kind == "harness-prompt")
+                        .map(|item| item.episode)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before_routes = routes();
+    assert!(before_routes[0].1.is_empty());
+    assert_eq!(before_routes[1].1, vec![asked.id.clone()]);
+    assert!(before_routes[2].1.is_empty());
+    assert_eq!(
+        store
+            .answer_native_prompt(seat, &asked.id, "allow", "person/avery")
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert_eq!(
+        store
+            .answer_native_prompt(seat, "missing", "allow", "person/robin")
+            .unwrap_err()
+            .code,
+        "stale-fence"
+    );
+    declare(
+        &store,
+        &source("accountable \"person/avery\";"),
+        "person/avery",
+        "with-principal",
+    );
+    assert_eq!(
+        store.trace_principal(seat).unwrap().as_deref(),
+        Some("person/avery")
+    );
+    assert_eq!(
+        store.agent_person(seat).unwrap().as_deref(),
+        Some("person/robin")
+    );
+    assert_eq!(store.directive_notes(seat).unwrap(), before_notes);
+    assert_eq!(routes(), before_routes);
+    assert_eq!(
+        store
+            .answer_native_prompt(seat, &asked.id, "allow", "person/avery")
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    store
+        .answer_native_prompt(seat, &asked.id, "allow", "person/robin")
+        .unwrap();
+    assert!(routes().iter().all(|(_, episodes)| episodes.is_empty()));
+}
