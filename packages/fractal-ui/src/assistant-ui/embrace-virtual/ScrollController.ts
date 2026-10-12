@@ -35,6 +35,8 @@ export class ScrollController {
   private userScrolling = false
   private olderNavigation = false
   private homeNavigation = false
+  /** scrollTop when an older-navigation command began, until RAC moves the viewport. */
+  private navigationTop: number | undefined
   private anchor: ReadingPosition | undefined
   private pendingAnchor: ReadingPosition | undefined
   private restoreFrame: number | undefined
@@ -63,6 +65,7 @@ export class ScrollController {
     this.restoring = false
     this.userInputAt = performance.now()
     this.userScrolling = true
+    this.navigationTop = this.element?.scrollTop
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
     this.restoreFrame = undefined
     this.captureAnchor()
@@ -76,6 +79,7 @@ export class ScrollController {
     this.olderNavigation = false
     this.homeNavigation = false
     this.following = false
+    this.navigationTop = undefined
     this.restoring = false
     this.pendingAnchor = { key: this.rowByTarget.get(key) ?? key, offset: 0 }
     // The kit targets ES2022; this deferred completion needs its executor API.
@@ -110,6 +114,7 @@ export class ScrollController {
     this.following = true
     this.olderNavigation = false
     this.homeNavigation = false
+    this.navigationTop = undefined
     this.restoring = false
     this.pendingAnchor = undefined
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
@@ -127,6 +132,7 @@ export class ScrollController {
       this.finishJump({ _tag: 'Superseded' })
       this.olderNavigation = false
       this.homeNavigation = false
+      this.navigationTop = undefined
       this.userInputAt = performance.now()
       this.userScrolling = true
       this.pendingAnchor = undefined
@@ -138,6 +144,7 @@ export class ScrollController {
       const resized =
         element.scrollHeight !== this.geometry.contentHeight ||
         element.clientHeight !== this.geometry.viewportHeight
+      if (this.navigationTop !== undefined && element.scrollTop !== this.navigationTop) this.navigationTop = undefined
       if (this.restoring || this.pendingJump !== undefined || this.pressed !== undefined) return
       if (this.pendingAnchor?.key === this.leadingKey && this.pendingAnchor !== undefined) return
       if (this.pendingAnchor !== undefined && !this.userScrolling) return
@@ -163,6 +170,9 @@ export class ScrollController {
       this.savePosition()
     }
     const onScrollEnd = () => {
+      // Measurement can end an unmoved scroll after a key command but before RAC
+      // applies it. That must not hand the viewport back to the pre-key anchor.
+      if (this.navigationTop !== undefined) return
       if (this.userScrolling && !this.following && this.pendingAnchor === undefined &&
         this.pendingJump === undefined && this.pressed === undefined && !this.restoring) this.captureAnchor()
       this.userScrolling = false
