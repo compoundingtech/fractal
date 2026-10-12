@@ -2841,16 +2841,60 @@ witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
-fn the_policy_renders_the_rules_description_with_only_the_limits_rule_changed_since_14() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 15);
+fn the_policy_renders_the_rules_description_with_review_reader_fenced_since_15() {
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 16);
     assert_eq!(
         super::checkpoint_rules::rules_description(),
         RULES_V14_DESCRIPTION.replace(
             "harness.limits keep=all-source-observations",
             "harness.limits slot=subject keep=newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at\n\
              runtime.reconcile-decision slot=subject,key keep=newest,newest-carrier-of-each-field",
-        )
+        ) + "\nreview=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references"
     );
+}
+
+#[test]
+fn review_reader_retains_durable_history_and_every_referenced_drop_candidate() {
+    for kind in st3_schema::review::KINDS {
+        let mut sealed = Sealed::default();
+        let mut refs = serde_json::Map::new();
+        for name in ["binding_claim", "previous_binding", "request", "verdict", "carry_forward_from", "attempt_receipt", "observation"] {
+            let subject = format!("agent/tester/{name}");
+            sealed.add("ada", 0, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            let referenced = sealed.add("ada", 1, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            sealed.add("ada", 2, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            refs.insert(name.into(),json!(referenced));
+        }
+        for name in ["evidence", "finding_refs", "authorization_evidence"] {
+            let subject = format!("agent/tester/{name}");
+            sealed.add("ada", 0, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            let referenced = sealed.add("ada", 1, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            sealed.add("ada", 2, draft("harness.observed", &subject, json!({"state":"idle","incarnation_id":"tester"})));
+            refs.insert(name.into(),json!([referenced]));
+        }
+        let history = sealed.add("reviewer",3,draft(kind,"gate-operation/tester",Value::Object(refs.clone())));
+        let mut fixture = sealed.build();
+        let dropped = plan_drops(&fixture).claims.into_iter().map(|claim|claim.id).collect::<BTreeSet<_>>();
+        assert!(!dropped.contains(&history),"{kind}");
+        for value in refs.values() {
+            for id in value.as_array().map_or_else(|| vec![value], |values| values.iter().collect()) {
+                assert!(!dropped.contains(id.as_str().unwrap()),"{kind}");
+            }
+        }
+        fixture.claims.iter_mut().find(|claim| claim.claim.id == history).unwrap().claim.body = json!({"fields":{}});
+        let unprotected = plan_drops(&fixture).claims.into_iter().map(|claim|claim.id).collect::<BTreeSet<_>>();
+        for value in refs.values() {
+            for id in value.as_array().map_or_else(|| vec![value], |values| values.iter().collect()) {
+                assert!(unprotected.contains(id.as_str().unwrap()),"negative control: {kind}");
+            }
+        }
+    }
+    let mut legacy = Sha256::new();
+    legacy.update(b"st3-checkpoint-rules-v1\0");
+    legacy.update(15_u32.to_be_bytes());
+    let description = super::checkpoint_rules::rules_description().split("\nreview=").next().unwrap();
+    legacy.update(description.as_bytes());
+    assert_ne!(hex::encode(legacy.finalize()),rules_digest());
 }
 
 /// `slot_of` as it was before the policy file, to show the policy groups claims into the same

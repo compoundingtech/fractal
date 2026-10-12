@@ -31,7 +31,9 @@ use smallclaims::store::checkpoint::*;
 /// than an hour older than their account group's newest, other than each seat's newest. The
 /// proof compares the account fold across every seat. It also keeps only the newest
 /// `runtime.reconcile-decision` of each decision key.
-pub const RULES_VERSION: u32 = 15;
+/// Version 16 preserves exact review binding, withdrawal and author-attempt references.
+/// It ships in the reader release before review-at-head activation.
+pub const RULES_VERSION: u32 = 16;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -70,7 +72,8 @@ graph=shared-projection-tables-including-arrangements-and-arrangement_registers-
 replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
-carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
+carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field
+review=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references";
 
 /// A canonical description of every rule: one line per rule of the retention policy
 /// (`crates/st3-schema/retention.toml`), then the engine's terms. The rules digest hashes it with
@@ -606,7 +609,13 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
                 .into_iter()
                 .flat_map(|inputs| inputs.values())
                 .filter_map(|input| input.get("claim_id").and_then(Value::as_str));
-            evidence.chain(inputs)
+            evidence.chain(inputs).chain(st3_schema::review::claim_references(
+                &sealed_claim.claim.kind, body,
+            )).chain(
+                st3_schema::review::KINDS.contains(&sealed_claim.claim.kind.as_str())
+                    .then_some(sealed_claim.claim.predecessors.iter().map(String::as_str))
+                    .into_iter().flatten(),
+            )
         })
         .collect::<BTreeSet<_>>();
     let mut newest_envelope: BTreeMap<&str, u64> = BTreeMap::new();
