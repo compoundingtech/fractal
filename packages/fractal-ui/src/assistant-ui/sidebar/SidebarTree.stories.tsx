@@ -40,6 +40,7 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
         if (target === null) { probeFrame = requestAnimationFrame(firstExposure); return }
         const bounds = target.getBoundingClientRect()
         const view = viewport(example).getBoundingClientRect()
+        if (bounds.bottom <= view.top || bounds.top >= view.bottom) { probeFrame = requestAnimationFrame(firstExposure); return }
         const inset = Math.min(view.height * 0.4, bounds.height * 4)
         example.dataset.firstRevealClear = String(bounds.top >= view.top + inset - 1 && bounds.bottom <= view.bottom + 1)
       }
@@ -113,7 +114,13 @@ export const VisibleFocusDoesNotJump: Story = { render: pair, play: async ({ can
     const before = view.scrollTop
     // The disabled-stickiness control deliberately reproduces the previous exact
     // focus alignment, so this assertion has a genuinely failing comparison.
-    const naiveFocus = () => row.scrollIntoView({ block: 'start' })
+    let controlFrame: number | undefined
+    const naiveFocus = () => {
+      controlFrame = requestAnimationFrame(() => {
+        view.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+        view.scrollTop += row.getBoundingClientRect().top - view.getBoundingClientRect().top
+      })
+    }
     if (example === no) view.addEventListener('focusin', naiveFocus)
     try {
       row.focus()
@@ -122,6 +129,7 @@ export const VisibleFocusDoesNotJump: Story = { render: pair, play: async ({ can
       else await expect(Math.abs(view.scrollTop - before)).toBeGreaterThan(1)
     } finally {
       view.removeEventListener('focusin', naiveFocus)
+      if (controlFrame !== undefined) cancelAnimationFrame(controlFrame)
     }
   }
 } }
@@ -135,8 +143,12 @@ export const CollapseFilterReorder: Story = { render: pair, play: async ({ canva
     if (example === yes) await assertChain(yes)
     await userEvent.click(within(example as HTMLElement).getByRole('button', { name: 'Reorder' }))
     await frames()
-    await scroll(example, 0)
-    await expect(viewport(example).querySelector('[data-sidebar-tree-key]')?.getAttribute('data-sidebar-tree-key')).toBe('south')
+    const row = viewport(example).querySelector<HTMLElement>('[data-sidebar-tree-key]')!
+    row.focus()
+    await userEvent.keyboard('{Home}')
+    await frames()
+    await expect((document.activeElement as HTMLElement).getAttribute('data-sidebar-tree-key')).toBe('south')
+    await expect(stack(example).dataset.topKey).toBe('south')
     await scroll(example)
     await expect(stack(example).dataset.topKey).toMatch(/^south/)
     if (example === yes) await assertChain(yes)
