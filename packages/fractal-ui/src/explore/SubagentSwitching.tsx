@@ -1,10 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Tabs, TabList, Tab, TabPanel } from 'react-aria-components'
+import { Button, Tabs, TabList, Tab, TabPanel, VisuallyHidden } from 'react-aria-components'
 import { Composer } from '../assistant-ui/composition/Composer'
 import { Transcript, type TranscriptTurn } from '../assistant-ui/composition/Transcript'
-import { SidebarAgentRow } from '../assistant-ui/sidebar/SidebarAgentRow'
-import type { SidebarAgentRow as Row } from '../assistant-ui/sidebar/model'
 import { Icon } from '../assistant-ui/composition/Icons'
 import { EmbraceRuntimeProvider } from '../assistant-ui/EmbraceRuntime'
 import type { TextItem } from '../assistant-ui/embrace-data/model'
@@ -13,74 +11,157 @@ import { baselineTheme } from '../assistant-ui/neutral-theme'
 import { lightTheme } from '../assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, statusVars as tone, borderVars as border, spaceVars as s, typeVars as t, radiusVars as r, geometryVars as g, accentVars as accent } from '../assistant-ui/composition-tokens.stylex'
 import { switchingGeometry as geometry } from './switching-tokens.stylex'
-import { workspaces, type Agent, type Scenario } from './switching-fixtures'
+import { depthOf, workspaces, type Agent, type Scenario } from './switching-fixtures'
 import { SwitchingSidebar, type CountPlacement } from './SwitchingSidebar'
 
 export const variants = ['S1', 'S2', 'S3'] as const
-export interface SwitchingArgs { switcher: typeof variants[number]; placement: CountPlacement; sidebarWidth: 240 | 320; state: Scenario; compare: boolean; allLanes: boolean; scheme: 'dark' | 'light'; width: 1440 | 900; focusRequest: number }
+export type SwitcherVariant = typeof variants[number]
+export const switcherNames: Record<SwitcherVariant, string> = { S1: 'Bottom switcher', S2: 'Top tabs', S3: 'Breadcrumb + thread drawer' }
+/** `focusRequest` counts count-chip presses; `focusLane` names the lane whose switcher takes focus, so compare mode moves focus once. */
+export interface SwitchingArgs { switcher: SwitcherVariant; placement: CountPlacement; sidebarWidth: 240 | 320; state: Scenario; compare: boolean; allLanes: boolean; scheme: 'dark' | 'light'; width: 1440 | 900; focusRequest: number; focusLane: string }
+export const laneId = ({ switcher, scheme, width }: Pick<SwitchingArgs, 'switcher' | 'scheme' | 'width'>) => `${switcher}/${scheme}/${width}`
+
 const now = Date.parse('2026-01-15T12:05:00Z')
-const at = '2026-01-15T12:00:00Z'
-function asRow(agent: Agent, agents: readonly Agent[]): Row {
-  return { ref: `agent/${agent.id}`, id: agent.id, parentRef: agent.parent ? `agent/${agent.parent}` : undefined, title: agent.name, description: agent.task, status: agent.status === 'Running' ? 'working' : agent.status === 'Needs you' ? 'waiting' : 'ended', statusLabel: agent.status, host: 'Workspace', freshness: 'live', unread: agent.unread, needsMe: agent.status === 'Needs you', usage: { _tag: 'Known', scope: 'lifetime-incl-subagents', tokens: 1800, usd: 0.03 }, duration: { _tag: 'Known', scope: 'lifetime', ms: 45000 }, lastTurn: { _tag: 'Known', kind: 'activity', at: now - 60000 }, children: agents.filter(child => child.parent === agent.id).map(child => asRow(child, agents)) }
-}
-function AgentCue({ agent }: { agent: Agent }) {
-  return <><span aria-hidden="true" {...stylex.props(styles.glyph, agent.status === 'Running' && styles.running, agent.status === 'Failed' && styles.failed, agent.status === 'Needs you' && styles.attention)}><Icon name={agent.status === 'Failed' ? 'x' : agent.status === 'Finished' ? 'check' : agent.status === 'Running' ? 'spinner' : 'alert'} /></span><span {...stylex.props(styles.name)}>{agent.name}</span><span {...stylex.props(styles.meta)}>{agent.status}{agent.unread > 0 ? ` · ${agent.unread} unread` : ''}</span></>
-}
-function threadFor(agent: Agent, sent: readonly string[]): TranscriptTurn[] {
-  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${agent.id}/prompt`, role: 'user', text: agent.task, attachments: [], streaming: false, at, sender: { kind: 'human', label: 'Operator' } }
-  const text = agent.status === 'Failed' ? 'The navigation check stopped because the fixture could not load. The partial findings are preserved; the root agent can review the missing input.' : agent.status === 'Needs you' ? 'Should the switcher include finished agents by default? I have compared both paths and am waiting for your preference.' : agent.status === 'Finished' ? 'The navigation review is complete. Selection stays attached to the active thread, and returning to the root preserves the conversation.' : 'I am checking the navigation path. The root conversation stays available while this delegated thread continues independently.'
+const statusGlyph = { Running: 'spinner', Finished: 'check', Failed: 'x', 'Needs you': 'alert' } as const
+/** Each child opens on its most telling thread; the root is the default everywhere else. */
+const initialThread: Partial<Record<Scenario, string>> = { nested: 'great-grandchild', finished: 'child-1', failed: 'child-1', attention: 'child-1' }
+
+function threadFor(agent: Agent, agents: readonly Agent[], sent: readonly string[]): TranscriptTurn[] {
+  const parent = agents.find(candidate => candidate.id === agent.parent)
+  const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: `${agent.id}/prompt`, role: 'user', text: agent.task, attachments: [], streaming: false, at: '2026-01-15T12:00:00Z', sender: parent === undefined ? { kind: 'human', label: 'Operator' } : { kind: 'agent', label: parent.name } }
+  const text = { Failed: 'The navigation check stopped because the fixture could not load. The partial findings are preserved; the root agent can review the missing input.', 'Needs you': 'Should the switcher include finished agents by default? I have compared both paths and am waiting for your preference.', Finished: 'The navigation review is complete. Selection stays attached to the active thread, and returning to the root preserves the conversation.', Running: 'I am checking the navigation path. The root conversation stays available while this delegated thread continues independently.' }[agent.status]
   const answer: TextItem = { _tag: 'Text', id: `${agent.id}/answer`, role: 'assistant', text, attachments: [], streaming: false, at: '2026-01-15T12:01:00Z', sender: { kind: 'agent', label: agent.name } }
-  const items: TextItem[] = [answer, ...sent.map((message, index): TextItem => ({ ...prompt, id: `${agent.id}/sent-${index}`, text: message }))]
+  const items: TextItem[] = [answer, ...sent.map((message, index): TextItem => ({ ...prompt, id: `${agent.id}/sent-${index}`, text: message, sender: { kind: 'human', label: 'Operator' } }))]
   return [{ id: agent.id, prompt, items, work: workLogTurnFromItems(items, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }), senderCaptions: { [answer.id]: agent.name } }]
 }
-export function SwitchingLane({ switcher: variant, state, scheme, width, placement, sidebarWidth, focusRequest, onOpenWorkspace }: SwitchingArgs & { onOpenWorkspace: (state: Scenario) => void }) {
+
+/** Glyph, name and unread count are visible; the status word and "unread" are spoken, so no control needs an aria-label. */
+function ThreadLabel({ agent, unread }: { agent: Agent; unread: number }) {
+  return <>
+    <span aria-hidden="true" {...stylex.props(styles.glyph, agent.status === 'Running' && styles.running, agent.status === 'Failed' && styles.failed, agent.status === 'Needs you' && styles.attention)}><Icon name={statusGlyph[agent.status]} /></span>
+    <span {...stylex.props(styles.threadName)}>{agent.name}</span>
+    <VisuallyHidden elementType="span">{`, ${agent.status.toLowerCase()}${unread > 0 ? ', ' : ''}`}</VisuallyHidden>
+    {unread > 0 ? <><span {...stylex.props(styles.unread)}>{unread}</span><VisuallyHidden elementType="span"> unread</VisuallyHidden></> : null}
+  </>
+}
+
+export function SwitchingLane({ switcher: variant, state, scheme, width, placement, sidebarWidth, focusRequest, focusLane, landmarkContext, onOpenWorkspace }: SwitchingArgs & { landmarkContext?: string; onOpenWorkspace: (state: Scenario, focusSwitcher: boolean) => void }) {
   const agents = workspaces[state].agents
-  const switcher = React.useRef<HTMLElement>(null)
-  const [selected, setSelected] = React.useState(focusRequest > 0 ? 'root' : state === 'nested' ? 'great-grandchild' : state === 'finished' || state === 'failed' || state === 'attention' ? 'child-1' : 'root')
-  React.useLayoutEffect(() => { if (focusRequest > 0) { setSelected('root'); switcher.current?.focus() } }, [focusRequest, state])
-  const [drawer, setDrawer] = React.useState(false)
+  const focused = focusRequest > 0 && focusLane === laneId({ switcher: variant, scheme, width })
+  const lane = React.useRef<HTMLElement>(null)
+  const drawerId = React.useId()
+  const [selected, setSelected] = React.useState(focused ? 'root' : initialThread[state] ?? 'root')
+  const [drawer, setDrawer] = React.useState(focused && variant === 'S3')
+  const [pendingFocus, setPendingFocus] = React.useState(focused)
   const [messages, setMessages] = React.useState<Record<string, readonly string[]>>({})
   const [read, setRead] = React.useState<ReadonlySet<string>>(new Set())
+  // A count press opens the workspace's root thread and hands focus to the switcher's current item; S3 lists its threads in the drawer.
+  React.useLayoutEffect(() => { if (focused) { setSelected('root'); if (variant === 'S3') setDrawer(true); setPendingFocus(true) } }, [focusRequest])
+  React.useLayoutEffect(() => { if (pendingFocus) { lane.current?.querySelector<HTMLElement>('[data-switcher] [data-thread-current]')?.focus(); setPendingFocus(false) } })
   const active = agents.find(agent => agent.id === selected) ?? agents[0]!
-  const turns = React.useMemo(() => threadFor(active, messages[active.id] ?? []), [active, messages])
+  const turns = React.useMemo(() => threadFor(active, agents, messages[active.id] ?? []), [active, agents, messages])
   const runtime = React.useMemo(() => ({ messages: turns.flatMap(turn => [turn.prompt!, ...turn.items]), isRunning: false }), [turns])
   const choose = (id: string) => { setSelected(id); setRead(current => new Set([...current, id])) }
   const cycle = (direction: number) => choose(agents[(agents.findIndex(agent => agent.id === active.id) + direction + agents.length) % agents.length]!.id)
-  const displayed = agents.slice(0, width === 900 ? 3 : 5)
-  if (!displayed.some(agent => agent.id === active.id)) displayed.push(active)
+  const unreadOf = (agent: Agent) => read.has(agent.id) ? 0 : agent.unread
+  const context = (label: string) => landmarkContext === undefined ? label : `${label}, ${landmarkContext}`
+  // Rail and tabs show what fits and keep the open thread visible; everything else is one press away in the drawer.
+  const shown = agents.slice(0, width === 900 ? 3 : 6)
+  if (!shown.includes(active)) shown.push(active)
+  const hidden = agents.length - shown.length
   const path: Agent[] = [active]
-  while (path[0]!.parent) path.unshift(agents.find(agent => agent.id === path[0]!.parent)!)
-  const cue = (agent: Agent) => <AgentCue agent={read.has(agent.id) ? { ...agent, unread: 0 } : agent} />
-  const overflow = <Button aria-label="All agent threads" aria-expanded={drawer} onPress={() => setDrawer(value => !value)} {...stylex.props(styles.control)}><Icon name="drawer" />{agents.length} threads</Button>
-  const strip = <nav ref={variant === 'S1' ? switcher : undefined} tabIndex={-1} data-switcher aria-label="Bottom agent switcher" {...stylex.props(styles.strip)}>{displayed.map(agent => <Button key={agent.id} aria-label={`Switch to ${agent.name}`} aria-pressed={active.id === agent.id} onPress={() => choose(agent.id)} {...stylex.props(styles.control, active.id === agent.id && styles.selected)}>{cue(agent)}</Button>)}{overflow}</nav>
-  return <section data-switching-lane data-variant={variant} data-state={state} data-scheme={scheme} data-width={width} data-active={active.id} aria-label={`${variant} ${state} ${scheme} ${width}`} onKeyDown={event => { if (event.ctrlKey && (event.key === 'ArrowRight' || event.key === 'ArrowLeft')) { event.preventDefault(); cycle(event.key === 'ArrowRight' ? 1 : -1) } }} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.lane, width === 1440 ? styles.wide : styles.narrow)}>
-    <header {...stylex.props(styles.heading)}><strong>{variant} · {variant === 'S1' ? 'Composer rail' : variant === 'S2' ? 'Thread tabs' : 'Breadcrumb + thread drawer'}</strong><span>{state} / {scheme} / {width}</span>{cue(active)}<span>Ctrl + Left / Right cycles threads</span></header>
-    <div {...stylex.props(styles.shell, sidebarWidth === 240 ? styles.sidebar240 : styles.sidebar320)}><aside aria-label="Workspace sidebar" {...stylex.props(styles.sidebar)}><SwitchingSidebar placement={placement} selected={state} onOpen={onOpenWorkspace} /><p {...stylex.props(styles.hint)}>Counts include running and waiting subagents, never finished or failed ones.</p></aside>
-      <div {...stylex.props(styles.workspace)}>
-        {variant === 'S2' ? <Tabs selectedKey={active.id} onSelectionChange={key => choose(String(key))}><div ref={switcher as React.RefObject<HTMLDivElement>} tabIndex={-1} data-switcher {...stylex.props(styles.strip)}><TabList aria-label="Agent thread tabs" {...stylex.props(styles.tabs)}>{agents.map(agent => <Tab id={agent.id} key={agent.id} {...stylex.props(styles.control, active.id === agent.id && styles.selected)}>{cue(agent)}</Tab>)}</TabList>{overflow}</div>{agents.map(agent => <TabPanel id={agent.id} key={agent.id}><span {...stylex.props(styles.meta)}>Selected thread: {agent.name}</span></TabPanel>)}</Tabs> : null}
-        {variant === 'S3' ? <nav ref={switcher} tabIndex={-1} data-switcher aria-label="Agent ancestry" {...stylex.props(styles.strip)}>{path.map((agent, index) => <React.Fragment key={agent.id}>{index > 0 ? <Icon name="chevron-right" /> : null}<Button onPress={() => choose(agent.id)} aria-label={`Switch to ${agent.name}`} {...stylex.props(styles.control)}>{agent.name}</Button></React.Fragment>)}{overflow}</nav> : null}
-        <div {...stylex.props(styles.body)}>
-          <EmbraceRuntimeProvider options={runtime}>
-            <div {...stylex.props(styles.conversation)}>
-              <div {...stylex.props(styles.transcript)}><Transcript key={active.id} title={active.name} turns={turns} sync={{ _tag: 'Live', since: now - 5000 }} now={now} observedAt={now} /></div>
-              <div {...stylex.props(styles.composer)}>
-                {active.status === 'Needs you' ? <div role="status" {...stylex.props(styles.needs)}>{active.name} is waiting on your preference. Reply in this thread.</div> : null}
-                <Composer agent={active.name} draftKey={`switch-explore/${variant}/${state}/${scheme}/${width}/${active.id}`} onSend={message => setMessages(current => ({ ...current, [active.id]: [...(current[active.id] ?? []), message] }))} />
-              </div>
-            </div>
-          </EmbraceRuntimeProvider>
-          {drawer ? <aside aria-label="All agent threads" data-thread-drawer {...stylex.props(styles.drawer)}><header {...stylex.props(styles.heading)}><strong>Agent threads · {agents.length}</strong><Button aria-label="Close agent threads" onPress={() => setDrawer(false)} {...stylex.props(styles.control)}><Icon name="x" /></Button></header>{agents.map(agent => { let depth = 0; let parent = agent.parent; while (parent) { depth++; parent = agents.find(candidate => candidate.id === parent)?.parent } return <div key={agent.id} data-depth={depth} {...stylex.props(depth > 0 && styles.indent, depth > 1 && styles.indentTwo, depth > 2 && styles.indentThree)}><SidebarAgentRow item={asRow(read.has(agent.id) ? { ...agent, unread: 0 } : agent, agents)} now={now} active={agent.id === active.id} variant="SR-2" onOpen={() => choose(agent.id)} /></div> })}</aside> : null}
-        </div>
-        {variant === 'S1' ? strip : null}
+  while (path[0]!.parent !== undefined) path.unshift(agents.find(agent => agent.id === path[0]!.parent)!)
+  const drawerToggle = (text: string) => <Button data-thread-drawer-toggle aria-expanded={drawer} aria-controls={drawer ? drawerId : undefined} onPress={() => setDrawer(open => !open)} {...stylex.props(styles.chip, styles.quiet)}><Icon name="drawer" />{text}</Button>
+  const more = hidden > 0 ? drawerToggle(`+${hidden} more`) : null
+  const conversation = <EmbraceRuntimeProvider options={runtime}>
+    <div {...stylex.props(styles.conversation)}>
+      <div {...stylex.props(styles.transcript)}><Transcript key={active.id} title={active.name} turns={turns} sync={{ _tag: 'Live', since: now - 5000 }} now={now} observedAt={now} landmarkContext={landmarkContext} /></div>
+      <div {...stylex.props(styles.composerDock)}>
+        {active.status === 'Needs you' ? <div role="status" data-needs-you {...stylex.props(styles.needsBar)}><span aria-hidden="true" {...stylex.props(styles.glyph, styles.attention)}><Icon name="alert" /></span><span {...stylex.props(styles.needsWord)}>Needs you</span><span {...stylex.props(styles.needsText)}>{active.name} is waiting on your preference. Reply in this thread.</span></div> : null}
+        <Composer agent={active.name} draftKey={`switch-explore/${laneId({ switcher: variant, scheme, width })}/${state}/${active.id}`} onSend={message => setMessages(current => ({ ...current, [active.id]: [...(current[active.id] ?? []), message] }))} />
       </div>
+    </div>
+  </EmbraceRuntimeProvider>
+  const threadDrawer = drawer ? <aside id={drawerId} aria-label={context('All agent threads')} data-thread-drawer data-switcher onKeyDown={event => { if (event.key === 'Escape') setDrawer(false) }} {...stylex.props(styles.drawer)}>
+    <header {...stylex.props(styles.drawerHeader)}><strong {...stylex.props(styles.drawerTitle)}>Threads</strong><span {...stylex.props(styles.muted)}>{agents.length}</span><span {...stylex.props(styles.fill)} /><Button aria-label="Close agent threads" onPress={() => setDrawer(false)} {...stylex.props(styles.iconButton)}><Icon name="x" /></Button></header>
+    <ul {...stylex.props(styles.drawerList)}>{agents.map(agent => {
+      const depth = depthOf(agent, agents)
+      return <li key={agent.id} data-depth={depth} {...stylex.props(depth > 0 && styles.nested, depth === 2 && styles.depthTwo, depth === 3 && styles.depthThree)}><Button data-thread-item data-thread-current={agent.id === active.id ? true : undefined} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.drawerItem, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button></li>
+    })}</ul>
+  </aside> : null
+  const rail = <nav aria-label={context('Agent threads')} data-switcher {...stylex.props(styles.strip, styles.bottomStrip)}>
+    {shown.map(agent => <Button key={agent.id} data-thread-current={agent.id === active.id ? true : undefined} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.chip, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button>)}
+    {more}
+  </nav>
+  const crumbs = <nav aria-label={context('Agent ancestry')} data-switcher {...stylex.props(styles.strip)}>
+    <ol {...stylex.props(styles.crumbs)}>{path.map((agent, index) => <li key={agent.id} {...stylex.props(styles.crumb)}>
+      {index > 0 ? <span aria-hidden="true" {...stylex.props(styles.separator)}><Icon name="chevron-right" /></span> : null}
+      {agent === active ? <span aria-current="page" {...stylex.props(styles.crumbCurrent)}><ThreadLabel agent={agent} unread={0} /></span> : <Button onPress={() => choose(agent.id)} {...stylex.props(styles.crumbLink)}>{agent.name}</Button>}
+    </li>)}</ol>
+    <span {...stylex.props(styles.fill)} />
+    {drawerToggle(`All ${agents.length} threads`)}
+  </nav>
+  const frame = <div {...stylex.props(styles.workspace)}>
+    {variant === 'S3' ? crumbs : null}
+    <div {...stylex.props(styles.body)}>{variant === 'S2' ? <TabPanel id={active.id} {...stylex.props(styles.panel)}>{conversation}</TabPanel> : conversation}{threadDrawer}</div>
+    {variant === 'S1' ? rail : null}
+  </div>
+  return <section ref={lane} data-switching-lane data-variant={variant} data-state={state} data-scheme={scheme} data-width={width} data-active={active.id} aria-label={`${variant} ${switcherNames[variant]}, ${state}, ${scheme}, ${width}`} onKeyDown={event => { if (event.ctrlKey && (event.key === 'ArrowRight' || event.key === 'ArrowLeft')) { event.preventDefault(); cycle(event.key === 'ArrowRight' ? 1 : -1) } }} {...stylex.props(styles.lane)}>
+    <header {...stylex.props(styles.caption)}><h2 {...stylex.props(styles.captionTitle)}>{variant} · {switcherNames[variant]}</h2><span>{state} · {scheme} · {width}</span><span><kbd {...stylex.props(styles.kbd)}>Ctrl</kbd> + <kbd {...stylex.props(styles.kbd)}>Left</kbd> / <kbd {...stylex.props(styles.kbd)}>Right</kbd> cycles every thread</span></header>
+    <div data-lane-frame {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.frame, width === 1440 ? styles.wide : styles.narrow, sidebarWidth === 240 ? styles.sidebar240 : styles.sidebar320)}>
+      <div {...stylex.props(styles.sidebar)}><SwitchingSidebar placement={placement} selected={state} context={landmarkContext} onOpen={onOpenWorkspace} /></div>
+      {variant === 'S2' ? <Tabs selectedKey={active.id} onSelectionChange={key => choose(String(key))} {...stylex.props(styles.tabsRoot)}>
+        <div data-switcher {...stylex.props(styles.strip)}><TabList aria-label={context('Agent thread tabs')} {...stylex.props(styles.tabs)}>{shown.map(agent => <Tab id={agent.id} key={agent.id} data-thread-current={agent.id === active.id ? true : undefined} {...stylex.props(styles.tab, agent.id === active.id && styles.tabSelected)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Tab>)}</TabList>{more}</div>
+        {frame}
+      </Tabs> : frame}
     </div>
   </section>
 }
 const styles = stylex.create({
-  lane: { backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, flexShrink: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border }, wide: { width: geometry.wide }, narrow: { width: geometry.narrow },
-  heading: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, padding: s.lg, color: ink.fgMuted, fontSize: t.metaSize }, shell: { display: 'grid', height: geometry.height }, sidebar240: { gridTemplateColumns: geometry.columns240 }, sidebar320: { gridTemplateColumns: geometry.columns320 }, sidebar: { paddingBlock: s.md, borderRightWidth: g.hairline, borderRightStyle: 'solid', borderRightColor: border.border }, hint: { padding: s.lg, color: ink.fgMuted, lineHeight: t.uiLeading },
-  workspace: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }, body: { display: 'flex', flex: 1, minHeight: 0 }, conversation: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }, transcript: { flex: 1, minHeight: 0, overflow: 'auto' }, composer: { padding: s.lg }, needs: { color: tone.attention, fontSize: t.metaSize, padding: s.md },
-  strip: { display: 'flex', alignItems: 'center', gap: s.md, padding: s.md, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border, overflowX: 'auto', flexShrink: 0, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, tabs: { display: 'flex', gap: s.md, overflowX: 'auto', minWidth: 0, flex: 1 },
-  control: { display: 'inline-flex', alignItems: 'center', gap: s.sm, minHeight: g.controlLg, paddingInline: s.md, paddingBlock: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', flexShrink: 0, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, selected: { backgroundColor: surface.rowActive, color: ink.fg, borderColor: accent.primary }, name: { whiteSpace: 'nowrap' }, meta: { color: ink.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap' }, glyph: { width: g.icon, height: g.icon, display: 'inline-flex' }, running: { color: tone.runningFg }, failed: { color: tone.dangerFg }, attention: { color: tone.attention },
-  drawer: { width: geometry.drawer, flexShrink: 0, overflowY: 'auto', borderLeftWidth: g.hairline, borderLeftStyle: 'solid', borderLeftColor: border.border, backgroundColor: surface.raised }, indent: { marginLeft: geometry.indent }, indentTwo: { marginLeft: `calc(${geometry.indent} * 2)` }, indentThree: { marginLeft: `calc(${geometry.indent} * 3)` },
+  lane: { display: 'flex', flexDirection: 'column', gap: s.md, flexShrink: 0 },
+  caption: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: s.lg, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  captionTitle: { margin: s.zero, color: ink.fg, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
+  kbd: { fontFamily: t.fontSans, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.keyboard },
+  frame: { display: 'grid', height: geometry.height, overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md },
+  wide: { width: geometry.wide }, narrow: { width: geometry.narrow },
+  sidebar240: { gridTemplateColumns: geometry.columns240 }, sidebar320: { gridTemplateColumns: geometry.columns320 },
+  sidebar: { minWidth: 0, overflowY: 'auto', padding: s.md, backgroundColor: surface.sidebar, borderRightWidth: g.hairline, borderRightStyle: 'solid', borderRightColor: border.border },
+  tabsRoot: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 },
+  workspace: { display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 },
+  body: { display: 'flex', flex: 1, minHeight: 0 },
+  panel: { display: 'flex', flex: 1, minWidth: 0, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  conversation: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' },
+  transcript: { flex: 1, minHeight: 0, overflow: 'hidden' },
+  composerDock: { display: 'flex', flexDirection: 'column', gap: s.md, padding: s.lg },
+  needsBar: { display: 'flex', alignItems: 'center', gap: s.md, height: g.footer, boxSizing: 'border-box', paddingInline: s.lg, backgroundColor: surface.raised, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  needsWord: { flexShrink: 0, color: tone.attention, fontWeight: t.weightMedium },
+  needsText: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft },
+  strip: { display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0, paddingBlock: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  bottomStrip: { paddingTop: s.zero, borderBottomWidth: 0 },
+  chip: { display: 'inline-flex', alignItems: 'center', gap: s.sm, flexShrink: 0, minHeight: g.controlLg, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  quiet: { color: ink.fgMuted },
+  current: { backgroundColor: surface.rowActive, borderColor: border.borderStrong, color: ink.fg, ':hover': { backgroundColor: surface.rowActive } },
+  tabs: { display: 'flex', gap: s.md, minWidth: 0, flex: 1, overflowX: 'auto' },
+  tab: { display: 'inline-flex', alignItems: 'center', gap: s.sm, flexShrink: 0, minHeight: g.controlLg, paddingInline: s.md, borderBottomWidth: g.focusRing, borderBottomStyle: 'solid', borderBottomColor: surface.transparent, color: ink.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', outlineStyle: 'none', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  tabSelected: { borderBottomColor: ink.fg, color: ink.fg },
+  crumbs: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, margin: s.zero, padding: s.zero, listStyle: 'none', overflow: 'hidden' },
+  crumb: { display: 'inline-flex', alignItems: 'center', gap: s.xs, minWidth: 0 },
+  separator: { display: 'inline-flex', color: ink.fgMuted },
+  crumbLink: { minHeight: g.controlLg, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  crumbCurrent: { display: 'inline-flex', alignItems: 'center', gap: s.sm, paddingInline: s.sm, color: ink.fg, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  drawer: { display: 'flex', flexDirection: 'column', width: geometry.drawer, flexShrink: 0, overflowY: 'auto', backgroundColor: surface.raised, borderLeftWidth: g.hairline, borderLeftStyle: 'solid', borderLeftColor: border.border },
+  drawerHeader: { display: 'flex', alignItems: 'center', gap: s.md, paddingBlock: s.md, paddingInline: s.lg, color: ink.fg, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  drawerTitle: { fontWeight: t.weightMedium },
+  drawerList: { display: 'flex', flexDirection: 'column', gap: s.xs2, margin: s.zero, paddingInline: s.md, paddingBottom: s.md, listStyle: 'none' },
+  // Nesting is 22px plus a 1px rail, the visual language's nesting step.
+  nested: { marginInlineStart: geometry.indent, paddingInlineStart: s.xs, borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong },
+  depthTwo: { marginInlineStart: geometry.indentTwo }, depthThree: { marginInlineStart: geometry.indentThree },
+  drawerItem: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.controlLg, paddingInline: s.md, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'start', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  glyph: { display: 'inline-flex', flexShrink: 0, color: ink.fgMuted },
+  running: { color: tone.runningFg }, failed: { color: tone.dangerFg }, attention: { color: tone.attention },
+  threadName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  unread: { flexShrink: 0, color: ink.fg, fontWeight: t.weightMedium, fontVariantNumeric: 'tabular-nums' },
+  muted: { color: ink.fgMuted, fontVariantNumeric: 'tabular-nums' },
+  fill: { flex: '1 1 0', minWidth: 0 },
 })
