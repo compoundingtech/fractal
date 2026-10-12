@@ -81,7 +81,10 @@ function assertRows(canvas: HTMLElement) {
         expect(cell.getBoundingClientRect().height).toBeLessThanOrEqual(24)
         for (const run of cell.querySelectorAll('[data-line-run]')) {
           const range = document.createRange(); range.selectNodeContents(run)
-          expect(range.getClientRects().length).toBe(1)
+          // Chromium reports a full text rect plus its ellipsis rect on the same line.
+          const rects = Array.from(range.getClientRects())
+          expect(rects.length).toBeGreaterThan(0)
+          expect(new Set(rects.map(rect => Math.round(rect.top))).size).toBe(1)
         }
       }
       const rowBox = row.getBoundingClientRect()
