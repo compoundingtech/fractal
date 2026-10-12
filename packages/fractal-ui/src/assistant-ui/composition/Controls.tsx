@@ -12,8 +12,8 @@ export function IconButton({ icon, label, ...props }: Omit<ButtonProps, 'childre
   return <Button {...props} aria-label={label}><Icon name={icon} /></Button>
 }
 /** The themed host owns each React Aria portal; menus never fall back to the global palette. */
-export function Tooltip({ label, placement = 'bottom', delay = 350, children }: { label: string; placement?: 'top' | 'bottom'; delay?: number; children: React.ReactNode }) {
-  return <ThemePortal><TooltipTrigger delay={delay} closeDelay={0}>{children}<AriaTooltip placement={placement} offset={geometryNumbers.tooltipOffset} {...stylex.props(styles.tooltip)}>{label}</AriaTooltip></TooltipTrigger></ThemePortal>
+export function Tooltip({ label, placement = 'bottom', delay = 350, isOpen, onOpenChange, children }: { label: string; placement?: 'top' | 'bottom'; delay?: number; isOpen?: boolean; onOpenChange?: (isOpen: boolean) => void; children: React.ReactNode }) {
+  return <ThemePortal><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={onOpenChange}>{children}<AriaTooltip placement={placement} offset={geometryNumbers.tooltipOffset} {...stylex.props(styles.tooltip)}>{label}</AriaTooltip></TooltipTrigger></ThemePortal>
 }
 const styles = stylex.create({
   button: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: s.xs, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', flexShrink: 0, ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline }, ':disabled': { opacity: 0.64, cursor: 'default' } },

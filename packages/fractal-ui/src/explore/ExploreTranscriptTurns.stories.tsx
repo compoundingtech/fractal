@@ -23,7 +23,7 @@ import { turnsGeometry as geometry } from './turns-tokens.stylex'
 const dimensions = {
   T: [{ id: 'T1', description: 'Inputs are sender Cards; the owning seat replies in unnamed Prose.' }, { id: 'T2', description: 'Inputs align right in 75% bubbles; seat Prose aligns left.' }, { id: `T${3}`, description: 'Composition glyph slot and nesting-step gutter; names only when the sender changes.' }],
   K: [{ id: 'K1', description: 'One Card shape with kind word; verified is silent, Unverified is explicit.' }, { id: 'K2', description: 'Person accent rail, agent neutral rail, muted dashed relay / system rails.' }, { id: 'K3', description: 'Relay / system become expandable one-line summaries; person / agent stay cards.' }],
-  M: [{ id: 'M1', description: 'Time in input header; seat time / copy float above the run on reveal.' }, { id: 'M2', description: 'Time in the left first-line gutter; copy overlay top-right on reveal.' }, { id: 'M3', description: 'Time divider for inputs after ≥5 minutes or a day change; exact-time tooltip.' }, { id: 'M4', description: 'Time inline after the last line; copy overlay top-right on reveal.' }],
+  M: [{ id: 'M1', description: 'Time in input header; a reserved 16px time / Copy row above each seat run, revealed on hover, focus or tap.' }, { id: 'M2', description: 'Time in the left first-line gutter; copy overlay top-right on reveal.' }, { id: 'M3', description: 'Time divider for inputs after ≥5 minutes or a day change; exact-time tooltip.' }, { id: 'M4', description: 'Time inline after the last line; copy overlay top-right on reveal.' }],
 } as const
 interface ExploreArgs { turn: `T${1 | 2 | 3}`; kind: 'K1' | 'K2' | 'K3'; meta: 'M1' | 'M2' | 'M3' | 'M4'; compareT: boolean; compareK: boolean; compareM: boolean; scheme: 'dark' | 'light'; width: 1440 | 900; recommended: boolean; probe: boolean }
 const glyphs: Record<TurnBlock['kind'], IconName> = { Person: 'person', Agent: 'message', Relay: 'arrow-right', System: 'gear', Seat: 'thought' }
@@ -78,7 +78,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
     return () => observer.disconnect()
   }, [expanded, meta, block.id, block.sender, turn, kind])
   const time = <time data-turn-time dateTime={block.at} {...stylex.props(styles.time)}>{clock(block.at)}</time>
-  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? `${copied ? 'Copied · ' : ''}${exact(block.at)}` : copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
+  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy, meta === 'M1' && seat && styles.rowCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? `${copied ? 'Copied · ' : ''}${exact(block.at)}` : copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
   const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time>{time}</span></> : null}</span>
   const content = seat
     ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
@@ -86,7 +86,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
   const header = seat && turn === `T${3}` && previous?.sender !== block.sender
     ? <header data-turn-header {...stylex.props(styles.header)}><strong>{block.sender}</strong></header> : null
   const body = <div data-turn-content {...stylex.props(styles.content)}>{content}</div>
-  return <div ref={root} {...hoverProps} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-hovered={isHovered || undefined} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && previous !== undefined && styles.turnStart, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, collapsedKind && styles.quiet)}>
+  return <div ref={root} {...hoverProps} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-hovered={isHovered || undefined} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && previous !== undefined && styles.turnStart, meta === 'M1' && seat && styles.seatRow, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, collapsedKind && styles.quiet)}>
     {turn === `T${3}` && !collapsedKind ? <span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name={glyphs[block.kind]} /></span> : null}
     {meta === 'M3' && isDivider(block, previous) ? <div data-time-divider {...stylex.props(styles.divider)}>{time}</div> : null}
     {meta === 'M1' && seat ? <div data-seat-meta-overlay data-affordance="reveal" {...stylex.props(styles.seatMeta)}><span data-meta-time>{time}</span>{copy}</div> : null}
@@ -139,8 +139,10 @@ function Explorer(initialArgs: ExploreArgs) {
       <div data-control-missing-time>Reply without its own timestamp.</div>
       <div data-control-nested-card data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Projected sender/time</header><article data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Duplicate card header</header>Nested input.</article></div>
       <div data-control-covered-line {...stylex.props(styles.block)}><p>First line under a toolbar.</p><div data-seat-meta-overlay {...stylex.props(styles.seatMeta, styles.coveredLine)}>Covering metadata</div></div>
-      <div data-control-long-final-line {...stylex.props(styles.longLineControl)}><div {...stylex.props(styles.block)}><p {...stylex.props(styles.controlLine)}>A preceding input whose final line runs to the right edge.</p></div><div {...stylex.props(styles.block)}><div data-seat-meta-overlay {...stylex.props(styles.seatMeta)}>Meta</div><p {...stylex.props(styles.controlLine)}>Reply.</p></div></div>
+      <div data-control-long-final-line {...stylex.props(styles.longLineControl)}><div {...stylex.props(styles.block)}><p {...stylex.props(styles.controlLine)}>A preceding input whose final line runs to the right edge.</p></div><div {...stylex.props(styles.block, styles.seatRow)}><div data-seat-meta-overlay {...stylex.props(styles.seatMeta)}>Meta</div><p {...stylex.props(styles.controlLine)}>Reply.</p></div></div>
+      <div data-control-proximity {...stylex.props(styles.longLineControl)}><div {...stylex.props(styles.block, styles.inputFrame)}><p {...stylex.props(styles.controlLine)}>Trigger input.</p></div><div {...stylex.props(styles.block)}><div {...stylex.props(styles.seatMeta, styles.stackedRow)}>Meta</div><p data-control-reply {...stylex.props(styles.controlLine)}>Reply under the stacked 8px gap and 24px row.</p></div><div {...stylex.props(styles.block, styles.turnStart, styles.inputFrame)}><p {...stylex.props(styles.controlLine)}>Next turn.</p></div></div>
       <article data-control-header-wrap><header data-message-header {...stylex.props(styles.wrappedHeaderControl)}><span>From Workspace</span><span>Review · Small Talk</span></header><h2 data-message-subject {...stylex.props(styles.controlLine)}>Wrapped sender path</h2></article>
+      <div data-control-identity-clip {...stylex.props(styles.identityClipControl)}><span {...stylex.props(styles.ellipsisLine)}>From <strong><span data-agent-id-trigger {...stylex.props(styles.atomicRun)}><span data-agent-segment="parent">Workspace</span>›<span data-agent-segment="leaf">Review</span></span></strong> · Small Talk</span></div>
       <span data-control-unicode-glyph>↪</span>
       <strong data-control-heavy-sender>Heavy sender</strong>
     </section> : null}
@@ -183,9 +185,17 @@ const styles = stylex.create({
   trailing: { display: 'inline-block', width: geometry.trailingWidth, marginInlineEnd: geometry.trailingOverlap, whiteSpace: 'nowrap' },
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
+  // The seat row is one 16px meta line; Copy keeps a 24px hit area by overhanging it equally above and below.
+  rowCopy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.controlSm, minHeight: g.controlSm, marginBlock: `calc((${t.metaLeading} - ${g.controlSm}) / 2)` },
   inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
-  // M1 reserves one toolRow above each seat run at every width: the toolbar lives in the inter-turn gap, never over text.
-  seatMeta: { width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  // M1 reserves one 16px meta row above each seat run at every width. The row replaces the 8px block gap rather than
+  // stacking on it, so a reply stays closer to its own trigger than to the next turn; the toolbar never overlays text.
+  seatMeta: { width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: t.metaLeading, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  seatRow: { marginTop: `calc(-1 * ${s.md})` },
+  stackedRow: { height: g.toolRow },
+  identityClipControl: { width: g.controlLg, maxWidth: '100%', fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap' },
+  ellipsisLine: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  atomicRun: { display: 'inline-flex', alignItems: 'center' },
   coveredLine: { position: 'absolute', top: 0, bottom: 'auto', left: 0, right: 'auto' },
   longLineControl: { width: g.previewMax, maxWidth: '100%', display: 'flex', flexDirection: 'column', gap: s.md },
   controlLine: { margin: 0, textAlign: 'right' },
@@ -247,6 +257,40 @@ function headerCollisions(header: Element, subject: Element) {
   }
   return collisions
 }
+/** Text extent of a subtree: top of its first glyph row, bottom of its last. */
+function textExtent(root: Element) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let top = Infinity, bottom = -Infinity
+  while (walker.nextNode()) {
+    if (walker.currentNode.textContent?.trim() === '') continue
+    const range = document.createRange()
+    range.selectNodeContents(walker.currentNode)
+    for (const rect of range.getClientRects()) if (rect.width > 0 && rect.height > 0) { top = Math.min(top, rect.top); bottom = Math.max(bottom, rect.bottom) }
+  }
+  return { top, bottom }
+}
+/** A reply's text distance to its own trigger and to the next turn. */
+function proximity(trigger: Element, reply: Element, nextTurn: Element) {
+  const text = textExtent(reply)
+  return { toTrigger: text.top - trigger.getBoundingClientRect().bottom, toNext: nextTurn.getBoundingClientRect().top - text.bottom }
+}
+/** A dotted identity must truncate inside its own run: leaf whole, no glyph outside the run, no clipping or ellipsis ancestor. */
+function identityFaults(trigger: HTMLElement, boundary: Element) {
+  const faults: string[] = []
+  const run = trigger.getBoundingClientRect()
+  const leaf = trigger.querySelector<HTMLElement>('[data-agent-segment="leaf"]')
+  if (leaf === null || leaf.scrollWidth > leaf.clientWidth) faults.push('leaf truncated')
+  for (const segment of trigger.querySelectorAll('[data-agent-segment]')) {
+    const box = segment.getBoundingClientRect()
+    if (box.left < run.left - 0.5 || box.right > run.right + 0.5) faults.push('glyph outside run')
+  }
+  for (let element = trigger.parentElement; element !== null && element !== boundary.parentElement; element = element.parentElement) {
+    const style = getComputedStyle(element), clip = element.getBoundingClientRect()
+    if (style.textOverflow === 'ellipsis') faults.push('ellipsis over the run')
+    if (style.overflowX !== 'visible' && (run.left < clip.left - 0.5 || run.right > clip.right + 0.5)) faults.push('run clipped')
+  }
+  return faults
+}
 function reservedMetaHeight(block: HTMLElement) {
   const height = block.getBoundingClientRect().height
   const metadata = Array.from(block.querySelectorAll<HTMLElement>('[data-meta-time], [data-time-divider], [data-copy], [data-seat-meta-overlay], time'))
@@ -282,14 +326,22 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         for (const glyph of header.querySelectorAll(':scope > span[aria-hidden="true"]')) await expect(glyph.querySelector('svg')).not.toBeNull()
         const subject = header.parentElement?.querySelector(':scope > [data-message-subject]')
         if (subject) await expect(headerCollisions(header, subject)).toEqual([])
+        for (const trigger of header.querySelectorAll<HTMLElement>('[data-agent-id-trigger]')) await expect(identityFaults(trigger, header)).toEqual([])
       }
       const overlay = block.querySelector('[data-seat-meta-overlay]')
       if (overlay !== null) {
         const firstLine = block.querySelector('[data-turn-content] p')!
         await expect(overlay.getBoundingClientRect().bottom).toBeLessThanOrEqual(firstLine.getBoundingClientRect().top)
-        await expect(overlay.getBoundingClientRect().height).toBe(24)
+        await expect(overlay.getBoundingClientRect().height).toBe(16)
         const previous = block.previousElementSibling as HTMLElement
-        await expect(block.getBoundingClientRect().top - previous.getBoundingClientRect().bottom).toBe(8)
+        await expect(Math.abs(block.getBoundingClientRect().top - previous.getBoundingClientRect().bottom)).toBeLessThan(0.5)
+        if (previous.getAttribute('data-turn-kind') !== 'Seat') {
+          const nextTurn = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]:not([data-turn-kind="Seat"])')).find(candidate => candidate.getBoundingClientRect().top > block.getBoundingClientRect().bottom - 0.5)
+          if (nextTurn !== undefined) {
+            const { toTrigger, toNext } = proximity(previous, block.querySelector('[data-turn-content]')!, nextTurn)
+            await expect(toTrigger, 'reply is closer to its own trigger than to the next turn').toBeLessThan(toNext)
+          }
+        }
         const previousLastLine = lastLineRects(previous)
         await expect(previousLastLine.length).toBeGreaterThan(0)
         for (const line of visibleTextRects(previous)) await expect(intersects(overlay.getBoundingClientRect(), line)).toBe(false)
@@ -354,30 +406,49 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   await expect(overlapsPreceding()).toBe(false)
   const wrappedHeader = canvasElement.querySelector('[data-control-header-wrap]')!
   await expect(headerCollisions(wrappedHeader.querySelector('[data-message-header]')!, wrappedHeader.querySelector('[data-message-subject]')!).length).toBeGreaterThan(0)
+  // The previous structure (an atomic inline-flex run inside an ellipsis line) clips the identity instead of truncating it.
+  const clipControl = canvasElement.querySelector('[data-control-identity-clip]')!
+  await expect(identityFaults(clipControl.querySelector<HTMLElement>('[data-agent-id-trigger]')!, clipControl)).not.toEqual([])
+  // The previous stack (8px gap plus a 24px row) puts the reply nearer the next turn than its own trigger.
+  const proximityControl = canvasElement.querySelector('[data-control-proximity]')!
+  const stacked = proximity(proximityControl.children[0]!, proximityControl.querySelector('[data-control-reply]')!, proximityControl.children[2]!)
+  await expect(stacked.toTrigger).toBeGreaterThanOrEqual(stacked.toNext)
   for (const header of canvasElement.querySelectorAll('[data-lane] [data-message-header]')) await expect(header.querySelector('[title]')).toBeNull()
-  // The dotted identity is one focus stop named by its full identity; the kit tooltip shows it once on hover and on keyboard focus.
+  // The dotted identity is one focus stop named by its full identity; the kit tooltip shows it once on keyboard focus,
+  // hover and touch tap.
   const identity = canvasElement.querySelector<HTMLElement>('[data-lane] [data-agent-id="Workspace.Review"] [data-agent-id-trigger]')
   if (identity !== null) {
+    const view = canvasElement.ownerDocument.defaultView!
+    const settle = () => new Promise<void>(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())))
     const tooltips = () => Array.from(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).filter(tip => tip.textContent === 'Workspace.Review')
+    const exactlyOne = (label: string) => waitFor(() => {
+      expect(tooltips(), label).toHaveLength(1)
+      expect(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]').length, label).toBe(1)
+    }, { timeout: 2000 })
     // Hidden dots join the flex parts; name computation may pad them with spaces.
     await expect(identity).toHaveAccessibleName(/^Workspace\s*\.\s*Review$/)
     await expect(identity.textContent).toBe('Workspace.Review')
-    // Earlier steps leave keyboard modality; React Aria opens hover tooltips only under pointer modality.
-    // Under a loaded runner the 350ms delay can outlast one poll window, so the hover is re-entered until it opens.
-    await waitFor(async () => {
-      await userEvent.unhover(identity)
-      await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
-      await userEvent.hover(identity)
-      await waitFor(() => expect(tooltips(), 'identity tooltip on hover').toHaveLength(1), { timeout: 1500 })
-    }, { timeout: 6000 })
-    await userEvent.unhover(identity)
-    await waitFor(() => expect(tooltips()).toHaveLength(0))
+    // Keyboard focus on an off-screen trigger scrolls it into view; that scroll must not close the tooltip it opened.
+    view.scrollTo(0, identity.getBoundingClientRect().top + view.scrollY + view.innerHeight)
+    await settle()
     await userEvent.keyboard('{Escape}')
     identity.focus()
-    await waitFor(() => {
-      expect(tooltips(), 'identity tooltip on keyboard focus').toHaveLength(1)
-      expect(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]').length, 'one tooltip on keyboard focus').toBe(1)
-    }, { timeout: 3000 })
+    await exactlyOne('identity tooltip on keyboard focus')
+    await settle()
+    await exactlyOne('identity tooltip after the focus scroll settles')
+    identity.blur()
+    await waitFor(() => expect(tooltips()).toHaveLength(0))
+    // Hover: the trigger is settled in view and the pointer is the input modality.
+    identity.scrollIntoView({ block: 'center' })
+    await settle()
+    await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
+    await userEvent.hover(identity)
+    await exactlyOne('identity tooltip on hover')
+    await userEvent.unhover(identity)
+    await waitFor(() => expect(tooltips()).toHaveLength(0))
+    // Touch has no hover: a tap opens the tooltip; leaving the trigger closes it.
+    await userEvent.pointer({ keys: '[TouchA]', target: identity })
+    await exactlyOne('identity tooltip on touch tap')
     identity.blur()
     await waitFor(() => expect(tooltips()).toHaveLength(0))
   }
@@ -390,7 +461,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     for (const [index, block] of blocks.entries()) {
       const seatToolbar = block.querySelector('[data-seat-meta-overlay]')
       const inFlow = seatToolbar !== null && getComputedStyle(seatToolbar).position === 'static'
-      await expect(reservedMetaHeight(block)).toBe(inFlow ? 24 : 0)
+      await expect(reservedMetaHeight(block)).toBe(inFlow ? 16 : 0)
       if (lane.getAttribute('data-meta-variant') === 'M4') await expect(block.querySelectorAll('time[data-turn-time]')).toHaveLength(1)
       const next = blocks[index + 1]
       if (next === undefined) continue
@@ -399,7 +470,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   }
   await expect(canvasElement.querySelector('[data-control-missing-time]')!.querySelectorAll('time')).toHaveLength(0)
   await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-height]')!)).toBeGreaterThan(0)
-  await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-missing-time]')!)).not.toBe(24)
+  await expect(reservedMetaHeight(canvasElement.querySelector<HTMLElement>('[data-control-missing-time]')!)).not.toBe(16)
   const owner = canvasElement.querySelector('[data-control-owner]')!, next = canvasElement.querySelector('[data-control-next]')!, label = owner.querySelector('time')!
   await expect(distance(label.getBoundingClientRect(), owner.getBoundingClientRect())).toBeGreaterThan(distance(label.getBoundingClientRect(), next.getBoundingClientRect()))
   const samples: HTMLElement[] = []
