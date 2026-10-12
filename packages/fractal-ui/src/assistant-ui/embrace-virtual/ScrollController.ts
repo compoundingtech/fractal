@@ -272,6 +272,12 @@ export class ScrollController {
       this.restore()
       return
     }
+    if (this.pressed !== undefined) {
+      this.pendingAnchor = this.pressed
+      this.restore()
+      this.scheduleRestore()
+      return
+    }
     if (this.following) {
       this.options.setUnread(false)
       if (this.element !== null) this.element.scrollTop = this.element.scrollHeight
