@@ -101,7 +101,12 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
   if (!shown.includes(active)) shown.push(active)
   const path: Agent[] = [active]
   while (path[0]!.parent !== undefined) path.unshift(agents.find(agent => agent.id === path[0]!.parent)!)
-  const drawerToggle = (text: string, beyond: readonly Agent[]) => <Button data-thread-drawer-toggle aria-expanded={drawer} aria-controls={drawer ? drawerId : undefined} onPress={() => setDrawer(open => !open)} {...stylex.props(styles.chip, styles.quiet)}><Icon name="drawer" />{text}<AlertCues agents={beyond} /></Button>
+  // Flex items are block-level, so name-from-content would read "Layout , running"; controls carry an aria-label in visible order (name, alert word, unread), then the quiet status.
+  const threadLabel = (agent: Agent) => {
+    const alert = agent.status === 'Failed' || agent.status === 'Needs you'
+    return [agent.name, ...(alert ? [agent.status] : []), ...(unreadOf(agent) > 0 ? [`${unreadOf(agent)} unread`] : []), ...(alert ? [] : [agent.status.toLowerCase()])].join(', ')
+  }
+  const drawerToggle = (text: string, beyond: readonly Agent[]) => <Button data-thread-drawer-toggle aria-label={[text, ...alertWords(beyond)].join(', ')} aria-expanded={drawer} aria-controls={drawer ? drawerId : undefined} onPress={() => setDrawer(open => !open)} {...stylex.props(styles.chip, styles.quiet)}><Icon name="drawer" />{text}<AlertCues agents={beyond} /></Button>
   const beyondStrip = agents.filter(agent => !shown.includes(agent))
   const more = beyondStrip.length > 0 ? drawerToggle(`+${beyondStrip.length} more`, beyondStrip) : null
   // OMP and other unreported harnesses: say what is unknown instead of an empty child list or a spinner.
@@ -126,12 +131,12 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
     <header {...stylex.props(styles.drawerHeader)}><strong {...stylex.props(styles.drawerTitle)}>Threads</strong><span {...stylex.props(styles.muted)}>{agents.length}</span><span {...stylex.props(styles.fill)} /><Button aria-label="Close agent threads" onPress={() => setDrawer(false)} {...stylex.props(styles.iconButton)}><Icon name="x" /></Button></header>
     <ul {...stylex.props(styles.drawerList)}>{agents.map(agent => {
       const depth = depthOf(agent, agents)
-      return <li key={agent.id} data-depth={depth} {...stylex.props(depth > 0 && styles.nested, depth === 2 && styles.depthTwo, depth === 3 && styles.depthThree)}><Button data-thread-item data-thread-current={agent.id === active.id ? true : undefined} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.drawerItem, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button></li>
+      return <li key={agent.id} data-depth={depth} {...stylex.props(depth > 0 && styles.nested, depth === 2 && styles.depthTwo, depth === 3 && styles.depthThree)}><Button data-thread-item data-thread-current={agent.id === active.id ? true : undefined} aria-label={threadLabel(agent)} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.drawerItem, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button></li>
     })}</ul>
     {unreported === null ? null : <div {...stylex.props(styles.drawerNote)}>{unreported}</div>}
   </aside> : null
   const rail = <nav aria-label={context('Agent threads')} data-switcher data-rail {...stylex.props(styles.strip, styles.bottomStrip)}>
-    {shown.map(agent => <Button key={agent.id} data-thread-current={agent.id === active.id ? true : undefined} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.chip, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button>)}
+    {shown.map(agent => <Button key={agent.id} data-thread-current={agent.id === active.id ? true : undefined} aria-label={threadLabel(agent)} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.chip, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button>)}
     {more}
     {unreported}
   </nav>
@@ -154,7 +159,7 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
     <div data-lane-frame {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.frame, width === 1440 ? styles.wide : styles.narrow, sidebarWidth === 240 ? styles.sidebar240 : styles.sidebar320)}>
       <div {...stylex.props(styles.sidebar)}><SwitchingSidebar placement={placement} selected={state} context={landmarkContext} onOpen={onOpenWorkspace} /></div>
       {variant === 'S2' ? <Tabs selectedKey={active.id} onSelectionChange={key => choose(String(key))} {...stylex.props(styles.tabsRoot)}>
-        <div data-switcher {...stylex.props(styles.strip)}><TabList aria-label={context('Agent thread tabs')} {...stylex.props(styles.tabs)}>{shown.map(agent => <Tab id={agent.id} key={agent.id} data-thread-current={agent.id === active.id ? true : undefined} {...stylex.props(styles.tab, agent.id === active.id && styles.tabSelected)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Tab>)}</TabList>{more}{unreported}</div>
+        <div data-switcher {...stylex.props(styles.strip)}><TabList aria-label={context('Agent thread tabs')} {...stylex.props(styles.tabs)}>{shown.map(agent => <Tab id={agent.id} key={agent.id} aria-label={threadLabel(agent)} data-thread-current={agent.id === active.id ? true : undefined} {...stylex.props(styles.tab, agent.id === active.id && styles.tabSelected)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Tab>)}</TabList>{more}{unreported}</div>
         {frame}
       </Tabs> : frame}
     </div>
