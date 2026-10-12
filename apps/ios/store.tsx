@@ -738,8 +738,8 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** Each input takes a fresh terminal fence and refuses a changed runtime incarnation. */
     async terminalInput(terminalId: string, incarnation: string, mode: 'line' | 'key' | 'raw', value: string) {
-      if (!client) throw new Error('not connected');
-      const selected = feed?.terminalControl(terminalId, incarnation);
+      if (!client || !feed) throw new Error('not connected');
+      const selected = feed.terminalControl(terminalId, incarnation);
       const terminalClient = selected?.client ?? client;
       // Typed keys need no screen fence, and an agent's spinner moves the screen faster than a read
       // and a send can race it (Nathan, 2026-10-06: nothing typed ever arrived). So one request,
@@ -760,8 +760,8 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** Sizes the terminal to the phone; whoever attaches next may size it again. */
     async terminalResize(terminalId: string, incarnation: string, rows: number, columns: number) {
-      if (!client) throw new Error('not connected');
-      const selected = feed?.terminalControl(terminalId, incarnation);
+      if (!client || !feed) throw new Error('not connected');
+      const selected = feed.terminalControl(terminalId, incarnation);
       const terminalClient = selected?.client ?? client;
       await withFreshTerminalFence(terminalClient, terminalId, incarnation, terminalFence => {
         const id = actionId();

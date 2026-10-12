@@ -188,6 +188,7 @@ export class Feed {
   /** Controls take their snapshot and client from the same terminal route as the screen. */
   terminalControl(id: string, incarnation: string) {
     if (this.terminal instanceof RoutedTerminalFollow) return this.terminal.control(id, incarnation);
+    if (this.terminalRouting) throw new Error('The terminal route is not ready; keys were not sent');
     return null;
   }
   terminalControlFailed(error: unknown): void {

@@ -89,7 +89,7 @@ export class RoutedTerminalFollow {
             onFrame: frame => {
               if (!valid() || controller.signal.aborted || frame.id !== 'terminal') return;
               if (frame.kind === 'screen' && frame.collection === 'terminal') {
-                try { this.check(frame.value); } catch (error) { this.first?.reject(error as Error); this.stop(TERMINAL_RESTARTED); return; }
+                try { this.check(frame.value); } catch (error) { this.first?.reject(error as Error); this.stop(plainError(error)); return; }
                 this.snapshot = frame.snapshot.id;
                 this.direct = true;
                 this.handlers.onReady?.(true);
@@ -122,7 +122,7 @@ export class RoutedTerminalFollow {
       if (!valid()) return;
       if (restarted(error)) { this.stop(TERMINAL_RESTARTED); return; }
       controller.abort();
-      const failure = remembered || timedOut ? { reason: plainError(error), unreachable: timedOut }
+      const failure = remembered || timedOut ? { reason: plainError(error), unreachable: timedOut && !!this.target }
         : await this.failure(error);
       if (!valid()) return;
       if (!remembered && failure.unreachable && this.descriptor) this.routing.memory.failed(this.descriptor, failure.reason);
@@ -166,7 +166,6 @@ export class RoutedTerminalFollow {
       if (!valid()) { this.detach(this.gateway); return; }
       this.attached = this.gateway;
       this.gatewaySocket()?.subscribeTerminal('terminal', this.id, this.pin, capability);
-      this.handlers.onReady?.(true);
       this.handlers.onIssue('');
     } catch (error) {
       if (!valid()) return;
@@ -181,6 +180,7 @@ export class RoutedTerminalFollow {
     try { this.check(screen); } catch { this.stop(TERMINAL_RESTARTED); return; }
     if (snapshot) this.snapshot = snapshot.id;
     this.failures = 0;
+    this.handlers.onReady?.(true);
     this.handlers.onIssue('');
     this.handlers.onScreen(screen);
   }
