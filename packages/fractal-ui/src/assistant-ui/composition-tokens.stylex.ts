@@ -44,6 +44,17 @@ export const interactionVars = stylex.defineVars({
   wash: 'rgba(245, 245, 245, 0.06)',
 })
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback — DELETE at contraction — https://www.notion.so/3f7e3d41f4a381839fa5f7b257ba8f3c
+/**
+ * Literal-name alias of `interactionVars.focusRing` for the global fallback ring
+ * in `tokens.css`. Themes that override `interactionVars` also override this
+ * alias so it resolves at the themed element.
+ */
+export const focusRingBridgeVars = stylex.defineVars({
+  '--fractal-focus-ring': interactionVars.focusRing,
+})
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback
+
 export const statusVars = stylex.defineVars({
   running: '#3b82f6',
   runningFg: '#60a5fa',

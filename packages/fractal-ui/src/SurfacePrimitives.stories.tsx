@@ -91,7 +91,7 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(getComputedStyle(rename).backgroundColor).toBe(reference.backgroundColor)
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
-  await expect(actions).toHaveFocus()
+  await waitFor(() => expect(actions).toHaveFocus())
 
   const trigger = canvas.getByRole('button', { name: 'View options' })
   trigger.focus()
@@ -132,7 +132,7 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   if (args.selectionMode === 'single') await userEvent.keyboard(' ')
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
-  await expect(trigger).toHaveFocus()
+  await waitFor(() => expect(trigger).toHaveFocus())
 
   // Local state rerenders the production children; selection and tooltip copy must survive it.
   await userEvent.click(canvas.getByRole('button', { name: 'Update labels' }))
@@ -146,7 +146,7 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await assertMotion(canvas.getByTestId('menu-surface'))
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
-  await expect(trigger).toHaveFocus()
+  await waitFor(() => expect(trigger).toHaveFocus())
   await expect(checkbox).toBeChecked()
 
   // Hover runs before any other tooltip opens, so React Aria's warm-up cannot skip the 500ms delay.
