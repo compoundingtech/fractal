@@ -176,7 +176,7 @@ export class RoutedTerminalFollow {
   }
 
   screen(screen: TerminalScreen, snapshot?: Snapshot): void {
-    if (this.closed || this.direct) return;
+    if (this.closed || this.direct || this.current !== this.gateway) return;
     try { this.check(screen); } catch { this.stop(TERMINAL_RESTARTED); return; }
     if (snapshot) this.snapshot = snapshot.id;
     this.failures = 0;
@@ -186,7 +186,7 @@ export class RoutedTerminalFollow {
   }
 
   failed(code: string | undefined, message: string): void {
-    if (this.closed || this.direct) return;
+    if (this.closed || this.direct || this.current !== this.gateway) return;
     if (code && !['stale-fence', 'remote-unavailable'].includes(code)) this.stop(`${this.routeReason}: ${message}`);
     else this.retry(message);
   }
@@ -200,7 +200,7 @@ export class RoutedTerminalFollow {
   }
 
   control(id: string, incarnation: string): { client: TerminalClient; snapshot: string } {
-    if (this.closed || !this.current || !this.snapshot || !this.active() || !this.direct && !this.attached) throw new Error('The terminal route is not ready; keys were not sent');
+    if (this.closed || !this.current || !this.snapshot || !this.active() || !this.direct && (this.current !== this.gateway || !this.attached)) throw new Error('The terminal route is not ready; keys were not sent');
     if (id !== this.id) throw new Error('This terminal is not the followed route; keys were not sent');
     if (incarnation !== this.pin) throw new Error(TERMINAL_RESTARTED);
     return { client: this.current, snapshot: this.snapshot };

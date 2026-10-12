@@ -58,6 +58,21 @@ test('refusal falls back visibly with fresh gateway capability and unchanged pin
   assert.match(h.routes.at(-1), /owner refused read scope/); assert.equal(h.feed.terminalControl(id, 'runtime:one').snapshot, 'snapshot/gateway/frame');
   h.follow(); await settle(); assert.equal(h.state.opens, 2, 'terminal refusal does not poison owner memory'); h.feed.close();
 });
+test('late gateway frames cannot ready or fence an owner before its first screen', async () => {
+  const h = harness({ first: false }); h.follow(); await settle();
+  assert.equal(h.owner.calls.attaches.length, 1);
+  assert.throws(() => h.feed.terminalControl(id, 'runtime:one'), /not ready/);
+  h.gateway.sockets[0].frame({ kind: 'screen', id: 'terminal', collection: 'terminal', snapshot: { id: 'snapshot/gateway/late' }, value: h.gateway.screen() });
+  h.gateway.sockets[0].frame({ kind: 'error', id: 'terminal', code: 'internal', message: 'old gateway follow failed' });
+  assert.equal(h.ready.at(-1), false);
+  assert.throws(() => h.feed.terminalControl(id, 'runtime:one'), /not ready/);
+  h.owner.sockets[0].frame({ kind: 'screen', id: 'terminal', collection: 'terminal', snapshot: { id: 'snapshot/owner/first' }, value: h.owner.screen() });
+  await settle();
+  const control = h.feed.terminalControl(id, 'runtime:one');
+  assert.equal(control.client, h.owner.client); assert.equal(control.snapshot, 'snapshot/owner/first');
+  assert.equal(h.ready.at(-1), true); assert.equal(h.routes.at(-1), 'Fabric to owner-a');
+  h.feed.close();
+});
 for (const reason of ['dial failed', 'missing peer grant', 'tunnel failed']) test(`${reason}: only the actual failure starts the minute`, async () => {
   const h = harness({ openError: failure(reason) }); h.follow(); await settle(); assert.match(h.routes.at(-1), new RegExp(reason));
   h.state.now = 59_999; h.follow(); await settle(); assert.equal(h.state.opens, 1); assert.match(h.routes.at(-1), /not tried again yet/);
