@@ -139,7 +139,8 @@ function Explorer(initialArgs: ExploreArgs) {
       <div data-control-missing-time>Reply without its own timestamp.</div>
       <div data-control-nested-card data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Projected sender/time</header><article data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Duplicate card header</header>Nested input.</article></div>
       <div data-control-covered-line {...stylex.props(styles.block)}><p>First line under a toolbar.</p><div data-seat-meta-overlay {...stylex.props(styles.seatMeta, styles.coveredLine)}>Covering metadata</div></div>
-      <div data-control-overhang {...stylex.props(styles.overhangControl)}><div {...stylex.props(styles.block)}><p {...stylex.props(styles.controlLine)}>Previous last line.</p></div><div {...stylex.props(styles.block)}><p {...stylex.props(styles.controlLine)}>Reply.</p><div data-seat-meta-overlay {...stylex.props(styles.seatMeta, styles.noOverhang)}>Meta</div></div></div>
+      <div data-control-long-final-line {...stylex.props(styles.longLineControl)}><div {...stylex.props(styles.block)}><p {...stylex.props(styles.controlLine)}>A preceding input whose final line runs to the right edge.</p></div><div {...stylex.props(styles.block)}><div data-seat-meta-overlay {...stylex.props(styles.seatMeta)}>Meta</div><p {...stylex.props(styles.controlLine)}>Reply.</p></div></div>
+      <article data-control-header-wrap><header data-message-header {...stylex.props(styles.wrappedHeaderControl)}><span>From Workspace</span><span>Review · Small Talk</span></header><h2 data-message-subject {...stylex.props(styles.controlLine)}>Wrapped sender path</h2></article>
       <span data-control-unicode-glyph>↪</span>
       <strong data-control-heavy-sender>Heavy sender</strong>
     </section> : null}
@@ -183,11 +184,12 @@ const styles = stylex.create({
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
-  seatMeta: { position: geometry.metaPosition, bottom: '100%', right: `calc(-1 * ${s.panel})`, width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  // M1 reserves one toolRow above each seat run at every width: the toolbar lives in the inter-turn gap, never over text.
+  seatMeta: { width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
   coveredLine: { position: 'absolute', top: 0, bottom: 'auto', left: 0, right: 'auto' },
-  noOverhang: { position: 'absolute', right: 0 },
-  overhangControl: { width: g.previewMax, maxWidth: '100%', display: 'flex', flexDirection: 'column', gap: s.md },
-  controlLine: { margin: 0, paddingRight: s.section, textAlign: 'right' },
+  longLineControl: { width: g.previewMax, maxWidth: '100%', display: 'flex', flexDirection: 'column', gap: s.md },
+  controlLine: { margin: 0, textAlign: 'right' },
+  wrappedHeaderControl: { display: 'flex', flexDirection: 'column', height: g.icon, fontSize: t.metaSize, lineHeight: t.metaLeading },
   collapsedMeta: { position: 'absolute', right: 0, top: 0, display: 'flex', gap: s.md, alignItems: 'center', height: g.toolRow },
   divider: { position: 'absolute', bottom: '100%', left: 0, right: 0, textAlign: 'center', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   summary: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: `min(${geometry.metaRoom}, 25%)`, minHeight: g.toolRow, lineHeight: g.toolRow, whiteSpace: 'nowrap', borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { flex: '1 1 auto', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
@@ -231,6 +233,20 @@ function lastLineRects(block: HTMLElement) {
   const bottom = Math.max(...rects.map(rect => rect.bottom))
   return rects.filter(rect => rect.bottom > bottom - 1)
 }
+/** Visible header text that leaves its 16px header box or reaches into the subject line. */
+function headerCollisions(header: Element, subject: Element) {
+  const box = header.getBoundingClientRect(), subjectBox = subject.getBoundingClientRect()
+  const walker = document.createTreeWalker(header, NodeFilter.SHOW_TEXT)
+  const collisions: DOMRect[] = []
+  while (walker.nextNode()) {
+    const parent = walker.currentNode.parentElement!
+    if (walker.currentNode.textContent?.trim() === '' || parent.getBoundingClientRect().width <= 1) continue
+    const range = document.createRange()
+    range.selectNodeContents(walker.currentNode)
+    for (const rect of range.getClientRects()) if (rect.bottom > box.bottom + 0.5 || rect.top < box.top - 0.5 || intersects(rect, subjectBox)) collisions.push(rect)
+  }
+  return collisions
+}
 function reservedMetaHeight(block: HTMLElement) {
   const height = block.getBoundingClientRect().height
   const metadata = Array.from(block.querySelectorAll<HTMLElement>('[data-meta-time], [data-time-divider], [data-copy], [data-seat-meta-overlay], time'))
@@ -264,6 +280,8 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
       for (const header of block.querySelectorAll('[data-message-header]')) {
         if (block.getAttribute('data-turn-structure') !== `T${3}`) await expect(header.querySelector('svg')).not.toBeNull()
         for (const glyph of header.querySelectorAll(':scope > span[aria-hidden="true"]')) await expect(glyph.querySelector('svg')).not.toBeNull()
+        const subject = header.parentElement?.querySelector(':scope > [data-message-subject]')
+        if (subject) await expect(headerCollisions(header, subject)).toEqual([])
       }
       const overlay = block.querySelector('[data-seat-meta-overlay]')
       if (overlay !== null) {
@@ -276,7 +294,6 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         await expect(previousLastLine.length).toBeGreaterThan(0)
         for (const line of visibleTextRects(previous)) await expect(intersects(overlay.getBoundingClientRect(), line)).toBe(false)
         await expect(overlay.getBoundingClientRect().right).toBeLessThanOrEqual(lane.getBoundingClientRect().right)
-        if (getComputedStyle(overlay).position === 'absolute') await expect(overlay.getBoundingClientRect().right - block.getBoundingClientRect().right).toBe(32)
         await expect(overlay.getBoundingClientRect().left).toBeGreaterThanOrEqual(lane.getBoundingClientRect().left)
       }
     }
@@ -323,18 +340,22 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   const coveredControl = canvasElement.querySelector('[data-control-covered-line]')!
   await expect(coveredControl.querySelector('[data-seat-meta-overlay]')!.getBoundingClientRect().bottom).toBeGreaterThan(coveredControl.querySelector('p')!.getBoundingClientRect().top)
   await expect(lastLineRects(coveredControl as HTMLElement).some(line => intersects(coveredControl.querySelector('[data-seat-meta-overlay]')!.getBoundingClientRect(), line))).toBe(true)
-  const overhangControl = canvasElement.querySelector<HTMLElement>('[data-control-overhang]')!
-  const overhangOverlay = overhangControl.querySelector<HTMLElement>('[data-seat-meta-overlay]')!
-  const preceding = overhangControl.firstElementChild as HTMLElement
-  const overlapsControl = () => visibleTextRects(preceding).some(line => intersects(overhangOverlay.getBoundingClientRect(), line))
-  await expect(overlapsControl()).toBe(true)
-  overhangOverlay.style.right = `calc(-1 * ${s.panel})`
-  await expect(overlapsControl()).toBe(false)
-  overhangOverlay.style.right = '0'
-  await expect(overlapsControl()).toBe(true)
-  overhangOverlay.style.right = '-100vw'
-  await expect(overhangOverlay.getBoundingClientRect().right).toBeGreaterThan(overhangControl.getBoundingClientRect().right)
-  overhangOverlay.style.right = ''
+  // Long final line: the preceding block's last line reaches the right edge. The row toolbar clears it;
+  // the rejected zero-height overhang (absolute, 32px past the run) erases its end.
+  const longLineControl = canvasElement.querySelector<HTMLElement>('[data-control-long-final-line]')!
+  const longLineToolbar = longLineControl.querySelector<HTMLElement>('[data-seat-meta-overlay]')!
+  const preceding = longLineControl.firstElementChild as HTMLElement
+  const overlapsPreceding = () => visibleTextRects(preceding).some(line => intersects(longLineToolbar.getBoundingClientRect(), line))
+  await expect(lastLineRects(preceding).at(-1)!.right).toBeGreaterThan(preceding.getBoundingClientRect().right - 2)
+  await expect(overlapsPreceding()).toBe(false)
+  Object.assign(longLineToolbar.style, { position: 'absolute', bottom: '100%', right: `calc(-1 * ${s.panel})` })
+  await expect(overlapsPreceding()).toBe(true)
+  Object.assign(longLineToolbar.style, { position: '', bottom: '', right: '' })
+  await expect(overlapsPreceding()).toBe(false)
+  const wrappedHeader = canvasElement.querySelector('[data-control-header-wrap]')!
+  await expect(headerCollisions(wrappedHeader.querySelector('[data-message-header]')!, wrappedHeader.querySelector('[data-message-subject]')!).length).toBeGreaterThan(0)
+  const dottedSender = canvasElement.querySelector('[data-lane] [data-agent-id="Workspace.Review"]')
+  if (dottedSender !== null) await expect(dottedSender).toHaveAttribute('title', 'Workspace.Review')
   if (canvasElement.ownerDocument.defaultView!.innerWidth <= 440) {
     await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
   }

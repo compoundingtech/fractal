@@ -45,8 +45,9 @@ export interface AgentMessageProps {
   readonly fullMessageUnavailableReason?: string
 }
 
-/** Dotted harness identifiers preserve the parent/child relation without inventing labels. */
-export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}>{id.includes('.') ? <><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></> : id}</span>
+/** Dotted harness identifiers preserve the parent/child relation without inventing labels.
+ * The path is one non-wrapping run; containers truncate it and the title carries the full identity. */
+export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id} title={id}>{id.includes('.') ? <><span aria-hidden="true" {...stylex.props(styles.agentPath)}>{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></> : id}</span>
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
 const MessageBody = ({ text, foreground = false }: { readonly text: string; readonly foreground?: boolean }) => {
@@ -184,6 +185,7 @@ const styles = stylex.create({
   openedSubject: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   counterpart: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  agentPath: { display: 'inline-flex', alignItems: 'center', flexWrap: 'nowrap', whiteSpace: 'nowrap', verticalAlign: 'top', maxWidth: '100%' },
   direction: { flex: '0 0 auto', width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
   sender: { color: textVars.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium },
   time: { marginLeft: 'auto', flex: '0 0 auto', whiteSpace: 'nowrap', textAlign: 'right' },
