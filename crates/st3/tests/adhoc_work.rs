@@ -201,14 +201,14 @@ async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
     use st3::agent_trace::issuer::{self, Facts};
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare(Some("person/gardener"));
+    daemon.declare(Some("person/avery"));
     daemon.start().await;
     let opened = daemon.ok(&["work", "start", "Check trace lifecycle", "--as", ALDER]).await;
     let step = opened["subject"].as_str().unwrap();
     let path = root.path().join("agent-trace.json");
     let runtime = issuer::build(&Facts {
         agent: ALDER.into(),
-        principal: "person/gardener".into(),
+        principal: "person/avery".into(),
         incarnation: "alder-one".into(),
         harness_tool: "omp".into(),
         harness_version: None,

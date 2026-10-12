@@ -16408,10 +16408,11 @@ async fn lock_agent_trace(path: &Path) -> Result<std::fs::File> {
 
 async fn trace_mission_name(client: &Client, lease: Option<&StepRunView>) -> Result<Option<String>> {
     let Some(lease) = lease else { return Ok(None) };
-    let run: MissionRunView = client
-        .get(&format!("/v1/mission-runs/{}", urlencoding::encode(&lease.run)))
+    let mission: Option<String> = client
+        .get(&format!("/v1/agent-trace/mission/{}", urlencoding::encode(&lease.run)))
         .await?;
-    Ok(Some(run.mission.strip_prefix("mission/").unwrap_or(&run.mission).to_owned()))
+    let mission = mission.context("claimed lease has no recorded mission")?;
+    Ok(Some(mission.strip_prefix("mission/").unwrap_or(&mission).to_owned()))
 }
 
 async fn initialize_agent_trace(
@@ -16436,13 +16437,33 @@ async fn initialize_agent_trace(
         write_driver_log(subject, "agent trace omitted: the seat has no recorded human principal")?;
         return Ok(());
     };
+    let work: Vec<StepRunView> = client
+        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
+    let lease = trace_lease(&work, subject, incarnation);
+    let mission_name = trace_mission_name(client, lease).await?;
+    let facts = trace_launch_facts(client, subject, Some(driver), incarnation, argv,
+        principal, mission_name).await?;
+    issuer::write_atomic(path, &issuer::build(&facts, lease)?)
+}
+
+async fn trace_launch_facts(
+    client: &Client,
+    subject: &str,
+    driver: Option<&str>,
+    incarnation: &str,
+    argv: &[String],
+    principal: String,
+    mission_name: Option<String>,
+) -> Result<st3::agent_trace::issuer::Facts> {
     let status: StatusResponse = client
-        .get(&format!("/v1/status?subject={}", urlencoding::encode(subject)))
-        .await?;
-    let declaration = status.subjects.iter()
-        .find(|seat| seat.subject == subject)
-        .and_then(|seat| seat.desired.as_ref())
-        .map(declaration_node).transpose()?;
+        .get(&format!("/v1/status?subject={}", urlencoding::encode(subject))).await?;
+    let seat = status.subjects.iter().find(|seat| seat.subject == subject)
+        .context("agent trace has no recorded seat")?;
+    let driver = driver.or_else(|| seat.harness.as_ref()
+        .filter(|harness| harness.incarnation_id == incarnation)
+        .and_then(|harness| harness.driver.as_deref()))
+        .context("agent trace has no observed harness tool")?;
+    let declaration = seat.desired.as_ref().map(declaration_node).transpose()?;
     let harness = declaration.as_ref().and_then(KdlNode::children)
         .and_then(|body| body.get("harness")).and_then(KdlNode::children);
     let declared = |name: &str| harness.and_then(|body| body.get(name))
@@ -16452,11 +16473,7 @@ async fn initialize_agent_trace(
         .or_else(|| argv.iter().find_map(|arg| arg.strip_prefix("--model=").map(str::to_owned)));
     let model_route = declared("model").or(argv_model)
         .and_then(|model| trace_model_route(driver, &model, None));
-    let work: Vec<StepRunView> = client
-        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
-    let lease = trace_lease(&work, subject, incarnation);
-    let mission_name = trace_mission_name(client, lease).await?;
-    let facts = issuer::Facts {
+    Ok(st3::agent_trace::issuer::Facts {
         agent: subject.into(),
         principal,
         incarnation: incarnation.into(),
@@ -16469,8 +16486,7 @@ async fn initialize_agent_trace(
         host: Some(st_drivers::run::detect_host()),
         worktree: Some(std::env::current_dir()?.display().to_string()),
         mission_name,
-    };
-    issuer::write_atomic(path, &issuer::build(&facts, lease)?)
+    })
 }
 
 async fn refresh_agent_trace(
@@ -16502,16 +16518,24 @@ async fn refresh_agent_trace(
         return Ok(work);
     };
     let raw = match fs::read(path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(work),
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
-    let mut runtime: issuer::Runtime = serde_json::from_slice(&raw)?;
-    issuer::update_principal(&mut runtime, principal)?;
     let lease = trace_lease(&work, subject, incarnation);
     let mission_name = trace_mission_name(client, lease).await?;
-    issuer::update_lease(&mut runtime, subject, incarnation, lease, mission_name.as_deref(),
-        u128::from(st_drivers::message::now_ms()))?;
+    let mut runtime = if let Some(raw) = raw.as_ref() {
+        let mut runtime: issuer::Runtime = serde_json::from_slice(raw)?;
+        issuer::update_principal(&mut runtime, principal)?;
+        issuer::update_lease(&mut runtime, subject, incarnation, lease, mission_name.as_deref(),
+            u128::from(st_drivers::message::now_ms()))?;
+        runtime
+    } else {
+        // Ownership can become known when an unauthored seat claims a person's mission.
+        let facts = trace_launch_facts(client, subject, None, incarnation, &[],
+            principal, mission_name).await?;
+        issuer::build(&facts, lease)?
+    };
     if let Some(observed) = observed
         && let Some(model) = observed.model.as_deref()
         && let Some(route) = trace_model_route(observed.harness.as_str(), model, observed.provider.as_deref())
@@ -16520,7 +16544,8 @@ async fn refresh_agent_trace(
         issuer::update_model(&mut runtime, &route, None)?;
     }
     // Avoid file churn for an unchanged lease and model.
-    if serde_json::to_vec(&runtime)?.as_slice() != raw.strip_suffix(b"\n").unwrap_or(&raw) {
+    let encoded = serde_json::to_vec(&runtime)?;
+    if raw.as_deref().is_none_or(|raw| encoded.as_slice() != raw.strip_suffix(b"\n").unwrap_or(raw)) {
         issuer::write_atomic(path, &runtime)?;
     }
     Ok(work)

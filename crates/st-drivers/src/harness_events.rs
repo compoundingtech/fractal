@@ -681,6 +681,7 @@ mod protocol_tests {
             window_tokens: Some(100),
             used_percent: Some(20.0),
             model: Some("fixture-model".into()),
+            provider: Some("fixture-provider".into()),
             cost_usd: Some(0.1),
             session_total_tokens: Some(30),
             rate_limits: RateLimits::default(),
