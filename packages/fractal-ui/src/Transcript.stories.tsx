@@ -124,8 +124,9 @@ export const LongCommandRow: Story = { render: args => <main {...stylex.props(st
   const assertTokenHeights = async () => {
     for (const height of heights()) await expect(height).toBe(toolRow)
   }
-  const label = rows[1]!.querySelector<HTMLElement>('span[title]')!
-  await expect(label).toHaveAttribute('title', `run ${longCommand}`)
+  // The row keeps the whole command in place behind the ellipsis; the hover tooltip repeats it.
+  const label = rows[1]!.querySelector<HTMLElement>('[data-call-title]')!
+  await expect(label).toHaveTextContent(`run ${longCommand}`)
   await waitFor(() => expect(label.querySelector('[data-syntax-token]')).not.toBeNull())
   await nextFrame()
   await assertTokenHeights()
@@ -185,10 +186,9 @@ export const RawInputOnExpand: Story = { render: args => <main {...stylex.props(
   await waitFor(() => expect(canvas.getAllByTestId('tool-raw-input')).toHaveLength(2))
   await expect(canvas.getAllByTestId('tool-raw-input')[1]).toHaveTextContent(`${rawMarker}:raw/run`)
   await expect(canvas.getByRole('alert').textContent).not.toContain(rawMarker)
-  for (const label of canvasElement.querySelectorAll('[data-tool-status] span[title]')) {
-    await expect(label.textContent).not.toContain(rawMarker)
-    await expect(label.getAttribute('title')).not.toContain(rawMarker)
-  }
+  const labels = canvasElement.querySelectorAll('[data-tool-status] [data-call-title]')
+  await expect(labels.length).toBeGreaterThan(0)
+  for (const label of labels) await expect(label.textContent).not.toContain(rawMarker)
 } }
 export const RawInputOnExpandLight: Story = { ...RawInputOnExpand, args: { scheme: 'light' } }
 const rawDefaultTurn = workLogTurnFromItems([{ _tag: 'ToolCall', id: 'raw-default/run', callId: 'raw-default/run', name: 'run', input: `pnpm test rows # ${rawMarker}:default`, status: 'success', result: { content: '✓ selection retained', isError: false, at }, callSeen: true, at }], { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })

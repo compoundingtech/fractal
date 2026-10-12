@@ -182,6 +182,9 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(getComputedStyle(success[0]!).transitionDuration).toBe(reduced ? '0s' : '0.15s')
   await userEvent.click(success[0]!)
   await expect(success[0]!).toHaveAttribute('aria-expanded', 'true')
+  // The output sits behind the row's raw disclosure.
+  await expect(canvas.queryByTestId('work-call-output')).toBeNull()
+  await userEvent.click(within(success[0]!.parentElement!).getByRole('button', { name: 'Show raw input/output' }))
   await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('stable identity')
 
   // 11: Thinking is a work row; its framed body starts on the text column and renders muted 13px Markdown
