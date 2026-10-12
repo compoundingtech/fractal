@@ -41,6 +41,8 @@ pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod projection_busy_tests;
 #[cfg(test)]
+mod projection_observation_tests;
+#[cfg(test)]
 mod receive_writer_tests;
 #[cfg(test)]
 mod membership_query_tests;
@@ -743,6 +745,9 @@ pub struct Store {
     /// Low bit means deferred; each new deferral advances the generation by two so an
     /// older projection pass cannot clear a newer admission or catch-up deferral.
     replication_projection_state: AtomicU64,
+    /// Monotone carrier for a successful empty attempt's conditional token restoration.
+    /// Saturation disables restoration; this is not a projection or authority certificate.
+    replication_projection_deferrals: AtomicU64,
     /// Only limits new error detail lines; it never caches projection results or decisions.
     projection_diagnostics: Mutex<ProjectionDiagnosticState>,
     /// Advances only for numeric SQLite contention, so the daemon can coalesce a bounded
@@ -997,6 +1002,7 @@ impl Store {
             projection: Mutex::new(()),
             replication_timers: ReplicationTimers::default(),
             replication_projection_state: AtomicU64::new(0),
+            replication_projection_deferrals: AtomicU64::new(0),
             projection_diagnostics: Mutex::new(ProjectionDiagnosticState::default()),
             projection_contention_generation: AtomicU64::new(0),
             last_replication_projection_unix_ms: AtomicU64::new(0),
@@ -6406,12 +6412,18 @@ impl Store {
         self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn defer_replication_projection(&self) {
-        let _ = self.replication_projection_state.fetch_update(
+    fn defer_replication_projection(&self) -> (u64, u64) {
+        let previous = self.replication_projection_state.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |state| Some(state.wrapping_add(2) | 1),
-        );
+        ).expect("deferral always supplies a replacement");
+        let nonce = self.replication_projection_deferrals.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |nonce| Some(nonce.saturating_add(1)),
+        ).expect("deferral always supplies a replacement").saturating_add(1);
+        (previous, nonce)
     }
 
     /// Copy WAL pages off the writer queue, then serialize the writer-lock-taking TRUNCATE.
@@ -6573,7 +6585,8 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let _timing = time_stage(&self.replication_timers.projection);
-        self.defer_replication_projection();
+        let (before_attempt, attempt_nonce) = self.defer_replication_projection();
+        let attempt_state = before_attempt.checked_add(2).map(|state| state | 1);
         self.last_replication_projection_unix_ms
             .store(now_ms() as u64, Ordering::Release);
         // Finish the backlog observed at entry. New receives can admit more between chunks;
@@ -6581,6 +6594,8 @@ impl Store {
         let target = self.index()?;
         let mut chunked = false;
         let mut processed = 0_u64;
+        let mut genuinely_empty = before_attempt & 1 == 0
+            && self.runtime.empty_projection_has_only_row_effects();
         loop {
             let mut connection = self.connection.write();
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
@@ -6601,15 +6616,15 @@ impl Store {
                     // deferred generation and attempt time. The daemon also schedules retry.
                     error
                 })?;
-            let frontier: u64 = transaction
+            let health: Option<(String, Option<u64>)> = transaction
                 .query_row(
-                    "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                    "SELECT status,last_good_store_index FROM projection_health WHERE aggregate='graph'",
                     [],
-                    |row| row.get::<_, Option<u64>>(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .optional()?
-                .flatten()
-                .unwrap_or(0);
+                .optional()?;
+            genuinely_empty &= health.as_ref().is_some_and(|(status, _)| status == "healthy");
+            let frontier = health.and_then(|(_, frontier)| frontier).unwrap_or(0);
             let (through, count) = transaction
                 .query_row(
                     "SELECT MAX(store_index), COUNT(*) FROM (
@@ -6626,6 +6641,7 @@ impl Store {
                 processed: None,
                 total: None,
             });
+            let changes_before_projection = transaction.total_changes();
             let result = (|| -> Result<bool, St3Error> {
                 // Non-contention incremental failures retain the full replay fallback,
                 // which quarantines claims it cannot project. SQLite contention defers below.
@@ -6718,6 +6734,10 @@ impl Store {
             })();
             match result {
                 Ok(replayed) => {
+                    // Runtime hooks can change projections even with no claim rows. Never
+                    // restore for those writes, a replay, a partial chunk or a frontier gap.
+                    genuinely_empty &= count == 0 && !replayed && frontier == target
+                        && transaction.total_changes() == changes_before_projection;
                     // A fallback replay folds the whole log, including anything admitted after
                     // this pass started. An incremental chunk advances only its bounded frontier.
                     let through = if replayed {
@@ -6760,6 +6780,7 @@ impl Store {
                         continue;
                     }
                     if self.verdicts_due.swap(false, Ordering::AcqRel) {
+                        genuinely_empty = false;
                         self.judge_claims(true).map_err(|error| {
                             self.verdicts_due.store(true, Ordering::Release);
                             let error = crate::error::typed(error);
@@ -6777,9 +6798,18 @@ impl Store {
                     let pending = through < self.index()?;
                     before_clear();
                     if !pending {
+                        // Projection attempts are serialized by `projection`. Restore only
+                        // this attempt's exact entry state, with no intervening deferral.
+                        // A wrapping state or saturated carrier stays conservative. A reader
+                        // that observed the temporary pending state sees an extra change.
+                        let restore = genuinely_empty
+                            && attempt_nonce != u64::MAX
+                            && self.replication_projection_deferrals.load(Ordering::Acquire)
+                                == attempt_nonce
+                            && attempt_state == Some(projection_state);
                         let _ = self.replication_projection_state.compare_exchange(
                             projection_state,
-                            projection_state & !1,
+                            if restore { before_attempt } else { projection_state & !1 },
                             Ordering::AcqRel,
                             Ordering::Acquire,
                         );

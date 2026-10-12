@@ -138,6 +138,12 @@ pub trait Runtime: Send + Sync {
     /// Reapply this node's local state that a projection replaced, once a projection ends.
     fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), Error>;
 
+    /// Opt in only when empty incremental/after-projection hooks cannot publish
+    /// non-SQL effects. Unknown runtimes keep conservative attempt-token changes.
+    fn empty_projection_has_only_row_effects(&self) -> bool {
+        false
+    }
+
     /// Projections changed beneath whatever the runtime keeps in memory about them.
     fn forget_views(&self);
 
@@ -297,6 +303,10 @@ impl Runtime for Plain {
 
     fn after_projection(&self, _transaction: &Transaction<'_>) -> Result<(), Error> {
         Ok(())
+    }
+
+    fn empty_projection_has_only_row_effects(&self) -> bool {
+        true
     }
 
     fn forget_views(&self) {}
