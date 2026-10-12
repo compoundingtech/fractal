@@ -7,6 +7,11 @@ const config: StorybookConfig = {
   framework: '@storybook/react-vite',
   addons: ['@storybook/addon-docs', '@storybook/addon-a11y'],
   core: { disableTelemetry: true },
-  viteFinal: async (config) => ({ ...config, plugins: [...(config.plugins ?? []), tailwindcss(), stylex.vite({ useCSSLayers: false })] }),
+  viteFinal: async (config) => ({
+    ...config,
+    // Keep the complete StyleX rule set in the preview head.
+    build: { ...config.build, cssCodeSplit: false },
+    plugins: [...(config.plugins ?? []), tailwindcss(), stylex.vite({ useCSSLayers: false })],
+  }),
 }
 export default config

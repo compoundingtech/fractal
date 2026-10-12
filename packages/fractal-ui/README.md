@@ -263,3 +263,15 @@ Per direction, the metaphor and the behavior it emphasizes are:
 All displayed content is newly written synthetic data. The terminal is a read-only fixture, not an emulator. Nothing contacts a filesystem, network service, model or provider.
 
 This note records provenance practice. It is not legal clearance or an independent originality certification.
+
+## Quota priority exploration
+
+`Fractal UI/Explore/QuotaPriority` compares truncation, suffix hiding and a
+React Aria `+N` readings popover. Account information precedes primary usage,
+then the primary reset, then secondary and additional windows. The matrix
+shows 200/240/320 sidebars in both themes inside 1440/900 host frames.
+`Exploration` has no play and supports deep-linked `variant`, `sidebar`,
+`scheme`, `viewport` and `compare` args. `QuotaPriorityProbe` drives the real
+controls and reasserts prefix visibility and one-line geometry after rerenders.
+The explorer reuses `UsageMeterReading` and `UsageMeterRowDetail`; production
+table policy is unchanged.

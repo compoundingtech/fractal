@@ -39,7 +39,7 @@ const isSortKey = (key: string | number): key is UsageMeterSortKey => columns.so
 const resetEvidence = (row: UsageMeterRow): string =>
   `Reset ${row.reset}${row.resetAt === undefined ? '' : ` · ${row.resetAt}`} · ${row.resetCount === undefined ? 'Reset count unreported' : `${row.resetCount} reported resets`}`
 
-const Meter = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCell; readonly stale: boolean; readonly compact?: boolean }) => <div data-usage-meter-tone={meter.tone} {...stylex.props(styles.meter, compact && styles.compactMeter)}>
+export const UsageMeterReading = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCell; readonly stale: boolean; readonly compact?: boolean }) => <div data-usage-meter-tone={meter.tone} {...stylex.props(styles.meter, compact && styles.compactMeter)}>
   <span title={meter.label} {...stylex.props(styles.windowLabel, compact && styles.compactWindow)}>{meter.label}</span>
   <div {...stylex.props(styles.meterReading, compact && styles.compactReading)}>
     {meter.fraction !== undefined && meter.tone !== 'unknown' && <span aria-hidden="true" data-usage-meter-bar {...stylex.props(styles.track, stale && styles.staleBar, compact && styles.compactTrack)}>
@@ -90,7 +90,7 @@ export const UsageMeterRowDetail = ({ row, history, onClose }: { readonly row: U
   <h4 {...stylex.props(styles.title)}>Windows</h4>
   {row.detail.windows.map(window => <section key={window.id} aria-label={window.label} {...stylex.props(styles.detailWindow)}>
     <h5 {...stylex.props(styles.title)}>{window.label}</h5>
-    <Meter meter={window.meter} stale={row.stale} />
+    <UsageMeterReading meter={window.meter} stale={row.stale} />
     <Facts facts={window.facts} />
   </section>)}
   <h4 {...stylex.props(styles.title)}>Resets</h4>
@@ -151,9 +151,9 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
           const resetDescription = resetEvidence(row)
           return <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
           <Cell textValue={accountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={accountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}><span aria-hidden="true">{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}><span data-usage-meter-account-prefix {...stylex.props(styles.compactPrefix)}><span dir="ltr">{row.compactIdentity.prefix}</span></span><span data-usage-meter-account-name {...stylex.props(styles.compactAccount)}>{row.compactIdentity.account}</span></span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}><Icon name="alert" size={10} /></span>}</span><VisuallyHidden><span data-usage-meter-full-value>{accountEvidence}</span></VisuallyHidden></span></Cell>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><UsageMeterReading meter={row.governing} stale={row.stale} compact /></Cell>
           <Cell textValue={resetDescription} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={resetDescription} {...stylex.props(styles.reset)}><span aria-hidden="true">{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}><Icon name="swap" size={10} />{row.resetCount}</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{resetDescription}</span></VisuallyHidden></span></Cell>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <UsageMeterReading meter={row.comparison} stale={row.stale} compact />}</Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Button aria-label={`Show all windows and evidence for ${row.label}`} aria-expanded={selected?.id === row.id} onPress={() => onSelect(row.id)} {...stylex.props(styles.moreButton)}>
             <span {...stylex.props(styles.wideCount)}>+{row.omitted}</span><span {...stylex.props(styles.narrowCount)}>+{row.omitted + (row.comparison === undefined ? 0 : 1)}</span>
           </Button></Cell>
