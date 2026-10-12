@@ -759,3 +759,388 @@ fn complete_operation_reconciliation_repairs_missing_or_wrong_known_key_logical_
         tx.commit().unwrap();
     }
 }
+
+// Frozen current-main keyed fold; covering access must preserve its typed refusal and membership.
+fn legacy_expected_operation(
+    connection: &Connection,
+    operation_id: &str,
+) -> Result<Option<(String, String, String)>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT id, json_extract(body, '$._operation.request_digest') FROM claims INDEXED BY claims_operation_index
+         WHERE json_extract(body, '$._operation.id')=?1
+           AND json_type(body, '$._operation.id')='text'
+           AND json_type(body, '$._operation.request_digest')='text'
+           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)",
+    )?;
+    let mut operation = OperationMetadata::default();
+    for row in statement.query_map([operation_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })? {
+        let (claim_id, request_digest) = row?;
+        operation.include(request_digest, claim_id, true);
+    }
+    let mut statement = connection.prepare_cached(
+        "SELECT request_digest,id FROM checkpoint_claims
+         WHERE operation_id=?1 AND request_digest IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
+           AND NOT EXISTS(SELECT 1 FROM claims WHERE id=checkpoint_claims.id
+             AND json_type(body,'$._operation.id')='text'
+             AND json_type(body,'$._operation.request_digest')='text'
+             AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))",
+    )?;
+    for row in statement.query_map([operation_id], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (request_digest, claim_id) = row?;
+        operation.include(request_digest, claim_id, false);
+    }
+    Ok(operation.row())
+}
+
+fn checkpoint_candidate(connection: &Connection, operation: &str, digest: &str, id: &str) {
+    connection
+        .execute(
+            "INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,actor,
+         predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
+         VALUES (?1,'alder',1,'fixture-envelope','note/checkpoint','example.note',NULL,
+         '[]',?2,?3,0,'checkpoint/2026-10-01')",
+            params![id, operation, digest],
+        )
+        .unwrap();
+}
+
+fn assert_keyed_oracle(connection: &Connection, operation: &str) {
+    let expected = legacy_expected_operation(connection, operation).unwrap();
+    assert_eq!(expected_operation(connection, operation).unwrap(), expected);
+    assert_eq!(
+        expected,
+        expected_operations(connection)
+            .unwrap()
+            .get(operation)
+            .cloned()
+    );
+}
+
+#[test]
+fn repair_checkpoint_extrema_preserve_legacy_membership_and_canonical_fallback() {
+    let store = node();
+    let stored = operation_claim(&store, "op/target", "b", "stored");
+    operation_claim(&store, "op/target", "c", "second");
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    // Duplicate metadata cannot lower the stored claim's real digest.
+    checkpoint_candidate(&tx, "op/target", "!duplicate", &stored.id);
+    checkpoint_candidate(&tx, "op/target", "!repaired", "cp/repaired");
+    tx.execute(
+        "INSERT INTO projection_digest_repaired_claims(id) VALUES ('cp/repaired')",
+        [],
+    )
+    .unwrap();
+    checkpoint_candidate(&tx, "op/target", "ignored", "cp/null-digest");
+    tx.execute("UPDATE checkpoint_claims SET request_digest=NULL WHERE id='cp/null-digest'", []).unwrap();
+    assert_keyed_oracle(&tx, "op/target");
+    for (n, digest) in ["b", "c", "", "é", "𐀀", "0"].into_iter().enumerate() {
+        checkpoint_candidate(&tx, "op/target", digest, &format!("cp/{n}"));
+        assert_keyed_oracle(&tx, "op/target");
+    }
+    // Both sources keep conflict refusal, even with a prior cached active receipt.
+    assert_eq!(
+        checkpointed_operation_outcome(&tx, "op/target", "b")
+            .unwrap_err()
+            .code,
+        "idempotency-conflict"
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn repair_checkpoint_extrema_observe_late_arrival_deletion_and_rollback() {
+    let store = node();
+    operation_claim(&store, "op/target", "b", "stored");
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        assert_keyed_oracle(&tx, "op/target");
+        checkpoint_candidate(&tx, "op/target", "a", "cp/late");
+        assert_keyed_oracle(&tx, "op/target");
+        tx.execute_batch("SAVEPOINT changed_candidates").unwrap();
+        tx.execute("DELETE FROM checkpoint_claims WHERE id='cp/late'", [])
+            .unwrap();
+        checkpoint_candidate(&tx, "op/target", "z", "cp/transient");
+        assert_keyed_oracle(&tx, "op/target");
+        tx.execute_batch("ROLLBACK TO changed_candidates; RELEASE changed_candidates")
+            .unwrap();
+        assert_keyed_oracle(&tx, "op/target");
+        assert_eq!(
+            expected_operation(&tx, "op/target").unwrap().unwrap().0,
+            "a"
+        );
+        tx.commit().unwrap();
+    }
+    operation_claim(&store, "op/target", "0", "late-stored");
+    assert_keyed_oracle(&store.readers.get(), "op/target");
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        tx.execute("DELETE FROM operations WHERE id='op/target'", [])
+            .unwrap();
+        tx.execute(
+            "DELETE FROM claims WHERE json_extract(body,'$._operation.id')='op/target'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(expected_operation(&tx, "op/target").unwrap(), None);
+        assert_eq!(legacy_expected_operation(&tx, "op/target").unwrap(), None);
+        tx.commit().unwrap();
+    }
+}
+
+#[test]
+fn repair_checkpoint_extrema_refuse_corruption_and_roll_back_the_entire_repair() {
+    let store = node();
+    let old = operation_claim(&store, "op/old", "a", "old");
+    let replacement = operation_claim(&store, "op/new", "b", "new");
+    let record = record(&store, &old);
+    repair(&store, &record, &replacement.id, "bad-checkpoint");
+    {
+        let connection = store.connection.write();
+        checkpoint_candidate(&connection, "op/new", "a", "cp/least");
+        checkpoint_candidate(&connection, "op/new", "𐀀", "cp/greatest");
+        checkpoint_candidate(&connection, "op/new", "c", "cp/bad");
+        // Keep the immutable source ID intact. The malformed TEXT digest sorts between
+        // the two valid extrema, so decoding only first/last rows would miss its refusal.
+        connection
+            .execute(
+                "UPDATE checkpoint_claims SET request_digest=CAST(x'80' AS TEXT) WHERE id='cp/bad'",
+                [],
+            )
+            .unwrap();
+        assert!(legacy_expected_operation(&connection, "op/new").is_err());
+        assert!(expected_operation(&connection, "op/new").is_err());
+        connection
+            .execute("DELETE FROM checkpoint_claims WHERE id='cp/bad'", [])
+            .unwrap();
+        checkpoint_candidate(&connection, "op/new", "c", "cp/bad");
+        connection
+            .execute(
+                "UPDATE checkpoint_claims SET request_digest=x'80' WHERE id='cp/bad'",
+                [],
+            )
+            .unwrap();
+        assert!(legacy_expected_operation(&connection, "op/new").is_err());
+        assert!(expected_operation(&connection, "op/new").is_err());
+    }
+    let before = rows(&store);
+    assert!(store.apply_replication_repairs().is_err());
+    assert_eq!(rows(&store), before);
+    assert_eq!(
+        store
+            .readers
+            .get()
+            .query_row(
+                "SELECT state FROM replica_records WHERE record_ref=?1",
+                [&record],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "valid"
+    );
+    store
+        .connection
+        .write()
+        .execute("DELETE FROM checkpoint_claims WHERE id='cp/bad'", [])
+        .unwrap();
+    assert_eq!(store.apply_replication_repairs().unwrap(), 1);
+    assert_canonical(&store);
+}
+
+#[test]
+fn repair_checkpoint_extrema_do_not_bless_a_damaged_unrelated_receipt() {
+    let store = node();
+    let old = operation_claim(&store, "op/old", "a", "old");
+    let replacement = operation_claim(&store, "op/new", "b", "new");
+    operation_claim(&store, "unrelated/damaged", "z", "damaged");
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE operations SET request_digest='prior-corruption' WHERE id='unrelated/damaged'",
+            [],
+        )
+        .unwrap();
+    let damaged = rows(&store)["unrelated/damaged"].clone();
+    let record = record(&store, &old);
+    repair(&store, &record, &replacement.id, "keyed");
+    protect_unrelated(&store);
+    assert_eq!(store.apply_replication_repairs().unwrap(), 1);
+    assert_eq!(rows(&store)["unrelated/damaged"], damaged);
+    assert_keyed_oracle(&store.readers.get(), "op/new");
+    assert_ne!(
+        rows(&store),
+        expected_operations(&store.readers.get()).unwrap(),
+        "targeted repair must not certify unrelated corruption"
+    );
+}
+
+#[test]
+fn repair_checkpoint_extrema_use_the_affected_key_as_unrelated_inventory_grows() {
+    fn sample(unrelated: usize) -> crate::sqlite::work::SqliteWork {
+        let store = node();
+        operation_claim(&store, "op/target", "b", "stored");
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            checkpoint_candidate(&tx, "op/target", "a", "cp/least");
+            checkpoint_candidate(&tx, "op/target", "z", "cp/greatest");
+            for n in 0..unrelated {
+                checkpoint_candidate(
+                    &tx,
+                    &format!("unrelated/{n}"),
+                    "0",
+                    &format!("cp/unrelated/{n}"),
+                );
+            }
+            tx.commit().unwrap();
+        }
+        let connection = store.readers.get();
+        {
+            let query = format!("EXPLAIN QUERY PLAN {CHECKPOINT_OPERATION_KEYED_QUERY}");
+            let plan = connection
+                .prepare(&query)
+                .unwrap()
+                .query_map(["op/target"], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(plan.iter().any(|line|line.contains("SEARCH checkpoint_claims USING COVERING INDEX checkpoint_claims_operation_digest")),"{plan:?}");
+            assert!(
+                !plan.iter().any(|line| line.contains("USE TEMP B-TREE")),
+                "{plan:?}"
+            );
+        }
+        let scope = crate::sqlite::work::SqliteWorkScope::start();
+        let result = expected_operation(&connection, "op/target").unwrap();
+        let work = scope.finish();
+        assert_eq!(
+            result,
+            legacy_expected_operation(&connection, "op/target").unwrap()
+        );
+        assert!(work.vm_steps > 0);
+        assert_eq!(work.fullscan_steps, 0);
+        work
+    }
+    let small = sample(16);
+    let large = sample(2048);
+    eprintln!("checkpoint extrema keyed work: 16={small:?},2048={large:?}");
+    assert_eq!(small.statements, large.statements);
+    assert!(large.vm_steps <= small.vm_steps * 2, "{small:?}->{large:?}");
+}
+
+#[test]
+fn repair_checkpoint_extrema_index_is_added_on_reopen_without_receipt_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let before;
+    {
+        let store = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+        operation_claim(&store, "op/target", "b", "stored");
+        checkpoint_candidate(&store.connection.write(), "op/target", "a", "cp/dropped");
+        before = rows(&store);
+        store
+            .connection
+            .write()
+            .execute_batch("DROP INDEX checkpoint_claims_operation_digest")
+            .unwrap();
+    }
+    // An older/raw read-only store cannot install missing schema: refuse, never skip.
+    let old_readonly = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert!(expected_operation(&old_readonly, "op/target").is_err());
+    drop(old_readonly);
+    let reopened = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
+    assert_eq!(rows(&reopened), before);
+    assert_keyed_oracle(&reopened.readers.get(), "op/target");
+    assert_eq!(
+        reopened
+            .readers
+            .get()
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .unwrap(),
+        18
+    );
+    assert!(reopened.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='checkpoint_claims_operation_digest')", [], |row| row.get::<_,bool>(0)).unwrap());
+    drop(reopened);
+    let readonly = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_keyed_oracle(&readonly, "op/target");
+    drop(readonly);
+    // The ordinary SQLite scratch copy carries the installed index into immutable readers.
+    let copy_path = dir.path().join("scratch.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source.execute("VACUUM INTO ?1", [copy_path.to_str().unwrap()]).unwrap();
+    drop(source);
+    let uri = format!("file:{}?immutable=1", copy_path.display());
+    let immutable = Connection::open_with_flags(uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI).unwrap();
+    assert_keyed_oracle(&immutable, "op/target");
+}
+
+
+#[test]
+#[ignore = "explicit private first-open index size characterization"]
+fn checkpoint_covering_index_build_characterization() {
+    // Raw synthetic checkpoint metadata only, using the production physical schema and
+    // bundled SQLite. This measures the CREATE INDEX + COMMIT portion of first open,
+    // not full Store initialization or production writer-return latency.
+    for count in [615_894_i64, 1_000_000] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint-index.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        crate::sqlite::observe(&mut connection);
+        connection.execute_batch(SCHEMA).unwrap();
+        connection.execute_batch("DROP INDEX checkpoint_claims_operation_digest").unwrap();
+        connection.create_scalar_function("fixture_digest", 1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let n = context.get::<i64>(0)?;
+                Ok(hex::encode(Sha256::digest(n.to_be_bytes())))
+            }).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        connection.execute(
+            "WITH RECURSIVE n(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM n WHERE value+1<?1)
+             INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,actor,
+                 predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
+             SELECT fixture_digest(value),'fixture',value,fixture_digest(value),
+                 'note/checkpoint','example.note',NULL,'[]','op/'||fixture_digest(value/8),
+                 fixture_digest(value%3),1791676800000,'checkpoint/2026-10-11' FROM n", [count],
+        ).unwrap();
+        connection.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        let rows: i64 = connection.query_row("SELECT COUNT(*) FROM checkpoint_claims", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, count);
+        let used_pages = |c: &Connection| -> i64 {
+            let pages: i64 = c.pragma_query_value(None, "page_count", |r| r.get(0)).unwrap();
+            let free: i64 = c.pragma_query_value(None, "freelist_count", |r| r.get(0)).unwrap();
+            pages-free
+        };
+        let page_size: i64 = connection.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+        let before = used_pages(&connection);
+        let start = SCHEMA.find("CREATE INDEX IF NOT EXISTS checkpoint_claims_operation_digest").unwrap();
+        let end = start + SCHEMA[start..].find(';').unwrap() + 1;
+        let index_sql = &SCHEMA[start..end];
+        let timer = std::time::Instant::now();
+        let scope = crate::sqlite::work::SqliteWorkScope::start();
+        connection.execute_batch(&format!("BEGIN IMMEDIATE; {index_sql} COMMIT;")).unwrap();
+        let work = scope.finish();
+        let elapsed_ms = timer.elapsed().as_secs_f64()*1000.0;
+        let footprint = (used_pages(&connection)-before)*page_size;
+        assert!(footprint>0);
+        let indexed: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM checkpoint_claims INDEXED BY checkpoint_claims_operation_digest
+             WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(indexed,count); // All synthetic rows qualify: conservative eligible-row count.
+        eprintln!("checkpoint covering first-open characterization {}", json!({
+            "table_rows":count,"indexed_rows":indexed,"build_and_commit_ms":elapsed_ms,
+            "allocated_live_page_delta_bytes":footprint,"page_size":page_size,
+            "statements":work.statements,"vm_steps":work.vm_steps,"fullscan_steps":work.fullscan_steps,
+            "sorts":work.sorts,"autoindex_rows":work.autoindex_rows,
+            "scope":"synthetic fixed-width hash keys; index DDL+COMMIT only, excludes population/full Store open/managed writer return",
+        }));
+    }
+}

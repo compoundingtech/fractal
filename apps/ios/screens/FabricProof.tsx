@@ -79,7 +79,7 @@ export function FabricProofScreen({ input, onClose, renderClient }: {
         setNode(own);
         console.info(`Fabric proof public node: ${own}`);
         if (!input.id || !input.code) {
-          setResult('Grant this public node ID only the test gateway service, then open a proof pairing link. Add client=1 to use Home and conversations.');
+          setResult('Grant this public node ID only the test gateway service, then open a proof pairing link. Add client=1 to use Now and conversations.');
           return;
         }
         const before = await fabricStats();

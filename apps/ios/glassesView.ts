@@ -4,10 +4,10 @@ import { missionWord, wordName, wordStyle } from './missionsView';
 import { missionLabels } from './presentation';
 import type { MachineView } from './projectionCache';
 
-// Glasses on the phone, an experiment behind a setting (mission fleet/stui/glass): the person's
-// named workspaces from stui, read from st. A glass is splits, each with its own tabs, and each
-// tab one pane. The phone shows one thing at a time: Home, then each split's tabs as a list, and
-// a tab opens its pane full screen. Pane keys are stui's
+// Spaces on the phone (kept as glasses by st): the person's
+// named workspaces from stui, read from st. Each space has panes with their own tabs;
+// choosing a space lists its tabs grouped by pane. A tab opens its pane full screen.
+// Pane keys are stui's
 // (crates/stui/src/ui/pane.rs): `agent:agent/…`, `mission:mission/…`, `machine:machine/…`.
 
 /** What a pane opens on the phone. */

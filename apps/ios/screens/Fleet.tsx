@@ -78,7 +78,7 @@ export function FleetScreen() {
       </View>)}
       {!gatewayListed && gatewayHost ? <View><ListRow glyph="●" glyphColor={theme.idle} title={`${gatewayHost} · this gateway`} />{found}</View> : null}
       {truncated.machines || truncated.devices ? <Note tone="warning">This view is partial; the CLI lists every machine and device.</Note> : null}
-      <SectionHeader title="tabs" />
+      <SectionHeader title="conversations" />
       <ListRow
         glyph={simpleOn ? '●' : '○'}
         glyphColor={simpleOn ? theme.green : theme.overlay1}
