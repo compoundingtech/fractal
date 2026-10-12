@@ -110,26 +110,34 @@ export function AgentMessage({ item, senderLine, continuation = false }: { reado
 /**
  * ActionBarPrimitive.Copy for a whole prose run: it writes the run text instead of this message's own text.
  * Like the primitive, the write starts inside the press; a missing API, sync throw or rejection is swallowed;
- * success sets the message's `isCopied` (`data-copied`) for 3s, cleared on unmount.
+ * success sets the message's `isCopied` (`data-copied`) for 3s, cleared on unmount. A write that settles after
+ * unmount or a scope change (a new generation or message id) is ignored.
  */
 function RunCopy({ text, visible }: { readonly text: string; readonly visible: boolean }) {
   const aui = useAui()
   const isCopied = useAuiState(state => state.message.isCopied)
+  const messageId = useAuiState(state => state.message.id)
   const timer = React.useRef<{ readonly id: number; readonly reset: (value: boolean) => void } | undefined>(undefined)
+  const generation = React.useRef(0)
+  const committedId = React.useRef(messageId)
+  React.useInsertionEffect(() => { committedId.current = messageId }, [messageId])
   React.useEffect(() => () => {
+    generation.current += 1
     if (timer.current === undefined) return
     window.clearTimeout(timer.current.id)
     timer.current.reset(false)
     timer.current = undefined
-  }, [aui])
+  }, [aui, messageId])
   const copy = () => {
     let write: Promise<void>
     try {
       if (typeof navigator === 'undefined' || !navigator.clipboard) return
       write = navigator.clipboard.writeText(text)
     } catch { return }
+    const started = generation.current, copiedId = messageId
     const setCopied = aui.message.setIsCopied
     write.then(() => {
+      if (started !== generation.current || copiedId !== committedId.current) return
       if (timer.current !== undefined) window.clearTimeout(timer.current.id)
       setCopied(true)
       timer.current = { id: window.setTimeout(() => { timer.current = undefined; setCopied(false) }, 3000), reset: setCopied }

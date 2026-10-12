@@ -53,12 +53,12 @@ const run = [
 ]
 const idle: WorkLogTurn = { calls: [], running: false, failed: false, interrupted: false, durationMs: undefined }
 const caption = 'Release reviewer'
-const turns = (splitRun: boolean): readonly TranscriptTurn[] => [
+const turns = (splitRun: boolean, runShown: boolean): readonly TranscriptTurn[] => [
   { id: 'hierarchy/rich-turn', items: [rich], work: idle, senderCaptions: { [rich.id]: caption } },
   // The split restores a header Copy that only covers the first block: later blocks lose the shared sender.
-  { id: 'hierarchy/run-turn', items: run, work: idle, senderCaptions: splitRun ? { [run[0]!.id]: caption } : Object.fromEntries(run.map(item => [item.id, caption])) },
+  ...runShown ? [{ id: 'hierarchy/run-turn', items: run, work: idle, senderCaptions: splitRun ? { [run[0]!.id]: caption } : Object.fromEntries(run.map(item => [item.id, caption])) }] : [],
 ]
-const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'fold-scroll', 'answer-footer', 'markdown-margin', 'loose-list', 'quote-strong', 'run-copy', 'copy-reject', 'prose-run'] as const
+const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'fold-scroll', 'answer-footer', 'markdown-margin', 'loose-list', 'quote-strong', 'run-copy', 'copy-reject', 'copy-late', 'prose-run'] as const
 type Failure = typeof failures[number]
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
@@ -70,6 +70,8 @@ const styles = stylex.create({
 function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none' }: { scheme?: Scheme; narrow?: boolean; failure?: Failure }) {
   const root = React.useRef<HTMLElement>(null)
   const [revision, rerender] = React.useState(0)
+  const [runShown, setRunShown] = React.useState(true)
+  const [remounts, setRemounts] = React.useState(0)
   // Each selectable negative control restores one old behavior after the production tree re-renders; its measured assertion must fail.
   React.useLayoutEffect(() => {
     if (revision === 0 || root.current === null) return
@@ -88,12 +90,14 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none' }: { sche
     // Quoted strong text lifts to the unquoted strong ink, as it did before quotes set the muted tone.
     if (failure === 'quote-strong') element('[data-item-id="hierarchy/rich"] blockquote strong').style.color = getComputedStyle(element('[data-item-id="hierarchy/rich"] p > strong')).color
     if (failure === 'copy-reject') element('[data-item-id="hierarchy/run-1"] [aria-label="Copy answer"]').dataset.copied = 'true'
+    // A write that settles after unmount marks the remounted run copied, as an unguarded success handler would.
+    if (failure === 'copy-late' && remounts > 0) element('[data-item-id="hierarchy/run-1"] [aria-label="Copy answer"]').dataset.copied = 'true'
     if (failure === 'prose-run') { const header = element('[data-item-id="hierarchy/run-1"] [data-testid="message-header"]'); element('[data-item-id="hierarchy/run-2"]').prepend(header.cloneNode(true)) }
-  }, [failure, revision])
+  }, [failure, revision, remounts])
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
-    <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><span>{failure}</span></div>
+    <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><Button onPress={() => setRunShown(false)}>Hide run</Button><Button onPress={() => { setRunShown(true); setRemounts(value => value + 1) }}>Show run</Button><span>{failure}</span></div>
     <section aria-label="Fold example"><WorkLogV1 turn={work} hideLiveRow ariaLabel="Release work" expandedBody={<ThinkingEntry text="Check the **retained snapshot** first, then compare identities." />} /></section>
-    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={turns(failure === 'run-copy' && revision > 0)} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={turns(failure === 'run-copy' && revision > 0, runShown)} /></EmbraceRuntimeProvider></section>
   </main>
 }
 const meta = {
@@ -226,9 +230,10 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(loose.getBoundingClientRect().bottom).toBeCloseTo(items[1]!.querySelector('p')!.getBoundingClientRect().bottom, 1)
 
   // Prose run: the single header Copy takes every block of the run, joined by a blank line. A rejected
-  // write is handled (no unhandled rejection, no copied state); a successful one sets data-copied.
-  const runBlocks = run.map(item => canvasElement.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)!)
-  const runCopy = within(runBlocks[0]!).getByRole('button', { name: 'Copy answer' })
+  // write is handled (no unhandled rejection, no copied state); a write that settles after the run
+  // unmounts leaves the remounted run uncopied; a successful one sets data-copied.
+  const runBlock = (index: number) => canvasElement.querySelector<HTMLElement>(`[data-item-id="${run[index]!.id}"]`)
+  let runCopy = within(runBlock(0)!).getByRole('button', { name: 'Copy answer' })
   const clipboard = navigator.clipboard
   const original = Object.getOwnPropertyDescriptor(clipboard, 'writeText')
   const unhandled: unknown[] = []
@@ -243,6 +248,18 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
     for (let frame = 0; frame < 2; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
     await expect(unhandled).toEqual([])
     await expect(runCopy).not.toHaveAttribute('data-copied')
+    // The package lib is ES2022 (no Promise.withResolvers): keep the deferred write's resolver.
+    let release = () => {}
+    Object.defineProperty(clipboard, 'writeText', { configurable: true, value: () => new Promise<void>(resolve => { release = resolve }) })
+    await userEvent.click(runCopy)
+    await userEvent.click(canvas.getByRole('button', { name: 'Hide run' }))
+    await waitFor(() => expect(runBlock(0)).toBeNull())
+    release()
+    for (let frame = 0; frame < 2; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
+    await userEvent.click(canvas.getByRole('button', { name: 'Show run' }))
+    runCopy = await waitFor(() => within(runBlock(0)!).getByRole('button', { name: 'Copy answer' }))
+    for (let frame = 0; frame < 2; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
+    await expect(runCopy).not.toHaveAttribute('data-copied')
     Object.defineProperty(clipboard, 'writeText', { configurable: true, value: async (text: string) => { copied = text } })
     await userEvent.click(runCopy)
     await waitFor(() => expect(copied).toBe(run.map(item => item.text).join('\n\n')))
@@ -253,6 +270,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   }
 
   // Prose run: one sender line with the time, then the following blocks without a header.
+  const runBlocks = run.map((_, index) => runBlock(index)!)
   await expect(within(runBlocks[0]!).getByTestId('message-sender')).toHaveTextContent(caption)
   await expect(within(runBlocks[0]!).getByTestId('message-header')).toContainElement(runBlocks[0]!.querySelector('time'))
   for (const block of runBlocks.slice(1)) {
