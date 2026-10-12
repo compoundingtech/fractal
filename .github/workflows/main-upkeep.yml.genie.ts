@@ -1,4 +1,4 @@
-import { buildSnapshotSave } from './build-snapshot.ts'
+import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import {
@@ -27,7 +27,7 @@ const whenMissing = (steps: readonly unknown[], conditionMissing = missing) => s
 // exact entries before provisioning Nix or restoring gigabytes; fill only missing entries.
 const warmJob = (stage: string, setup: readonly unknown[], nixOnly = false) => ({
   name: `warm-${stage}`,
-  'runs-on': linuxStageRunner,
+  'runs-on': stage === 'genie' ? 'ubuntu-latest' : linuxStageRunner,
   'timeout-minutes': 120,
   defaults: { run: { shell: 'bash' } },
   env: { ...buildEnv, CI_CACHE_DEV_SHELL: stage === 'genie' ? 'genie' : 'default' },
@@ -49,7 +49,7 @@ if ${nixOnly ? '[ \"$NIX_HIT\" != true ]' : '[ \"$CARGO_HIT\" != true ] || [ \"$
 fi`,
     },
     ...whenMissing([
-      ...setup,
+      ...(stage === 'genie' ? setup.filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup),
       nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
       { name: 'Save Nix outputs', run: 'bash scripts/ci-nix-cache save' },
       // PR/merge builds restore these entries and retain exact-source artifacts. Only
@@ -60,7 +60,7 @@ fi`,
         uses: 'actions/cache/save@v4',
         with: { path: step.with.path, key: step.with.key },
       })),
-      ...buildSnapshotSave,
+      ...(stage === 'genie' ? [] : buildSnapshotSave),
     ], nixOnly ? "steps.nix-probe.outputs.cache-hit != 'true'" : missing),
   ],
 })
@@ -108,7 +108,7 @@ export default githubWorkflow(auditCaches({
     'isolation-vm': warmJob('isolation-vm', commonSetupSteps),
     'typescript-cache': {
       name: 'warm-typescript',
-      'runs-on': linuxStageRunner,
+      'runs-on': 'ubuntu-latest',
       'timeout-minutes': 10,
       env: { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' },
       steps: [

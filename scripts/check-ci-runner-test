@@ -156,15 +156,19 @@ check("priority-labelled mixed worker cannot provide partial capacity", [{"runne
 import re
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
 required_priority = "(github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2"
-for job in ("linux-clippy", "linux-fleet-compat", "genie-freshness", "typescript-client", "isolation-vm", "perf-cost"):
+for job in ("linux-clippy", "linux-fleet-compat", "isolation-vm", "perf-cost"):
     assert "outputs.ci1" not in blocks[job], (job, "supporting job consumes reserved cores")
     assert (required_priority if job != "perf-cost" else "github.event_name == 'merge_group' && 1 || 2") in blocks[job], (job, "required PR checks share merge priority; optional cost stays separate")
     assert "github.run-id=" in blocks[job], (job, "prevent cross-run assignment")
-    if job in ("genie-freshness", "typescript-client", "isolation-vm"):
+    if job == 'isolation-vm':
         assert "namespace-profile-linux-x86-64;job.priority={1};github.run-id=" in blocks[job], (job, "profile controls must be inline")
         assert "namespace-features:" not in blocks[job], (job, "separate feature labels are unsupported with profiles")
     else:
         assert "namespace-features:github.run-id=" in blocks[job], (job, "shape labels need a separate features label")
+for job in ('genie-freshness', 'typescript-client'):
+    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'light checks must not consume reserved or Namespace capacity')
+    assert 'namespace-profile-' not in blocks[job] and 'namespace-features:' not in blocks[job] and 'cargo-cache' not in blocks[job], job
+    assert 'Keep valid same-source build outputs' not in blocks[job] and 'build-snapshot' not in blocks[job], job
 for job, output in [('linux-tests-shard-2', 'ci1_secondary'), ('mail-redelivery-canaries', 'ci1_mail')]:
     assert f'outputs.{output}) ||' in blocks[job], (job, 'extra jobs need their own idle-slot output')
     assert not re.search(r'outputs\.ci1\b', blocks[job]), (job, 'extra jobs must never take the primary reserved lane')
@@ -194,7 +198,10 @@ assert 'CI_TEST_PARTITION' not in canaries, "every required canary must run"
 assert 'mail_redelivery' not in blocks['linux-tests'] and 'scripts/ci-mail-redelivery-canaries' not in blocks['linux-tests'], "canaries cannot serialize the primary shard"
 assert 'needs.mail-redelivery-canaries.result' in blocks['linux-gate'], "failures and skips must still fail the Linux gate"
 assert "job.priority={1}" in blocks["linux-tests"] and "github.run-id={0}" in blocks["linux-tests"], "event priority and evaluated run id in Namespace fallback"
-for path in ("perf.yml", "main-upkeep.yml", "public-repo.yml", "release-daily.yml", "release-portable.yml", "release-smalltalk.yml"):
+performance = (ROOT / ".github/workflows/perf.yml").read_text()
+assert "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=2" in performance
+assert "github.run-id=" in performance
+for path in ("main-upkeep.yml", "public-repo.yml", "release-daily.yml", "release-portable.yml", "release-smalltalk.yml"):
     generated = (ROOT / ".github/workflows" / path).read_text()
     assert ";job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}" in generated, (path, "non-merge Linux work keeps the second class")
     assert "github.run-id=" in generated, (path, "avoid nondeterministic runner pickup")
@@ -221,7 +228,7 @@ def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', part
     expression = expression.replace('github.event_name', repr(event)).replace('github.run_id', '123').replace('vars.CI_MERGE_NAMESPACE_PROFILE', repr(profile)).replace('vars.CI_MERGE_CI1', repr(merge_ci1))
     return eval(expression.replace('&&', ' and ').replace('||', ' or '), {'__builtins__': {}}, {'fromJSON': json.loads, 'format': lambda template, *args: template.format(*args)})
 
-for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'genie-freshness', 'typescript-client', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
     assert route(job, 'merge_group', merge_ci1='on') == ['ci1-merge'], job
     assert route(job, 'merge_group', 'queue-reserved', '["ci1"]', merge_ci1='on') == ['ci1-merge'], (job, 'configured reservation overrides picked general slots')
     assert route(job, 'merge_group', 'queue-reserved') == ['namespace-profile-queue-reserved;job.priority=1;github.run-id=123'], job
@@ -234,7 +241,7 @@ for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'genie-fre
         assert f"job.priority={1 if event == 'pull_request' else 2}" in ordinary[0], (job, 'required PRs share merge class; manual work remains second')
     if job in ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
         assert route(job, 'merge_group', 'queue-reserved', '["ci1-merge"]') == ['namespace-profile-queue-reserved;job.priority=1;github.run-id=123'], (job, 'no individual picked lane may override whole-group admission')
-for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'genie-freshness', 'typescript-client', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
     selected = route(job, 'merge_group', partial_primary='["ci1-merge"]', partial_mail='["ci1-merge"]')
     assert (selected == ['ci1-merge']) == (job in ('linux-tests', 'mail-redelivery-canaries')), (job, 'partial allocation must not reach the producer or supporting jobs')
     assert route(job, 'pull_request', partial_primary='["ci1-merge"]', partial_mail='["ci1-merge"]') == route(job, 'pull_request'), (job, 'merge consumer allocation cannot reach PRs')
