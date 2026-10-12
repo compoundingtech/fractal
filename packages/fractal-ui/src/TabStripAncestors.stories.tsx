@@ -1,11 +1,12 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { Tabs } from 'react-aria-components'
-import { Button } from './kit'
+import { TabPanel, Tabs } from 'react-aria-components'
+import { Button } from './assistant-ui/composition/Controls'
 import { TabStrip, type TabStripItem } from './assistant-ui/workbench/TabStrip'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
+import { surfaceVars as surface } from './assistant-ui/composition-tokens.stylex'
 
 const items: readonly TabStripItem[] = [
   { key: 'coordinator', label: 'Release coordinator', icon: 'message', kind: 'thread' },
@@ -15,6 +16,7 @@ const items: readonly TabStripItem[] = [
   { key: 'notes', label: 'Release notes', icon: 'copy', kind: 'document' },
 ]
 const width = 640
+const styles = stylex.create({ root: { backgroundColor: surface.canvas } })
 interface Args extends React.ComponentProps<typeof TabStrip> { scenario: 'resize' | 'scroll'; scheme: 'dark' | 'light' }
 
 const meta = {
@@ -25,7 +27,7 @@ const meta = {
   render: function Render({ scenario, scheme, ...args }) {
     const ancestor = React.useRef<HTMLDivElement>(null)
     // Only the clipping wrapper geometry is story-owned; RAC and TabStrip are production mounts.
-    return <section {...stylex.props(...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
+    return <section {...stylex.props(styles.root, ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
       <Button onPress={() => {
         const host = ancestor.current!
         if (scenario === 'resize') host.style.width = `${width / 2}px`
@@ -38,7 +40,8 @@ const meta = {
       }}>Restore ancestor</Button>
       <div ref={ancestor} data-testid="clipping-ancestor" style={{ width, overflow: scenario === 'resize' ? 'hidden' : 'auto', scrollbarWidth: 'none' }}>
         <div style={{ width: scenario === 'scroll' ? width + 200 : width }}>
-          <Tabs defaultSelectedKey={args.selectedKey} style={{ width }}><TabStrip {...args} /></Tabs>
+          {/* Each tab controls a mounted panel, as in Workbench; RAC mounts only the selected one. */}
+          <Tabs defaultSelectedKey={args.selectedKey} style={{ width }}><TabStrip {...args} />{args.items.map(item => <TabPanel key={item.key} id={item.key} />)}</Tabs>
         </div>
       </div>
     </section>

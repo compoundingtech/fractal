@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Button } from './kit'
+import { Button } from './assistant-ui/composition/Controls'
 import { Workbench, type WorkbenchProps } from './assistant-ui/workbench/Workbench'
 import { group, paneKey, type WorkbenchPane } from './assistant-ui/workbench/workbench-model'
 import { detailsWorkbenchResources as workbenchResources } from './assistant-ui/details/story-fixtures'
@@ -40,7 +40,7 @@ const meta = {
   title: 'Fractal UI/Details Recovery',
   component: Workbench,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Mounted production Details recovery. Host controls change decoded observations, content variants and actual pane widths. Plays retain the inherited pending geometry, header, keyboard and accessibility batteries; schemes are args and viewports are owned by the canonical browser matrix.' } } },
-  args: { resources: workbenchResources, layout, workspaceId: 'details-recovery', scheme: 'dark', mountedWidth: 320, variantIndex: defaultVariant, initialState: 'busy', appearance: { width: 'W2', header: 'H3', chrome: 'P2', dropZones: 'D1' }, describePane: () => ({ title: 'Details' }) },
+  args: { resources: workbenchResources, layout, workspaceId: 'details-recovery', scheme: 'dark', mountedWidth: 320, variantIndex: defaultVariant, initialState: 'busy', describePane: () => ({ title: 'Details' }) },
   render: function Render({ mountedWidth, variantIndex, initialState, ...args }) {
     const [width, setWidth] = React.useState(mountedWidth)
     const [variant, setVariant] = React.useState(variantIndex)
@@ -50,10 +50,10 @@ const meta = {
     const recover = () => setObservation(observationFor('busy'))
     const reset = (content: DetailsState) => { setObservation(observationFor(content)); setIntent({ hiddenSections: [] }); setGeneration(value => value + 1) }
     return <div {...stylex.props(styles.root, ...baselineTheme, ...(args.scheme === 'light' ? lightTheme : []))}>
-      <div {...stylex.props(styles.controls)}>{[118, 159, 160, 240, 320, 400, 520].map(value => <Button key={value} size="sm" variant="quiet" data-recovery-width={value} onPress={() => setWidth(value)}>{value}px</Button>)}{states.map(state => <Button key={state} size="sm" variant="quiet" data-recovery-reset={state} onPress={() => reset(state)}>Start {state}</Button>)}</div>
-      <div {...stylex.props(styles.controls)}>{variants.map((value, index) => <Button key={index} size="sm" variant="quiet" data-recovery-variant={index} onPress={() => setVariant(index)}>{value.overview}{value.context}{value.spend}</Button>)}</div>
-      <div {...stylex.props(styles.controls)}><Button size="sm" variant="quiet" data-recovery-action="loading" onPress={() => setObservation(observationFor('loading'))}>Loading</Button><Button size="sm" variant="quiet" data-recovery-action="failed" onPress={() => setObservation(current => ({ ...current, sync: failed }))}>Fail details</Button><Button size="sm" variant="quiet" data-recovery-action="busy" onPress={recover}>Busy</Button></div>
-      <div {...stylex.props(styles.controls)}>{(['forbidden', 'unsupported'] as const).flatMap(code => [false, true].map(retained => <Button key={`${code}-${retained}`} size="sm" variant="quiet" data-recovery-failure-code={code} data-recovery-prior={String(retained)} onPress={() => setObservation({ content: retained ? 'busy' : 'loading', sync: { _tag: 'Failed', cause: { _tag: 'Server', code, message: code === 'forbidden' ? 'Access to this agent was denied.' : 'This gateway does not provide agent details.' } } })}>{code} · {retained ? 'retained' : 'first load'}</Button>))}</div>
+      <div {...stylex.props(styles.controls)}>{[118, 159, 160, 240, 320, 400, 520].map(value => <Button key={value} size="sm" data-recovery-width={value} onPress={() => setWidth(value)}>{value}px</Button>)}{states.map(state => <Button key={state} size="sm" data-recovery-reset={state} onPress={() => reset(state)}>Start {state}</Button>)}</div>
+      <div {...stylex.props(styles.controls)}>{variants.map((value, index) => <Button key={index} size="sm" data-recovery-variant={index} onPress={() => setVariant(index)}>{value.overview}{value.context}{value.spend}</Button>)}</div>
+      <div {...stylex.props(styles.controls)}><Button size="sm" data-recovery-action="loading" onPress={() => setObservation(observationFor('loading'))}>Loading</Button><Button size="sm" data-recovery-action="failed" onPress={() => setObservation(current => ({ ...current, sync: failed }))}>Fail details</Button><Button size="sm" data-recovery-action="busy" onPress={recover}>Busy</Button></div>
+      <div {...stylex.props(styles.controls)}>{(['forbidden', 'unsupported'] as const).flatMap(code => [false, true].map(retained => <Button key={`${code}-${retained}`} size="sm" data-recovery-failure-code={code} data-recovery-prior={String(retained)} onPress={() => setObservation({ content: retained ? 'busy' : 'loading', sync: { _tag: 'Failed', cause: { _tag: 'Server', code, message: code === 'forbidden' ? 'Access to this agent was denied.' : 'This gateway does not provide agent details.' } } })}>{code} · {retained ? 'retained' : 'first load'}</Button>))}</div>
       <section aria-label="Mounted Details recovery" data-recovery-stage style={{ width }} {...stylex.props(styles.stage)}><ThemePortal><Workbench {...args} key={generation} workspaceId={`${args.workspaceId}-${generation}`} focusedPaneKey={paneKey(details)} renderPane={pane => pane.view === 'details' ? <DetailsPane {...detailsStoryInputs(observation.content)} variants={variants[variant]!} state={observation.content} syncStatus={observation.sync} hasPriorContent={observation.content !== 'loading' && observation.content !== 'error' && observation.content !== 'new'} intent={intent} onIntentChange={setIntent} onOpen={() => { throw new Error('Recovery gate unexpectedly opened a resource') }} onRetry={recover} /> : args.renderPane?.(pane)} /></ThemePortal></section>
     </div>
   },
@@ -223,7 +223,8 @@ async function anchorPlay({ canvasElement: canvas }: Play) {
   reason.textContent = 'Unavailable'
   try { await rejectsControl('Error lacks its one exact human failure heading', () => assertPresentation(error)) } finally { reason.textContent = text }
   assertPresentation(error)
-  const identity = element(error, 'strong'), title = identity.textContent
+  // The painted error identity; the inert pending twin above it never reaches innerText.
+  const identity = element(error, '[data-details-error] strong'), title = identity.textContent
   identity.textContent = 'Unknown'
   try { await rejectsControl('Details renders Unknown instead of measured or pending evidence', () => assertPresentation(error)) } finally { identity.textContent = title }
   assertPresentation(error)

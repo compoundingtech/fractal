@@ -2,12 +2,12 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Button } from './kit'
+import { Button } from './assistant-ui/composition/Controls'
 import { Workbench, type WorkbenchProps } from './assistant-ui/workbench/Workbench'
 import { group } from './assistant-ui/workbench/workbench-model'
 import { detailsWorkbenchResources as workbenchResources } from './assistant-ui/details/story-fixtures'
 import { DetailsPane, type DetailsVariants, type DetailsLayoutIntent } from './assistant-ui/details/DetailsPane'
-import { traceHistorySection } from './assistant-ui/details/DetailsResources'
+import { DetailsLabelContext, traceHistorySection } from './assistant-ui/details/DetailsResources'
 import { ResourceCardV1, ResourceChipV1 } from './assistant-ui/resources/ResourceCardV1'
 import { resources as sharedResources } from './assistant-ui/details/resource-fixtures'
 import { hasDetailsChartData } from './assistant-ui/details/DetailsCharts'
@@ -68,12 +68,12 @@ const meta = {
     const [opens, setOpens] = React.useState<readonly { key: string; split: boolean }[]>([])
     const mounted = comparison ? cases : [cases[selected]!]
     return <div data-testid="resource-gates" data-selected-case={selected} data-intent-writes={intentWrites} data-open-events={JSON.stringify(opens)}>
-      <header {...stylex.props(styles.controls)}>{!comparison && cases.map((item, index) => <Button key={item.name} size="sm" variant="quiet" onPress={() => { setSelected(index); setStateOverride(undefined) }}>{item.name}</Button>)}
-        {(['idle', 'new', 'absent'] as const).map(state => <Button key={state} size="sm" variant="quiet" onPress={() => setStateOverride(state)}>Set {state}</Button>)}
+      <header {...stylex.props(styles.controls, ...baselineTheme, ...(args.scheme === 'light' ? lightTheme : []))}>{!comparison && cases.map((item, index) => <Button key={item.name} size="sm" onPress={() => { setSelected(index); setStateOverride(undefined) }}>{item.name}</Button>)}
+        {(['idle', 'new', 'absent'] as const).map(state => <Button key={state} size="sm" onPress={() => setStateOverride(state)}>Set {state}</Button>)}
       </header>
       <div {...stylex.props(comparison && styles.comparison)}>{mounted.map(item => <section key={item.name} aria-label={item.name} data-testid="resource-stage" style={{ width: item.width }} {...stylex.props(styles.root, ...baselineTheme, ...(args.scheme === 'light' ? lightTheme : []))}>
-        <ThemePortal><Workbench {...args} workspaceId={`${args.workspaceId}-${item.name}`} renderPane={() => <DetailsPane {...detailsStoryInputs(stateOverride ?? item.state,item.trace)} variants={item.variants} state={stateOverride ?? item.state} intent={intent}
-          onIntentChange={next => { setIntent(next); setIntentWrites(count => count + 1) }} onOpen={(key, split) => setOpens(current => [...current, { key, split }])} onRetry={() => setStateOverride('busy')} />}/></ThemePortal>
+        <ThemePortal><Workbench {...args} workspaceId={`${args.workspaceId}-${item.name}`} renderPane={() => <DetailsLabelContext.Provider value={comparison ? `${item.name} ` : ''}><DetailsPane {...detailsStoryInputs(stateOverride ?? item.state,item.trace)} variants={item.variants} state={stateOverride ?? item.state} intent={intent}
+          onIntentChange={next => { setIntent(next); setIntentWrites(count => count + 1) }} onOpen={(key, split) => setOpens(current => [...current, { key, split }])} onRetry={() => setStateOverride('busy')} /></DetailsLabelContext.Provider>}/></ThemePortal>
       </section>)}</div>
     </div>
   },
@@ -141,7 +141,7 @@ function assertCraft(pane: HTMLElement, item: Case) {
   assertHuman(pane)
   for (const reason of pane.querySelectorAll<HTMLElement>('[data-details-unavailable]')) if (shown(reason)) requireContract(contrast(reason) >= 4.5, 'Unavailable explanation contrast below 4.5:1')
   for (const name of ['Workspace', 'Pull requests', 'CI runs']) {
-    const section = pane.querySelector(`section[aria-label="${name}"]`), heading = section?.querySelector('[data-details-heading]'), meta = section?.querySelector('[data-resource-meta]')
+    const section = pane.querySelector(`section[aria-label$="${name}"]`), heading = section?.querySelector('[data-details-heading]'), meta = section?.querySelector('[data-resource-meta]')
     if (heading && meta) requireContract(contrast(heading) > contrast(meta), 'Resource heading is no stronger than metadata')
   }
   if (item.state === 'new' && item.variants.empty === 'E3') {
@@ -150,14 +150,14 @@ function assertCraft(pane: HTMLElement, item: Case) {
     requireContract(!pane.querySelector('[data-details-source-note]'), 'New agent repeats source unavailability')
     for (const section of pane.querySelectorAll('section')) requireContract(section.querySelector('strong,dd,[data-details-data-row],[data-details-resource-row],svg[role="img"]'), 'New agent offers an empty disclosure')
   }
-  if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label="${name}"] [data-details-missing-value]`), 'Unknown source omits a field-specific explanation')
-  const history = pane.querySelector('section[aria-label="History"]')
+  if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-missing-value]`), 'Unknown source omits a field-specific explanation')
+  const history = pane.querySelector('section[aria-label$="History"]')
   if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:name=>/^Open Incarnation|^Incarnation/.test(name)}).length>0, 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
   if (changes) requireContract(/897\.2K → 133K/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')
   if (item.state === 'busy' && item.variants.empty === 'E3' && item.variants.spend !== 'S1') {
     const chart = pane.querySelector(`[data-details-chart="${item.variants.spend}"]`), meter = chart?.querySelector('dl[aria-label="Trace spend meters"]')
-    requireContract(meter?.textContent?.includes('Cumulative tokens') && meter.textContent.includes('Subagents') && chart?.querySelector('[aria-label="Subagent spend breakdown"]')?.textContent?.includes('Worker 1'), 'E3 chart omits known spend meter rows')
+    requireContract(meter?.textContent?.includes('Cumulative tokens') && meter.querySelector('[data-details-metric="subagent-usd"] dd') && chart?.querySelector('[aria-label="Subagent spend breakdown"]')?.textContent?.includes('Worker 1'), 'E3 chart omits known spend meter rows')
     requireContract(chart?.firstElementChild?.contains(meter!), 'E3 meter is not above its chart')
   }
 }
@@ -365,7 +365,8 @@ export const Interactions: Story = { play: async ({ canvasElement }) => {
   await userEvent.click(terminal); requireContract(events().length === 2 && writes() === before + 2, 'Repeated terminal request alters layout intent or fails to reattach')
   const file = within(pane).getAllByRole('button', { name: /^Open src\// })[0]!
   await userEvent.click(file); requireContract(events().at(-1)?.key.startsWith('diff:sample/') && !events().at(-1)?.split, 'Details resource open callback loses pane identity')
-  await userEvent.keyboard('{Control>}'); try { await userEvent.click(file) } finally { await userEvent.keyboard('{/Control}') }
+  // One user-event instance carries the held modifier into the click; direct APIs reset keyboard state per call.
+  const user = userEvent.setup(); await user.keyboard('{Control>}'); try { await user.click(file) } finally { await user.keyboard('{/Control}') }
   requireContract(events().at(-1)?.split, 'Details modified resource open loses split intent')
   const split = within(pane).getAllByRole('button', { name: /in split$/ })[0]!
   await userEvent.click(split); requireContract(events().at(-1)?.split && writes() === before + 2, 'Explicit split action alters synced visibility or loses split intent')
@@ -444,7 +445,7 @@ export const BranchOrphan: Story = { args: { cases: widths.map(width => example(
   await eachCase(canvasElement, args.cases, assertBranch)
   const pane = paneFor(canvasElement), title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, row = title.closest('[data-details-resource-row]')!, original = row.getAttribute('aria-label'), originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace
   try {
-    title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'; row.setAttribute('aria-label', `Open ${title.textContent}`)
+    title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'; row.setAttribute('aria-label', 'Open declared branch orphan')
     await rejectsControl('Wrapped identity leaves an orphaned final word', () => assertBranch(pane))
   } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace; if(original===null)row.removeAttribute('aria-label');else row.setAttribute('aria-label', original) }
   assertBranch(pane)
@@ -478,7 +479,7 @@ export const E3ChartMatrix: Story = { args: { cases: e3Cases }, play: async ({ c
       requireContract(section, 'E3 omits its chart section')
       const body = section.querySelector(`[data-details-chart="${name === 'Context' ? item.variants.context : item.variants.spend}"]`)!
       const data = hasDetailsChartData({ trace: item.trace!, context: item.variants.context, spend: item.variants.spend, section: name === 'Context' ? 'context' : 'spend', empty: 'E3' })
-      if (!data) requireContract(body.querySelector('[data-details-reason]'), 'E3 hides unavailable field explanations')
+      if (!data) requireContract(body.querySelector('[data-details-missing-value]'), 'E3 hides unavailable field explanations')
       else requireContract(body.querySelector('[data-details-data-row],dl,svg[role="img"]'), 'E3 drops known chart rows')
     }
     if (item.trace!.meters.spend.tokens._tag === 'Known') assertScope(pane, item.trace!)

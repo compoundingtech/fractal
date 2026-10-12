@@ -2,6 +2,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { userEvent, waitFor, within } from 'storybook/test'
 import { DetailsPane, type DetailsPaneProps } from './assistant-ui/details/DetailsPane'
+import { DetailsLabelContext } from './assistant-ui/details/DetailsResources'
 import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
 import { fullTraceFixture } from './assistant-ui/details/trace/fixture-provider'
 import type { TraceFact, TraceSeries } from './assistant-ui/details/trace-series'
@@ -393,7 +394,7 @@ export const InvalidPartialOverflow:Story={args:{scenario:'invalidOverflow'},pla
 export const AllStates: Story = {
   render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{Object.entries(scenarios).map(([name, trace]) => <section key={name} aria-label={name} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
     <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-all-${name}`} scheme={scheme}
-      renderPane={() => <DetailsPane {...props} trace={trace} pendingTrace={trace} />}/></ThemePortal>
+      renderPane={() => <DetailsLabelContext.Provider value={`${name} `}><DetailsPane {...props} trace={trace} pendingTrace={trace} /></DetailsLabelContext.Provider>}/></ThemePortal>
   </section>)}</div>,
   play:async({canvasElement})=>{
     assertAllStates(canvasElement)
