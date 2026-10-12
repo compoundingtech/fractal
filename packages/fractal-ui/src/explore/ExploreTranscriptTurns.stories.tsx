@@ -5,6 +5,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button, Disclosure, DisclosurePanel, Tooltip, TooltipTrigger } from 'react-aria-components'
+import { useHover } from 'react-aria'
 import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { AgentMessage } from '../assistant-ui/AgentMessage'
 import { AgentMessage as TranscriptAnswer } from '../assistant-ui/composition/Transcript'
@@ -49,6 +50,7 @@ function FocusRemountControl() {
 /** Variant-only projection of production rows. No change to runtime facts or message bodies. */
 function Block({ block, previous, turn, kind, meta }: Pick<ExploreArgs, 'turn' | 'kind' | 'meta'> & { block: TurnBlock; previous?: TurnBlock }) {
   const root = React.useRef<HTMLDivElement>(null)
+  const { hoverProps, isHovered } = useHover({})
   const [tail, setTail] = React.useState<Element | null>(null)
   const [tapped, setTapped] = React.useState(false)
   const [copied, setCopied] = React.useState(false)
@@ -77,7 +79,7 @@ function Block({ block, previous, turn, kind, meta }: Pick<ExploreArgs, 'turn' |
   const header = (!seat || turn === `T${3}`) && (turn !== `T${3}` || previous?.sender !== block.sender)
     ? <header data-turn-header {...stylex.props(styles.header)}><strong>{block.sender}</strong>{kind === 'K1' && !seat ? <span>{block.kind} · {block.verified ? 'Verified' : 'Unverified'}</span> : null}</header> : null
   const body = <div data-turn-content {...stylex.props(styles.content)}>{content}</div>
-  return <div ref={root} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && styles.input, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, kind === 'K2' && block.kind === 'Person' && styles.humanRail, kind === 'K2' && block.kind === 'Agent' && styles.agentRail, kind === 'K2' && (block.kind === 'Relay' || block.kind === 'System') && styles.quietRail, collapsedKind && styles.quiet)}>
+  return <div ref={root} {...hoverProps} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-hovered={isHovered || undefined} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && styles.input, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, kind === 'K2' && block.kind === 'Person' && styles.humanRail, kind === 'K2' && block.kind === 'Agent' && styles.agentRail, kind === 'K2' && (block.kind === 'Relay' || block.kind === 'System') && styles.quietRail, collapsedKind && styles.quiet)}>
     {turn === `T${3}` ? <span aria-hidden="true" {...stylex.props(styles.glyph)}>{glyphs[block.kind]}</span> : null}
     {meta === 'M3' && isDivider(block, previous) ? <div data-time-divider {...stylex.props(styles.divider)}>── {time} ──</div> : null}
     {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary)}><span data-input-kind-icon aria-hidden="true">{glyphs[block.kind]} {expanded ? '▾' : '▸'}</span><strong data-input-sender>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}>{block.text.split('\n')[0]}</span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{header}{body}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
@@ -129,7 +131,7 @@ const projectionCss = `
 [data-turns-explorer] [data-turn-content] p:last-child { margin-bottom: 0; }
 [data-turns-explorer] [data-meta="M4"] [data-turn-content] p:last-child { padding-inline-end: ${geometry.trailingWidth}; }
 [data-turns-explorer] [data-turn-block] [data-affordance="reveal"] { opacity: 0; }
-[data-turns-explorer] [data-turn-block]:hover [data-affordance="reveal"],
+[data-turns-explorer] [data-turn-block][data-hovered] [data-affordance="reveal"],
 [data-turns-explorer] [data-turn-block]:focus-within [data-affordance="reveal"],
 [data-turns-explorer] [data-turn-block][data-tapped] [data-affordance="reveal"] { opacity: 1; }
 `
