@@ -9,6 +9,9 @@ export type StackParams = {
   NowRoot: undefined;
   ResourcesRoot: undefined;
   FleetRoot: undefined;
+  /** Full lists opened from Resources, with their own search and row actions. */
+  Agents: undefined;
+  Missions: undefined;
   /** Spend and limits, opened from Fleet's usage card. */
   Usage: undefined;
   /** One group's spend (an agent, mission, step, account...), over the period it was opened in. */

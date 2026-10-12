@@ -552,6 +552,42 @@ Cargo builds use the host's four-job limit. Workspace test shards explicitly use
 threads, with the host's 14 GiB per-job memory limit. The repository variable `CI1_MIN_IDLE`
 can override admission; keep it at four when preserving CPU capacity for reserved lanes.
 
+### Compiler-cache measurement
+
+`python3 scripts/sccache-evidence capture` reads an already-running Linux sccache
+0.16.0 server. The runner owner supplies `--runner`, `--pid`, `--start-ticks`,
+`--port`, `--config-id`, `--job`, `--source`, `--storage`, `--sccache`, and `--output`.
+Use the process's field 22 in `/proc/PID/stat` as its start ticks, and an
+owner-qualified configuration revision or digest as its configuration identity.
+Storage is explicitly `local-disk`, `shared-webdav`, or `remote-webdav`; the
+collector verifies that the observed backend agrees. It checks the executable,
+process start, and ownership of the listening socket before and after collection.
+Missing identity, denied access, incompatible versions, or synthetic empty stats
+abort collection. It never starts, stops, or resets a daemon. Socket inspection
+needs the existing process owner's authority; it grants no host or cache access.
+
+Capture before and after one job, using an identical job/source/daemon/configuration
+identity, then run:
+
+```sh
+python3 scripts/sccache-evidence report --before before.json --after after.json --output interval.json
+```
+
+Omit `--before` only to report explicitly labelled server-lifetime counters.
+Each report separates compile requests, non-cacheable requests, errors, all-language
+hits/misses, and Rust hits/misses. Hit rates use completed hits divided by hits plus
+misses; non-cacheable calls and errors stay visible outside that denominator.
+No lookups means a null rate. Identity changes and counter resets invalidate a delta.
+Use exclusive job ownership to attribute an interval to a job: concurrent users of
+one daemon make it an aggregate interval, and same-process counter resets cannot
+always be detected from two samples alone. Keep snapshots and reports together.
+No cache URLs, paths, or credentials are copied into the evidence.
+
+The source opt-in described in [development](development.md) is off by default.
+This repository provisions no remote route or credential for Namespace or builders.
+Network, method permissions, writer provenance, and access policy remain the cache
+owner's responsibility. Cache hits establish compiler reuse, not fresh test results.
+
 The local test stage sets `TMPDIR`, `TMP` and `TEMP` to the short `RUNNER_TEMP/t` path on
 the runner's memory filesystem. Otherwise `nix develop` chooses disk-backed `/tmp`, making
 every test-store commit wait for a disk sync. Stores survive fixture process restarts and are
@@ -674,6 +710,34 @@ Run either locally with `TMPDIR=/var/tmp`; `ST_BENCH_DIR` keeps the generated st
 cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads 1
 ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
+
+#### Measuring a change on hetz2: the perf slot
+
+A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
+hetz2 that takes the perf slot first (`scripts/ci-perf-slot`; its `--help` repeats this page's
+flow), so nobody has to remember to. One run holds the slot at a time. Others wait in line, oldest
+first, and are told who holds it, since when, and for which branch; `scripts/ci-perf-slot --status`
+shows the same. Outside CI the report summary goes to `$RUNNER_TEMP/perf-summary.md`
+(`/var/tmp/st-perf-UID` by default, where generated stores also stay between runs); `cost` is not slotted, since its counts do not depend on
+the machine.
+
+- The slot is the kernel's `flock` on `/var/tmp/perf-slot/slot.lock`, held by a watchdog that
+  lives as long as the run. A run killed at any point, even with SIGKILL, has its process
+  group killed and the slot freed at once. Cargo's test runner on hetz2 starts the test binary
+  with `systemd-run --user --scope`, which moves the process into a transient unit but keeps it in
+  the group; `scripts/ci-perf-slot-test` proves that case.
+- A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
+  timeout is two hours unless the run asks for less with `--timeout`; time in line does not
+  count. A run stopped by it exits 124.
+- Only `load` is slotted, and only on hetz2. Anywhere else nothing shares the machine.
+  `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
+
+The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
+2-core ceiling for the daemon, with no baseline to compare. Main's relative gate (twice the worst
+of its last five reports) runs on the PR in Performance. Put on the PR the report table the run
+printed, the branch and commit, and one line saying it ran alone in the slot. For a change meant to
+make a path cheaper, put main's table beside it. Intake reviews that evidence and the merge queue
+checks the change; the slot gates nothing.
 
 ### Cache coverage across workflows
 
