@@ -28,7 +28,7 @@ function makeTurn(index: number): TranscriptTurn {
 }
 // Shared immutable fixtures, matching Transcript.stories' runtime-source/work-log pattern.
 const turns = Array.from({ length: total + 2 }, (_, index) => makeTurn(index))
-const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'empty-latch', 'touch-latch', 'touch-scroll-required', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
+const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'empty-latch', 'touch-latch', 'touch-scroll-required', 'failed-auto-retry', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
 type Failure = typeof failures[number]
 type Page = { readonly _tag: 'Ready' } | { readonly _tag: 'Loading' } | { readonly _tag: 'Failed' }
 const styles = stylex.create({
@@ -106,7 +106,7 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
       <button type="button" onClick={() => { if (failure !== 'jump') handle.current?.jumpTo('history/50') }}>Jump to unloaded checkpoint 50</button>
       <button type="button" onClick={() => handle.current?.jumpTo('history/1300')}>Jump to loaded checkpoint 1300</button>
     </div>
-    <section aria-label="Paged conversation" {...stylex.props(styles.frame)} onTouchStartCapture={event => { if (failure === 'touch-latch') event.stopPropagation() }} onTouchMoveCapture={event => { if (failure === 'touch-scroll-required' || failure === 'touch-latch') event.stopPropagation() }} onPointerDownCapture={event => { if (failure === 'touch-latch' && event.pointerType === 'touch') event.stopPropagation() }} onKeyDownCapture={event => { if (failure === 'keyboard' && (event.key === 'Home' || event.key === 'PageUp')) { event.preventDefault(); event.stopPropagation() } }} onClickCapture={event => { if (failure === 'fold' && (event.target as Element).closest('[data-testid="work-log"]')) { event.preventDefault(); event.stopPropagation() } }}>
+    <section aria-label="Paged conversation" {...stylex.props(styles.frame)} onScrollCapture={() => { if (failure === 'failed-auto-retry' && page._tag === 'Failed') loadOlder() }} onTouchStartCapture={event => { if (failure === 'touch-latch') event.stopPropagation() }} onTouchMoveCapture={event => { if (failure === 'touch-scroll-required' || failure === 'touch-latch') event.stopPropagation() }} onPointerDownCapture={event => { if (failure === 'touch-latch' && event.pointerType === 'touch') event.stopPropagation() }} onKeyDownCapture={event => { if (failure === 'keyboard' && (event.key === 'Home' || event.key === 'PageUp')) { event.preventDefault(); event.stopPropagation() } }} onClickCapture={event => { if (failure === 'fold' && (event.target as Element).closest('[data-testid="work-log"]')) { event.preventDefault(); event.stopPropagation() } }}>
       <EmbraceRuntimeProvider options={{ messages, onNew: async () => {} }}><Transcript ref={handle} scrollToBottomKey={followKey} title="Checkpoint review" turns={loaded} history={history} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} /></EmbraceRuntimeProvider>
     </section>
   </main>
@@ -223,7 +223,20 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Failed'))
   await expect(await canvas.findByTestId('history-error')).toHaveTextContent('Earlier messages could not be loaded')
   await expect(root).toHaveAttribute('data-start', '200')
-  await userEvent.click(canvas.getByTestId('history-retry'))
+  const failedRequests = Number(root.getAttribute('data-requests'))
+  lane.focus()
+  await userEvent.keyboard('{Home}')
+  lane.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -120 }))
+  lane.dispatchEvent(new Event('scroll'))
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  await expect(root).toHaveAttribute('data-page', 'Failed')
+  await expect(Number(root.getAttribute('data-requests'))).toBe(failedRequests)
+  const retryControl = canvas.getByTestId('history-retry')
+  for (let index = 0; index < 60 && document.activeElement !== retryControl; index++) await userEvent.tab()
+  await expect(retryControl).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+  await expect(Number(root.getAttribute('data-requests'))).toBe(failedRequests + 1)
   await deliver(100)
   await expect(canvas.queryByTestId('history-error')).toBeNull()
 
