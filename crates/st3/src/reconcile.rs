@@ -20157,11 +20157,22 @@ mission "feedback-review" state="ready" {
             .unwrap();
         fs::create_dir(workspace.path().join(".claude")).unwrap();
         fs::write(workspace.path().join(".claude/settings.local.json"), "{}\n").unwrap();
-        crate::test_support::git()
-            .args(["add", ".claude/settings.local.json"])
-            .current_dir(workspace.path())
-            .status()
-            .unwrap();
+        // A person's global gitignore commonly ignores this file; the fixture ignores it too
+        // and tracks it anyway, as a repository that commits it does.
+        fs::create_dir_all(workspace.path().join(".git/info")).unwrap();
+        fs::write(
+            workspace.path().join(".git/info/exclude"),
+            "settings.local.json\n",
+        )
+        .unwrap();
+        assert!(
+            crate::test_support::git()
+                .args(["add", "-f", ".claude/settings.local.json"])
+                .current_dir(workspace.path())
+                .status()
+                .unwrap()
+                .success()
+        );
         let source = format!(
             r#"version 2
 agent "bad" {{ workspace {:?}; command "true"; render {{ file ".claude/settings.local.json" "changed" }} }}
@@ -20238,11 +20249,20 @@ agent "bad" {{ workspace {:?}; command "true" }}
             .unwrap();
         fs::create_dir(workspace.path().join(".claude")).unwrap();
         fs::write(workspace.path().join(".claude/settings.local.json"), "{}\n").unwrap();
-        crate::test_support::git()
-            .args(["add", ".claude/settings.local.json"])
-            .current_dir(workspace.path())
-            .status()
-            .unwrap();
+        fs::create_dir_all(workspace.path().join(".git/info")).unwrap();
+        fs::write(
+            workspace.path().join(".git/info/exclude"),
+            "settings.local.json\n",
+        )
+        .unwrap();
+        assert!(
+            crate::test_support::git()
+                .args(["add", "-f", ".claude/settings.local.json"])
+                .current_dir(workspace.path())
+                .status()
+                .unwrap()
+                .success()
+        );
         let workspace_path = workspace.path().display().to_string();
         apply_source(
             &store,

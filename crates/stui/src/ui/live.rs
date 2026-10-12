@@ -730,7 +730,7 @@ pub fn run(context: Context) -> Result<()> {
                         Ok(session) => model.add_opened_session(*session),
                         Err(message) => {
                             ui.flash(format!("Could not open {id}: {message}"));
-                            failed.insert(id, message);
+                            failed.insert(id, format!("{message} · open it again to retry"));
                         }
                     }
                 }
@@ -1062,11 +1062,14 @@ pub fn run(context: Context) -> Result<()> {
         if let Some(trace) = &mut open_timing {
             trace.intend(&wanted);
         }
+        retry_failed_opens(&mut sessions_requested, &failed, &wanted);
         for id in &wanted {
             if id.starts_with("session/")
                 && !model.opened_sessions.contains_key(id)
                 && sessions_requested.insert(id.clone())
             {
+                // Opened again after a failure: loading, not the old error, until st answers.
+                failed.remove(id);
                 let client = client.clone();
                 let tx = fetched_tx.clone();
                 let id = id.clone();
@@ -1751,6 +1754,16 @@ fn conversations(
         out.insert(target.to_owned(), load);
     }
     out
+}
+
+/// A session that could not be opened is asked for again once the person has left it and opens
+/// it again; while it stays on screen, the error stays, so a refusal is not asked in a loop.
+fn retry_failed_opens(
+    requested: &mut HashSet<String>,
+    failed: &BTreeMap<String, String>,
+    wanted: &[String],
+) {
+    requested.retain(|id| !failed.contains_key(id) || wanted.contains(id));
 }
 
 /// Entries per page read back: st's largest, so a long session takes few requests.
@@ -3398,6 +3411,37 @@ mod tests {
     }
 
     #[test]
+    fn a_session_that_failed_to_open_says_why_and_is_asked_again_when_reopened() {
+        let session = "session/example-child".to_owned();
+        let failed = BTreeMap::from([(
+            session.clone(),
+            "not found · open it again to retry".to_owned(),
+        )]);
+        let shown = conversations(
+            &Model::default(),
+            "person/avery",
+            &BTreeMap::new(),
+            &failed,
+            &[session.clone()],
+        );
+        match &shown[&session] {
+            Load::Failed(reason) => assert!(
+                reason.contains("not found") && reason.contains("retry"),
+                "{reason}"
+            ),
+            other => panic!("a failed open is an error, not loading: {other:?}"),
+        }
+        let mut requested = HashSet::from([session.clone(), "session/example-open".to_owned()]);
+        // On screen, the failure stays and is not asked again in a loop.
+        retry_failed_opens(&mut requested, &failed, std::slice::from_ref(&session));
+        assert!(requested.contains(&session));
+        // Left, it is forgotten, so opening it again asks st once more; a good open is kept.
+        retry_failed_opens(&mut requested, &failed, &[]);
+        assert!(!requested.contains(&session));
+        assert!(requested.contains("session/example-open"));
+    }
+
+    #[test]
     fn a_conversation_says_above_its_oldest_entry_how_far_back_it_goes() {
         let items: Vec<st3_client::TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"c","sequence":2,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"assistant","type":"content","final":true,
@@ -3468,7 +3512,7 @@ mod tests {
         let conversing = [target.clone()];
         assert_eq!(
             moved_sessions(&conversing, &model, &timelines, &mut asked),
-            [target.clone()]
+            std::slice::from_ref(&target)
         );
         // Asked once for that session, not on every pass.
         assert!(moved_sessions(&conversing, &model, &timelines, &mut asked).is_empty());
