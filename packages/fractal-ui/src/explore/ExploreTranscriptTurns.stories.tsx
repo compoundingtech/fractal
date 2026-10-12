@@ -116,6 +116,7 @@ function Explorer(args: ExploreArgs) {
       <div data-control-transition data-turn-variant="T1" data-kind-variant="K1" data-meta-variant="M1" data-scheme="dark" data-width="1440" data-lane-count="1"><Button {...stylex.props(styles.control)}>Inert transition control</Button><Button aria-expanded={false} {...stylex.props(styles.control)}>Inert disclosure control</Button></div>
       <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root data-control-production-meta><ThreadPrimitive.Unstable_MessageById messageId={replyItems[0]!.id} components={metaControlComponents} /></ThreadPrimitive.Root></EmbraceRuntimeProvider>
       <div data-control-k3 {...stylex.props(styles.quietInputControl)}><span data-input-title>Quiet summary with no sender or kind cue</span></div>
+      <div data-control-k3-stacked {...stylex.props(styles.stackedInputControl)}><span data-input-title>Sender<br />Wrapped title</span></div>
       <FocusRemountControl />
       <div data-control-missing-time>Reply without its own timestamp.</div>
     </section>
@@ -155,7 +156,8 @@ const styles = stylex.create({
   trailing: { display: 'inline-block', width: geometry.trailingWidth, marginInlineEnd: geometry.trailingOverlap, whiteSpace: 'nowrap' },
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   divider: { position: 'absolute', top: geometry.lift, left: 0, right: 0, textAlign: 'center', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  summary: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
+  summary: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, lineHeight: g.toolRow, whiteSpace: 'nowrap', borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { flex: '1 1 auto', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
+  stackedInputControl: { width: geometry.metaRoom, fontSize: t.uiSize, lineHeight: g.toolRow },
   quietInputControl: { color: ink.fgMuted, height: g.iconSm, overflow: 'hidden', fontSize: t.metaSize, lineHeight: t.metaLeading },
   work: { marginTop: s.md }, tooltip: { padding: s.md, backgroundColor: surface.raised, color: ink.fg, fontSize: t.metaSize, borderRadius: r.sm },
   negativeControls: { marginTop: s.section, display: 'flex', flexDirection: 'column', gap: s.section }, footerControl: { height: g.toolRow }, wrongOwner: { position: 'absolute', top: '100%', marginTop: s.section, fontSize: t.metaSize }, hoverOnly: { opacity: { default: 0, ':hover': 1 } },
@@ -197,6 +199,10 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
       await expect(trigger.querySelector('[data-input-sender]')!.textContent?.trim().length).toBeGreaterThan(0)
       await expect(trigger.querySelector('[data-input-kind-icon]')!.textContent?.trim().length).toBeGreaterThan(0)
       await expect(trigger.getBoundingClientRect().height).toBeGreaterThanOrEqual(24)
+      await expect(trigger.getBoundingClientRect().height).toBeLessThanOrEqual(parseFloat(getComputedStyle(trigger).lineHeight))
+      const titleRun = document.createRange()
+      titleRun.selectNodeContents(trigger.querySelector('[data-input-title]')!)
+      await expect(titleRun.getClientRects()).toHaveLength(1)
     }
   }
   await waitFor(() => expect(canvasElement.querySelector('[data-control-production-meta] [data-testid="answer-meta"]')).not.toBeNull())
@@ -204,6 +210,11 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   await expect(getComputedStyle(quietControl.querySelector('[data-input-title]')!).color).not.toBe(styled.color)
   await expect(quietControl.querySelector('[data-input-sender], [data-input-kind-icon]')).toBeNull()
   await expect(quietControl.getBoundingClientRect().height).toBeLessThan(24)
+  const stackedControl = canvasElement.querySelector<HTMLElement>('[data-control-k3-stacked]')!
+  await expect(stackedControl.getBoundingClientRect().height).toBeGreaterThan(parseFloat(getComputedStyle(stackedControl).lineHeight))
+  const stackedRun = document.createRange()
+  stackedRun.selectNodeContents(stackedControl.querySelector('[data-input-title]')!)
+  await expect(stackedRun.getClientRects().length).toBeGreaterThan(1)
   for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
     const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
     for (const [index, block] of blocks.entries()) {
