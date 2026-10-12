@@ -6,6 +6,13 @@ use serde_json::Value;
 pub const PREFIX: &str = "st-work-claim-socket-failure: ";
 pub const CODE: &str = "work-claim-socket-failed";
 
+/// Known Unix socket permission/path defects cannot improve while waiting for a daemon.
+/// Other connect errors retain the shared client's existing outage-wait behavior.
+pub fn is_socket_access_defect(errno: i32) -> bool {
+    matches!(errno, libc::EPERM | libc::EACCES | libc::EINVAL | libc::ENAMETOOLONG
+        | libc::ENOTDIR | libc::ENOTSOCK | libc::ELOOP)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
@@ -37,8 +44,15 @@ impl Receipt {
 
     pub fn reason(&self) -> String {
         let cause = std::io::Error::from_raw_os_error(self.os_error);
+        let advice = if matches!(self.os_error, libc::EPERM | libc::EACCES) {
+            "Inspect the seat's sandbox permissions and socket path; no claim request was sent."
+        } else if is_socket_access_defect(self.os_error) {
+            "Inspect the socket path; no claim request was sent."
+        } else {
+            "No claim request was sent."
+        };
         format!(
-            "`{}` reported that `st work claim {}` could not connect to daemon Unix socket `{}`: {cause}. Inspect the seat's sandbox permissions and socket path; no claim request was sent.",
+            "`{}` reported that `st work claim {}` could not connect to daemon Unix socket `{}`: {cause}. {advice}",
             self.actor, self.step_run, self.socket
         )
     }
@@ -86,6 +100,27 @@ pub fn key(actor: &str, step: &str, attempt: u32, epoch: u32, incarnation: &str)
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claim_socket_resource_pressure_is_reported_without_path_advice() {
+        let receipt = Receipt {
+            actor: "agent/node.worker".into(),
+            step_run: "step-run/sample/work".into(),
+            socket: "/tmp/st.sock".into(),
+            os_error: libc::EMFILE,
+            started_at_unix_ms: 1233,
+            observed_at_unix_ms: 1234,
+        };
+        let reason = receipt.reason();
+        assert!(reason.contains(&std::io::Error::from_raw_os_error(libc::EMFILE).to_string()));
+        assert!(!reason.contains("Inspect"));
+        assert!(!reason.contains("permissions"));
+        let permission = Receipt { os_error: libc::EPERM, ..receipt.clone() }.reason();
+        assert!(permission.contains("Inspect the seat's sandbox permissions and socket path"));
+        let path = Receipt { os_error: libc::ENAMETOOLONG, ..receipt }.reason();
+        assert!(path.contains("Inspect the socket path"));
+        assert!(!path.contains("permissions"));
+    }
 
     #[test]
     fn claim_socket_receipt_requires_failed_tool_and_bounded_typed_cli_output() {
