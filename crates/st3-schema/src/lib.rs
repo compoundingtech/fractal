@@ -2622,11 +2622,13 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("after", reference()),
             ("report_to", reference()),
             ("stalled_after_ms", integer()),
+            ("report_stalls", boolean()),
             ("report_completed", boolean()),
         ],
         "mission-run.report-to" => &[
             ("report_to", reference()),
             ("stalled_after_ms", integer()),
+            ("report_stalls", boolean()),
             ("report_completed", boolean()),
         ],
         "mission-run.state" => &[
@@ -3874,6 +3876,33 @@ fn validate_harness_todo(fields: &BTreeMap<String, Value>) -> Result<(), Validat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_report_stall_policy_is_an_optional_boolean() {
+        for kind in ["mission-run.created", "mission-run.report-to"] {
+            let mut fields =
+                BTreeMap::from([("report_to".into(), serde_json::json!("agent/ops/watcher"))]);
+            assert!(
+                registry()
+                    .validate_claim("mission-run/parent/1", kind, &fields)
+                    .is_ok()
+            );
+            for value in [serde_json::json!(false), serde_json::json!(true)] {
+                fields.insert("report_stalls".into(), value);
+                assert!(
+                    registry()
+                        .validate_claim("mission-run/parent/1", kind, &fields)
+                        .is_ok()
+                );
+            }
+            fields.insert("report_stalls".into(), serde_json::json!("false"));
+            assert!(
+                registry()
+                    .validate_claim("mission-run/parent/1", kind, &fields)
+                    .is_err()
+            );
+        }
+    }
 
     fn todo_fields() -> BTreeMap<String, Value> {
         serde_json::from_value(serde_json::json!({
