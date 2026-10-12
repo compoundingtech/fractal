@@ -202,9 +202,27 @@ async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
     daemon.declare(Some("person/avery"));
+    let source = r#"version 2
+mission "trace-check" state="ready" {
+    goal "Check runtime trace lifecycle."
+    step "work" { assigned-to "agent/example/alder"; }
+}
+"#;
+    let intent = st3::parse_intent(source, "example").unwrap();
+    let preview = daemon.store.mission(&intent, st3::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    daemon.store.apply_as(&intent, &preview.subject_tokens, "trace-mission", Some("person/avery")).unwrap();
     daemon.start().await;
-    let opened = daemon.ok(&["work", "start", "Check trace lifecycle", "--as", ALDER]).await;
-    let step = opened["subject"].as_str().unwrap();
+    let opened = daemon.ok(&["missions", "start", "trace-check", "--workspace",
+        root.path().to_str().unwrap(), "--as", "person/avery"]).await;
+    let run = opened["mission_run"]["subject"].as_str().unwrap();
+    let reconciler = st3::reconcile::Reconciler::new(
+        daemon.store.clone(), Arc::new(NoRuntime), "example".into(), Arc::new(Notify::new()),
+    );
+    reconciler.reconcile_once().unwrap();
+    let run_view = daemon.store.mission_run_steps(run, false).unwrap().unwrap();
+    let step = run_view.steps[0].subject.as_str();
     let path = root.path().join("agent-trace.json");
     let runtime = issuer::build(&Facts {
         agent: ALDER.into(),
@@ -239,6 +257,9 @@ async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
         if action == "claim" {
             assert_eq!(value["how"]["issuance"]["_tag"], "st-issued");
             assert_eq!(value["how"]["issuance"]["step_run"], step);
+            assert_eq!(value["why"]["mission"]["run"], run);
+            assert_eq!(value["why"]["step"]["run"],
+                run_view.steps[0].generation.strip_prefix("run-generation/").unwrap());
             assert!(value["why"]["mission"]["name"].is_string());
             assert!(value["why"]["step"]["name"].is_string());
         } else {

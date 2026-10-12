@@ -112,19 +112,39 @@ pub fn update_lease(
         runtime.how.issuance = None;
         return Ok(());
     };
-    let mission_run = step.run.strip_prefix("mission-run/").context("lease has no mission run reference")?;
+    let mission_run = &step.run;
     let step_run = step.generation.strip_prefix("run-generation/").context("lease has no step generation reference")?;
+    let references = (|| -> Result<_> {
+        Ok((
+            AgentTraceRuntimeV1WhyMissionRun::try_from(mission_run.to_owned())?,
+            AgentTraceRuntimeV1WhyStepRun::try_from(step_run.to_owned())?,
+            AgentTraceRuntimeV1HowIssuanceVariant0StepRun::try_from(step.subject.clone())?,
+        ))
+    })();
+    let (mission_run, step_run, issued_step_run) = match references {
+        Ok(references) => references,
+        Err(error) => {
+            tracing::warn!(
+                event = "agent_trace_lease_unrepresentable",
+                subject = %step.subject, run = %step.run, generation = %step.generation,
+                %error, "runtime authority cannot represent lease references"
+            );
+            runtime.why = None;
+            runtime.how.issuance = None;
+            return Ok(());
+        }
+    };
     let mission = AgentTraceRuntimeV1WhyMission {
         name: mission_name.context("claimed lease requires its mission name")?.to_owned().try_into()?,
-        run: Some(mission_run.to_owned().try_into()?),
+        run: Some(mission_run),
     };
     let why_step = AgentTraceRuntimeV1WhyStep {
         name: step.step.clone().try_into()?,
-        run: Some(step_run.to_owned().try_into()?),
+        run: Some(step_run),
     };
     let issuance = AgentTraceRuntimeV1HowIssuance::Variant0(AgentTraceRuntimeV1HowIssuanceVariant0 {
         r#_tag: "st-issued".to_owned().try_into()?,
-        step_run: step.subject.clone().try_into()?,
+        step_run: issued_step_run,
     });
     runtime.why = Some(AgentTraceRuntimeV1Why { mission: Some(mission), step: Some(why_step) });
     runtime.how.issuance = Some(issuance);
@@ -208,7 +228,7 @@ mod tests {
 
     fn lease() -> StepRunView {
         serde_json::from_value(json!({
-            "subject":format!("step-run/{GENERATION}/work"), "run":format!("mission-run/{MISSION}"),
+            "subject":format!("step-run/{GENERATION}/work"), "run":format!("mission-run/example/repo/example-mission/{MISSION}"),
             "generation":format!("run-generation/{GENERATION}"), "step":"work", "definition_hash":"definition",
             "status":"claimed", "attempt":1, "assigned_to":"agent/example", "agentless":false,
             "title":null, "worker_reported":false, "claimant":"agent/example", "claim_incarnation":"execution-one",
@@ -230,7 +250,7 @@ mod tests {
     #[test]
     fn claimed_lease_maps_actual_references() {
         let value = serde_json::to_value(build(&facts(), Some(&lease())).unwrap()).unwrap();
-        assert_eq!(value["why"]["mission"], json!({"name":"example-mission", "run":MISSION}));
+        assert_eq!(value["why"]["mission"], json!({"name":"example-mission", "run":format!("mission-run/example/repo/example-mission/{MISSION}")}));
         assert_eq!(value["why"]["step"], json!({"name":"work", "run":GENERATION}));
         assert_eq!(value["how"]["issuance"], json!({"_tag":"st-issued", "step_run":format!("step-run/{GENERATION}/work")}));
     }
@@ -272,7 +292,34 @@ mod tests {
         let completed = refresh(&path, &facts.agent, &facts.incarnation, None, None).unwrap();
         assert_eq!(completed, initial);
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        let files: std::collections::BTreeSet<_> = std::fs::read_dir(root.path())
+            .unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(files, ["runtime.json", "runtime.lock"].map(std::ffi::OsString::from).into());
+    }
+
+    #[test]
+    fn ad_hoc_lease_preserves_actual_run_generation_and_subject() {
+        let facts = facts();
+        let mut step = lease();
+        step.run = format!("mission-run/work/{MISSION}");
+        step.generation = format!("run-generation/work-{GENERATION}");
+        step.subject = format!("step-run/work-{GENERATION}/work");
+        let runtime = build(&facts, Some(&step)).unwrap();
+        let value = serde_json::to_value(&runtime).unwrap();
+        assert_eq!(value["why"]["mission"]["run"], step.run);
+        assert_eq!(value["why"]["step"]["run"], format!("work-{GENERATION}"));
+        assert_eq!(value["how"]["issuance"]["step_run"], step.subject);
+        let decoded: Runtime = serde_json::from_slice(&serde_json::to_vec(&runtime).unwrap()).unwrap();
+        assert_eq!(decoded, runtime);
+    }
+
+    #[test]
+    fn unrepresentable_lease_omits_purpose_instead_of_fabricating_references() {
+        let mut step = lease();
+        step.generation = "run-generation/not-a-generation".into();
+        let runtime = build(&facts(), Some(&step)).unwrap();
+        assert!(runtime.why.is_none());
+        assert!(runtime.how.issuance.is_none());
     }
 
     #[test]
