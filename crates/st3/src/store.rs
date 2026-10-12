@@ -9689,10 +9689,11 @@ impl Store {
                 old_revision: current.as_ref().map(|row| row.revision.clone()),
                 new_revision: revision,
             });
-            let previous = current.as_ref().and_then(|row| row.member.as_deref())
-                .map(serde_json::from_str::<crate::model::MemberSpec>)
-                .transpose().map_err(internal)?;
-            if let Some(action) = crate::suspension::publication_action(self, previous.as_ref(), desired, false)
+            if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
+                Ok(current.as_ref().and_then(|row| row.member.as_deref())
+                    .map(serde_json::from_str::<crate::model::MemberSpec>)
+                    .transpose()?)
+            })
                 .map_err(internal)?
             {
                 actions.push(action);

@@ -1442,6 +1442,46 @@ fn suspended_non_launch_publications_preserve_hold_and_resume_updated_environmen
 }
 
 #[test]
+fn explicit_stop_preview_names_and_discards_completed_suspension() {
+    let seat = Seat::new_with_owned_publication(false);
+    let (operation, _, _) = seat.finish_suspend();
+    let source = format!("version 2\nstop {SUBJECT:?}\n");
+    let input = crate::graph::parse_internal_intent(&source, "amber").unwrap();
+    let preview = seat
+        .store
+        .mission(
+            &input,
+            crate::model::IntentInput {
+                kdl: source,
+                source_name: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(preview.predicted_actions[0].action, "stop");
+    assert!(preview.predicted_actions[0].reason.contains(&operation));
+    assert!(
+        preview.predicted_actions[0]
+            .reason
+            .contains("explicit stop would discard the hold")
+    );
+    seat.store
+        .apply_as(
+            &input,
+            &preview.subject_tokens,
+            "stop",
+            Some("person/operator"),
+        )
+        .unwrap();
+    assert!(
+        crate::suspension::current(&seat.store, SUBJECT)
+            .unwrap()
+            .is_none()
+    );
+    seat.reconcile();
+    assert!(seat.runtime.starts.lock().unwrap().is_empty());
+}
+
+#[test]
 fn immediate_publication_ends_completed_suspension() {
     let seat = Seat::new();
     let (operation, _, _) = seat.finish_suspend();

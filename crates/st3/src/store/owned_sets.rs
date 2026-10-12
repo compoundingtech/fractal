@@ -1286,9 +1286,11 @@ impl Store {
         // transaction reads and suspension follows the shared launch-lineage comparator.
         for (subject, effect) in &mut preview.effects {
             let Some(next) = intent.subjects.get(subject) else { continue; };
-            let previous = self.desired_subject_with_writer(subject).map_err(internal)?;
             if let Some(action) = crate::suspension::publication_action(
-                self, previous.as_ref().and_then(|(desired, _)| desired.member.as_ref()), next, true,
+                self, next, true, || {
+                    Ok(self.desired_subject_with_writer(subject)?
+                        .and_then(|(desired, _)| desired.member))
+                },
             ).map_err(internal)? {
                 effect.push_str("; ");
                 effect.push_str(&action.reason);

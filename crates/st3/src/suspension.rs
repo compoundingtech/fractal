@@ -116,9 +116,9 @@ impl Suspension {
 /// Manual deferral is available only to owned-set publication; this introduces no guard.
 pub(crate) fn publication_action(
     store: &Store,
-    previous: Option<&crate::model::MemberSpec>,
     next: &crate::model::DesiredSubject,
     owned: bool,
+    previous: impl FnOnce() -> Result<Option<crate::model::MemberSpec>>,
 ) -> Result<Option<crate::model::PlannedAction>> {
     if !matches!(next.kind.as_str(), "agent" | "stop") {
         return Ok(None);
@@ -126,22 +126,35 @@ pub(crate) fn publication_action(
     let Some(hold) = current(store, &next.subject)?.filter(Suspension::holds_seat) else {
         return Ok(None);
     };
+    let suspension = hold
+        .suspend_operation_id
+        .as_deref()
+        .unwrap_or(&hold.operation_id);
+    // A stop does not compare launches, including when the prior declaration is legacy.
+    if next.kind == "stop" {
+        return Ok(Some(crate::model::PlannedAction {
+            subject: next.subject.clone(),
+            action: "stop".into(),
+            reason: format!("suspension {suspension}: the explicit stop would discard the hold"),
+        }));
+    }
     let pending = crate::rollout::pending_manual_launch(store, &next.subject)?;
-    let previous_member = pending.as_ref().map(|(_, member)| member).or(previous);
-    let same_launch = next.kind == "agent"
-        && previous_member
-            .zip(next.member.as_ref())
-            .is_some_and(|(previous, next)| next.launch_changes(previous).is_empty());
+    // Only a held agent publication needs its previous launch. Do not impose full-member
+    // deserialization on ordinary previews of legacy declarations without a suspension.
+    let previous = if pending.is_none() { previous()? } else { None };
+    let previous_member = pending
+        .as_ref()
+        .map(|(_, member)| member)
+        .or(previous.as_ref());
+    let same_launch = previous_member
+        .zip(next.member.as_ref())
+        .is_some_and(|(previous, next)| next.launch_changes(previous).is_empty());
     let manual = owned
         && next.kind == "agent"
         && crate::rollout::manual(next)
         && store
             .rollout(&next.subject)?
             .is_none_or(|operation| operation.phase == "superseded");
-    let suspension = hold
-        .suspend_operation_id
-        .as_deref()
-        .unwrap_or(&hold.operation_id);
     let (action, reason) = if same_launch || manual {
         (
             "hold-kept",
@@ -153,11 +166,6 @@ pub(crate) fn publication_action(
                     "declared launch unchanged; environment edits take effect only on explicit resume"
                 }
             ),
-        )
-    } else if next.kind == "stop" {
-        (
-            "stop",
-            format!("suspension {suspension}: the explicit stop would discard the hold"),
         )
     } else {
         (
