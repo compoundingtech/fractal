@@ -51,7 +51,7 @@ export const QuestionForm = (props: QuestionFormProps) => {
   const disabled = !request.answerable || request.state._tag === 'submitting'
   const complete = request.questions.every(q => q.required === false || answered(q, draft[q.id]))
   const focusedPreview = question?.options.find(option => option.id === focused)?.preview ?? question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.preview ?? (question?.options.find(option => option.recommended) ?? question?.options[0])?.preview
-  const update = (q: QuestionView, patch: Partial<AnswerDraft>) => props.onDraftChange?.({ ...draft, [q.id]: { selected: [], ...draft[q.id], ...patch } })
+  const update = (q: QuestionView, patch: Partial<AnswerDraft>) => props.onDraftChange?.({ ...draft, [q.id]: { ...(draft[q.id] ?? { selected: [] }), ...patch } })
   const submit = (next = draft) => {
     if (!disabled && request.questions.every(q => q.required === false || answered(q, next[q.id]))) {
       const answers = Object.fromEntries(request.questions.flatMap(q => next[q.id] !== undefined ? [[q.id, next[q.id]]] : q.kind === 'multi' ? [[q.id, { selected: [] }]] : []))
