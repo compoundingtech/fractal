@@ -216,12 +216,29 @@ const withoutOutputData: TranscriptStoryData = { sync: { _tag: 'Live', since: no
   { id: 'silent', items: silentItems, work: workLogTurnFromItems(silentItems, { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: true, interrupted: false, startedAt: at, completeHistory: true, failureNote: 'The run stopped; your conversation and changes are retained.' }) },
   { id: 'live', items: liveItems, work: workLogTurnFromItems(liveItems, { kindFor: () => 'run', running: true, failed: false, interrupted: false, startedAt: at }) },
 ] }
+/** One leading glyph per work row (visual language 2.5); a running row shows its state through the glyph colour. */
+const workGlyphProblems = (rows: readonly HTMLElement[]) => {
+  const leads = rows.map(row => row.querySelectorAll<HTMLElement>('[data-work-glyph]'))
+  const problems = leads.flatMap((lead, index) => lead.length === 1 && lead[0]!.querySelectorAll('svg').length === 1 ? [] : [`row ${index} has ${lead.length === 1 ? lead[0]!.querySelectorAll('svg').length : lead.length} leading glyphs`])
+  const running = leads.find(lead => lead[0]?.dataset.workGlyph === 'running')?.[0], settled = leads.find(lead => lead[0]?.dataset.workGlyph === 'read')?.[0]
+  return running !== undefined && settled !== undefined && getComputedStyle(running).color === getComputedStyle(settled).color ? [...problems, 'running glyph is not tinted'] : problems
+}
 /** Silent success, failure and in-flight calls retain both disclosure stages even without output. */
 export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={withoutOutputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const notice = await canvas.findByRole('alert')
   const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
   await expect(rows).toHaveLength(3)
+  await expect(rows.map(row => row.querySelector<HTMLElement>('[data-work-glyph]')?.dataset.workGlyph)).toEqual(['read', 'failed', 'running'])
+  await expect(workGlyphProblems(rows)).toEqual([])
+  // Control: a second leading glyph and an untinted running glyph are both rejected, then restored.
+  const readLead = rows[0]!.querySelector<HTMLElement>('[data-work-glyph]')!, runningLead = rows[2]!.querySelector<HTMLElement>('[data-work-glyph]')!
+  const extra = readLead.appendChild(readLead.querySelector('svg')!.cloneNode(true))
+  runningLead.style.color = getComputedStyle(readLead).color
+  await expect(workGlyphProblems(rows)).toEqual(['row 0 has 2 leading glyphs', 'running glyph is not tinted'])
+  extra.remove()
+  runningLead.style.removeProperty('color')
+  await expect(workGlyphProblems(rows)).toEqual([])
   for (const row of rows) {
     await expect(row).toHaveAttribute('aria-expanded', 'false')
     await expectNoOutputWithControl(row)

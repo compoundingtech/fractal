@@ -18,6 +18,7 @@ import {
 
 import { compactTime, type AgentStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
+import { statusVars as statusTone } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import { Button } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
@@ -86,9 +87,9 @@ const styles = stylex.create({
     borderInlineStartStyle: 'solid',
     borderInlineStartColor: tokens['--ds-gray-700'],
   },
-  workingRail: { borderInlineStartColor: tokens['--ds-green-900'] },
-  waitingRail: { borderInlineStartColor: tokens['--ds-amber-900'] },
-  staleRail: { borderInlineStartColor: tokens['--ds-red-900'] },
+  // The rail follows the status disc: running and needs-you carry tone; stale and the rest stay neutral.
+  workingRail: { borderInlineStartColor: statusTone.runningFg },
+  waitingRail: { borderInlineStartColor: statusTone.attention },
   secondLine: {
     display: 'flex',
     alignItems: 'center',
@@ -979,7 +980,6 @@ const CurrentAgent = ({
         styles.rail,
         status === 'working' && styles.workingRail,
         status === 'waiting' && styles.waitingRail,
-        status === 'stale' && styles.staleRail,
         styles.indent(depth),
         current && styles.selected,
       )}
