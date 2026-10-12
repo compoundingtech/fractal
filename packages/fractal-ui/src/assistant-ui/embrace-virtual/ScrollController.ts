@@ -1,5 +1,5 @@
 import type { ListLayout } from 'react-aria-components'
-import { scrollToLayoutKey } from '../composition/virtual-layout'
+import { layoutKeyAtOffset, scrollToLayoutKey } from '../composition/virtual-layout'
 
 /** The source transcript persists a mode or a stable entry, never a numeric bottom. */
 export type ScrollAnchor =
@@ -37,6 +37,20 @@ export class ScrollController {
   private geometry = { contentHeight: 0, viewportHeight: 0 }
   private pressed: ReadingPosition | undefined
   private pendingJump: string | undefined
+  private leadingKey: string | undefined
+
+  /** An older-navigation command owns the viewport before RAC scrolls/focuses. */
+  readonly read = () => {
+    this.following = false
+    this.pendingJump = undefined
+    this.pendingAnchor = undefined
+    this.restoring = false
+    this.userInputAt = performance.now()
+    this.userScrolling = true
+    if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
+    this.restoreFrame = undefined
+    this.captureAnchor()
+  }
 
   readonly jumpTo = (key: string) => {
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
@@ -98,12 +112,16 @@ export class ScrollController {
       const resized =
         element.scrollHeight !== this.geometry.contentHeight ||
         element.clientHeight !== this.geometry.viewportHeight
-      if (resized && performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS) return
-      if (this.restoring || this.pendingAnchor !== undefined) return
+      if (this.restoring || this.pendingJump !== undefined || this.pressed !== undefined) return
+      if (this.pendingAnchor?.key === this.leadingKey && this.pendingAnchor !== undefined) return
+      if (this.pendingAnchor !== undefined && !this.userScrolling) return
+      if (resized && this.following) return
       if (!this.userScrolling && performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS)
         return
       this.captureAnchor()
-      this.following =
+      // Measurement may extend the bottom after a fling. Geometry is not a
+      // request to leave follow mode, or to enter it while reading history.
+      if (!resized) this.following =
         element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_SLACK
       if (this.following) this.options.setUnread(false)
       this.savePosition()
@@ -196,16 +214,22 @@ export class ScrollController {
     let nearestTop = Infinity
     for (const candidate of element.querySelectorAll<HTMLElement>('[data-embrace-entry-id]')) {
       const rect = candidate.getBoundingClientRect()
-      if (rect.bottom > top && rect.top < nearestTop) {
+      if (rect.bottom > top && rect.top < top + element.clientHeight && rect.top < nearestTop) {
         nearest = candidate
         nearestTop = rect.top
       }
     }
     const key = nearest?.dataset['embraceEntryId']
-    if (key !== undefined) {
+    if (key !== undefined && this.rowKeys.has(key)) {
       this.anchor = { key, offset: nearestTop - top }
-      if (this.pendingAnchor !== undefined) this.pendingAnchor = this.anchor
+    } else {
+      const leading = this.leadingKey === undefined ? null : this.options.layout.getLayoutInfo(this.leadingKey)
+      const match = leading !== null && element.scrollTop < leading.rect.y + leading.rect.height
+        ? { key: this.leadingKey!, info: leading }
+        : layoutKeyAtOffset(this.options.layout, this.rows, element.scrollTop)
+      if (match !== undefined) this.anchor = { key: String(match.key), offset: match.info.rect.y - element.scrollTop }
     }
+    if (this.pendingAnchor !== undefined) this.pendingAnchor = this.anchor
   }
 
   private scheduleRestore() {
@@ -262,14 +286,29 @@ export class ScrollController {
   }
 
   /** Call after a commit that changes the generic entry collection. */
-  afterRowsChange(rows: readonly Row[]) {
+  afterRowsChange(rows: readonly Row[], leadingKey?: string) {
     const previous = this.rows
     const previousFirst = this.firstKey
+    const previousLeading = this.leadingKey
+    this.leadingKey = leadingKey
     this.rows = rows
     this.firstKey = rows[0]?.id
-    if (previous !== rows) {
+    if (previous !== rows || previousLeading !== leadingKey) {
       this.rowKeys.clear()
       for (const row of rows) this.rowKeys.add(row.id)
+      if (leadingKey !== undefined) this.rowKeys.add(leadingKey)
+    }
+    if (leadingKey !== undefined && previousLeading !== leadingKey && !this.following && this.element?.scrollTop === 0) {
+      // The logical top includes the inline history state, not a focused turn
+      // below it. Keep that edge stable while the collection adopts the marker.
+      this.anchor = { key: leadingKey, offset: 0 }
+      this.pendingAnchor = this.anchor
+      this.scheduleRestore()
+    }
+    if (previousLeading !== undefined && previousLeading !== leadingKey && this.firstKey !== undefined) {
+      // Removing a loading/error marker leaves the first loaded row at the top.
+      if (this.anchor?.key === previousLeading) this.anchor = { key: this.firstKey, offset: 0 }
+      if (this.pendingAnchor?.key === previousLeading) this.pendingAnchor = this.anchor
     }
     // News survives a held row action. Pinning affects geometry, not delivery.
     if (previous.length > 0 && previous !== rows && !this.restoring) {

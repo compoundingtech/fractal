@@ -422,7 +422,10 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     let viewportHeight = viewport.clientHeight
     // Intent is independent of scroll events: at the top edge there may be
     // nothing left to scroll, but the reader can still request the next page.
-    const olderGesture = () => prefetch(true)
+    const olderGesture = () => {
+      controller.read()
+      prefetch(true)
+    }
     let draggingScrollbar = false
     let pointerY = 0
     let dragRequested = false
@@ -497,7 +500,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   React.useLayoutEffect(() => {
     if (scrollToBottomKey !== undefined && command.current !== scrollToBottomKey) controller.jump()
     command.current = scrollToBottomKey
-    controller.afterRowsChange(items)
+    controller.afterRowsChange(items, history._tag !== 'More' || items.length === 0 ? '__fractal_history__' : undefined)
     prefetch()
   }, [controller, items, history._tag, prefetch, scrollToBottomKey])
   React.useImperativeHandle(ref, () => ({ jumpTo: controller.jumpTo }), [controller])
@@ -507,9 +510,9 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   ], [items, history._tag])
   return <div {...stylex.props(styles.frame)}>
     <Virtualizer layout={layout} layoutOptions={measuredListLayoutOptions} shouldObserveItemSize>
-      <GridList {...props} ref={attach} items={collection} dependencies={[renderItem, boundary, empty, contentProps]} keyboardNavigationBehavior="tab" aria-busy={history._tag === 'Loading'} style={{ ...props.style, overflowAnchor: 'none' }}>
+      <GridList {...props} ref={attach} items={collection} dependencies={[renderItem, boundary, empty, contentProps]} keyboardNavigationBehavior="tab" render={domProps => <div {...domProps} aria-busy={history._tag === 'Loading'} />} style={{ ...props.style, overflowAnchor: 'none' }}>
         {row => <GridListItem id={row.id} textValue={row.id} {...stylex.props(styles.virtualRow)}>
-          <div data-embrace-entry-id={row.item?.id} {...contentProps}>
+          <div data-embrace-entry-id={row.id} {...contentProps}>
             <ButtonContext.Provider value={null}>{row.item === undefined ? <>{boundary}{items.length === 0 ? empty : null}</> : renderItem(row.item)}</ButtonContext.Provider>
           </div>
         </GridListItem>}
