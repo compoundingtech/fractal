@@ -520,6 +520,16 @@ const MAX_STEP_EXTENSION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// so a seat that stopped answering cannot hide behind a wait.
 pub(crate) const MAX_STEP_WAIT_MS: u64 = 12 * 60 * 60 * 1000;
 
+/// A wait span as hours and minutes, for the budget error and the step view.
+pub(crate) fn format_wait_span(milliseconds: u128) -> String {
+    let minutes = milliseconds / 60_000;
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes}m"),
+        (hours, 0) => format!("{hours}h"),
+        (hours, minutes) => format!("{hours}h{minutes:02}m"),
+    }
+}
+
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
 const SCHEMA: &str = r#"
@@ -8965,6 +8975,27 @@ impl Store {
                     .clone()
                     .or_else(|| Some(requested_incarnation.to_owned()));
                 let actor_incarnation = effective_incarnation.clone();
+                if action == "wait" {
+                    // Waits draw on one budget per attempt, so a seat that keeps declaring them
+                    // cannot hide a hung step from the execution timeout. The budget is time
+                    // spent waiting, not time declared: a resumed wait gives back what it did
+                    // not use.
+                    let spent = step_execution_clock_at(transaction, &subject, current.attempt, now, true)
+                        .map_err(internal)?
+                        .waited;
+                    let left = u128::from(MAX_STEP_WAIT_MS).saturating_sub(spent);
+                    if u128::from(request.wait_ms.unwrap_or_default()) > left {
+                        return Err(St3Error::new(
+                            "wait-budget-exhausted",
+                            format!(
+                                "this attempt has waited {} of its {} wait budget; {} is left",
+                                format_wait_span(spent),
+                                format_wait_span(u128::from(MAX_STEP_WAIT_MS)),
+                                format_wait_span(left),
+                            ),
+                        ));
+                    }
+                }
                 let (status, worker_reported, claimant, claim_incarnation, claim_expiry) = match action {
                     "claim" => {
                         if current.status != "ready" && current.status != "claimed" {
@@ -32150,6 +32181,7 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
         carried_claimant: None,
         execution_started_at_unix_ms: None,
         execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
         execution_elapsed_ms: 0,
         timeout_ms: None,
         timeout_extension_ms: 0,
@@ -32218,6 +32250,7 @@ fn enrich_step_queue_at(
     )?;
     view.execution_started_at_unix_ms = timing.started;
     view.execution_paused_until_unix_ms = timing.paused_until;
+    view.execution_waited_ms = timing.waited;
     view.execution_elapsed_ms = timing.elapsed;
     view.timeout_extension_ms =
         step_timeout_extension_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?;
@@ -32767,6 +32800,21 @@ pub(crate) struct StepTiming {
     pub elapsed: u128,
     /// When a declared wait ends on its own, while the clock is stopped for one.
     pub paused_until: Option<u128>,
+    /// The time this attempt has spent in declared waits so far, a wait still running included.
+    pub waited: u128,
+}
+
+/// Close the wait that began at `pause_started` and add what it spent to `waited`.
+fn end_wait(
+    waited: &mut u128,
+    pause_started: &mut Option<u128>,
+    paused_until: &mut Option<u128>,
+    at: u128,
+) {
+    if let Some(began) = pause_started.take() {
+        *waited = waited.saturating_add(at.saturating_sub(began));
+    }
+    *paused_until = None;
 }
 
 /// Fold a step's execution timing from its step and work events in canonical order: the active
@@ -32798,6 +32846,8 @@ pub(crate) fn fold_step_clock(
     let mut started = None;
     let mut lease_expires = None;
     let mut paused_until: Option<u128> = None;
+    let mut pause_started: Option<u128> = None;
+    let mut waited = 0_u128;
     for (kind, body, accepted) in events {
         let accepted = *accepted;
         if accepted > snapshot_unix_ms {
@@ -32815,7 +32865,7 @@ pub(crate) fn fold_step_clock(
             && accepted > deadline
         {
             started = Some(deadline);
-            paused_until = None;
+            end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
         }
         if let (Some(interval_start), Some(expiry)) = (started, lease_expires)
             && accepted > expiry
@@ -32843,7 +32893,7 @@ pub(crate) fn fold_step_clock(
             }
             "work.claimed" => {
                 // A new claim ends any wait the previous holder declared.
-                paused_until = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
                 if started.is_none() {
                     started = Some(accepted);
                 }
@@ -32862,7 +32912,7 @@ pub(crate) fn fold_step_clock(
                         .get("claimant")
                         .is_some_and(|claimant| !claimant.is_null()) =>
             {
-                paused_until = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
                 if started.is_none() {
                     started = Some(accepted);
                 }
@@ -32886,6 +32936,10 @@ pub(crate) fn fold_step_clock(
                     .filter(|deadline| *deadline > accepted);
                 match (clock, wait_until) {
                     (Some("paused"), Some(deadline)) => {
+                        // Declaring again while a wait runs spends the time so far and starts
+                        // the next span, so chained declarations draw on one budget.
+                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
+                        pause_started = Some(accepted);
                         if let Some(interval_start) = started {
                             let interval_end =
                                 lease_expires.map_or(accepted, |expiry| accepted.min(expiry));
@@ -32896,7 +32950,7 @@ pub(crate) fn fold_step_clock(
                         paused_until = Some(deadline);
                     }
                     (Some("running"), _) if paused_until.is_some() => {
-                        paused_until = None;
+                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
                         started = Some(accepted);
                     }
                     _ => {}
@@ -32914,7 +32968,7 @@ pub(crate) fn fold_step_clock(
                 }
                 started = None;
                 lease_expires = None;
-                paused_until = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
             }
             "step-run.state"
                 if fields
@@ -32929,7 +32983,7 @@ pub(crate) fn fold_step_clock(
                 }
                 started = None;
                 lease_expires = None;
-                paused_until = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
             }
             _ => {}
         }
@@ -32939,7 +32993,10 @@ pub(crate) fn fold_step_clock(
         && snapshot_unix_ms > deadline
     {
         started = Some(deadline);
-        paused_until = None;
+        end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
+    }
+    if let Some(began) = pause_started {
+        waited = waited.saturating_add(snapshot_unix_ms.saturating_sub(began));
     }
     if let Some(interval_start) = started {
         let interval_end =
@@ -32956,6 +33013,7 @@ pub(crate) fn fold_step_clock(
         started,
         elapsed,
         paused_until: paused_until.filter(|_| currently_active),
+        waited,
     }
 }
 
@@ -33983,6 +34041,7 @@ fn mission_run_view_with_enrichment_tx(
             )?;
             step.execution_started_at_unix_ms = timing.started;
             step.execution_paused_until_unix_ms = timing.paused_until;
+            step.execution_waited_ms = timing.waited;
             step.execution_elapsed_ms = timing.elapsed;
             step.timeout_extension_ms =
                 step_timeout_extension_at(connection, &step.subject, step.attempt, now_ms())?;

@@ -78,6 +78,7 @@ fn the_clock_is_stopped_for_the_whole_wait_and_the_view_names_when_it_ends() {
                 started: None,
                 elapsed: 2 * MINUTE,
                 paused_until: Some(T + 62 * MINUTE),
+                waited: (minutes - 2) * MINUTE,
             },
             "{minutes} minutes in"
         );
@@ -286,4 +287,150 @@ fn only_the_holder_of_a_live_lease_can_wait() {
         .work_action(&subject, "wait", &request("late-wait", Some("build slot"), Some(1_000)))
         .unwrap_err();
     assert_eq!(error.code, "work-not-claimed");
+}
+
+const HOUR: u128 = 60 * MINUTE;
+
+#[test]
+fn the_budget_is_time_spent_waiting_not_time_declared() {
+    // Ten hours declared, resumed after one: one hour is spent.
+    let events = vec![claimed(0), wait(MINUTE, 10 * HOUR), resume(MINUTE + HOUR)];
+    assert_eq!(timing(&events, 2 * HOUR).waited, HOUR);
+    // The budget does not grow after the resume.
+    assert_eq!(timing(&events, 20 * HOUR).waited, HOUR);
+}
+
+#[test]
+fn a_wait_that_ends_at_its_deadline_counts_its_full_length() {
+    let mut events = vec![claimed(0), wait(MINUTE, HOUR)];
+    events.extend(renewals(6 * MINUTE, 3 * HOUR));
+    let timing = timing(&events, 3 * HOUR);
+    assert_eq!(timing.waited, HOUR);
+    assert_eq!(timing.paused_until, None);
+}
+
+#[test]
+fn a_wait_still_running_counts_up_to_now() {
+    let mut events = vec![claimed(0), wait(MINUTE, 10 * HOUR)];
+    events.extend(renewals(6 * MINUTE, 3 * HOUR));
+    assert_eq!(timing(&events, 3 * HOUR).waited, 3 * HOUR - MINUTE);
+}
+
+#[test]
+fn chained_waits_draw_on_one_budget() {
+    // Declaring again while a wait runs spends the time so far and starts the next span.
+    let mut events = vec![claimed(0), wait(MINUTE, 6 * HOUR)];
+    events.extend(renewals(6 * MINUTE, 5 * HOUR));
+    events.push(wait(5 * HOUR, 6 * HOUR));
+    events.extend(renewals(5 * HOUR + 5 * MINUTE, 9 * HOUR));
+    events.push(wait(9 * HOUR, 6 * HOUR));
+    // Declared time is 18 hours; the time spent is what the clock has been stopped for.
+    assert_eq!(timing(&events, 10 * HOUR).waited, 10 * HOUR - MINUTE);
+}
+
+#[test]
+fn another_holder_in_the_same_attempt_keeps_the_spent_budget_and_a_new_attempt_starts_fresh() {
+    let mut events = vec![claimed(0), wait(MINUTE, 6 * HOUR)];
+    events.extend(renewals(6 * MINUTE, 2 * HOUR));
+    events.push(event("work.released", 2 * HOUR, None, None));
+    events.push(claimed(2 * HOUR + MINUTE));
+    // The wait ended at the release; what it spent stays spent for the attempt.
+    assert_eq!(timing(&events, 3 * HOUR).waited, 2 * HOUR - MINUTE);
+    // A later attempt folds none of the earlier attempt's events.
+    assert_eq!(fold_step_clock(&events, 2, T + 3 * HOUR, true).waited, 0);
+}
+
+#[test]
+fn chained_waits_stop_being_accepted_at_the_budget() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    let _reset = Reset;
+    let Waiting { store, subject, .. } = claimed_step();
+    let start = now_ms();
+    let at = |moment: u128| {
+        smallclaims::store::set_thread_clock(Some(moment));
+        store.set_write_clock_at(moment).unwrap();
+    };
+    let live_until = |until: u128| {
+        // The seat's driver renews while it waits.
+        let mut moment = now_ms();
+        while moment < until {
+            moment = (moment + 9 * MINUTE).min(until);
+            at(moment);
+            store
+                .work_action(&subject, "renew", &request(&format!("renew-{moment}"), None, None))
+                .unwrap();
+        }
+    };
+
+    at(start + MINUTE);
+    store
+        .work_action(&subject, "wait", &request("wait-a", Some("build slot"), Some(MAX_STEP_WAIT_MS)))
+        .unwrap();
+    live_until(start + 8 * HOUR);
+
+    // Eight hours are spent. A second declaration for the full cap is refused, and says what is left.
+    let refused = store
+        .work_action(&subject, "wait", &request("wait-b", Some("build slot"), Some(MAX_STEP_WAIT_MS)))
+        .unwrap_err();
+    assert_eq!(refused.code, "wait-budget-exhausted");
+    assert!(
+        refused.message.contains("7h59m") || refused.message.contains("8h"),
+        "{}",
+        refused.message
+    );
+    assert!(refused.message.contains("12h"), "{}", refused.message);
+
+    // What is left can still be declared.
+    let left = MAX_STEP_WAIT_MS - u64::try_from(8 * HOUR - MINUTE).unwrap();
+    store
+        .work_action(&subject, "wait", &request("wait-c", Some("build slot"), Some(left)))
+        .unwrap();
+
+    // Once it is all spent, a further declaration is refused with nothing left.
+    live_until(start + 13 * HOUR);
+    let spent = store
+        .work_action(&subject, "wait", &request("wait-d", Some("build slot"), Some(1_000)))
+        .unwrap_err();
+    assert_eq!(spent.code, "wait-budget-exhausted");
+    assert!(spent.message.contains("12h of its 12h"), "{}", spent.message);
+    assert!(spent.message.contains("0m is left"), "{}", spent.message);
+}
+
+#[test]
+fn a_resumed_wait_gives_back_what_it_did_not_use() {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    let _reset = Reset;
+    let Waiting { store, subject, .. } = claimed_step();
+    let start = now_ms();
+    let at = |moment: u128| {
+        smallclaims::store::set_thread_clock(Some(moment));
+        store.set_write_clock_at(moment).unwrap();
+    };
+    at(start + MINUTE);
+    store
+        .work_action(&subject, "wait", &request("wait-a", Some("build slot"), Some(MAX_STEP_WAIT_MS)))
+        .unwrap();
+    at(start + 6 * MINUTE);
+    store
+        .work_action(&subject, "resume", &request("resume-a", None, None))
+        .unwrap();
+    // Five minutes were spent, so nearly the whole cap is still available.
+    at(start + 7 * MINUTE);
+    store
+        .work_action(
+            &subject,
+            "wait",
+            &request("wait-b", Some("merge queue"), Some(MAX_STEP_WAIT_MS - 6 * 60_000)),
+        )
+        .unwrap();
 }
