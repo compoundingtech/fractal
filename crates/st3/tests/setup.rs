@@ -570,7 +570,7 @@ async fn the_expert_asks_first_and_an_existing_setup_never_starts_it_on_its_own(
         return;
     }
     let fixture = Fixture::new();
-    let (store, _client, server) = onboarding_api(&fixture).await;
+    let (store, client, server) = onboarding_api(&fixture).await;
     let setup = |extra: &[&str]| {
         let mut command = fixture.cli();
         command.args([
@@ -617,6 +617,11 @@ async fn the_expert_asks_first_and_an_existing_setup_never_starts_it_on_its_own(
         explicit.contains("Stop it with: st agents stop agent/st/expert --as person/ada"),
         "{explicit}"
     );
-    assert!(store.mission_run("st/onboarding").unwrap().is_some());
+    // An explicit start is a distinct run, counted in the mission's history.
+    let history: serde_json::Value = client
+        .get("/v1/mission-overview?mission=st%2Fonboarding")
+        .await
+        .unwrap();
+    assert_eq!(history["total_runs"], 1, "{history}");
     server.abort();
 }
