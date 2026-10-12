@@ -28,9 +28,62 @@ pub const CHECKPOINT_ATTENTION_AFTER_MS: u128 = 3 * DAY_MS;
 /// already proved unsafe is never attempted again, even after this backoff or a restart.
 pub const CHECKPOINT_PROOF_BACKOFF_MS: u128 = 10 * 60 * 1_000;
 
+#[cfg(feature = "test-support")]
+thread_local! {
+    static TEST_CHECKPOINT_IDENTITY: std::cell::Cell<Option<(&'static str, &'static str)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Pin proof identity for a simulation, so failed-proof diagnostics do not change its
+/// claim inputs when the test executable is rebuilt. Production keeps its real identity.
+/// The guard restores the enclosing thread's identity, including during unwinding.
+#[cfg(feature = "test-support")]
+#[must_use = "keep the guard alive throughout the simulation"]
+pub fn checkpoint_test_identity(build: &'static str, executable: &'static str) -> impl Drop {
+    struct Identity {
+        previous: Option<(&'static str, &'static str)>,
+        _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl Drop for Identity {
+        fn drop(&mut self) {
+            TEST_CHECKPOINT_IDENTITY.with(|identity| identity.set(self.previous));
+        }
+    }
+    Identity {
+        previous: TEST_CHECKPOINT_IDENTITY.with(|identity| identity.replace(Some((build, executable)))),
+        _thread: std::marker::PhantomData,
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+#[test]
+fn simulation_identity_is_scoped_to_its_thread_and_restores_on_unwind() {
+    let real_build = checkpoint_build();
+    {
+        let _outer = checkpoint_test_identity("fixture-build", "fixture-executable");
+        assert_eq!(checkpoint_build(), "fixture-build");
+        assert_eq!(checkpoint_executable_digest().unwrap(), "fixture-executable");
+        std::thread::scope(|scope| {
+            assert_eq!(scope.spawn(checkpoint_build).join().unwrap(), real_build);
+        });
+        let unwind = std::panic::catch_unwind(|| {
+            let _inner = checkpoint_test_identity("nested-build", "nested-executable");
+            assert_eq!(checkpoint_build(), "nested-build");
+            panic!("fixture unwind");
+        });
+        assert!(unwind.is_err());
+        assert_eq!(checkpoint_build(), "fixture-build");
+        assert_eq!(checkpoint_executable_digest().unwrap(), "fixture-executable");
+    }
+    assert_eq!(checkpoint_build(), real_build);
+}
+
 /// The build a seal or verification names, so status can say which build holds a checkpoint up.
 /// `CARGO_PKG_VERSION` alone is the same on every node today.
 pub fn checkpoint_build() -> String {
+    #[cfg(feature = "test-support")]
+    if let Some((build, _)) = TEST_CHECKPOINT_IDENTITY.with(std::cell::Cell::get) {
+        return build.to_owned();
+    }
     option_env!("ST3_BUILD_REVISION")
         .unwrap_or(env!("CARGO_PKG_VERSION"))
         .to_owned()
@@ -484,6 +537,10 @@ impl FailedProofInputs {
 /// On Linux the proc link still names this process's binary after an atomic deployment replaces
 /// its path. Never silently reuse a failed result if executable identity cannot be established.
 fn checkpoint_executable_digest() -> Result<&'static str> {
+    #[cfg(feature = "test-support")]
+    if let Some((_, executable)) = TEST_CHECKPOINT_IDENTITY.with(std::cell::Cell::get) {
+        return Ok(executable);
+    }
     use std::io::Read as _;
     static DIGEST: std::sync::LazyLock<std::result::Result<String, String>> = std::sync::LazyLock::new(|| {
         let hash = || -> Result<String> {
