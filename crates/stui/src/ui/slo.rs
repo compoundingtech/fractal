@@ -322,7 +322,7 @@ pub fn panic() {
         counters.add("panics", 1);
         let _ = write_line(
             &dir,
-            counters.take(hour(), &host(), &crate::version::display_version()),
+            counters.take(hour(), &host(), crate::version::display_version()),
         );
     }
 }
@@ -361,7 +361,7 @@ impl Session {
                             since.elapsed().as_millis().min(u64::MAX as u128) as u64,
                         );
                         since = Instant::now();
-                        let _ = write_line(&dir, METRICS.take(window, &host, &build));
+                        let _ = write_line(&dir, METRICS.take(window, &host, build));
                         if stopped {
                             break;
                         }
