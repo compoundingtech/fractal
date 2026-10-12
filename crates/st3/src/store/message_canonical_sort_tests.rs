@@ -1,12 +1,17 @@
 use super::*;
 
-// Exact pre-fusion sorter: keep both lookups as the independent oracle.
-fn old_sort(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
-    let mut keys = BTreeMap::new();
+// Shared only by the old-sort oracle and its EXPLAIN control: exact pre-fusion SQL.
+fn old_first_query() -> &'static str {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
         "SELECT id FROM claims WHERE subject=?1 AND kind IN ('message.sent','intent.desired') ORDER BY CANONICAL_ASC(claims) LIMIT 1"
     ));
-    let mut statement = connection.prepare_cached(&QUERY)?;
+    &QUERY
+}
+
+// Exact pre-fusion sorter: keep both lookups as the independent oracle.
+fn old_sort(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
+    let mut keys = BTreeMap::new();
+    let mut statement = connection.prepare_cached(old_first_query())?;
     for message in messages.iter() {
         let id: String = statement.query_row([&message.subject], |row| row.get(0))?;
         keys.insert(
@@ -210,16 +215,82 @@ fn later_replica_position_and_earlier_claim_are_visible_and_survive_reopening() 
     assert_eq!(serde_json::to_value(parity(&connection, &messages)).unwrap(), serde_json::to_value(expected).unwrap());
 }
 
+#[derive(Debug)]
+struct PlanStep {
+    id: i64,
+    parent: i64,
+    detail: String,
+}
+
+fn explain(connection: &Connection, sql: &str) -> rusqlite::Result<Vec<PlanStep>> {
+    connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+        .query_map(["message/probe"], |row| {
+            Ok(PlanStep { id: row.get(0)?, parent: row.get(1)?, detail: row.get(3)? })
+        })?
+        .collect()
+}
+
+fn normalize_subquery_number(detail: &str) -> String {
+    for prefix in ["SCALAR SUBQUERY ", "CORRELATED SCALAR SUBQUERY "] {
+        if let Some(number) = detail.strip_prefix(prefix)
+            && !number.is_empty()
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return format!("{prefix}#");
+        }
+    }
+    // Index names, lookup constraints and ORDER BY term counts are never normalized.
+    detail.to_owned()
+}
+
 #[test]
-fn fused_message_key_plan_seeks_subject_kind_and_chosen_claim_and_batch() {
-    // Use the actual Store schema/indexes, rather than the minimal ordering fixture.
+fn fused_message_key_plan_matches_old_subject_seek_and_canonical_subtree() {
+    // Both queries use this same empty actual Store, population and SQLite build.
+    // This does not establish the plan for differently populated or analyzed stores.
     let store = Store::open_memory("node").unwrap();
     let connection = store.readers.get();
-    let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", message_canonical_key_query()))
-        .unwrap().query_map(["message/probe"], |row| row.get::<_, String>(3))
-        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    assert!(plan.iter().any(|step| step.starts_with("SEARCH claims ") && step.contains("subject=?") && step.contains("kind=?")), "{plan:?}");
-    assert!(plan.iter().any(|step| step.starts_with("SEARCH chosen ") && step.contains("id=?")), "{plan:?}");
-    assert!(plan.iter().any(|step| step.starts_with("SEARCH batches ") && step.contains("id=?")), "{plan:?}");
-    assert!(!plan.iter().any(|step| step.starts_with("SCAN ")), "{plan:?}");
+    let old_result = explain(&connection, old_first_query());
+    let new_result = explain(&connection, message_canonical_key_query());
+    // Print both complete results before any unwrap/assertion, including SQL errors.
+    println!("OLD full plan: {old_result:#?}\nNEW full plan: {new_result:#?}");
+    let old = old_result.expect("old EXPLAIN failed (both results printed)");
+    let new = new_result.expect("new EXPLAIN failed (both results printed)");
+    let context = format!("OLD full plan: {old:#?}\nNEW full plan: {new:#?}");
+
+    // The uncorrelated scalar SELECT is the earliest-ID query; correlated subqueries
+    // calculate its canonical key or the outer chosen key. Never pick a claims row
+    // merely by its position in the flat EXPLAIN output.
+    let roots = new.iter().filter(|step| step.detail.starts_with("SCALAR SUBQUERY "))
+        .collect::<Vec<_>>();
+    assert_eq!(roots.len(), 1, "{context}");
+    let root = roots[0].id;
+    let mut ids = BTreeSet::from([root]);
+    loop {
+        let before = ids.len();
+        for step in &new {
+            if ids.contains(&step.parent) {
+                ids.insert(step.id);
+            }
+        }
+        if ids.len() == before { break; }
+    }
+    let inner = new.iter().filter(|step| step.id != root && ids.contains(&step.id))
+        .collect::<Vec<_>>();
+    let old_claims = old.iter().filter(|step| step.detail.starts_with("SEARCH claims "))
+        .collect::<Vec<_>>();
+    assert_eq!(old_claims.len(), 1, "{context}");
+    assert_eq!(old_claims[0].detail,
+        "SEARCH claims USING INDEX claims_subject_accepted_index (subject=?)", "{context}");
+    assert_eq!(old.iter().map(|step| normalize_subquery_number(&step.detail)).collect::<Vec<_>>(),
+        inner.iter().map(|step| normalize_subquery_number(&step.detail)).collect::<Vec<_>>(),
+        "complete earliest-ID plan changed; {context}");
+    // Explicitly keep every temp-sort line, including LAST n TERMS, as a hard gate.
+    assert_eq!(old.iter().filter(|step| step.detail.starts_with("USE TEMP B-TREE") && step.detail.contains("ORDER BY"))
+        .map(|step| &step.detail).collect::<Vec<_>>(),
+        inner.iter().filter(|step| step.detail.starts_with("USE TEMP B-TREE") && step.detail.contains("ORDER BY"))
+        .map(|step| &step.detail).collect::<Vec<_>>(), "{context}");
+    assert!(!old.iter().any(|step| step.detail.starts_with("SCAN ")), "{context}");
+    assert!(!new.iter().any(|step| step.detail.starts_with("SCAN ")), "{context}");
+    assert!(new.iter().any(|step| step.detail == "SEARCH chosen USING INDEX sqlite_autoindex_claims_1 (id=?)"), "{context}");
+    assert!(new.iter().any(|step| step.detail == "SEARCH batches USING INDEX sqlite_autoindex_batches_1 (id=?)"), "{context}");
 }
