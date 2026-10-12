@@ -158,9 +158,10 @@ connection. Healthy provider hooks could then coexist with a missing channel. Th
 offline-start regression reproduces the blocked handshake; historical incidents without Claude
 loader logs cannot be attributed conclusively to that timeout.
 
-The channel now answers initialization and metadata requests while incarnation discovery and
+The push channel now answers initialization and metadata requests while incarnation discovery and
 binding retry. A fresh binding also keeps waiting when its own nonterminal hook activity precedes
 `runtime.running`; those hooks allocate no ownership and cannot revive an exited incarnation.
+Matching `ended` or `indeterminate` hook states remain terminal rather than waiting for startup.
 If that runtime observation never arrives, the existing bounded seat-restart recovery still
 bounds the missing-channel episode. After initialization and binding, a failed
 initialization-diagnostic POST retries the identical claim and idempotency key until acknowledged. The existing one-second tick
@@ -173,6 +174,11 @@ its existing fence. Native handoff tracking and receipts prevent replay. EOF can
 attachment immediately, leaving no detached reconnect worker. An omitted plugin, an uninitialized
 MCP client, or a child Claude has already closed still needs the bounded seat-restart recovery;
 st does not type into the provider to recreate its channel.
+
+A resumed push channel whose saved incarnation differs from the live incarnation now refuses
+before mailbox binding, instead of continuing until a later fence. The non-push `claude-mcp`
+path also skips the synchronous daemon-incarnation wait; its existing filesystem protocol and
+owned readiness writer remain unchanged. This does not add a non-push readiness fallback.
 
 OMP todo observation does not own delivery's lifetime. If the local PTY incarnation is ahead of
 the graph, the channel retains the latest validated todo snapshot while delivery continues. Its

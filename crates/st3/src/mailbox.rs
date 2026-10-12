@@ -425,13 +425,13 @@ pub(crate) mod tests {
 
     #[test]
     fn startup_hook_activity_waits_for_runtime_evidence_without_allocating_ownership() {
-        for state in [
-            "starting",
-            "ready",
-            "idle",
-            "working",
-            "blocked",
-            "indeterminate",
+        for (state, expected_error) in [
+            ("starting", "mailbox-session-starting"),
+            ("ready", "mailbox-session-starting"),
+            ("idle", "mailbox-session-starting"),
+            ("working", "mailbox-session-starting"),
+            ("blocked", "mailbox-session-starting"),
+            ("indeterminate", "stale-mailbox-session"),
         ] {
             let store = Store::open_memory("node").unwrap();
             ready(&store, "previous");
@@ -449,7 +449,7 @@ pub(crate) mod tests {
             let replacement = Fence::new("agent/eval.worker", "replacement", "delivery");
             assert_eq!(
                 store.bind_mailbox(&replacement).unwrap_err().code,
-                "mailbox-session-starting",
+                expected_error,
                 "{state}"
             );
             assert_eq!(

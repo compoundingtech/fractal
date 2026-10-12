@@ -22927,14 +22927,14 @@ fn check_mailbox_incarnation(
             let fields = harness.get("fields").unwrap_or(&harness);
             if matches!(
                 fields.get("state").and_then(Value::as_str),
-                Some("starting" | "ready" | "idle" | "working" | "blocked" | "indeterminate")
+                Some("starting" | "ready" | "idle" | "working" | "blocked")
             )
                 && fields.get("incarnation_id").and_then(Value::as_str) == Some(&fence.incarnation)
             {
                 // The new driver can start while the graph still describes its predecessor,
                 // and its hooks can advance before reconciliation publishes runtime.running.
                 // Retry without allocating ownership or authorizing any mailbox reads/receipts.
-                // An exited observation for this same incarnation remains terminal.
+                // Ended and indeterminate observations remain terminal.
                 return Err(St3Error::new(
                     "mailbox-session-starting",
                     "waiting for the seat's running incarnation",

@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Scoped Claude MCP responds locally before ownership is available, and only begins subscriptions after current binding. Its acknowledged publication retains the initialization-only diagnostic introduced by #1859; it never publishes provider ready/idle/working. Current replay capability and scope validation remain intact."
+    "detail": "Push Claude MCP responds locally before ownership is available and only begins subscriptions after current binding. Its acknowledged publication retains the initialization-only diagnostic introduced by #1859, never provider ready/idle/working. A resumed channel with a saved/live incarnation mismatch is rejected before binding instead of reaching a later fence. Non-push Claude MCP also skips the synchronous daemon-incarnation wait; its existing filesystem protocol and owned readiness writer remain unchanged. Current replay capability and scope validation remain intact."
   },
   "downtime": {
     "status": "none",

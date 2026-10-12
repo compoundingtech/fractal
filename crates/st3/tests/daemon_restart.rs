@@ -2361,6 +2361,77 @@ async fn initialized_claude_channel_rejects_a_replacement_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_mcp_rejects_resumed_incarnation_mismatch_before_binding() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let mut daemon = Daemon::new(root);
+    declare_claude(&daemon, "agent/quartz");
+    daemon.observe_running("agent/quartz", "wrapper-current");
+    let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-current");
+    let bind_seen = Arc::new(AtomicBool::new(false));
+    let seen = bind_seen.clone();
+    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
+        axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let seen = seen.clone();
+                async move {
+                    if request.uri().path() == "/v1/mailbox/bind" {
+                        seen.store(true, Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ),
+    );
+    daemon.start_isolated_app(app).await;
+    let resume = st_drivers::reexec::write_state(
+        root,
+        "mismatched-channel",
+        &json!({
+            "initialized":true,
+            "fence":st3::mailbox::Fence::new("agent/quartz", "wrapper-retired", "delivery"),
+            "attempted":[], "confirmed":[], "accepted":[],
+            "lines":st_drivers::reexec::LineBuffer::default(),
+        }),
+    )
+    .unwrap();
+    let mut channel = fixture
+        .command(root, &daemon, "wrapper-current")
+        .args(["driver", "claude-mcp", "--subject", "agent/quartz"])
+        .env(st_drivers::reexec::CHANNEL_RESUME_ENV, resume)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until(
+        "the mismatched resumed channel refuses before binding",
+        Duration::from_secs(5),
+        || channel.try_wait().unwrap().is_some(),
+    )
+    .await;
+    let output = channel.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("the resumed Claude channel belongs to another runtime incarnation")
+    );
+    assert!(!bind_seen.load(Ordering::SeqCst));
+    assert!(
+        daemon
+            .store
+            .claims_for("agent/quartz", Some("harness.diagnostic"))
+            .unwrap()
+            .is_empty()
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_restarting() {
     if st3::test_support::supervise_test() {
         return;
