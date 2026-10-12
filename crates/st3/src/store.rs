@@ -12,6 +12,7 @@ mod schedule_active_run_tests;
 mod glasses;
 pub(crate) mod mailbox_wakes;
 mod mailbox_changes;
+pub(crate) mod reconcile_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
@@ -24415,20 +24416,56 @@ fn pending_attention_requests_tx(
 
 fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
     let mut keys = BTreeMap::new();
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
-        "SELECT id FROM claims WHERE subject=?1 AND kind IN ('message.sent','intent.desired') ORDER BY CANONICAL_ASC(claims) LIMIT 1"
-    ));
-    let mut statement = connection.prepare_cached(&QUERY)?;
     for message in messages.iter() {
-        let id: String = statement.query_row([&message.subject], |row| row.get(0))?;
         keys.insert(
             message.subject.clone(),
-            canonical::claim_key(connection, &id)?,
+            message_canonical_key_tx(connection, &message.subject)?,
         );
     }
     messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
     Ok(())
 }
+
+fn message_canonical_key_query() -> &'static str {
+    // Requires the named index: create_schema installs it before reader-pool creation.
+    // A dropped or renamed index makes preparation fail, rather than using a slower fallback.
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
+        &format!(
+            "SELECT chosen.accepted_at_unix_ms, batches.origin, batches.replica_sequence,
+                    chosen.batch_id, {}, chosen.id
+             FROM claims AS chosen JOIN batches ON batches.id=chosen.batch_id
+             WHERE chosen.id=(
+                 SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=?1
+                   AND kind IN ('message.sent','intent.desired')
+                 ORDER BY CANONICAL_ASC(claims) LIMIT 1
+             )",
+            canonical::position_sql("chosen"),
+        )
+    ));
+    &QUERY
+}
+
+fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Result<canonical::ClaimKey> {
+    // Select the earliest ID without a batch join. An absent batch for that ID is an error,
+    // not permission to select a younger claim. Decode exactly the shared key's columns.
+    let (time, writer, sequence, batch, position, id) = connection
+        .prepare_cached(message_canonical_key_query())?
+        .query_row([subject], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+    Ok((time.parse()?, writer, sequence, batch, position, id))
+}
+
+#[cfg(test)]
+#[path = "store/message_canonical_sort_tests.rs"]
+mod message_canonical_sort_tests;
 
 fn selected_actionable_messages(
     connection: &Connection,
