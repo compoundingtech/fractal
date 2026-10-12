@@ -59,6 +59,8 @@ async function assertRowNames(canvasElement: HTMLElement) {
     const title = row.querySelector('[data-row-column="title-text"]')!.textContent!
     await expect(title).toBe(fixture.title)
     await expect(button).toHaveAccessibleName(fixture.title)
+    // Label-in-name: the button's own visible text is exactly its name; subtitle facts are painted siblings and live in the description.
+    await expect(button.textContent).toBe(fixture.title)
     await expect(button).toHaveAccessibleDescription(sidebarRowDescription(fixture))
     await expect(button).toHaveAccessibleDescription(/Status: /)
     if (fixture.needsMe === true) await expect(button).toHaveAccessibleDescription(/Needs your attention/)
@@ -89,8 +91,16 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
     for (let node: HTMLElement | null = field; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
   }
   const row = canvasElement.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
-  for (const field of [...row.querySelectorAll<HTMLElement>(':is([data-row-column], [data-row-field], [data-row-signal])')]) {
-    await userEvent.hover(field)
+  // Resolve, before any card opens, the element that actually receives the pointer at each painted field (subtitle fields pass input through to the row button).
+  const targets = [...row.querySelectorAll<HTMLElement>(':is([data-row-column], [data-row-field], [data-row-signal])')].flatMap(field => {
+    const box = field.getBoundingClientRect()
+    return box.width === 0 || box.height === 0 ? [] : [document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) as HTMLElement]
+  })
+  await expect(targets.length).toBeGreaterThan(0)
+  for (const target of targets) {
+    await expect(row.contains(target)).toBe(true)
+    for (let node: HTMLElement | null = target; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
+    await userEvent.hover(target)
     await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1))
   }
   await userEvent.unhover(row)
@@ -107,7 +117,12 @@ async function assertCompactCard(canvasElement: HTMLElement) {
   await expect(new Set(labels).size).toBe(labels.length)
   for (const label of ['Name', 'ID', 'Description', 'Last activity', 'Worktree', 'Lease expires']) await expect(labels).not.toContain(label)
   await expect(card.querySelectorAll('li').length).toBeLessThanOrEqual(3)
-  await expect(card.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/)
+  // Exact instants stay in the hidden description carriers only; the painted card text never shows ISO timestamps.
+  const painted = card.cloneNode(true) as HTMLElement
+  const carriers = [...card.querySelectorAll('[aria-describedby]')].flatMap(described => described.getAttribute('aria-describedby')!.split(' '))
+  await expect(carriers.length).toBeGreaterThan(0)
+  for (const id of carriers) painted.querySelector(`#${CSS.escape(id)}`)!.parentElement!.remove()
+  await expect(painted.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/)
 }
 function CohortList() {
   return <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.map((row, index) => <SidebarAgentRow key={row.ref} item={row} now={storyNow} active={index === 0} />)}</div>

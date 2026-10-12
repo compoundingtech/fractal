@@ -10,7 +10,7 @@ const TimeValue = React.memo(function TimeValue({ at, now, kind = 'status', comp
   const label = kind === 'turn' ? 'Last completed turn' : kind === 'activity' ? 'Last activity' : 'Observed status since'
   const descriptionId = React.useId()
   // The exact ISO instant stays available as the description; hosts own the only hover disclosure.
-  return <><time dateTime={iso} aria-describedby={descriptionId} aria-label={`${kind === 'status' ? 'Elapsed in status' : label}: ${value}${kind === 'status' ? '' : ' ago'}`}>{showKind && kind === 'activity' ? 'act' : ''}{value}{kind !== 'status' && !compact ? ' ago' : ''}</time><VisuallyHidden><span id={descriptionId}>{`${label} ${iso}`}</span></VisuallyHidden></>
+  return <><time dateTime={iso} aria-describedby={descriptionId} aria-label={`${kind === 'status' ? 'Elapsed in status' : label}: ${value}${kind === 'status' ? '' : ' ago'}`}>{showKind && kind === 'activity' ? 'act' : ''}{value}{kind !== 'status' && !compact ? ' ago' : ''}</time><VisuallyHidden elementType="span"><span id={descriptionId}>{`${label} ${iso}`}</span></VisuallyHidden></>
 })
 /** Explicit clock comes from the host; no controller/transport subscription is created. */
 export const SidebarTime = React.memo(function SidebarTime({ now, ...props }: TimeProps & SidebarClock) { return <TimeValue {...props} now={now} /> })

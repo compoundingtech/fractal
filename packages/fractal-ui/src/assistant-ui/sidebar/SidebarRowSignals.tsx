@@ -74,7 +74,7 @@ export function attachSidebarLine1Fit(row: HTMLElement | null) {
   return () => { resize.disconnect(); changes.disconnect(); if (frame !== undefined) cancelAnimationFrame(frame) }
 }
 
- export function SidebarRowSignals({ children }: { readonly children: React.ReactNode }) {
+export function SidebarRowSignals({ children }: { readonly children: React.ReactNode }) {
   const attach = React.useCallback((element: HTMLSpanElement | null) => {
     if (!element) return
     let frame: number | undefined
@@ -138,6 +138,7 @@ export function attachSidebarLine1Fit(row: HTMLElement | null) {
   return <span ref={attach} data-row-column="subtitle" data-row-signals="measured" {...stylex.props(styles.signals)}>{React.Children.toArray(children).map((child, index) => <span key={index} data-row-priority={index} {...stylex.props(styles.field)}>{child}</span>)}</span>
 }
 const styles = stylex.create({
-  signals: { position: 'relative', gridColumn: '1 / -1', gridRow: '2', display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, overflow: 'hidden', color: ink.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  // A painted sibling of the row button spanning the button's columns; pointer input passes through to the button beneath.
+  signals: { position: 'relative', gridColumn: '2 / -1', pointerEvents: 'none', gridRow: '2', display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, overflow: 'hidden', color: ink.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   field: { display: 'block', flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
 })

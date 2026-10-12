@@ -10,5 +10,5 @@ export const SidebarDuration = React.memo(function SidebarDuration({ duration }:
   const label = duration.scope === '24h-activity-span' ? '24h activity span' : 'Lifetime duration'
   const descriptionId = React.useId()
   // Exact milliseconds stay available as the description; hosts own the only hover disclosure.
-  return <><time dateTime={`PT${duration.ms / 1000}S`} aria-label={`${label}: ${value}`} aria-describedby={descriptionId}>{value}{duration.scope === '24h-activity-span' && <span data-line1-drop="scope">/24h</span>}</time><VisuallyHidden><span id={descriptionId}>{`${label}: ${duration.ms} milliseconds`}</span></VisuallyHidden></>
+  return <><time dateTime={`PT${duration.ms / 1000}S`} aria-label={`${label}: ${value}`} aria-describedby={descriptionId}>{value}{duration.scope === '24h-activity-span' && <span data-line1-drop="scope">/24h</span>}</time><VisuallyHidden elementType="span"><span id={descriptionId}>{`${label}: ${duration.ms} milliseconds`}</span></VisuallyHidden></>
 })
