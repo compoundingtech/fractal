@@ -33,8 +33,12 @@ async fn run(socket: Option<&Path>, args: &[&str], closed: bool) -> Output {
     command.args(args);
     if closed {
         command.stdout(closed_pipe());
+    } else {
+        command.stdout(Stdio::piped());
     }
-    tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
+    // Tokio's Command::output() replaces stdout, including the pipe being tested.
+    let child = command.stderr(Stdio::piped()).spawn().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
         .await
         .expect("CLI must stop when its reader closes")
         .unwrap()
@@ -76,7 +80,10 @@ async fn shared_cli_output_reports_errors_other_than_a_closed_pipe() {
                 .open("/dev/full")
                 .unwrap(),
         )
-        .output()
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .wait_with_output()
         .await
         .unwrap();
     assert!(!output.status.success());
