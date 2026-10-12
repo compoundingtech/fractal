@@ -341,7 +341,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         if (previous.getAttribute('data-turn-kind') !== 'Seat') {
           const nextTurn = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]:not([data-turn-kind="Seat"])')).find(candidate => candidate.getBoundingClientRect().top > block.getBoundingClientRect().bottom - 0.5)
           if (nextTurn !== undefined) {
-            // The reply starts at its own text, including a T3 sender label; the meta row above it is not reply text.
+            // The reply starts at its own text, including a sender-gutter label; the meta row above it is not reply text.
             const { toTrigger, toNext } = proximity(previous, block, nextTurn)
             await expect(toTrigger, 'reply is closer to its own trigger than to the next turn').toBeLessThan(toNext)
           }
