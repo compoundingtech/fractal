@@ -896,7 +896,7 @@ describe('ConversationPane composition activation', () => {
     await mount()
     await act(async () => { source.setDraft!('Keep this recovery draft') })
     await act(async () => {
-      await source.runtimeOptions!.onNew!({ role: 'user', content: [{ type: 'text', text: 'Refused submission' }], attachments: [], parentId: null, sourceId: null, runConfig: {} })
+      await source.runtimeOptions!.onNew!({ role: 'user', content: [{ type: 'text', text: 'Refused submission' }], attachments: [], createdAt: new Date(0), metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined })
     })
     expect(source.composerProps.at(-1)?.sendDisabled).toBe(true)
     expect(text()).toContain('This device credential was revoked.')
