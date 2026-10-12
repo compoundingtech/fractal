@@ -167,6 +167,9 @@ pub struct SealedSet {
     /// `envelopes` with no claims, so a trimmed and an untrimmed node seal the same identities.
     pub envelope_tombstones: Vec<EnvelopeTombstone>,
     pub claim_tombstones: Vec<ClaimTombstone>,
+    /// Unit-test ownership probe; released only when the captured set is released.
+    #[cfg(test)]
+    pub(crate) capture_lifetime: std::sync::Arc<()>,
 }
 
 /// What a seal records of a sealed set: its digest, how many envelopes it holds, and the row it
@@ -328,6 +331,13 @@ type ProofSources = BTreeMap<(String, String), Vec<CheckpointItemSource>>;
 // No source/subject IDs are keys, and suppressed failures have no flush, queue or retry.
 static CHECKPOINT_DIAGNOSTICS: std::sync::OnceLock<std::sync::Mutex<super::ProjectionDiagnosticState>> = std::sync::OnceLock::new();
 
+/// The tombstones a sealed set reads: those before the cut, but none of a checkpoint whose trim
+/// is still recording them. A trim records tombstones in chunks, so after a crash part way
+/// through, the plan made again reads only what earlier checkpoints dropped, as it did the first
+/// time, and records the rest.
+const RECORDED_TOMBSTONE_FILTER: &str = "accepted_at_unix_ms < ?3
+    AND checkpoint NOT IN (SELECT id FROM checkpoints WHERE state='recording')";
+
 /// Record the tombstones of a checkpoint's drop. Recording them again changes nothing.
 pub fn record_checkpoint_tombstones_tx(
     transaction: &Transaction<'_>,
@@ -388,6 +398,7 @@ pub fn delete_dropped_rows_tx(
             )?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
+        super::principals::forget_claim_tx(transaction, &claim.id)?;
         transaction.execute("DELETE FROM claims WHERE id=?1", [&claim.id])?;
     }
     for envelope in envelopes {
@@ -543,6 +554,8 @@ fn status_history_diagnostics_bound_items_and_exclude_content() {
     let sealed = SealedSet {
         cut_unix_ms:DAY_MS, envelopes:Vec::new(), claims:Vec::new(), seal_rowid:7,
         envelope_tombstones:Vec::new(), claim_tombstones:Vec::new(),
+        #[cfg(test)]
+        capture_lifetime: std::sync::Arc::default(),
     };
     let plan = DropPlan {
         cut_unix_ms:DAY_MS, rules_digest:"rules".into(), sealed_envelopes:0, sealed_claims:0,
@@ -604,26 +617,124 @@ pub fn answer_mismatches(
     mismatches
 }
 
+/// How `copy_store_to` copied the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreCopy {
+    /// A copy-on-write clone: it costs only the pages the proof then rewrites.
+    Clone,
+    /// A full `VACUUM INTO` copy, where the filesystem cannot clone.
+    Full,
+}
+
+/// Clone `source` to a new file at `target`: APFS `clonefile`, or a reflink on Linux. An error
+/// where the filesystem cannot clone, as on ext4.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+    // SAFETY: both paths are NUL-terminated and outlive the call.
+    if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let source = fs::File::open(source)?;
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(target)?;
+    // SAFETY: both descriptors are open for the length of the call.
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    drop(file);
+    let _ = fs::remove_file(target);
+    Err(error)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clone_file(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
 fn open_checkpoint_copy(copy: &Path) -> Result<Connection> {
     let connection = Connection::open(copy)?;
     projection_digest::register(&connection)?;
     // This scratch transaction can rewrite most of the store twice. Its rollback journal
-    // belongs on disk, not in an allocation proportional to the database's size.
+    // belongs on disk, not in an allocation proportional to the database's size. The copy is
+    // discarded after the proof, so its commits need not wait for the disk.
     connection.execute_batch(&format!(
-        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE;
+        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
          PRAGMA cache_size = -{}; PRAGMA temp_store = FILE;",
         crate::sqlite::READ_CACHE_KIB,
     ))?;
     Ok(connection)
 }
 
+/// Keep only the sealed set on a proof copy. Blobs go with the claims that reference them.
+/// Admission needs a claim's blobs, so every node that holds the sealed claims holds these, while
+/// the blobs of later claims depend on what has arrived since the cut. A trim deletes no blob.
+fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
+         DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
+         DELETE FROM replica_records WHERE NOT EXISTS (
+             SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
+               AND s.sequence=replica_records.sequence AND s.envelope_hash=replica_records.envelope_hash);",
+    )?;
+    // Number the claims in canonical order. Every node that holds the sealed set then proves
+    // on the same store, whatever order its claims arrived in, so readers that compare store
+    // indexes answer alike and the digests can match across nodes.
+    connection.execute_batch(&format!(
+        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
+         INSERT INTO temp.canonical_index(old, new)
+             SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
+             FROM claims JOIN batches ON batches.id=claims.batch_id;
+         UPDATE claims SET store_index=-(SELECT new FROM temp.canonical_index
+                                         WHERE old=claims.store_index);
+         UPDATE claims SET store_index=-store_index;"
+    ))?;
+    Ok(())
+}
+
 /// Project a copy of the sealed set with and without the drop, and compare the graph and every
 /// reader answer. `copy` is a store file holding at least the sealed set; it is changed.
+/// The key a proof compares the runtime's global answers under, beside the subjects' answers.
+pub const GLOBAL_ANSWERS: &str = "fleet";
+
 pub fn prove_on_copy(
     runtime: &dyn Runtime,
     copy: &Path,
     sealed: &SealedSet,
     plan: &DropPlan,
+) -> Result<CheckpointProof> {
+    prove(runtime, copy, sealed, plan, false)
+}
+
+/// `prove_on_copy` for a copy that is deleted afterwards. Keeping the sealed set and numbering
+/// it commit first, statement by statement, so their rollback journal never holds every claim
+/// page at once. Inside one transaction each renumbering pass also kept a statement journal: the
+/// original of every claim page it moved, spilled to a temporary file. Only the replays and the
+/// comparison share a transaction, as before.
+fn prove_on_scratch_copy(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    sealed: &SealedSet,
+    plan: &DropPlan,
+) -> Result<CheckpointProof> {
+    prove(runtime, copy, sealed, plan, true)
+}
+
+fn prove(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    sealed: &SealedSet,
+    plan: &DropPlan,
+    commit_preparation: bool,
 ) -> Result<CheckpointProof> {
     let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
@@ -658,28 +769,14 @@ pub fn prove_on_copy(
         )?;
     }
     runtime.clear_checkpoint_projections(&transaction)?;
-    // Blobs go with the claims that reference them. Admission needs a claim's blobs, so every
-    // node that holds the sealed claims holds these, while the blobs of later claims depend on
-    // what has arrived since the cut. A trim deletes no blob.
-    transaction.execute_batch(
-        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
-         DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
-         DELETE FROM replica_records WHERE NOT EXISTS (
-             SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
-               AND s.sequence=replica_records.sequence AND s.envelope_hash=replica_records.envelope_hash);",
-    )?;
-    // Number the claims in canonical order. Every node that holds the sealed set then proves
-    // on the same store, whatever order its claims arrived in, so readers that compare store
-    // indexes answer alike and the digests can match across nodes.
-    transaction.execute_batch(&format!(
-        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
-         INSERT INTO temp.canonical_index(old, new)
-             SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
-             FROM claims JOIN batches ON batches.id=claims.batch_id;
-         UPDATE claims SET store_index=-(SELECT new FROM temp.canonical_index
-                                         WHERE old=claims.store_index);
-         UPDATE claims SET store_index=-store_index;"
-    ))?;
+    let transaction = if commit_preparation {
+        transaction.commit()?;
+        keep_sealed_claims_in_canonical_order(&connection)?;
+        connection.transaction()?
+    } else {
+        keep_sealed_claims_in_canonical_order(&transaction)?;
+        transaction
+    };
     let subjects = plan
         .claims
         .iter()
@@ -688,7 +785,10 @@ pub fn prove_on_copy(
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_before = graph_digest(&transaction)?;
     let digests_before = projection_digest::tables(&transaction)?;
-    let (before, before_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    let (mut before, before_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
+        before.insert(GLOBAL_ANSWERS.into(), answers);
+    }
     // As a trim does: tombstones first, which readers that walk ancestry pass through.
     record_checkpoint_tombstones_tx(
         &transaction,
@@ -699,7 +799,10 @@ pub fn prove_on_copy(
     delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims)?;
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_after = graph_digest(&transaction)?;
-    let (after, after_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    let (mut after, after_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
+        after.insert(GLOBAL_ANSWERS.into(), answers);
+    }
     let mut mismatches = answer_mismatches(&before, &after);
     if graph_digest_before != graph_digest_after {
         mismatches.splice(
@@ -1026,7 +1129,7 @@ impl Store {
             CheckpointCaptureQuery {
                 table: "checkpoint_envelopes",
                 columns: "writer, sequence, envelope_hash, accepted_at_unix_ms",
-                filter: "accepted_at_unix_ms < ?3",
+                filter: RECORDED_TOMBSTONE_FILTER,
             },
             cut, record_page, |row| {
                 Ok(EnvelopeTombstone {
@@ -1043,7 +1146,7 @@ impl Store {
                 table: "checkpoint_claims",
                 columns: "id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
                           operation_id, request_digest, accepted_at_unix_ms",
-                filter: "accepted_at_unix_ms < ?3",
+                filter: RECORDED_TOMBSTONE_FILTER,
             },
             cut, record_page, |row| {
                 Ok(ClaimTombstone {
@@ -1085,6 +1188,8 @@ impl Store {
             seal_rowid,
             envelope_tombstones,
             claim_tombstones,
+            #[cfg(test)]
+            capture_lifetime: std::sync::Arc::default(),
         })
     }
 
@@ -1243,8 +1348,12 @@ impl Store {
             .collect()
     }
 
-    /// Copy this store to `copy` from one consistent snapshot, while the writer carries on.
-    pub fn copy_store_to(&self, copy: &Path) -> Result<()> {
+    /// Copy this store to `copy` from one consistent snapshot, while the writer carries on: a
+    /// filesystem clone where the filesystem can make one, otherwise a full `VACUUM INTO` copy.
+    pub fn copy_store_to(&self, copy: &Path) -> Result<StoreCopy> {
+        if !self.shared_memory && self.clone_store_to(copy)? {
+            return Ok(StoreCopy::Clone);
+        }
         // `VACUUM INTO` reads the whole store in one transaction on a connection of its own, which
         // holds the WAL pinned for as long as the copy takes. Register it, so a pinned-WAL
         // report can name it: it was the one pin with no live read to blame.
@@ -1258,7 +1367,39 @@ impl Store {
         let connection = Connection::open_with_flags(&self.path, flags)?;
         connection.execute_batch("PRAGMA busy_timeout = 5000;")?;
         connection.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
-        Ok(())
+        Ok(StoreCopy::Full)
+    }
+
+    /// Clone the store file and its WAL to `copy` under one read snapshot, held only while the
+    /// filesystem clones them. While a snapshot is open no checkpoint copies a frame past it into
+    /// the store file, and the frames it reads stay in the WAL, so the two clones open as the
+    /// snapshot or a later commit. The `-shm` index is not copied: opening the copy rebuilds it
+    /// from the WAL. False, with nothing left at `copy`, where the filesystem cannot clone.
+    fn clone_store_to(&self, copy: &Path) -> Result<bool> {
+        let wal = PathBuf::from(format!("{}-wal", self.path.display()));
+        let copy_wal = PathBuf::from(format!("{}-wal", copy.display()));
+        let connection = self.readers.get();
+        let snapshot = connection.unchecked_transaction()?;
+        snapshot.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))?;
+        let store = clone_file(&self.path, copy);
+        let wal = store.as_ref().map(|()| match clone_file(&wal, &copy_wal) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !wal.exists() => Ok(()),
+            result => result,
+        });
+        snapshot.commit()?;
+        drop(connection);
+        match wal {
+            Ok(Ok(())) => {}
+            // A failed clone leaves nothing behind, so only the store clone needs removing.
+            Ok(Err(_)) => {
+                fs::remove_file(copy)?;
+                return Ok(false);
+            }
+            Err(_) => return Ok(false),
+        }
+        // Fold the cloned WAL into the copy, so it is one file, as a `VACUUM INTO` copy is.
+        Connection::open(copy)?.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
+        Ok(true)
     }
 
     /// Plan the drop for `cut_unix_ms` and prove it on a copy of this store in `scratch`, which
@@ -1303,7 +1444,7 @@ impl Store {
         let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
         let result = self
             .copy_store_to(&copy)
-            .and_then(|()| prove_on_copy(&*self.runtime, &copy, sealed, plan));
+            .and_then(|_| prove_on_scratch_copy(&*self.runtime, &copy, sealed, plan));
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = fs::remove_file(format!("{}{suffix}", copy.display()));
         }

@@ -523,6 +523,21 @@ async fn act_on_card(
                 )
                 .await?
         }
+        "prompt.respond" => {
+            let answer = answer.ok_or_else(|| anyhow::anyhow!("choose allow or deny"))?;
+            client
+                .prompt_respond(
+                    id,
+                    idem,
+                    fence,
+                    st3_client::PromptRespondParameters {
+                        target_id: source,
+                        episode: attention.episode.clone(),
+                        answer,
+                    },
+                )
+                .await?
+        }
         "review.approve" => {
             client
                 .review_approve(
@@ -664,6 +679,8 @@ async fn send_terminal_key(
 }
 
 fn main() -> Result<()> {
+    let process_started = std::time::Instant::now();
+    let open_timing = ui::open_timing::Trace::from_env(process_started);
     // What `st clients` lists for this stui: its name and build, as reported.
     st3_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
@@ -805,11 +822,12 @@ fn main() -> Result<()> {
     let (updates, incoming) = mpsc::channel::<feed::Update>();
     let (commands, command_receiver) = tokio::sync::mpsc::unbounded_channel();
     // Missions are large: the UI asks for that window only while a mission list is on screen.
-    runtime.spawn(feed::run_members_with(
+    runtime.spawn(feed::run_members_with_sidebar(
         clients,
         profile.is_some(),
         ui::glass_request(&args).is_some(),
         false,
+        ui::glass_request(&args).is_some().then(|| person.clone()).flatten(),
         updates,
         command_receiver,
     ));
@@ -822,6 +840,7 @@ fn main() -> Result<()> {
         cache_path,
         cached,
         glass: ui::glass_request(&args),
+        open_timing,
     })
 }
 

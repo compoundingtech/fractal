@@ -445,7 +445,7 @@ impl Fixture {
         key: &str,
     ) -> crate::model::MissionRunReportView {
         self.store
-            .set_mission_run_report(&run.subject, actor, to, stalled_after_ms, false, key)
+            .set_mission_run_report(&run.subject, actor, to, stalled_after_ms, None, false, key)
             .unwrap()
     }
 }
@@ -538,7 +538,7 @@ fn a_changed_reporter_is_told_instead_and_a_cleared_run_tells_nobody() {
             &moved.subject,
             "person/requester",
             Some(REPORTER),
-            None,
+            None, None,
             false,
             "finished-report",
         )
@@ -562,4 +562,323 @@ fn clearing_an_unreachable_reporter_closes_its_fault() {
     fixture.passes(4);
     assert_eq!(fixture.faults(&run), ["faulted", "recovered"]);
     assert_eq!(fixture.report_claims(), 0);
+}
+
+#[test]
+fn opting_out_of_stalls_removes_the_deadline_and_keeps_terminal_reports() {
+    let (_clock, fixture) = fixture();
+    for (outcome, event) in [
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+        ("completed", "completed"),
+    ] {
+        let run = fixture.start("watched", &format!("muted-{outcome}"));
+        fixture.passes(2);
+        assert!(
+            fixture
+                .reconciler
+                .incremental
+                .next_due(&run.subject)
+                .is_some()
+        );
+        let report = fixture
+            .store
+            .set_mission_run_report(
+                &run.subject,
+                "person/requester",
+                Some(REPORTER),
+                None,
+                Some(false),
+                true,
+                &format!("mute-{outcome}"),
+            )
+            .unwrap();
+        assert!(!report.report_stalls);
+        fixture.passes(2);
+        assert_eq!(fixture.reconciler.incremental.next_due(&run.subject), None);
+        let _late = Clock::at(&fixture.store, start() + 120 * MINUTE);
+        fixture.passes(2);
+        assert!(fixture.reports(REPORTER).iter().all(|message| {
+            !message
+                .tags
+                .contains(&format!("mission-run:{}", run.subject))
+        }));
+        if outcome == "failed" {
+            fixture
+                .store
+                .set_step_state(&Fixture::step(&run, "build"), "failed", None)
+                .unwrap();
+        } else if outcome == "completed" {
+            for step in ["build", "ship"] {
+                fixture
+                    .store
+                    .set_step_state(&Fixture::step(&run, step), "completed", None)
+                    .unwrap();
+            }
+        } else {
+            fixture
+                .store
+                .request_mission_run_cancellation(&run.id, "cancel fixture")
+                .unwrap();
+        }
+        fixture.passes(6);
+        let reports = fixture.reports(REPORTER);
+        let reports: Vec<_> = reports
+            .iter()
+            .filter(|message| {
+                message
+                    .tags
+                    .contains(&format!("mission-run:{}", run.subject))
+            })
+            .collect();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].tags.contains(&format!("st3-run-report:{event}")));
+    }
+}
+
+#[test]
+fn stall_reporting_can_be_reenabled_without_fabricating_progress() {
+    let (_clock, fixture) = fixture();
+    let run = fixture.start("watched", "toggle-stalls");
+    fixture
+        .store
+        .set_mission_run_report(
+            &run.subject,
+            "person/requester",
+            Some(REPORTER),
+            None,
+            Some(false),
+            false,
+            "disable-stalls",
+        )
+        .unwrap();
+    fixture.passes(2);
+    let _late = Clock::at(&fixture.store, start() + 120 * MINUTE);
+    fixture.passes(2);
+    assert_eq!(fixture.report_claims(), 0);
+    fixture
+        .store
+        .set_mission_run_report(
+            &run.subject,
+            "person/requester",
+            Some(REPORTER),
+            None,
+            Some(true),
+            false,
+            "enable-stalls",
+        )
+        .unwrap();
+    fixture.passes(2);
+    assert_eq!(fixture.reports(REPORTER).len(), 1);
+    assert!(
+        fixture.reports(REPORTER)[0]
+            .tags
+            .contains(&"st3-run-report:stalled".into())
+    );
+}
+
+/// The schedule's actual timer runs in an isolated, paused Tokio runtime. The claim clock
+/// advances separately so thirty minutes of parent silence need no wall-clock wait.
+#[tokio::test(start_paused = true)]
+async fn a_muted_retirement_parent_keeps_its_schedule_and_child_reports() {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    let (_clock, mut fixture) = fixture();
+    let root = tempfile::tempdir().unwrap();
+    let child_revision = fixture
+        .store
+        .mission_spec("watched-with-default-limit", None)
+        .unwrap()
+        .unwrap()
+        .revision;
+    let anchor_ms = start() + 60 * MINUTE;
+    let anchor = DateTime::<Utc>::from_timestamp_millis(anchor_ms as i64)
+        .unwrap()
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    apply_source(
+        &fixture.store,
+        &format!(
+            r#"version 2
+mission "parent" state="ready" report-to="agent/node.reporter" report-stalls=#false {{
+  goal "Run occurrences until retirement."
+  step "retire" {{
+    agentless
+    gate "retired" {{ field "state" "mission/parent" is "retired" }}
+  }}
+  schedule "cycle" {{
+    every "1h"
+    anchor "{anchor}"
+    catch-up "latest"
+    work {{ mission "watched-with-default-limit@{child_revision}"; workspace {:?} }}
+  }}
+}}"#,
+            root.path().display().to_string()
+        ),
+        "retirement-parent",
+    );
+    let parent = fixture.start("parent", "schedule-parent");
+    fixture.passes(4);
+    tokio::task::yield_now().await; // Let the real schedule task arm its sleep.
+    let schedule = format!("schedule/{}/cycle", parent.id);
+    let armed = fixture
+        .store
+        .claims_for(&schedule, Some("schedule.occurrence-scheduled"))
+        .unwrap();
+    assert_eq!(armed.len(), 1);
+    assert_eq!(armed[0].body["fields"]["occurrence"], 0);
+    assert_eq!(
+        armed[0].body["fields"]["scheduled_at_unix_ms"],
+        anchor_ms.to_string()
+    );
+    let parent_view = fixture.store.mission_run(&parent.id).unwrap().unwrap();
+    let retire = parent_view
+        .steps
+        .iter()
+        .find(|step| step.step == "retire")
+        .unwrap();
+    assert!(retire.agentless);
+    assert_eq!(retire.status, "working");
+    assert!(retire.claimant.is_none());
+    assert_eq!(
+        fixture.reconciler.incremental.next_due(&parent.subject),
+        None
+    );
+
+    let _quiet = Clock::at(&fixture.store, start() + 31 * MINUTE);
+    fixture.passes(2);
+    assert_eq!(fixture.report_claims(), 0);
+    assert!(
+        fixture
+            .store
+            .claims_for(&schedule, Some("schedule.occurrence-reached"))
+            .unwrap()
+            .is_empty()
+    );
+    let _anchor = Clock::at(&fixture.store, anchor_ms);
+    tokio::time::advance(Duration::from_millis((60 * MINUTE) as u64)).await;
+    tokio::task::yield_now().await;
+    fixture.passes(3);
+    let starts = fixture
+        .store
+        .claims_for(&schedule, Some("schedule.work-started"))
+        .unwrap();
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    let child = fixture
+        .store
+        .mission_run(starts[0].body["fields"]["mission_run"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.root_mission_run, parent.subject);
+    assert!(
+        fixture
+            .reconciler
+            .run_report(&child.subject)
+            .unwrap()
+            .unwrap()
+            .stalls
+    );
+    let _child_quiet = Clock::at(&fixture.store, anchor_ms + 31 * MINUTE);
+    fixture.passes(2);
+    let reports = fixture.reports(REPORTER);
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(
+        reports[0]
+            .tags
+            .contains(&format!("mission-run:{}", child.subject))
+    );
+    assert!(reports[0].tags.contains(&"st3-run-report:stalled".into()));
+
+    // Several missed anchors while the child is active never overlap it.
+    let _missed = Clock::at(&fixture.store, anchor_ms + 4 * 60 * MINUTE);
+    fixture.passes(2);
+    assert_eq!(
+        fixture
+            .store
+            .claims_for(&schedule, Some("schedule.work-started"))
+            .unwrap()
+            .len(),
+        1
+    );
+    fixture
+        .store
+        .set_step_state(&Fixture::step(&child, "build"), "failed", None)
+        .unwrap();
+    fixture.passes(6);
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::ZERO).await;
+    tokio::task::yield_now().await;
+    fixture.passes(3);
+    let reached = fixture
+        .store
+        .claims_for(&schedule, Some("schedule.occurrence-reached"))
+        .unwrap();
+    let occurrences: Vec<_> = reached
+        .iter()
+        .map(|claim| claim.body["fields"]["occurrence"].as_u64().unwrap())
+        .collect();
+    assert_eq!(occurrences, [0, 4], "latest skips the missed occurrences");
+    let starts = fixture
+        .store
+        .claims_for(&schedule, Some("schedule.work-started"))
+        .unwrap();
+    assert_eq!(starts.len(), 2);
+    let second = fixture
+        .store
+        .mission_run(starts[1].body["fields"]["mission_run"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    fixture
+        .store
+        .request_mission_run_cancellation(&second.id, "cancel child fixture")
+        .unwrap();
+    fixture.passes(6);
+    // Parent failure is reported even though its stalls were disabled.
+    fixture
+        .store
+        .set_step_state(&Fixture::step(&parent, "retire"), "failed", None)
+        .unwrap();
+    fixture.passes(6);
+    let cancelled_parent = fixture.start("parent", "cancelled-schedule-parent");
+    fixture
+        .store
+        .request_mission_run_cancellation(&cancelled_parent.id, "cancel parent fixture")
+        .unwrap();
+    fixture.passes(6);
+    let reports = fixture.reports(REPORTER);
+    for (run, event) in [
+        (&child, "stalled"),
+        (&child, "failed"),
+        (&second, "cancelled"),
+        (&parent, "failed"),
+        (&cancelled_parent, "cancelled"),
+    ] {
+        assert_eq!(
+            reports
+                .iter()
+                .filter(|message| {
+                    message
+                        .tags
+                        .contains(&format!("mission-run:{}", run.subject))
+                        && message.tags.contains(&format!("st3-run-report:{event}"))
+                })
+                .count(),
+            1,
+            "{reports:?}"
+        );
+    }
+    assert!(reports.iter().all(|message| {
+        !(message
+            .tags
+            .contains(&format!("mission-run:{}", parent.subject))
+            && message.tags.contains(&"st3-run-report:stalled".into()))
+    }));
+    // A restarted reconciler reads the same policy and sends no duplicate reports.
+    fixture.reconciler = Reconciler::new(
+        fixture.store.clone(),
+        Arc::new(FakeRuntime::default()),
+        "node".into(),
+        Arc::new(Notify::new()),
+    )
+    .skipping_unneeded(true);
+    fixture.passes(2);
+    assert_eq!(fixture.reports(REPORTER).len(), reports.len());
 }

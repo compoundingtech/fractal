@@ -15,6 +15,9 @@ use crate::model::PlannerSpec;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub node: String,
+    /// Absent in legacy installs: preserve their bypass policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<st_drivers::access::AccessMode>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
@@ -180,15 +183,28 @@ impl LimitsConfig {
     }
 }
 
-/// `[reconcile]`: maximum background pass starts per minute, default30.
+/// `[reconcile]`: maximum background pass starts per minute, default30, and when a seat that
+/// holds claimed work and has nothing set to wake it is nudged.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReconcileConfig {
     pub max_passes_per_minute: u32,
+    /// How long a seat idles holding a claimed step, with nothing set to wake it, before st nudges
+    /// it: a duration such as `30m`, or `off`.
+    pub idle_nudge_after: String,
+    /// How long a watched thread may stay still and its watch still count as something that will
+    /// wake the seat.
+    pub idle_nudge_quiet_watch: String,
 }
 
 impl Default for ReconcileConfig {
-    fn default() -> Self { Self { max_passes_per_minute: 30 } }
+    fn default() -> Self {
+        Self {
+            max_passes_per_minute: 30,
+            idle_nudge_after: "30m".into(),
+            idle_nudge_quiet_watch: "2h".into(),
+        }
+    }
 }
 
 impl ReconcileConfig {
@@ -196,7 +212,28 @@ impl ReconcileConfig {
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!((1..=600).contains(&self.max_passes_per_minute),
             "reconcile.max_passes_per_minute must be between 1 and 600");
+        self.idle_nudge()?;
         Ok(())
+    }
+
+    /// The idle-nudge settings these values name.
+    pub fn idle_nudge(&self) -> Result<crate::reconcile::IdleNudgeSettings> {
+        let at_least_a_minute = |value: &str, name: &str| -> Result<u64> {
+            let ms = parse_duration_ms(value, name)?;
+            anyhow::ensure!(ms >= 60_000, "{name} must be at least 1m");
+            Ok(ms)
+        };
+        let after_ms = match self.idle_nudge_after.trim() {
+            "off" => None,
+            after => Some(at_least_a_minute(after, "reconcile.idle_nudge_after")?),
+        };
+        Ok(crate::reconcile::IdleNudgeSettings {
+            after_ms,
+            quiet_watch_ms: at_least_a_minute(
+                &self.idle_nudge_quiet_watch,
+                "reconcile.idle_nudge_quiet_watch",
+            )?,
+        })
     }
 }
 
@@ -307,6 +344,7 @@ impl Default for Config {
         let client_gateway_socket = runtime_dir.join("st3-client.sock");
         Self {
             node: host_name(),
+            access_mode: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
@@ -329,6 +367,28 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn active_access_mode(&self) -> st_drivers::access::AccessMode {
+        self.access_mode.unwrap_or_default()
+    }
+
+    /// Service installation writes a new config once, never upgrading a legacy missing mode.
+    pub fn initialize_install_config(&self, path: &Path) -> Result<()> {
+        let mut fresh = self.clone();
+        fresh.access_mode = Some(self.access_mode.unwrap_or(st_drivers::access::AccessMode::Auto));
+        let bytes = toml::to_string(&fresh)?;
+        let parent = path.parent().context("the install config path has no directory")?;
+        fs::create_dir_all(parent)?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        use std::io::Write as _;
+        staged.write_all(bytes.as_bytes())?;
+        staged.as_file().sync_all()?;
+        match fs::hard_link(staged.path(), path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("initialize st config {}", path.display())),
+        }
+    }
+
     pub fn default_path() -> PathBuf {
         xdg_dir("XDG_CONFIG_HOME", ".config")
             .join("st3")
@@ -356,7 +416,7 @@ impl Config {
         let bytes = match fs::read_to_string(&selected) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && path.is_none() => {
-                return Ok(Self::default());
+                return Ok(Self { access_mode: Some(st_drivers::access::AccessMode::Auto), ..Self::default() });
             }
             Err(error) => {
                 return Err(error)
@@ -618,6 +678,24 @@ fn host_name() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn install_access_mode_preserves_legacy_config_and_writes_auto_once() {
+        use st_drivers::access::AccessMode;
+        let root = tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let legacy: Config = toml::from_str("node=\"example\"\n").unwrap();
+        assert_eq!(legacy.active_access_mode(), AccessMode::Bypass);
+        legacy.initialize_install_config(&path).unwrap();
+        assert_eq!(Config::load(Some(&path)).unwrap().active_access_mode(), AccessMode::Auto);
+        fs::write(&path, "node=\"example\"\n").unwrap();
+        legacy.initialize_install_config(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "node=\"example\"\n");
+        assert_eq!(Config::load(Some(&path)).unwrap().active_access_mode(), AccessMode::Bypass);
+        assert!(toml::from_str::<Config>("access_mode=\"guess\"").is_err());
+        let bypass: Config = toml::from_str("access_mode=\"bypass\"").unwrap();
+        assert_eq!(bypass.active_access_mode(), AccessMode::Bypass);
+    }
+
+    #[test]
     fn reconcile_rate_defaults_and_bad_reload_preserves_the_callers_effective_value() {
         use super::*;
         let directory = tempfile::tempdir().unwrap();
@@ -771,6 +849,37 @@ sekrets_profile = "nathan/daemon-gh"
             ))
             .unwrap();
             assert!(parsed.validate().is_err(), "{field}");
+        }
+    }
+
+    #[test]
+    fn idle_nudges_default_to_thirty_minutes_and_a_two_hour_quiet_watch() {
+        let config = Config::default();
+        let settings = config.reconcile.idle_nudge().unwrap();
+        assert_eq!(settings.after_ms, Some(30 * 60_000));
+        assert_eq!(settings.quiet_watch_ms, 2 * 3_600_000);
+        assert!(!toml::to_string(&config).unwrap().contains("[reconcile]"));
+
+        let parsed: Config = toml::from_str(
+            "[reconcile]\nidle_nudge_after = \"45m\"\nidle_nudge_quiet_watch = \"3h\"\n",
+        )
+        .unwrap();
+        parsed.validate().unwrap();
+        let settings = parsed.reconcile.idle_nudge().unwrap();
+        assert_eq!(settings.after_ms, Some(45 * 60_000));
+        assert_eq!(settings.quiet_watch_ms, 3 * 3_600_000);
+
+        let off: Config = toml::from_str("[reconcile]\nidle_nudge_after = \"off\"\n").unwrap();
+        assert_eq!(off.reconcile.idle_nudge().unwrap().after_ms, None);
+
+        for (field, value) in [
+            ("idle_nudge_after", "30s"),
+            ("idle_nudge_after", "soon"),
+            ("idle_nudge_quiet_watch", "off"),
+        ] {
+            let parsed: Config =
+                toml::from_str(&format!("[reconcile]\n{field} = \"{value}\"\n")).unwrap();
+            assert!(parsed.validate().is_err(), "{field} = {value}");
         }
     }
 

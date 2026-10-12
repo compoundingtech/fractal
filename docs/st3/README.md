@@ -45,6 +45,7 @@ Use these documents for implementation details:
   enough to stop, and how each harness comes back on its own native session.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow
   a replaced st binary without ending the provider session, and how st reports a stale message path.
+- [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.
 - [Delivery probes](delivery-probes.md) describes token-free native-channel probes, per-direction
   read latency, overdue attention, and the replicated results in `st doctor`.
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
@@ -85,5 +86,7 @@ harness events: sessions, turns, plan mode, subagents, tool calls, usage, and wh
 on. It never asks an agent to report on itself and never tells an agent how to behave. A seat starts
 idle with no prompt and takes no turn until a person types or a message is posted. Work reaches it
 as a message that names a ready step, and the step's goals and constraints say what the work is.
+A seat that sits idle holding a claimed step, with nothing set to wake it, gets one message naming
+the step and what it waits on ([idle holders](mission-graph-runtime.md#idle-holders)).
 st's only other text for agents is the skill that `st skill` prints, which describes how to use st
 and sets no rules of conduct. Keep this rule when changing drivers, messages, or the skill.

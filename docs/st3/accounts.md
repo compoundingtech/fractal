@@ -102,6 +102,18 @@ Their spend and limits use a stable label derived from the declared name; unboun
 provider's label. Queued observations capture the account at their source, so replay after a
 switch still charges the account that produced them.
 
+A seat that binds nothing but sets its harness's login variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) to
+a declared account's login directory on its host runs on that account: it is launched with
+`ST3_ACCOUNT`, and its readings carry the declared name, whatever identity the provider shows. A
+re-login in that directory changes the provider's identity but not the account. When one seat has
+reported both under a provider identity and under a declared account, that identity's readings are
+the declared account's, so `st usage` and the pool show the account once, with the live reading.
+Identity readings that share no seat with a declared account are never assigned to one.
+
+A limits reading older than the limits cadence (`[limits] fresh`, one hour unless configured) is the
+last known reading, not the current one. `st --json usage` marks it `stale: true`, and `st usage`
+ends its row with `stale`. The pool chooses by the account's freshest reading.
+
 Limits include `identified`: true when the source names a provider identity or a declared account,
 false when it names neither. Older servers omit this additive metadata. Identity and quota
 freshness are separate: a missing identity does not make a reading stale. Once a driver has
