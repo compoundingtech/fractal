@@ -91,6 +91,8 @@ pub enum SyncOutcome {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ImportReport {
     pub indexed_objects: usize,
+    pub visited_objects: usize,
+    pub elapsed_ms: u64,
     pub skipped_refs: usize,
     pub issues: Vec<ImportIssue>,
     pub omitted_issues: usize,
@@ -300,6 +302,7 @@ fn import_tracking(
     repository: &Repository,
     configuration: &RepositoryConfig,
 ) -> Result<ImportReport> {
+    let started = Instant::now();
     let namespace = format!(
         "refs/st/tracking/{}/",
         hex::encode(Sha256::digest(configuration.remote_url.as_bytes()))
@@ -399,6 +402,8 @@ fn import_tracking(
             report.indexed_objects += 1;
         }
     }
+    report.visited_objects = visited;
+    report.elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
     Ok(report)
 }
 

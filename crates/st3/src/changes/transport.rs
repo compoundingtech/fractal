@@ -334,7 +334,7 @@ impl Repository {
     pub fn tracking_inventory(&self, remote_url: &str) -> Result<String> {
         let namespace = format!(
             "refs/st/tracking/{}/",
-            hex::encode(Sha256::digest(remote_url.as_bytes()))
+            hex::encode(sha2::Sha256::digest(remote_url.as_bytes()))
         );
         self.text(
             &[
