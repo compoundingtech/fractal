@@ -260,12 +260,12 @@ function headerCollisions(header: Element, subject: Element) {
   }
   return collisions
 }
-/** Text extent of a subtree: top of its first glyph row, bottom of its last. */
+/** Text extent of a subtree, excluding its seat meta row: top of its first glyph row, bottom of its last. */
 function textExtent(root: Element) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   let top = Infinity, bottom = -Infinity
   while (walker.nextNode()) {
-    if (walker.currentNode.textContent?.trim() === '') continue
+    if (walker.currentNode.textContent?.trim() === '' || walker.currentNode.parentElement?.closest('[data-seat-meta-overlay]')) continue
     const range = document.createRange()
     range.selectNodeContents(walker.currentNode)
     for (const rect of range.getClientRects()) if (rect.width > 0 && rect.height > 0) { top = Math.min(top, rect.top); bottom = Math.max(bottom, rect.bottom) }
@@ -341,7 +341,8 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         if (previous.getAttribute('data-turn-kind') !== 'Seat') {
           const nextTurn = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]:not([data-turn-kind="Seat"])')).find(candidate => candidate.getBoundingClientRect().top > block.getBoundingClientRect().bottom - 0.5)
           if (nextTurn !== undefined) {
-            const { toTrigger, toNext } = proximity(previous, block.querySelector('[data-turn-content]')!, nextTurn)
+            // The reply starts at its own text, including a T3 sender label; the meta row above it is not reply text.
+            const { toTrigger, toNext } = proximity(previous, block, nextTurn)
             await expect(toTrigger, 'reply is closer to its own trigger than to the next turn').toBeLessThan(toNext)
           }
         }
@@ -417,48 +418,6 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   const stacked = proximity(proximityControl.children[0]!, proximityControl.querySelector('[data-control-reply]')!, proximityControl.children[2]!)
   await expect(stacked.toTrigger).toBeGreaterThanOrEqual(stacked.toNext)
   for (const header of canvasElement.querySelectorAll('[data-lane] [data-message-header]')) await expect(header.querySelector('[title]')).toBeNull()
-  // The dotted identity is one focus stop named by its full identity; the kit tooltip shows it once on keyboard focus,
-  // hover and touch tap.
-  const identity = canvasElement.querySelector<HTMLElement>('[data-lane] [data-agent-id="Workspace.Review"] [data-agent-id-trigger]')
-  if (identity !== null) {
-    const view = canvasElement.ownerDocument.defaultView!
-    const settle = () => new Promise<void>(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())))
-    const tooltips = () => Array.from(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).filter(tip => tip.textContent === 'Workspace.Review')
-    const exactlyOne = (label: string) => waitFor(() => {
-      expect(tooltips(), label).toHaveLength(1)
-      expect(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]').length, label).toBe(1)
-    }, { timeout: 2000 })
-    // Hidden dots join the flex parts; name computation may pad them with spaces.
-    await expect(identity).toHaveAccessibleName(/^Workspace\s*\.\s*Review$/)
-    await expect(identity.textContent).toBe('Workspace.Review')
-    // Keyboard focus on an off-screen trigger scrolls it into view; that scroll must not close the tooltip it opened.
-    view.scrollTo(0, identity.getBoundingClientRect().top + view.scrollY + view.innerHeight)
-    await settle()
-    await userEvent.keyboard('{Escape}')
-    identity.focus()
-    await exactlyOne('identity tooltip on keyboard focus')
-    await settle()
-    await exactlyOne('identity tooltip after the focus scroll settles')
-    identity.blur()
-    await waitFor(() => expect(tooltips()).toHaveLength(0))
-    // Hover: the trigger is settled in view and the pointer is the input modality.
-    identity.scrollIntoView({ block: 'center' })
-    await settle()
-    await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
-    await userEvent.hover(identity)
-    await exactlyOne('identity tooltip on hover')
-    await userEvent.unhover(identity)
-    await waitFor(() => expect(tooltips()).toHaveLength(0))
-    // Touch has no hover: a tap opens the tooltip; leaving the trigger closes it.
-    await userEvent.pointer({ keys: '[TouchA]', target: identity })
-    await exactlyOne('identity tooltip on touch tap')
-    identity.blur()
-    await waitFor(() => expect(tooltips()).toHaveLength(0))
-    // Hand the input back to the mouse so later hover checks are not read as emulated touch hover. The package lib is
-    // ES2022 (no Promise.withResolvers); wait past React Aria's emulated-mouse window.
-    await new Promise(resolve => view.setTimeout(resolve, 100))
-    await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
-  }
   if (canvasElement.ownerDocument.defaultView!.innerWidth <= 440) {
     await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
   }
@@ -502,7 +461,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     const focusOpacity = Array.from(block.querySelectorAll('[data-affordance="reveal"]')).map(element => getComputedStyle(element).opacity)
     copy.blur()
     await userEvent.hover(block)
-    await waitFor(() => expect(Array.from(block.querySelectorAll('[data-affordance="reveal"]')).map(element => getComputedStyle(element).opacity)).toEqual(focusOpacity))
+    await waitFor(() => expect(Array.from(block.querySelectorAll('[data-affordance="reveal"]')).map(element => getComputedStyle(element).opacity), `hover reveals ${block.getAttribute('data-turn-block')} (${block.getAttribute('data-turn-structure')}${block.getAttribute('data-meta')}, hovered=${block.hasAttribute('data-hovered')})`).toEqual(focusOpacity))
     await userEvent.unhover(block)
     block.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
     await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
@@ -520,6 +479,44 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   remountControl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
   await waitFor(() => expect(detachedCopy.isConnected).toBe(false))
   await expect(canvasElement.ownerDocument.activeElement).not.toBe(detachedCopy)
+  // The dotted identity is one focus stop named by its full identity; the kit tooltip shows it once on keyboard focus,
+  // hover and touch tap.
+  const identity = canvasElement.querySelector<HTMLElement>('[data-lane] [data-agent-id="Workspace.Review"] [data-agent-id-trigger]')
+  if (identity !== null) {
+    const view = canvasElement.ownerDocument.defaultView!
+    const settle = () => new Promise<void>(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())))
+    const tooltips = () => Array.from(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).filter(tip => tip.textContent === 'Workspace.Review')
+    const exactlyOne = (label: string) => waitFor(() => {
+      expect(tooltips(), label).toHaveLength(1)
+      expect(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]').length, label).toBe(1)
+    }, { timeout: 2000 })
+    // Hidden dots join the flex parts; name computation may pad them with spaces.
+    await expect(identity).toHaveAccessibleName(/^Workspace\s*\.\s*Review$/)
+    await expect(identity.textContent).toBe('Workspace.Review')
+    // Keyboard focus on an off-screen trigger scrolls it into view; that scroll must not close the tooltip it opened.
+    view.scrollTo(0, identity.getBoundingClientRect().top + view.scrollY + view.innerHeight)
+    await settle()
+    await userEvent.keyboard('{Escape}')
+    identity.focus()
+    await exactlyOne('identity tooltip on keyboard focus')
+    await settle()
+    await exactlyOne('identity tooltip after the focus scroll settles')
+    identity.blur()
+    await waitFor(() => expect(tooltips()).toHaveLength(0))
+    // Hover: the trigger is settled in view and the pointer is the input modality.
+    identity.scrollIntoView({ block: 'center' })
+    await settle()
+    await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
+    await userEvent.hover(identity)
+    await exactlyOne('identity tooltip on hover')
+    await userEvent.unhover(identity)
+    await waitFor(() => expect(tooltips()).toHaveLength(0))
+    // Touch has no hover: a tap opens the tooltip; leaving the trigger closes it.
+    await userEvent.pointer({ keys: '[TouchA]', target: identity })
+    await exactlyOne('identity tooltip on touch tap')
+    identity.blur()
+    await waitFor(() => expect(tooltips()).toHaveLength(0))
+  }
 }
 const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
   const canvas = within(canvasElement)
