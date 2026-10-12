@@ -23,6 +23,7 @@ mod owned_sets_tests;
 mod usage_fold_tests;
 mod resources;
 mod github_workflow_failures;
+pub mod git_changes;
 pub(crate) mod message_subscriptions;
 mod rollouts;
 mod seat_status;
