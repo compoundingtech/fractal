@@ -393,6 +393,8 @@ pub struct Ui {
     older_wanted: RefCell<BTreeSet<String>>,
     /// This device opens an agent's tab on its terminal, not its conversation (a setting).
     terminal_first: bool,
+    /// This device permits the daemon after a failed direct terminal route.
+    pub(crate) terminal_fallback: bool,
     /// The agent whose tab just took the focus, and when: its terminal attaches once the tab has
     /// stayed in front for a moment, so passing through tabs attaches nothing.
     attach_when: Option<(String, Instant)>,
@@ -681,6 +683,7 @@ impl Ui {
             closed: HashSet::new(),
             older_wanted: RefCell::default(),
             terminal_first: false,
+            terminal_fallback: true,
             attach_when: None,
             popover: None,
             chat: None,
@@ -856,6 +859,7 @@ impl Ui {
             let loaded = prefs::load(&path);
             self.simple = simplified(&loaded);
             self.terminal_first = loaded.terminal_first == Some(true);
+            self.terminal_fallback = loaded.terminal_fallback != Some(false);
         }
     }
 
@@ -941,9 +945,21 @@ impl Ui {
                 &prefs::Prefs {
                     simple: Some(self.simple),
                     terminal_first: Some(self.terminal_first),
+                    terminal_fallback: Some(self.terminal_fallback),
                 },
             );
         }
+    }
+
+    /// Change the next terminal attachment's route policy on this device.
+    pub(crate) fn toggle_terminal_fallback(&mut self) {
+        self.terminal_fallback = !self.terminal_fallback;
+        self.save_prefs();
+        self.flash(if self.terminal_fallback {
+            "Terminal routes: fall back through the daemon on failure"
+        } else {
+            "Terminal routes: fabric only, no fallback"
+        });
     }
 
     /// Open an agent's tab on its terminal, or on its conversation (the default): this device's

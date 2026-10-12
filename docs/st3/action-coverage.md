@@ -352,6 +352,7 @@ edits and removes retired subjects without changing unfiltered reads.
 | NewMission | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | ToggleSimple | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | ToggleTerminalFirst | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
+| ToggleTerminalFallback | device-local route preference; no daemon mutation, restart fence not applicable | [`terminal_fallback_defaults_on_and_the_palette_changes_it_locally`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | Name | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | Said | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | open panes, tabs, focus and Home | local UI state; no daemon mutation, restart fence not applicable | [`a_click_in_another_split_focuses_it`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
@@ -378,3 +379,9 @@ The sidebar's existing optional `resources.list` read is covered by
 `observed_resources::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix`
 (real Unix socket and arrangement filing), the daemon filter/fence and read-scope tests, and
 `sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing` (test backend navigation and explicit filing).
+
+The optional `inventory-collections` capability follows clients, usage, machines,
+devices, native sessions and terminal lists on the collection socket. The
+`collection_refresh_tests::*_inventory_*` real-socket tests cover source changes,
+frame schema and typed decoding, reconnect snapshots, invalid subscription
+filters/limits, active-device retirement and native filesystem/process events.
