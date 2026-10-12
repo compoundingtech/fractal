@@ -855,13 +855,13 @@ pub(crate) fn render_step_run(step: &StepRunView, style: OutputStyle, now_unix_m
         );
     }
     if step.execution_waited_ms > 0 || step.execution_paused_until_unix_ms.is_some() {
-        let budget = u128::from(crate::store::MAX_STEP_WAIT_MS);
+        let budget = u128::from(st3::store::MAX_STEP_WAIT_MS);
         let _ = writeln!(
             output,
             "  Wait budget  {} used of {} · {} left",
-            crate::store::format_wait_span(step.execution_waited_ms),
-            crate::store::format_wait_span(budget),
-            crate::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
+            st3::store::format_wait_span(step.execution_waited_ms),
+            st3::store::format_wait_span(budget),
+            st3::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
         );
     }
     if let Some(wake) = &step.wake {

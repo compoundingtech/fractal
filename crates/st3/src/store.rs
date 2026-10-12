@@ -519,10 +519,10 @@ const AGENT_WORK_PREVIEW_LIMIT: usize = 5;
 const MAX_STEP_EXTENSION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 /// The longest one `work wait` stops the execution clock. A wait past it must be declared again,
 /// so a seat that stopped answering cannot hide behind a wait.
-pub(crate) const MAX_STEP_WAIT_MS: u64 = 12 * 60 * 60 * 1000;
+pub const MAX_STEP_WAIT_MS: u64 = 12 * 60 * 60 * 1000;
 
 /// A wait span as hours and minutes, for the budget error and the step view.
-pub(crate) fn format_wait_span(milliseconds: u128) -> String {
+pub fn format_wait_span(milliseconds: u128) -> String {
     let minutes = milliseconds / 60_000;
     match (minutes / 60, minutes % 60) {
         (0, minutes) => format!("{minutes}m"),
