@@ -10005,6 +10005,7 @@ impl Store {
 
     /// Internal commit-time guard. Runs after subject CAS checks, before publication writes,
     /// using the writer's current runtime and incarnation rather than preview evidence.
+    #[cfg_attr(not(test), expect(dead_code, reason = "The following refusal slice exposes this tested commit-time guard."))]
     pub(crate) fn apply_as_checked(
         &self,
         intent: &NormalizedIntent,

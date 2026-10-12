@@ -673,17 +673,33 @@ mod tests {
             store
                 .append_claim(&input("runtime.observed", &format!("inc-{i}")))
                 .unwrap();
-            store
-                .append_claim(&input("runtime.action.succeeded", &format!("inc-{i}")))
-                .unwrap();
+            // Legacy shared system receipts use the actor-null checkpoint slot. Modern
+            // actor-null receipts are local; requester-authored shared receipts never drop.
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            append_claim_tx(
+                &tx,
+                "node",
+                "agent/example/worker",
+                "runtime.action.succeeded",
+                None,
+                &json!({"fields":{"action":"start","incarnation_id":"legacy",
+                    "desired_token":"not-retained","reason":format!("receipt-{i}")}}),
+                &[],
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            drop(writer);
+            // The newest envelope is protected independently of the kind's drop rule.
+            store.seal_local_batches().unwrap();
         }
-        store.seal_local_batches().unwrap();
         let before: u64 = store
             .readers
             .get()
             .query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))
             .unwrap();
-        assert!(store.trim_checkpoint_for_test(now_ms() + 1000) > 0);
+        assert!(store.trim_checkpoint_for_test(now_ms() + 6 * 24 * 60 * 60 * 1000) > 0);
         finish(&store);
         oracle(&store);
         let after: u64 = store
@@ -772,20 +788,36 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        // Reproduce a retained source whose envelope needs repair, then use the native
+        // repair publication path. A receipt alone does not change record admission state.
         store
-            .append_claim(&ClaimInput {
-                subject: "repair/example-publication".into(),
-                kind: "record.repaired".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("record".into(), json!(record)),
-                    ("replacement".into(), json!(new.id)),
-                    ("reason".into(), json!("synthetic native repair")),
-                ]),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
+            .connection
+            .write()
+            .execute(
+                "UPDATE replica_records SET state='invalid' WHERE record_ref=?1",
+                [&record],
+            )
+            .unwrap();
+        let source = format!(
+            "version 2\nrepair {record:?} {{ replacement {:?}; reason \"synthetic native repair\"; }}",
+            new.id
+        );
+        let intent = crate::graph::parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply(
+                &intent,
+                &preview.subject_tokens,
+                "native-publication-repair",
+            )
             .unwrap();
         finish(&store);
         oracle(&store);
@@ -1038,15 +1070,30 @@ mod tests {
         for i in 0..192 {
             let claim = input("runtime.observed", &format!("pending-{i}"));
             append_claim_tx(
-                &tx, "node", &claim.subject, &claim.kind, claim.actor.as_deref(),
-                &json!({"fields": claim.fields}), &[], None,
-            ).unwrap();
+                &tx,
+                "node",
+                &claim.subject,
+                &claim.kind,
+                claim.actor.as_deref(),
+                &json!({"fields": claim.fields}),
+                &[],
+                None,
+            )
+            .unwrap();
         }
         tx.commit().unwrap();
         drop(connection);
-        let pending = || store.readers.get().query_row(
-            "SELECT COUNT(*) FROM local_publication_pending", [], |row| row.get::<_, usize>(0),
-        ).unwrap();
+        let pending = || {
+            store
+                .readers
+                .get()
+                .query_row(
+                    "SELECT COUNT(*) FROM local_publication_pending",
+                    [],
+                    |row| row.get::<_, usize>(0),
+                )
+                .unwrap()
+        };
         let before = pending();
         assert!(before >= 128);
         assert!(!store.advance_publication_evidence().unwrap());

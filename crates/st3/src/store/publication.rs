@@ -6,7 +6,21 @@ use crate::publication::{Interruption, interruption};
 pub(crate) type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
 
 pub(crate) struct Check {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The following refusal slice reports the checked incarnation."
+        )
+    )]
     pub incarnation: Option<String>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The following refusal slice reports the actual launch values."
+        )
+    )]
     pub launched: Option<MemberSpec>,
     pub interruption: Interruption,
     pub unknown_reason: Option<&'static str>,
