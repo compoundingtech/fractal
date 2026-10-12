@@ -1,5 +1,6 @@
 //! Optional Linux proof with two private API daemons, a real PTY and the phone's TS/native code.
 use super::*;
+use anyhow::Context as _;
 use crate::model::ClaimInput;
 use smallclaims::sync::{FleetContext, peer_router};
 use std::os::unix::fs::PermissionsExt;
