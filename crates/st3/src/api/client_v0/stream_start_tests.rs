@@ -2,6 +2,87 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+/// Run alone with ST3_PROFILE_DIR and ST3_PROFILE_SLOW_MS=0 so the real profile
+/// sink can prove completion before the follower's intentional long-poll idle.
+#[tokio::test]
+#[ignore = "requires an isolated profile sink; run alone with --ignored"]
+async fn conversation_first_frame_profile_lifecycle() {
+    crate::profile::init_from_env();
+    assert!(crate::profile::enabled());
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "profile-fixture");
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/chat".into(), kind: "runtime.observed".into(),
+        actor: Some("agent/chat".into()),
+        fields: serde_json::from_value(json!({"status":"running", "runtime_id":"chat", "incarnation_id":"one"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let app = axum::Router::new().route("/stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
+        let state = state.clone();
+        async move {
+            let windows = collection_windows::Windows::attach(&state.store);
+            upgrade.on_upgrade(move |socket| collection_stream_socket_with_reader(
+                socket, state, ClientSession::local(None).unwrap(), None,
+                move |state, session, request, permit| {
+                    let windows = windows.clone();
+                    async move { collection_items_with_windows(&state, &session, &request, permit, windows).await }
+                },
+            ))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+    socket.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({"kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":"agent/chat"}).to_string().into(),
+    )).await.unwrap();
+    let raw = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    let frame: Value = serde_json::from_str(raw.to_text().unwrap()).unwrap();
+    assert_eq!(frame["kind"], "conversation");
+    // A ping/pong fence proves the socket has finished the send branch and its
+    // operation, without a sleep or relying on client receive/server scheduling.
+    socket.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new().into())).await.unwrap();
+    let pong = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    assert!(matches!(pong, tokio_tungstenite::tungstenite::Message::Pong(_)));
+    let path = std::path::PathBuf::from(std::env::var_os("ST3_PROFILE_DIR").unwrap()).join("slow.jsonl");
+    let profiles = || std::fs::read_to_string(&path).unwrap().lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|record| record["label"] == "stream conversation/first-frame").collect::<Vec<_>>();
+    let records = profiles();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["completion"], "finished");
+    let spans = records[0]["spans"].as_array().unwrap();
+    for name in ["conversation/first-frame-total", "conversation/admission-queue",
+        "conversation/owner-resolution", "conversation/first-page",
+        "conversation/frame-preparation", "conversation/serialization-send",
+        "conversation/serialization", "conversation/send"] {
+        assert!(spans.iter().any(|span| span["name"] == name), "missing {name}: {spans:?}");
+    }
+    for name in ["conversation/admission-queue", "conversation/owner-resolution", "conversation/first-page", "conversation/send"] {
+        let span = spans.iter().find(|span| span["name"] == name).unwrap();
+        assert_eq!(span["cpu_ms"], 0.0);
+        assert_eq!(span["sql_ms"], 0.0);
+    }
+    // The follower is now awaiting changes. Neither this intentional idle nor
+    // unsubscribing it may create another initial-work record.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    socket.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({"kind":"unsubscribe", "id":"chat"}).to_string().into(),
+    )).await.unwrap();
+    socket.send(tokio_tungstenite::tungstenite::Message::Ping(Vec::new().into())).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    assert_eq!(profiles(), records);
+    socket.close(None).await.unwrap();
+    // Cancellation/replacement before data delivery must not claim successful completion.
+    let canceled = subscription_first_frame("conversation", "canceled", None).unwrap();
+    drop(canceled);
+    let records = profiles();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[1]["completion"], "dropped");
+    server.abort();
+}
+
 #[tokio::test]
 async fn cold_open_four_subscriptions_do_not_wait_for_slow_roster() {
     let root = tempfile::tempdir().unwrap();
