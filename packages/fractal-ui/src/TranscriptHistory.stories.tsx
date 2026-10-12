@@ -1,3 +1,8 @@
+// Keyboard plays focus an active RAC row and exercise its synthetic React key
+// handling unchanged. Native scroller-focus defaults belong to the ui-design
+// browser gate; this fixture has no native-input bridge or keyboard scroll shim.
+// Headless Chromium exposes overlay scrollbars (clientWidth === offsetWidth),
+// so these plays cannot target a native thumb gutter and claim no drag coverage.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
@@ -71,25 +76,30 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
   React.useLayoutEffect(() => {
     const lane = root.current?.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')
     if (lane === null || lane === undefined) return
+    const offsetRegression = (failure === 'resize' && action === 'resize') || (failure === 'theme' && action === 'theme')
+    const applyOffset = () => {
+      const row = activeHistoryRow(lane, 1300)
+      if (offsetRegression && row !== null) row.style.translate = `0 ${s.lg}`
+    }
+    const observer = new MutationObserver(applyOffset)
+    if (offsetRegression) observer.observe(lane, { subtree: true, childList: true })
     const frame = requestAnimationFrame(() => {
-      if (failure === 'prepend' && action === 'prepend') lane.scrollTop = 0
+      applyOffset()
       if (failure === 'prepend-focus' && action === 'prepend') lane.focus()
-      if (failure === 'resize' && action === 'resize') lane.scrollTop = 0
-      if (failure === 'theme' && action === 'theme') lane.scrollTop = 0
       if (failure === 'empty-page' && action === 'empty') loadOlder()
       if (failure === 'unread' && action === 'append') {
         const unread = [...root.current!.querySelectorAll('button')].find(button => button.textContent?.includes('New messages'))
         if (unread !== undefined) unread.hidden = true
       }
       if (failure === 'stale-jump' && action === 'prepend' && followKey !== undefined) handle.current?.jumpTo('history/50')
-      if (failure === 'append-reading' && action === 'append') lane.scrollTop = lane.scrollHeight
-      if (failure === 'append-following' && action === 'append') lane.scrollTop = 0
+      if (failure === 'append-following' && action === 'append') handle.current?.jumpTo('history/1300')
+      if ((failure === 'prepend' && action === 'prepend') || (failure === 'append-reading' && action === 'append')) setFollowKey(value => `${value ?? 'regression'}/lost-anchor`)
       if (failure === 'dom-bound' && revision > 0) {
         const row = lane.querySelector('[data-testid="transcript-turn"]')
         if (row !== null) for (let index = 0; index < 250; index++) lane.append(row.cloneNode(true))
       }
     })
-    return () => cancelAnimationFrame(frame)
+    return () => { cancelAnimationFrame(frame); observer.disconnect() }
   }, [failure, revision, action, start])
   return <main ref={root} data-scheme={effectiveScheme} data-requests={requests} data-loaded={loaded.length} data-start={start} data-page={page._tag} data-end={end} {...stylex.props(styles.root, (narrow !== resized) && styles.narrow, ...baselineTheme, effectiveScheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}>
@@ -114,90 +124,152 @@ const meta = { title: 'Fractal UI/Transcript virtual history', component: PagedH
 export default meta
 type Story = StoryObj<typeof meta>
 
+function historyElementIsActionable(element: HTMLElement, lane: HTMLElement): boolean {
+  if (!element.isConnected || element.getBoundingClientRect().height === 0) return false
+  for (let ancestor: HTMLElement | null = element; ancestor !== null; ancestor = ancestor.parentElement) {
+    if (getComputedStyle(ancestor).pointerEvents === 'none') return false
+    if (ancestor === lane) return true
+  }
+  return false
+}
+
+function activeHistoryRow(lane: HTMLElement, id: number): HTMLElement | null {
+  const candidates = lane.querySelectorAll<HTMLElement>(`[data-embrace-entry-id="history/${id}"]`)
+  for (const candidate of candidates) {
+    if (historyElementIsActionable(candidate, lane)) return candidate
+  }
+  return null
+}
+
+async function focusHistoryKeyboardRow(lane: HTMLElement, id?: number): Promise<void> {
+  await waitFor(async () => {
+    const viewport = lane.getBoundingClientRect()
+    const candidates = id === undefined ? lane.querySelectorAll<HTMLElement>('[role="row"]') : [activeHistoryRow(lane, id)?.closest<HTMLElement>('[role="row"]') ?? null]
+    let target: HTMLElement | null = null
+    for (const candidate of candidates) {
+      if (candidate === null || !historyElementIsActionable(candidate, lane)) continue
+      const rectangle = candidate.getBoundingClientRect()
+      if (rectangle.height > 0 && rectangle.bottom > viewport.top && rectangle.top < viewport.bottom) { target = candidate; break }
+    }
+    await expect(target !== null, 'History keyboard setup: active RAC row').toBe(true)
+    if (target === null) return
+    if (document.activeElement !== target) target.focus({ preventScroll: true })
+    await expect(document.activeElement, 'History keyboard setup: RAC row focus identity').toBe(target)
+  })
+}
+async function settleInitialHistoryPage(canvasElement: HTMLElement, lane: HTMLElement): Promise<number> {
+  const canvas = within(canvasElement), root = canvasElement.querySelector('main')!
+  // The first physical top observation can request a page before initial following
+  // settles. Complete that real host request before starting a keyboard scenario.
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  if (root.getAttribute('data-page') === 'Loading') {
+    const expectedStart = Math.max(0, Number(root.getAttribute('data-start')) - pageSize)
+    canvas.getByRole('button', { name: 'Deliver older page' }).click()
+    await waitFor(() => expect(root.getAttribute('data-start')).toBe(String(expectedStart)))
+    await waitFor(() => expect(root.getAttribute('data-page')).toBe('Ready'))
+  }
+  await waitFor(() => expect(activeHistoryRow(lane, total - 1) !== null, 'History setup: settled latest row').toBe(true))
+  await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight, 'History setup: initial following gap').toBeLessThanOrEqual(1), { timeout: 5000 })
+  return Number(root.getAttribute('data-start'))
+}
+
+
+
 // Each detector has its own positive story and routes selected regressions directly
 // to that detector. An unrelated assertion in the full tour cannot mask a control.
 async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'pointer-retry') {
   if (target === 'stale-jump') return exerciseNewerFollow({ canvasElement })
-  if (target === 'touch-latch' || target === 'touch-scroll-required') return exerciseTouchAtZero({ canvasElement })
+  if (target === 'touch-latch' || target === 'touch-scroll-required') return exerciseTouchAtZero({ canvasElement }, target)
+  const detector = `History detector: ${target}`
   const canvas = within(canvasElement)
   const root = canvasElement.querySelector('main')!
   const lane = await canvas.findByTestId('transcript-scroll')
-  const currentRow = (id: number) => lane.querySelector<HTMLElement>(`[data-embrace-entry-id="history/${id}"]`)
+  const currentRow = (id: number) => activeHistoryRow(lane, id)
   await waitFor(() => expect(lane.querySelector('[data-testid="transcript-turn"]')).not.toBeNull())
   const settle = async () => {
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    // Native Home/row transitions settle after the immediate key dispatch.
+    await new Promise<void>(resolve => setTimeout(resolve, 200))
   }
   const page = async (start: number) => {
     await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-    await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+    canvas.getByRole('button', { name: 'Deliver older page' }).click()
     await waitFor(() => expect(root).toHaveAttribute('data-start', String(start)))
     await settle()
   }
   if (target === 'dom-bound') {
     await userEvent.click(canvas.getByRole('button', { name: 'Apply selected regression' }))
     await settle()
-    await expect(lane.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(120)
+    await expect(lane.querySelectorAll('[data-testid="transcript-turn"]').length, detector).toBeLessThan(120)
     return
   }
   if (target === 'jump' || target === 'start') {
     await userEvent.click(canvas.getByRole('button', { name: 'Jump to unloaded checkpoint 50' }))
-    for (const start of [200, 100, 0]) await page(start)
+    if (target === 'jump') await waitFor(() => expect(root.getAttribute('data-page'), detector).toBe('Loading'))
+    for (const start of [200, 100, 0]) {
+      if (start !== 200 && root.getAttribute('data-page') === 'Ready') canvas.getByRole('button', { name: 'Request older page' }).click()
+      await page(start)
+    }
     if (target === 'jump') {
-      await waitFor(() => expect(currentRow(50)).not.toBeNull())
+      await waitFor(() => expect(currentRow(50), detector).not.toBeNull())
       const rect = currentRow(50)!.getBoundingClientRect(), viewport = lane.getBoundingClientRect()
-      await expect(rect.top).toBeGreaterThanOrEqual(viewport.top)
-      await expect(rect.top).toBeLessThan(viewport.bottom)
+      await expect(rect.top, detector).toBeGreaterThanOrEqual(viewport.top)
+      await expect(rect.top, detector).toBeLessThan(viewport.bottom)
     } else {
-      lane.focus()
+      await focusHistoryKeyboardRow(lane)
       await userEvent.keyboard('{Home}')
-      await expect(await canvas.findByTestId('history-start')).toHaveTextContent('Start of conversation')
+      await waitFor(() => expect(canvas.queryByTestId('history-start') !== null, detector).toBe(true))
+      await expect(canvas.getByTestId('history-start')).toHaveTextContent('Start of conversation')
     }
     return
   }
   if (target === 'empty-page' || target === 'empty-latch' || target === 'retry' || target === 'failed-auto-retry' || target === 'pointer-retry') {
     if (target === 'retry' || target === 'failed-auto-retry' || target === 'pointer-retry') await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
-    lane.focus()
+    await focusHistoryKeyboardRow(lane)
     await userEvent.keyboard('{Home}')
     await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-    await expect(lane.scrollTop).toBe(0)
+    await waitFor(() => expect(lane.scrollTop).toBe(0))
     await expect(canvas.getByRole('grid')).toHaveAttribute('aria-busy', 'true')
     const requests = Number(root.getAttribute('data-requests'))
     if (target === 'empty-page' || target === 'empty-latch') {
-      await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+      canvas.getByRole('button', { name: 'Deliver empty page' }).click()
       await settle()
       if (target === 'empty-page') {
-        await expect(root).toHaveAttribute('data-page', 'Ready')
-        await expect(Number(root.getAttribute('data-requests'))).toBe(requests)
+        await expect(root.getAttribute('data-page'), detector).toBe('Ready')
+        await expect(Number(root.getAttribute('data-requests')), detector).toBe(requests)
       } else {
-        lane.focus()
+        await focusHistoryKeyboardRow(lane)
         await userEvent.keyboard('{PageDown}{PageDown}{PageDown}')
         await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
         await userEvent.keyboard('{Home}')
-        await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-        await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
+        await waitFor(() => expect(root.getAttribute('data-page'), detector).toBe('Loading'))
+        await expect(Number(root.getAttribute('data-requests')), detector).toBe(requests + 1)
       }
     } else {
-      await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+      canvas.getByRole('button', { name: 'Deliver older page' }).click()
       await waitFor(() => expect(root).toHaveAttribute('data-page', 'Failed'))
       if (target === 'failed-auto-retry') {
-        lane.focus()
+        await focusHistoryKeyboardRow(lane)
         await userEvent.keyboard('{Home}')
         lane.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -120 }))
         lane.dispatchEvent(new Event('scroll'))
         await settle()
-        await expect(root).toHaveAttribute('data-page', 'Failed')
-        await expect(Number(root.getAttribute('data-requests'))).toBe(requests)
+        await expect(root.getAttribute('data-page'), detector).toBe('Failed')
+        await expect(Number(root.getAttribute('data-requests')), detector).toBe(requests)
       } else {
-        const retry = canvas.getByTestId('history-retry')
+        await waitFor(() => expect([...lane.querySelectorAll<HTMLElement>('[data-testid="history-retry"]')].some(candidate => historyElementIsActionable(candidate, lane)), 'History setup: actionable Retry control').toBe(true))
+        const retry = [...lane.querySelectorAll<HTMLElement>('[data-testid="history-retry"]')].find(candidate => historyElementIsActionable(candidate, lane))
+        await expect(retry !== undefined, 'History setup: current Retry control').toBe(true)
+        if (retry === undefined) return
         if (target === 'pointer-retry') await userEvent.click(retry)
         else {
-          lane.focus()
+          await focusHistoryKeyboardRow(lane)
           for (let index = 0; index < 60 && document.activeElement !== retry; index++) await userEvent.tab()
           await expect(retry).toHaveFocus()
           await userEvent.keyboard('{Enter}')
         }
-        await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-        await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
+        await waitFor(() => expect(root.getAttribute('data-page'), detector).toBe('Loading'))
+        await expect(Number(root.getAttribute('data-requests')), detector).toBe(requests + 1)
       }
     }
     return
@@ -210,39 +282,54 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
     await userEvent.click(canvas.getByRole('button', { name: 'Append turn' }))
     await waitFor(() => expect(root).toHaveAttribute('data-end', '2401'))
     await settle()
-    await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight).toBeLessThanOrEqual(1))
+    await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight, detector).toBeLessThanOrEqual(1))
     return
   }
   await userEvent.click(canvas.getByRole('button', { name: 'Jump to loaded checkpoint 1300' }))
   await waitFor(() => expect(currentRow(1300)).not.toBeNull())
   await settle()
   if (target === 'keyboard') {
-    lane.focus()
+    await focusHistoryKeyboardRow(lane, 1300)
     const top = lane.scrollTop
     await userEvent.keyboard('{PageUp}')
-    await waitFor(() => expect(lane.scrollTop).toBeLessThan(top))
+    await waitFor(() => expect(lane.scrollTop, detector).toBeLessThan(top))
     return
   }
-  const top = currentRow(1300)!.getBoundingClientRect().top
+  await waitFor(() => expect(currentRow(1300) !== null, 'History setup: active semantic reading row').toBe(true))
+  const baseline = currentRow(1300)?.getBoundingClientRect()
+  await expect(baseline !== undefined, 'History setup: semantic row geometry').toBe(true)
+  if (baseline === undefined) return
+  const top = baseline.top - lane.getBoundingClientRect().top
   if (target === 'resize' || target === 'theme') {
     await userEvent.click(canvas.getByRole('button', { name: target === 'resize' ? 'Resize reading lane' : 'Switch reading theme' }))
     await settle()
-    await expect(currentRow(1300)!.getBoundingClientRect().top - top).toBe(0)
+    await waitFor(async () => {
+      const rectangle = currentRow(1300)?.getBoundingClientRect()
+      const offset = rectangle === undefined ? undefined : rectangle.top - lane.getBoundingClientRect().top - top
+      await expect(offset !== undefined, detector).toBe(true)
+      if (offset === undefined) return
+      await expect(offset, detector).toBe(0)
+    })
   } else if (target === 'prepend' || target === 'prepend-focus') {
     await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
     const focused = within(currentRow(1300)!).getByRole('button', { name: /Worked/ })
     focused.focus({ preventScroll: true })
     await page(200)
-    if (target === 'prepend') await expect(currentRow(1300)!.getBoundingClientRect().top - top).toBe(0)
-    else await expect(document.activeElement).toBe(focused)
+    if (target === 'prepend') {
+      await waitFor(() => expect(currentRow(1300), detector).not.toBeNull())
+      await expect(currentRow(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - top, detector).toBe(0)
+    } else await expect(document.activeElement, detector).toBe(focused)
   } else if (target === 'fold') {
+    await waitFor(() => expect(getComputedStyle(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
     await userEvent.click(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }))
-    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'true')
+    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }).getAttribute('aria-expanded'), detector).toBe('true')
+    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }), detector).toHaveAttribute('aria-expanded', 'true')
     const expanded = currentRow(1300)!.getBoundingClientRect().height
+    await waitFor(() => expect(getComputedStyle(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
     await userEvent.click(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }))
     await settle()
-    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'false')
-    await expect(currentRow(1300)!.getBoundingClientRect().height).toBeLessThan(expanded)
+    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }), detector).toHaveAttribute('aria-expanded', 'false')
+    await expect(currentRow(1300)!.getBoundingClientRect().height, detector).toBeLessThan(expanded)
   } else {
     const held = within(currentRow(1300)!).getByRole('button', { name: /Worked/ })
     held.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, buttons: 1 }))
@@ -250,8 +337,17 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
       canvas.getByRole('button', { name: 'Append turn' }).click()
       await waitFor(() => expect(root).toHaveAttribute('data-end', '2401'))
       await settle()
-      if (target === 'unread') await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
-      else await expect(currentRow(1300)!.getBoundingClientRect().top - top).toBe(0)
+      if (target === 'unread') {
+        const unread = canvas.queryByRole('button', { name: /New messages/ })
+        await expect(unread !== null, detector).toBe(true)
+        if (unread === null) return
+        await expect(unread.hidden, detector).toBe(false)
+        await expect(unread).toBeVisible()
+      }
+      else {
+        await waitFor(() => expect(currentRow(1300), detector).not.toBeNull())
+        await expect(currentRow(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - top, detector).toBe(0)
+      }
     } finally {
       held.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, buttons: 0 }))
     }
@@ -284,13 +380,13 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   const canvas = within(canvasElement)
   const root = canvasElement.querySelector('main')!
   const lane = await canvas.findByTestId('transcript-scroll')
-  const row = (id: number) => lane.querySelector<HTMLElement>(`[data-embrace-entry-id="history/${id}"]`)
+  const row = (id: number) => activeHistoryRow(lane, id)
   const bottomGap = () => lane.scrollHeight - lane.scrollTop - lane.clientHeight
   const scrollTo = (top: number) => { lane.scrollTop = top; lane.dispatchEvent(new Event('scroll')) }
   const mountedBound = async () => { await expect(Number(root.getAttribute('data-loaded'))).toBeGreaterThanOrEqual(2100); await expect(lane.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(120) }
   const deliver = async (start: number) => {
     await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-    await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+    canvas.getByRole('button', { name: 'Deliver older page' }).click()
     await waitFor(() => expect(root).toHaveAttribute('data-start', String(start)))
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   }
@@ -311,7 +407,7 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   await waitFor(() => expect(row(1300)).not.toBeNull())
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   const anchor = row(1300)!
-  const readingTop = anchor.getBoundingClientRect().top
+  const readingTop = row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top
   const heldReader = within(anchor).getByRole('button', { name: /Worked/ })
   heldReader.focus({ preventScroll: true })
   // Hold a real row pointer down through the asynchronous host append: focus alone
@@ -321,7 +417,7 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
     canvas.getByRole('button', { name: 'Append turn' }).click()
     await waitFor(() => expect(root).toHaveAttribute('data-end', '2402'))
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-    await expect(row(1300)!.getBoundingClientRect().top - readingTop).toBe(0)
+    await waitFor(() => expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - readingTop).toBe(0))
     await expect(bottomGap()).toBeGreaterThan(lane.clientHeight)
     await expect(document.activeElement).toBe(heldReader)
     await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
@@ -331,46 +427,52 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
 
   // Remeasure wrapping and theme without moving the current reading anchor.
   for (const name of ['Resize reading lane', 'Switch reading theme', 'Resize reading lane', 'Switch reading theme']) {
-    const top = row(1300)!.getBoundingClientRect().top
+    const top = row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top
     await userEvent.click(canvas.getByRole('button', { name }))
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-    await expect(row(1300)!.getBoundingClientRect().top - top).toBe(0)
+    await waitFor(() => expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - top).toBe(0))
   }
 
   // A manually completed asynchronous prepend must move the reading anchor by 0px.
   await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
   const focusedBeforePrepend = within(row(1300)!).getByRole('button', { name: /Worked/ })
-  focusedBeforePrepend.focus()
+  focusedBeforePrepend.focus({ preventScroll: true })
   await deliver(200)
-  await waitFor(() => expect(row(1300)?.getBoundingClientRect().top - readingTop).toBe(0))
+  await waitFor(() => expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - readingTop).toBe(0))
   await expect(document.activeElement).toBe(focusedBeforePrepend)
   await mountedBound()
 
   // Expand and fold a measured mid-list work log, retaining its turn and reading position.
-  const work = within(row(1300)!).getByTestId('work-log')
-  const fold = within(work).getByRole('button', { name: /Worked/ })
-  const foldTop = row(1300)!.getBoundingClientRect().top
-  await userEvent.click(fold)
-  await expect(fold).toHaveAttribute('aria-expanded', 'true')
+  const foldTop = row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top
+  await waitFor(() => expect(getComputedStyle(within(row(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
+  await userEvent.click(within(row(1300)!).getByRole('button', { name: /Worked/ }))
+  await expect(within(row(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'true')
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   const expandedHeight = row(1300)!.getBoundingClientRect().height
-  await userEvent.click(fold)
-  await expect(fold).toHaveAttribute('aria-expanded', 'false')
+  await waitFor(() => expect(getComputedStyle(within(row(1300)!).getByRole('button', { name: /Worked/ })).pointerEvents).not.toBe('none'))
+  await userEvent.click(within(row(1300)!).getByRole('button', { name: /Worked/ }))
+  await expect(within(row(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'false')
   await waitFor(() => expect(row(1300)!.getBoundingClientRect().height).toBeLessThan(expandedHeight))
-  await expect(row(1300)!.getBoundingClientRect().top - foldTop).toBe(0)
+  await expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - foldTop).toBe(0)
   await mountedBound()
 
-  // Native keyboard gestures page the scroll lane and request history at its top.
-  lane.focus()
+  // RAC row keyboard handling is exercised with real row focus, not a synthetic
+  // scroller key default. Native scroller-focus keys are covered by ui-design.
+  // Start the keyboard slice from a fresh host navigation after the preceding
+  // width/theme/disclosure changes; no key default or scroll amount is emulated.
+  await userEvent.click(canvas.getByRole('button', { name: 'Jump to loaded checkpoint 1300' }))
+  await waitFor(() => expect(row(1300) !== null, 'History keyboard setup: current mid-list turn').toBe(true))
+  await focusHistoryKeyboardRow(lane, 1300)
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
   const beforePageUp = lane.scrollTop
   await userEvent.keyboard('{PageUp}')
   await waitFor(() => expect(lane.scrollTop).toBeLessThan(beforePageUp))
   // Empty success retains the oldest ID and must not trigger a request loop.
-  lane.focus()
+  await focusHistoryKeyboardRow(lane)
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
   const requestsBeforeEmpty = root.getAttribute('data-requests')
-  await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+  canvas.getByRole('button', { name: 'Deliver empty page' }).click()
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
   await expect(root).toHaveAttribute('data-page', 'Ready')
   await expect(root).toHaveAttribute('data-start', '200')
@@ -378,20 +480,20 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
   // Leaving and re-entering the boundary is new reading intent, not an automatic
   // empty-page loop: it must re-arm fetching without the fixture request button.
-  lane.focus()
+  await focusHistoryKeyboardRow(lane)
   await userEvent.keyboard('{PageDown}{PageDown}{PageDown}')
   await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-  await expect(lane.scrollTop).toBe(0)
+  await waitFor(() => expect(lane.scrollTop).toBe(0))
   await expect(canvas.getByRole('grid')).toHaveAttribute('aria-busy', 'true')
   await expect(Number(root.getAttribute('data-requests'))).toBe(Number(requestsBeforeEmpty) + 1)
-  await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+  canvas.getByRole('button', { name: 'Deliver older page' }).click()
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Failed'))
   await expect(await canvas.findByTestId('history-error')).toHaveTextContent('Earlier messages could not be loaded')
   await expect(root).toHaveAttribute('data-start', '200')
   const failedRequests = Number(root.getAttribute('data-requests'))
-  lane.focus()
+  await focusHistoryKeyboardRow(lane)
   await userEvent.keyboard('{Home}')
   lane.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -120 }))
   lane.dispatchEvent(new Event('scroll'))
@@ -417,7 +519,7 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
     expect(target.top).toBeLessThan(viewport.bottom)
   })
   await expect(canvas.queryByTestId('history-start')).toBeNull()
-  lane.focus()
+  await focusHistoryKeyboardRow(lane, 50)
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(lane.scrollTop).toBe(0))
   await expect(await canvas.findByTestId('history-start')).toHaveTextContent('Start of conversation')
@@ -437,15 +539,23 @@ async function exerciseNewerFollow({ canvasElement }: { canvasElement: HTMLEleme
   await userEvent.click(canvas.getByRole('button', { name: 'Jump to unloaded checkpoint 50' }))
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
   await userEvent.click(canvas.getByRole('button', { name: 'Follow latest' }))
-  await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight).toBeLessThanOrEqual(1))
+  await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight).toBeLessThanOrEqual(1), { timeout: 5000 })
   for (const start of [200, 100, 0]) {
-    if (start !== 200) await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
-    await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+    if (start !== 200) {
+      await waitFor(() => expect(root.getAttribute('data-page'), 'History detector: stale-jump').toBe('Ready'))
+      canvas.getByRole('button', { name: 'Request older page' }).click()
+    }
+    // Host transitions must commit separately: a same-task Request+Deliver would
+    // click a still-disabled delivery control and never adopt the next page.
+    await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+    await expect(canvas.getByRole('grid')).toHaveAttribute('aria-busy', 'true')
+    canvas.getByRole('button', { name: 'Deliver older page' }).click()
     await waitFor(() => expect(root).toHaveAttribute('data-start', String(start)))
+    await waitFor(() => expect(root.getAttribute('data-page'), 'History detector: stale-jump').toBe('Ready'))
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-    await expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight).toBeLessThanOrEqual(1)
+    await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight, 'History detector: stale-jump').toBeLessThanOrEqual(1), { timeout: 5000 })
   }
-  await expect(lane.querySelector('[data-embrace-entry-id="history/50"]')).toBeNull()
+  await expect(lane.querySelector('[data-embrace-entry-id="history/50"]'), 'History detector: stale-jump').toBeNull()
 }
 export const NewerFollowDark1440: Story = { play: exerciseNewerFollow }
 export const NewerFollowLight1440: Story = { args: { scheme: 'light' }, play: exerciseNewerFollow }
@@ -457,11 +567,16 @@ async function exerciseTouchRearm({ canvasElement }: { canvasElement: HTMLElemen
   const root = canvasElement.querySelector('main')!
   const lane = await canvas.findByTestId('transcript-scroll')
   await waitFor(() => expect(lane.querySelector('[data-testid="transcript-turn"]')).not.toBeNull())
-  lane.focus()
+  const oldest = await settleInitialHistoryPage(canvasElement, lane)
+  await focusHistoryKeyboardRow(lane)
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+  await waitFor(() => expect(lane.scrollTop).toBe(0))
+  await waitFor(() => expect(activeHistoryRow(lane, oldest) !== null, 'History setup: loaded head after RAC Home').toBe(true))
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  await waitFor(() => expect(lane.scrollTop).toBe(0))
   const requests = Number(root.getAttribute('data-requests'))
-  await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+  canvas.getByRole('button', { name: 'Deliver empty page' }).click()
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   await expect(root).toHaveAttribute('data-page', 'Ready')
 
@@ -490,8 +605,8 @@ async function exerciseTouchRearm({ canvasElement }: { canvasElement: HTMLElemen
   try {
     await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
     await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
-    await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
-    await waitFor(() => expect(root).toHaveAttribute('data-start', '200'))
+    canvas.getByRole('button', { name: 'Deliver older page' }).click()
+    await waitFor(() => expect(root).toHaveAttribute('data-start', String(Math.max(0, oldest - pageSize))))
   } finally {
     lane.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch', pointerId: 2, isPrimary: true, buttons: 0 }))
     lane.dispatchEvent(new Event('touchend', { bubbles: true }))
@@ -502,33 +617,38 @@ export const TouchRearmLight1440: Story = { args: { scheme: 'light' }, play: exe
 export const TouchRearmDark440: Story = { args: { narrow: true }, play: exerciseTouchRearm }
 export const TouchRearmLight440: Story = { args: { scheme: 'light', narrow: true }, play: exerciseTouchRearm }
 
-async function exerciseTouchAtZero({ canvasElement }: { canvasElement: HTMLElement }) {
+async function exerciseTouchAtZero({ canvasElement }: { canvasElement: HTMLElement }, detector: 'touch-latch' | 'touch-scroll-required' = 'touch-scroll-required') {
   const canvas = within(canvasElement)
   const root = canvasElement.querySelector('main')!
   const lane = await canvas.findByTestId('transcript-scroll')
   await waitFor(() => expect(lane.querySelector('[data-testid="transcript-turn"]')).not.toBeNull())
-  lane.focus()
+  const oldest = await settleInitialHistoryPage(canvasElement, lane)
+  await focusHistoryKeyboardRow(lane)
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-  await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+  await waitFor(() => expect(lane.scrollTop).toBe(0))
+  await waitFor(() => expect(activeHistoryRow(lane, oldest) !== null, 'History setup: loaded head after RAC Home').toBe(true))
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  await waitFor(() => expect(lane.scrollTop).toBe(0))
+  canvas.getByRole('button', { name: 'Deliver empty page' }).click()
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   await expect(root).toHaveAttribute('data-page', 'Ready')
-  await expect(lane.scrollTop).toBe(0)
+  await waitFor(() => expect(lane.scrollTop).toBe(0))
   const requests = Number(root.getAttribute('data-requests'))
   lane.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, touches: [new Touch({ identifier: 3, target: lane, clientY: 100 })] }))
   try {
     // No scroll write/event: overscroll at zero cannot produce upward movement.
     lane.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, touches: [new Touch({ identifier: 3, target: lane, clientY: 140 })] }))
-    await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
-    await expect(lane.scrollTop).toBe(0)
-    await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
-    await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+    await waitFor(() => expect(root.getAttribute('data-page'), `History detector: ${detector}`).toBe('Loading'))
+    await waitFor(() => expect(lane.scrollTop).toBe(0))
+    await expect(Number(root.getAttribute('data-requests')), `History detector: ${detector}`).toBe(requests + 1)
+    canvas.getByRole('button', { name: 'Deliver empty page' }).click()
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
     // The same touch sequence is consumed once even after another empty result.
     lane.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, touches: [new Touch({ identifier: 3, target: lane, clientY: 180 })] }))
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-    await expect(root).toHaveAttribute('data-page', 'Ready')
-    await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
+    await expect(root.getAttribute('data-page'), `History detector: ${detector}`).toBe('Ready')
+    await expect(Number(root.getAttribute('data-requests')), `History detector: ${detector}`).toBe(requests + 1)
   } finally {
     lane.dispatchEvent(new TouchEvent('touchend', { bubbles: true, touches: [] }))
   }
@@ -564,8 +684,10 @@ export const AllStates: Story = { render: args => <HistoryStates scheme={args.sc
   await expect(await failed.findByTestId('history-error')).toHaveTextContent('Earlier messages could not be loaded')
   await userEvent.click(failed.getByTestId('history-retry'))
   await expect(canvas.getByLabelText('History actions')).toHaveTextContent('Failed page retried.')
-  const more = within(canvas.getByRole('region', { name: 'More history example' })).getByTestId('transcript-scroll')
-  more.focus()
+  const moreExample = canvas.getByRole('region', { name: 'More history example' })
+  moreExample.scrollIntoView({ block: 'center' })
+  const more = within(moreExample).getByTestId('transcript-scroll')
+  await focusHistoryKeyboardRow(more)
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(canvas.getByLabelText('History actions')).toHaveTextContent('Older page requested.'))
 } }

@@ -131,7 +131,7 @@ export class ScrollController {
       this.userScrolling = false
     }
     let resizeFrame: number | undefined
-    const observer = new ResizeObserver(() => {
+    const geometryChanged = () => {
       // Correct visible geometry before paint; RAC's measured layout can settle
       // in the next frame, so retain the id/offset until the next reader input.
       if (this.pressed !== undefined) this.pendingAnchor = this.pressed
@@ -145,10 +145,34 @@ export class ScrollController {
         else if (this.following) element.scrollTop = element.scrollHeight
         this.geometry = { contentHeight: element.scrollHeight, viewportHeight: element.clientHeight }
       })
-    })
+    }
+    const observer = new ResizeObserver(geometryChanged)
     observer.observe(element)
-    const sizer = element.firstElementChild
-    if (sizer !== null) observer.observe(sizer)
+    const observedRows = new Set<Element>()
+    let sizer: Element | null = null
+    const observeMountedGeometry = () => {
+      const nextSizer = element.firstElementChild
+      if (sizer !== nextSizer) {
+        if (sizer !== null) observer.unobserve(sizer)
+        sizer = nextSizer
+        if (sizer !== null) observer.observe(sizer)
+      }
+      const mounted = new Set(element.querySelectorAll('[data-embrace-entry-id]'))
+      for (const row of observedRows) {
+        if (!mounted.has(row)) { observer.unobserve(row); observedRows.delete(row) }
+      }
+      for (const row of mounted) {
+        if (!observedRows.has(row)) { observedRows.add(row); observer.observe(row) }
+      }
+    }
+    // Measured entering rows can extend past RAC's current spacer without
+    // resizing that spacer. Observe only mounted rows, including replacements.
+    const mutations = new MutationObserver(() => {
+      observeMountedGeometry()
+      geometryChanged()
+    })
+    mutations.observe(element, { childList: true, subtree: true })
+    observeMountedGeometry()
     const press = (event: PointerEvent) => {
       if (!(event.target instanceof Element)) return
       const row = event.target.closest<HTMLElement>('[data-embrace-entry-id]')
@@ -178,6 +202,7 @@ export class ScrollController {
     element.addEventListener('scrollend', onScrollEnd, { passive: true })
     return () => {
       observer.disconnect()
+      mutations.disconnect()
       if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame)
       if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
       this.restoreFrame = undefined
