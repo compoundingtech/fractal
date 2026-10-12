@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { QuotaStoryHarness, QuotaUsageMatrix, quotaStoryDefaults, quotaStoryControls, quotaBrushPlay, quotaRefreshPlay } from './quota-design-story-harness.tsx'
-const meta = { title: 'Fractal/App/Quota/Usage page variants', component: QuotaStoryHarness, args: { ...quotaStoryDefaults, initialView: 'usage' }, argTypes: quotaStoryControls, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof QuotaStoryHarness>
+import { QuotaStoryHarness, QuotaUsageMatrix, quotaStoryDefaults, quotaStoryControls, quotaBrushPlay, quotaRefreshPlay, quotaControlPlay } from './quota-design-story-harness.tsx'
+const meta = { title: 'Fractal/App/Quota/Usage page variants', component: QuotaStoryHarness, args: { ...quotaStoryDefaults, initialView: 'usage' }, argTypes: quotaStoryControls, play: quotaControlPlay, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof QuotaStoryHarness>
 export default meta
 type Story = StoryObj<typeof meta>
 export const OverviewAndBrush: Story = { play: quotaBrushPlay }

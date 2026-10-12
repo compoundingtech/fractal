@@ -48,7 +48,7 @@ export function QuotaStoryHarness(args: QuotaStoryArgs) {
     data-quota-story data-quota-account-count={accounts.length} data-sort-key={state.sort.key} data-sort-direction={state.sort.direction} data-unit={state.unit} data-range={`${state.range[0]}:${state.range[1]}`} data-selected-day={state.selectedDay ?? ''} data-selected-account={state.selectedAccount ?? ''} data-view={state.view} data-collapsed={String(state.collapsed)} data-escaped={state.escaped} data-refreshed={String(state.refreshed)}>
     <ThemePortal>
       <div {...stylex.props(styles.proofToolbar)}>
-        <Button {...stylex.props(styles.button)} onPress={() => update({ refreshed: !state.refreshed, statusOverride: 'current' })}>Refresh snapshot</Button>
+        <Button {...stylex.props(styles.button)} onPress={() => update({ refreshed: !state.refreshed, statusOverride: state.refreshed ? undefined : 'current' })}>Refresh snapshot</Button>
         <Button {...stylex.props(styles.button)} onPress={() => update({ statusOverride: 'failed' })}>Simulate failed refresh</Button>
       </div>
       {usage ? <QuotaUsagePage landmarkContext={args.landmarkContext} accounts={accounts} days={args.empty ? [] : quotaDays} economics={args.empty ? [] : quotaEconomics} status={status} variant={args.usageVariant} unit={state.unit} stackBy={state.stackBy} range={state.range}
@@ -68,7 +68,28 @@ export const QuotaStatesMatrix = (args: QuotaStoryArgs) => <div {...stylex.props
 const storyRoot = (canvas: HTMLElement) => canvas.querySelector<HTMLElement>('[data-quota-story]')!
 const ids = (canvas: HTMLElement) => [...canvas.querySelectorAll('[data-quota-row]')].map(row => row.getAttribute('data-quota-row'))
 const defaultOrder = ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'spruce', 'cove', 'willow', 'unknown']
+/** Exercise the real controlled refresh callback, including a disabled-action control. */
+export const quotaControlPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-quota-story]')) {
+    const refresh = within(root).getByRole<HTMLButtonElement>('button', { name: 'Refresh snapshot' })
+    const before = root.dataset.refreshed
+    const after = before === 'true' ? 'false' : 'true'
+    refresh.disabled = true
+    try {
+      await userEvent.click(refresh)
+      await expect(waitFor(() => expect(root.dataset.refreshed).toBe(after), { timeout: 100 })).rejects.toThrow()
+    } finally {
+      refresh.disabled = false
+    }
+    await userEvent.click(refresh)
+    await waitFor(() => expect(root.dataset.refreshed).toBe(after))
+    await userEvent.click(refresh)
+    await waitFor(() => expect(root.dataset.refreshed).toBe(before))
+    root.dataset.quotaControlPassed = 'true'
+  }
+}
 export const quotaDensityPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+ await quotaControlPlay({ canvasElement })
  for (const drawer of canvasElement.querySelectorAll<HTMLElement>('[data-quota-drawer]')) {
   // React Aria's collection can populate after the first static render. Wait
   // for supplied inventory, not for the presence of already-rendered rows.
@@ -103,6 +124,7 @@ export const quotaKeyboardPlay = async ({ canvasElement }: { canvasElement: HTML
   await waitFor(() => expect(storyRoot(canvasElement).dataset.escaped).toBe('1'))
 }
 export const quotaBrushPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaControlPlay({ canvasElement })
   const canvas = within(canvasElement)
   const start = canvas.getByRole('slider', { name: /Range start/ })
   start.focus()

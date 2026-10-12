@@ -13,7 +13,7 @@ const sortNames: Record<QuotaSortKey, string> = { governing: 'governing usage', 
 const tokenFormat = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 })
 const usdFormat = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 })
 const amountText = (value: number | undefined, unit: 'usd' | 'tokens'): string => value === undefined
-  ? 'Unknown tok'
+  ? 'Unreported tok'
   : unit === 'usd' ? usdFormat.format(value) : `${tokenFormat.format(value)} tok`
 
 const resetText = (account: QuotaAccount, now: string): string => {
