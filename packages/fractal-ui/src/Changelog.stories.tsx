@@ -23,10 +23,10 @@ const scenario = (value: Scenario): { readonly state: ChangelogLoad; readonly ba
   state: value === 'loading' ? { _tag: 'Loading' } : value === 'failure' ? { _tag: 'Failed' } : { _tag: 'Ready', manifest: value === 'empty' ? { ...fixture, entries: [] } : fixture },
   baseline: value === 'first' ? initialSeen : { visited: true, entryIds: value === 'seen' ? fixture.entries.map((entry) => entry.id) : ['2026-10-10-reconnect'] },
 })
-const ChangelogStoryHarness = ({ mode = 'unseen', dark = true, width = 1440 }: { readonly mode?: Scenario; readonly dark?: boolean; readonly width?: number }) => {
+const ChangelogStoryHarness = ({ mode = 'unseen', dark = true, width = 1440, initiallyOpen = true }: { readonly mode?: Scenario; readonly dark?: boolean; readonly width?: number; readonly initiallyOpen?: boolean }) => {
   const current = scenario(mode)
-  const [open, setOpen] = React.useState(true)
-  const [cursor, setCursor] = React.useState(() => current.state._tag === 'Ready' ? acknowledgeEntryIds(current.state.manifest.entries.map((entry) => entry.id), current.baseline) : current.baseline)
+  const [open, setOpen] = React.useState(initiallyOpen)
+  const [cursor, setCursor] = React.useState(() => initiallyOpen && current.state._tag === 'Ready' ? acknowledgeEntryIds(current.state.manifest.entries.map((entry) => entry.id), current.baseline) : current.baseline)
   const [baseline, setBaseline] = React.useState(current.baseline)
   const [state, setState] = React.useState(current.state)
   return <main data-changelog-story="" data-scheme={dark ? 'dark' : 'light'} {...stylex.props(styles.canvas, width === 440 ? styles.narrow : styles.wide, dark ? assistantDarkTheme : assistantLightTheme)}>
@@ -171,11 +171,12 @@ const visibleStatePlay: NonNullable<Story['play']> = async ({ canvasElement, arg
 }
 const acknowledgementPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const body = within(canvasElement.ownerDocument.body)
+  const trigger = body.getByRole('button', { name: 'Changes, unread' })
+  await userEvent.click(trigger)
   const dialog = await body.findByRole('dialog', { name: 'Recent changes' })
   expect(within(dialog).getByRole('heading', { name: 'New since you last looked' })).toBeVisible()
   await userEvent.click(body.getByRole('button', { name: 'Close recent changes' }))
   await waitFor(() => expect(body.queryByRole('dialog', { name: 'Recent changes' })).toBeNull())
-  const trigger = body.getByRole('button', { name: 'Changes' })
   await waitFor(() => expect(trigger).toHaveFocus())
   await userEvent.click(trigger)
   const reopened = await body.findByRole('dialog', { name: 'Recent changes' })
@@ -202,13 +203,26 @@ export const LoadFailure1440Dark: Story = { args: { mode: 'failure' }, play: vis
 export const LoadFailure1440Light: Story = { args: { mode: 'failure', dark: false }, play: visibleStatePlay }
 export const LoadFailure440Dark: Story = { args: { mode: 'failure', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
 export const LoadFailure440Light: Story = { args: { mode: 'failure', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
-export const Loading: Story = { args: { mode: 'loading' }, play: visibleStatePlay }
-export const FirstVisit: Story = { args: { mode: 'first' }, play: visibleStatePlay }
-export const Acknowledgement: Story = { play: acknowledgementPlay }
+export const Loading1440Dark: Story = { args: { mode: 'loading' }, play: visibleStatePlay }
+export const Loading1440Light: Story = { args: { mode: 'loading', dark: false }, play: visibleStatePlay }
+export const Loading440Dark: Story = { args: { mode: 'loading', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
+export const Loading440Light: Story = { args: { mode: 'loading', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
+export const FirstVisit1440Dark: Story = { args: { mode: 'first' }, play: visibleStatePlay }
+export const FirstVisit1440Light: Story = { args: { mode: 'first', dark: false }, play: visibleStatePlay }
+export const FirstVisit440Dark: Story = { args: { mode: 'first', width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
+export const FirstVisit440Light: Story = { args: { mode: 'first', width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: visibleStatePlay }
+export const Acknowledgement1440Dark: Story = { args: { initiallyOpen: false }, play: acknowledgementPlay }
+export const Acknowledgement1440Light: Story = { args: { initiallyOpen: false, dark: false }, play: acknowledgementPlay }
+export const Acknowledgement440Dark: Story = { args: { initiallyOpen: false, width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: acknowledgementPlay }
+export const Acknowledgement440Light: Story = { args: { initiallyOpen: false, width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, play: acknowledgementPlay }
+export const OverflowLightDismiss1440Dark: Story = { render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
+export const OverflowLightDismiss1440Light: Story = { args: { dark: false }, render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
 export const OverflowLightDismiss440Dark: Story = { args: { width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
 export const OverflowLightDismiss440Light: Story = { args: { width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogOverflowStoryHarness {...args} />, play: overflowLightDismissPlay }
-export const DesktopAnchorDark: Story = { render: () => <ChangelogDesktopAnchorStoryHarness />, play: desktopAnchorPlay }
-export const DesktopAnchorLight: Story = { render: () => <ChangelogDesktopAnchorStoryHarness dark={false} />, play: desktopAnchorPlay }
+export const DesktopAnchor1440Dark: Story = { render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
+export const DesktopAnchor1440Light: Story = { args: { dark: false }, render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
+export const DesktopAnchor440Dark: Story = { args: { width: 440 }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
+export const DesktopAnchor440Light: Story = { args: { width: 440, dark: false }, globals: { viewport: { value: 'changelog440', isRotated: false } }, render: (args) => <ChangelogDesktopAnchorStoryHarness {...args} />, play: desktopAnchorPlay }
 const ChangelogStateCard = ({ mode, dark }: { readonly mode: Scenario; readonly dark: boolean }) => {
   const current = scenario(mode)
   const [state, setState] = React.useState(current.state)
