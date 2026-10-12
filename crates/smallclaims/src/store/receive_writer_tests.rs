@@ -555,3 +555,123 @@ fn background_receipt_finalizer_failure_rolls_back_the_whole_page_and_retry() {
         0
     );
 }
+
+#[test]
+fn trimming_the_highest_peer_batches_cannot_skip_new_local_envelopes() {
+    let source = node("birch");
+    let target = node("cedar");
+    let observer = node("elm");
+    let exchange = page(&source, &target, 8);
+    target
+        .receive_replication_exchange("birch", FLEET, &exchange)
+        .unwrap();
+    target.validate_replication_backlog().unwrap();
+    target.seal_local_batches().unwrap();
+    let frontier = target.seeded_batch_rowid.load(Ordering::Acquire);
+    {
+        // The checkpoint's physical deletion removes its claims, envelopes and orphan batches.
+        let mut connection = target.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let envelopes = exchange
+            .envelopes
+            .iter()
+            .map(|envelope| EnvelopeTombstone {
+                writer: envelope.writer.clone(),
+                sequence: envelope.sequence,
+                envelope_hash: envelope.hash.clone(),
+                accepted_at_unix_ms: envelope.accepted_at_unix_ms,
+            })
+            .collect::<Vec<_>>();
+        let claims = transaction
+            .prepare("SELECT id FROM claims")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|id| ClaimTombstone {
+                id: id.unwrap(),
+                operation_id: None,
+                writer: String::new(),
+                sequence: 0,
+                envelope_hash: String::new(),
+                subject: String::new(),
+                kind: String::new(),
+                actor: None,
+                predecessors: Vec::new(),
+                request_digest: None,
+                accepted_at_unix_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        super::checkpoint::delete_dropped_rows_tx(&transaction, &envelopes, &claims).unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(max_batch_rowid(&target.readers.get()).unwrap(), 0);
+    let claim = target
+        .append_claim(&ClaimInput {
+            subject: "note/after-adoption".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(max_batch_rowid(&target.readers.get()).unwrap() > frontier);
+    let exported = target
+        .export_replication_exchange(FLEET, &observer.replication_inventory().unwrap())
+        .unwrap();
+    assert_eq!(exported.envelopes.len(), 1);
+    observer
+        .receive_replication_exchange("cedar", FLEET, &exported)
+        .unwrap();
+    observer.validate_replication_backlog().unwrap();
+    assert!(observer.claim_by_id(&claim.id).unwrap().is_some());
+}
+
+#[test]
+fn an_old_sealing_frontier_recovers_skipped_batches_once_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    let claim;
+    {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        claim = store
+            .append_claim(&ClaimInput {
+                subject: "note/skipped-before-upgrade".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        // An old build reused rowid 1 after deleting rows through 8. It had already advanced
+        // the durable sealing cursor, so the retained claim never acquired its source envelope.
+        store
+            .connection
+            .write()
+            .execute_batch(
+                "DELETE FROM meta WHERE key='batch_rowid_high_water';
+             INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid','8');",
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    let observer = node("elm");
+    let exported = store
+        .export_replication_exchange(FLEET, &observer.replication_inventory().unwrap())
+        .unwrap();
+    assert_eq!(exported.envelopes.len(), 1);
+    observer
+        .receive_replication_exchange("cedar", FLEET, &exported)
+        .unwrap();
+    observer.validate_replication_backlog().unwrap();
+    assert!(observer.claim_by_id(&claim.id).unwrap().is_some());
+    let cursor = store.seeded_batch_rowid.load(Ordering::Acquire);
+    drop(store);
+    let reopened = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert_eq!(reopened.seeded_batch_rowid.load(Ordering::Acquire), cursor);
+}

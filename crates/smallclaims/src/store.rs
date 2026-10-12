@@ -75,6 +75,8 @@ pub use checkpoint::{
     verify_checkpoint_manifest,
 };
 pub use checkpoint_agreement::write_time;
+#[cfg(feature = "test-support")]
+pub use checkpoint_agreement::checkpoint_test_identity;
 pub use checkpoint_agreement::{
     CHECKPOINT_ATTENTION_AFTER_MS, CHECKPOINT_EXCUSED, CHECKPOINT_PROTOCOL, CHECKPOINT_SEALED,
     CHECKPOINT_VERIFIED, Certificate, CheckpointAction, CheckpointClaim, CheckpointContext,
@@ -938,46 +940,35 @@ impl Store {
         shared_memory: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
-        // Opening cannot seal recent work: the caller has not loaded its signing keys yet.
-        // Resume at the first batch still needing an envelope, so a restart seals it with
-        // the same person and agent keys instead of permanently losing its delegation signatures.
-        //
-        // Finding that batch meant probing the envelope table once per batch, 611,000 probes: 3 to
-        // 9 s on every start. Sealing stores how far it has gone in `meta` in the transaction
-        // that seals, so a start reads it. It is a lower bound that is always safe: sealing only
-        // seals batches that still lack an envelope, so a cursor behind the truth costs a longer
-        // range, never a missed batch. A store without the cursor, once, finds it the slow way.
-        let max_rowid: i64 = connection.query_row(
-            "SELECT COALESCE(MAX(rowid), 0) FROM batches",
-            [],
-            |row| row.get(0),
-        )?;
-        let stored_cursor: Option<i64> = connection
+        // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
+        // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
+        // leaves new local batches behind the frontier. Persist the allocation high water.
+        // Existing stores also rewind sealing once to recover batches an older build skipped;
+        // seal_local_batches processes that history in bounded writer loans with keys loaded.
+        let max_rowid = max_batch_rowid(&connection)?;
+        let stored_cursor: i64 = connection
             .query_row(
-                "SELECT value FROM meta WHERE key='seeded_batch_rowid'",
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='seeded_batch_rowid'",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| row.get(0),
             )
             .optional()?
-            .and_then(|value| value.parse().ok());
-        let seeded_batch_rowid = match stored_cursor {
-            Some(cursor) => cursor.min(max_rowid),
-            None => {
-                let found: i64 = connection.query_row(
-                    "SELECT COALESCE(
-                        (SELECT MIN(batches.rowid)-1 FROM batches WHERE NOT EXISTS (
-                            SELECT 1 FROM replica_envelopes WHERE batch_id=batches.id)),
-                        (SELECT MAX(rowid) FROM batches), 0)",
-                    [],
-                    |row| row.get(0),
-                )?;
-                connection.execute(
-                    "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid', ?1)",
-                    [found.to_string()],
-                )?;
-                found
-            }
+            .unwrap_or(0);
+        let transaction = connection.unchecked_transaction()?;
+        let initialized = transaction.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('batch_rowid_high_water',?1)",
+            [max_rowid.max(stored_cursor).to_string()],
+        )?;
+        let seeded_batch_rowid = if initialized != 0 {
+            transaction.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('seeded_batch_rowid','0')",
+                [],
+            )?;
+            0
+        } else {
+            stored_cursor
         };
+        transaction.commit()?;
         let index = current_index(&connection)?;
         // Older stores have no admission watermark. Startup recovery projects this index
         // before serving; subsequent admission chunks update it in their own transaction.
@@ -3309,6 +3300,25 @@ pub fn record_invalid_replica_envelope(
     Ok(())
 }
 
+/// Allocate a batch key that a trim or adoption cannot reuse behind the sealing frontier.
+/// Both local appends and admitted peer batches use this, in their source transaction.
+fn next_batch_rowid(transaction: &Connection) -> Result<i64> {
+    let rowid: i64 = transaction.query_row(
+        "SELECT MAX(
+             COALESCE((SELECT MAX(rowid) FROM batches),0),
+             COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                       WHERE key='batch_rowid_high_water'),0)
+         ) + 1",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT OR REPLACE INTO meta(key,value) VALUES('batch_rowid_high_water',?1)",
+        [rowid.to_string()],
+    )?;
+    Ok(rowid)
+}
+
 pub fn max_batch_rowid(connection: &Connection) -> Result<i64> {
     connection
         .query_row("SELECT COALESCE(MAX(rowid), 0) FROM batches", [], |row| {
@@ -4686,10 +4696,19 @@ pub fn validate_and_admit_envelope_tx(
             outcome.invalid += 1;
         }
     }
+    let batch_rowid = transaction
+        .query_row(
+            "SELECT rowid FROM batches WHERE id=?1",
+            [&batch.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(internal)?
+        .map_or_else(|| next_batch_rowid(transaction).map_err(internal), Ok)?;
     transaction
         .prepare_cached(
-            "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR IGNORE INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .map_err(internal)?
         .execute(params![
@@ -4699,6 +4718,7 @@ pub fn validate_and_admit_envelope_tx(
                 batch.previous_hash,
                 batch.hash,
                 batch.accepted_at_unix_ms.to_string(),
+                batch_rowid,
             ])
         .map_err(internal)?;
     for (position, claim) in batch.claims.iter().enumerate() {
@@ -8448,8 +8468,8 @@ pub fn append_claim_record_tx(
         let hash = batch_header_hash(origin, sequence, previous_hash.as_deref(), now)?;
         let id = format!("batch/{origin}/{sequence}/{hash}");
         transaction.execute(
-            "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, origin, sequence, previous_hash, hash, now.to_string()],
+            "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms, rowid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, origin, sequence, previous_hash, hash, now.to_string(), next_batch_rowid(transaction)?],
         )?;
         id
     };

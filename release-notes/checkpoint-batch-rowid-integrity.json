@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Checkpoint adoption cannot make envelope sealing skip new local claims by reusing deleted batch rowids",
+  "replay": {"status": "changed", "detail": "On first open with this fix, reset the envelope-sealing frontier once. The existing 64-batch sealing chunks revisit retained batches with signing keys loaded and recover local batches skipped by older builds. No graph projection replay is added."},
+  "schema": {"status": "none", "detail": "No table, column or index changes. Transactional batch_rowid_high_water metadata prevents reuse of deleted batch keys in both local append and peer admission."},
+  "rules": {"status": "none", "detail": "Checkpoint rules, proof invariants, certificates and manifests are unchanged."},
+  "compatibility": {"status": "none", "detail": "Batch rowids are local scan keys and are not part of signed batch or envelope identities. Older peers retain the same wire protocol."},
+  "downtime": {"status": "none", "detail": "No downtime beyond the normal daemon restart. Existing stores revisit retained batch headers once in bounded sealing chunks; already sealed batches are skipped."},
+  "manual": {"status": "none", "detail": "No manual repair. Reachable-member read-only counts found zero retained claims without a source envelope or a claim tombstone."},
+  "recovery": {"status": "changed", "detail": "Deploy forward. An older writer can reintroduce rowid reuse and skipped envelope sealing after checkpoint deletion."}
+}

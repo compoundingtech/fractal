@@ -12,6 +12,7 @@ autotests = false
 test-support = []
 # Opt in only in Performance; ordinary workspace checks need not build a second test binary.
 perf-load = []
+convergence-audit = []
 
 [dependencies]
 anyhow = "1"
@@ -111,6 +112,11 @@ path = "tests/integration.rs"
 name = "perf_load"
 path = "tests/perf_load.rs"
 required-features = ["perf-load"]
+
+[[test]]
+name = "convergence_audit"
+path = "tests/convergence_audit.rs"
+required-features = ["convergence-audit"]
 
 [[test]]
 name = "api_accept"
