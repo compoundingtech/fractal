@@ -145,6 +145,9 @@ type OpenSubagent = {
   /** The subagent session's newest context, asked whether the session is still busy. */
   ctx: ExtensionContext;
   reportedAt: number;
+  /** Human waits belong to this subagent, never to the top-level seat. */
+  pendingAsks: Set<string>;
+  pendingApproval: boolean;
 };
 
 /**
@@ -231,6 +234,13 @@ const SUBAGENT_PROGRESS_MS = 10_000;
 const SUBAGENT_HEARTBEAT_MS = 60_000;
 const SUBAGENT_SILENT_MS = 5 * 60_000;
 const SUBAGENT_ACTIVITY = new Set(["message_end", "tool_execution_start", "tool_execution_end"]);
+
+/** Reject rather than truncate identities: truncation would merge distinct subagents. */
+const subagentText = (value: unknown, maxBytes: number) => {
+  if (typeof value !== "string") return undefined;
+  const text = value.trim();
+  return text && Buffer.byteLength(text, "utf8") <= maxBytes ? text : undefined;
+};
 
 /**
  * Compile-time coupling to the pinned pi declarations for the surfaces the context producer reads.
@@ -879,6 +889,13 @@ export default function (pi: ExtensionAPI) {
       }
       if (!idleProof(ctx)) return;
       clearInterval(poller);
+      // Restored asks need this idle observation to drive their existing retry handshake,
+      // but retain their own delivery fence until reopening or timeout resolves it.
+      if (!state.restoringAsk) {
+        state.running = false;
+        toolCallsInFlight().clear();
+        if (heldMessages().length > 0) void release();
+      }
       sendFrame({ type: "state", state: "idle" });
     }, IDLE_POLL_MS);
     poller.unref?.();
@@ -917,10 +934,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
     try {
-      // `deliverAs` is required only while a turn is streaming, and an idle send that carries
-      // one is rejected, so the idle proof selects the call shape. It never selects the
-      // policy. Not optional-chained: reading a missing idle proof as "idle" would silently
-      // turn every mid-turn delivery into a plain send.
+      // Positive idle selects a plain send; streaming delivery retains the requested mode.
+      // Not optional-chained: reading a missing idle proof as "idle" would silently turn
+      // every mid-turn delivery into a plain send. This selects timing, not message policy.
       if (first.ctx.isIdle()) {
         await pi.sendUserMessage(content);
       } else {
@@ -975,6 +991,12 @@ export default function (pi: ExtensionAPI) {
   /** Deliver a message from the channel now, or hold it while omp is running a turn. */
   const receive = (message: HeldMessage): Promise<void> => {
     heldMessages().push(message);
+    if (!state.pendingAskToolCallId && !state.pendingApproval && !state.restoringAsk &&
+      idleProof(message.ctx)) {
+      state.running = false;
+      toolCallsInFlight().clear();
+      return release();
+    }
     if (state.running || toolCallsInFlight().size > 0) {
       armHoldCap();
       return Promise.resolve();
@@ -1164,33 +1186,52 @@ export default function (pi: ExtensionAPI) {
   const heartbeat = () => {
     const now = Date.now();
     for (const [id, open] of state.subagents ?? []) {
-      if (subagentBusy(open.ctx)) reportSubagent(open, now);
+      // Native omp keeps foreground tools (including asks and approvals) inside the busy run.
+      // Event caches are not liveness evidence: a lost resolution must not renew an idle child.
+      const busy = subagentBusy(open.ctx);
+      if (!busy) {
+        open.pendingAsks.clear();
+        open.pendingApproval = false;
+      }
+      if (busy) reportSubagent(open, now);
       // st has ended a run this quiet; forget it so the heartbeat stops with the last run.
       else if (now - open.reportedAt >= SUBAGENT_SILENT_MS) closeSubagent(id);
     }
   };
   const observeSubagent = (event: string, payload: unknown, ctx: ExtensionContext) => {
     const agent = record(record(ctx)?.agent);
-    const id = typeof agent?.id === "string" ? agent.id.trim() : "";
+    const id = subagentText(agent?.id, 256);
     if (!id) return;
-    const name = typeof agent?.name === "string" ? agent.name.trim() : "";
+    const name = subagentText(agent?.name, 128);
     const frame = { type: "subagent", id, ...(name ? { name } : {}) };
     const running = (state.subagents ??= new Map<string, OpenSubagent>());
     const open = running.get(id);
     if (open) open.ctx = ctx;
     const now = Date.now();
+    const tool = record(payload);
+    const callId = subagentText(tool?.toolCallId, 256);
+    if (open) {
+      if ((event === "tool_call" || event === "tool_execution_start") &&
+        tool?.toolName === "ask" && callId) open.pendingAsks.add(callId);
+      if ((event === "tool_result" || event === "tool_execution_end") && callId) {
+        open.pendingAsks.delete(callId);
+      }
+      if (event === "tool_approval_requested") open.pendingApproval = true;
+      if (event === "tool_approval_resolved") open.pendingApproval = false;
+    }
     if (event === "agent_start") {
-      running.set(id, { frame, ctx, reportedAt: now });
+      running.set(id, { frame, ctx, reportedAt: now, pendingAsks: new Set(), pendingApproval: false });
       sendFrame({ ...frame, event: "start" });
       state.subagentHeartbeat ??= setInterval(heartbeat, SUBAGENT_HEARTBEAT_MS).unref();
-    } else if (event === "turn_end") {
-      if (open) open.reportedAt = now;
-      sendFrame({ ...frame, event: "progress" });
+    } else if (event === "turn_end" && open) {
+      reportSubagent(open, now);
     } else if (SUBAGENT_ACTIVITY.has(event)) {
       if (open && now - open.reportedAt >= SUBAGENT_PROGRESS_MS) reportSubagent(open, now);
     } else if (event === "agent_end") {
       const end = record(payload) ?? {};
       if (end.willContinue === true) return;
+      if (open && (open.pendingAsks.size || open.pendingApproval) &&
+        subagentBusy(ctx) && subagentOutcome(end) === "completed") return;
       closeSubagent(id);
       sendFrame({ ...frame, event: "end", outcome: subagentOutcome(end) });
     } else if (event === "session_shutdown" && closeSubagent(id)) {
@@ -1241,6 +1282,10 @@ export default function (pi: ExtensionAPI) {
     // one print-mode run). Nothing is claimed from those — least of all about a credential.
     if (end.willContinue === true) {
       cancelSettle();
+      // Background work can continue after foreground streaming stops. A positive idle proof
+      // releases held mail without declaring the background job terminal; transient retries
+      // remain active until that same proof, and newer activity fences this poll.
+      watchSettle(ctx);
       return;
     }
     // The typed turn result, on every turn that ACTUALLY ended and in both directions. It is one

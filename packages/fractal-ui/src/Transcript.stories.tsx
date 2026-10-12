@@ -71,9 +71,12 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
   await userEvent.click(fold)
   await expect(fold).toHaveAttribute('aria-expanded', 'true')
-  await expect(canvas.getByTestId('tool-preview-remaining')).toHaveTextContent('+2 lines')
+  await expect(canvas.queryByTestId('tool-preview-remaining')).toBeNull()
   const previews = canvas.getAllByTestId('tool-detail-preview')
   await expect(previews).toHaveLength(2)
+  await expect(previews[0]!.querySelector('pre')).toBeNull()
+  for (const preview of previews) await userEvent.click(within(preview).getByRole('button', { name: 'Show raw input/output' }))
+  await expect(canvas.getByTestId('tool-preview-remaining')).toHaveTextContent('+2 lines')
   await waitFor(() => expect(previews[0]!.querySelector('[data-syntax-token~="keyword"]')).not.toBeNull())
   await expect(previews[0]).toHaveTextContent('export const visibleRows')
   await expect(previews[1]).toHaveTextContent('selection retained')
@@ -124,7 +127,7 @@ const rawInputData: TranscriptStoryData = (() => {
   const work = workLogTurnFromItems([turn.prompt!, ...items], { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: true, interrupted: false, startedAt: at, completeHistory: true, failureNote: 'The run stopped; your conversation and changes are retained.' })
   return { ...base, turns: [{ ...turn, items, work }] }
 })()
-/** Raw tool input stays out of row labels, previews and the failure overlay until the reader expands the row. */
+/** Row expansion shows intent first; exact input requires the second disclosure. */
 export const RawInputOnExpand: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={rawInputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const notice = await canvas.findByRole('alert')
@@ -135,12 +138,20 @@ export const RawInputOnExpand: Story = { render: args => <main {...stylex.props(
   await expect(canvas.queryAllByTestId('tool-raw-input')).toHaveLength(0)
   await expect(canvasElement.textContent).not.toContain(rawMarker)
   await userEvent.click(canvas.getByRole('button', { name: /^read src\/rows\.ts/ }))
+  await expect(canvas.queryAllByTestId('tool-raw-input')).toHaveLength(0)
+  const readPreview = canvas.getAllByTestId('tool-detail-preview')[0]!
+  await expect(readPreview).toHaveTextContent('success')
+  await userEvent.click(within(readPreview).getByRole('button', { name: 'Show raw input/output' }))
   const read = await canvas.findByTestId('tool-raw-input')
   await expect(read).toHaveTextContent(`"note": "${rawMarker}:raw/read"`)
   await expect(read).toHaveTextContent('"path": "src/rows.ts"')
   // Control: the whole-canvas absence probe that passed above now fails.
   await expect(canvasElement.textContent).toContain(rawMarker)
   await userEvent.click(canvas.getByRole('button', { name: /^run pnpm test rows/ }))
+  await expect(canvas.getAllByTestId('tool-raw-input')).toHaveLength(1)
+  const runPreview = canvas.getAllByTestId('tool-detail-preview')[1]!
+  await expect(runPreview).toHaveTextContent('error')
+  await userEvent.click(within(runPreview).getByRole('button', { name: 'Show raw input/output' }))
   await waitFor(() => expect(canvas.getAllByTestId('tool-raw-input')).toHaveLength(2))
   await expect(canvas.getAllByTestId('tool-raw-input')[1]).toHaveTextContent(`${rawMarker}:raw/run`)
   await expect(canvas.getByRole('alert').textContent).not.toContain(rawMarker)
@@ -158,6 +169,9 @@ export const RawInputDefaultDetail: Story = { render: args => <main {...stylex.p
   await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
   await expect(canvasElement.textContent).not.toContain(rawMarker)
   await userEvent.click(canvas.getByRole('button', { name: /^run/ }))
+  await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
+  await expect(canvas.getByTestId('work-log')).toHaveTextContent('success')
+  await userEvent.click(canvas.getByRole('button', { name: 'Show raw input/output' }))
   await expect(await canvas.findByTestId('tool-raw-input')).toHaveTextContent(`pnpm test rows # ${rawMarker}:default`)
   await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('selection retained')
   // Control: the absence probe that passed while collapsed now fails.
@@ -173,7 +187,7 @@ const withoutOutputData: TranscriptStoryData = { sync: { _tag: 'Live', since: no
   { id: 'silent', items: silentItems, work: workLogTurnFromItems(silentItems, { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: true, interrupted: false, startedAt: at, completeHistory: true, failureNote: 'The run stopped; your conversation and changes are retained.' }) },
   { id: 'live', items: liveItems, work: workLogTurnFromItems(liveItems, { kindFor: () => 'run', running: true, failed: false, interrupted: false, startedAt: at }) },
 ] }
-/** A silent success, a failed call without output and an in-flight call each expand to their raw input alone. */
+/** Silent success, failure and in-flight calls retain both disclosure stages even without output. */
 export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={withoutOutputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const notice = await canvas.findByRole('alert')
@@ -187,6 +201,9 @@ export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.p
     await userEvent.click(row)
     await expect(row).toHaveAttribute('aria-expanded', 'true')
     const preview = row.parentElement!.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
+    await expect(within(preview).queryByTestId('tool-raw-input')).toBeNull()
+    await expect(preview).toHaveTextContent(index === 0 ? 'success' : index === 1 ? 'error' : 'running')
+    await userEvent.click(within(preview).getByRole('button', { name: 'Show raw input/output' }))
     await expect(within(preview).getByTestId('tool-raw-input')).toHaveTextContent(`"note": "${rawMarker}:${id}"`)
     // Only the input: no empty-output block or placeholder.
     await expect(preview.querySelectorAll('pre')).toHaveLength(1)
@@ -598,9 +615,18 @@ export const MidTurnHistoryLight: Story = { ...MidTurnHistory, args: { scheme: '
 export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const work = await within(canvasElement).findByTestId('work-log')
   await expect(work.querySelector(':scope > button, :scope > [role="button"]')).toBeNull()
-  const rows = work.querySelectorAll('[data-tool-status]')
+  const rows = work.querySelectorAll<HTMLElement>('[data-tool-status]')
   await expect(rows).toHaveLength(3)
-  for (const row of rows) await expect(row.querySelector('button, [role="button"], [data-row-disclosure]')).toBeNull()
+  for (const row of rows) {
+    await expect(row.querySelector('[data-row-disclosure]')).toBeNull()
+    await expect(row.querySelector('button[aria-label^="Open "]')).toBeNull()
+    const raw = within(row).queryByRole('button', { name: 'Show raw input/output' })
+    if (raw !== null) {
+      await expect(raw).toHaveAttribute('aria-expanded', 'false')
+      await userEvent.click(raw)
+      await expect(raw).toHaveAttribute('aria-expanded', 'true')
+    } else await expect(row).toHaveTextContent('No output')
+  }
   await expect(within(work).getByRole('button', { name: 'Thinking' })).toBeVisible()
   await expect(work).toHaveTextContent('export const last = visibleRows.at(-1)')
   await expect(work).toHaveTextContent('selection retained')
@@ -670,6 +696,7 @@ export const SemanticItems: Story = { render: args => <main {...stylex.props(sty
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 24s/ }))
   await userEvent.click(canvas.getByRole('button', { name: 'Thinking' }))
   await expect(canvas.getByTestId('tool-detail-preview')).toBeVisible()
+  await userEvent.click(canvas.getByRole('button', { name: 'Show raw input/output' }))
   await expect(canvas.getByTestId('tool-detail-preview')).toHaveTextContent('export const semantic = true')
   for (const text of ['User content retained.', 'System context retained.', 'Notice content retained.', 'Error notice retained.', 'Error detail retained.', 'Message handoff retained.', 'Message untitled-handoff', 'Event title retained.', 'Event body retained.', 'future.semantic.event', 'Status detail retained.', 'Usage · response · 123 input · 45 output', 'Reasoning content retained.', 'Assistant content retained.']) {
     await expect(canvas.getByText(text, { exact: false })).toBeVisible()

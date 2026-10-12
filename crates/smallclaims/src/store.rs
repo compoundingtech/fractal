@@ -56,6 +56,7 @@ pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
 mod checkpoint_completion;
+pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 pub mod heal;
@@ -70,7 +71,7 @@ pub use checkpoint::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
     CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView,
     CheckpointProof, ClaimTombstone, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone,
-    SealedSet, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
+    SealedSet, StoreCopy, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
     verify_checkpoint_manifest,
 };
 pub use checkpoint_agreement::write_time;
@@ -4939,9 +4940,11 @@ impl Store {
             .connection
             .clone()
             .expect("the pin holds its connection");
+        let timing = crate::sqlite::ReaderTiming::start();
         connection.execute_batch("BEGIN")?;
         // The first read starts the snapshot; every later read in `read` sees the same one.
         let index = current_index(&connection)?;
+        drop(timing);
         live.snapshot_started(&connection);
         crate::sqlite::push_pinned_reader(key, connection);
         pinned.registered = true;
@@ -6386,6 +6389,15 @@ impl Store {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
     }
 
+    /// An opaque process/Store-lifetime observation token plus its deferred flag, sampled
+    /// together. A changed token can invalidate cached consumers even if they missed the
+    /// pending interval. This is not a persisted cut or a certificate for replay/heal,
+    /// physical removal, OLD images or every projection path. Its existing generation wraps.
+    pub fn replication_projection_observation(&self) -> (u64, bool) {
+        let state = self.replication_projection_state.load(Ordering::Acquire);
+        (state, state & 1 != 0)
+    }
+
     pub fn projection_contention_generation(&self) -> u64 {
         self.projection_contention_generation.load(Ordering::Acquire)
     }
@@ -6568,6 +6580,7 @@ impl Store {
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
         let mut chunked = false;
+        let mut processed = 0_u64;
         loop {
             let mut connection = self.connection.write();
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
@@ -6597,15 +6610,15 @@ impl Store {
                 .optional()?
                 .flatten()
                 .unwrap_or(0);
-            let through = transaction
+            let (through, count) = transaction
                 .query_row(
-                    "SELECT MAX(store_index) FROM (
+                    "SELECT MAX(store_index), COUNT(*) FROM (
                 SELECT store_index FROM claims WHERE store_index>?1 AND store_index<=?2
                 ORDER BY store_index LIMIT ?3)",
                     params![frontier, target, PROJECTION_CHUNK_CLAIMS as i64],
-                    |row| row.get::<_, Option<u64>>(0),
-                )?
-                .unwrap_or(target.max(frontier));
+                    |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, u64>(1)?)),
+                )?;
+            let through = through.unwrap_or(target.max(frontier));
             progress(ProjectionProgress {
                 phase: "project-incremental",
                 frontier,
@@ -6720,11 +6733,14 @@ impl Store {
                     params![through, now_ms().to_string()],
                 )?;
                     transaction.commit()?;
+                    if !replayed {
+                        processed += count;
+                    }
                     progress(ProjectionProgress {
                         phase: "projection-committed",
                         frontier: through,
                         target,
-                        processed: None,
+                        processed: (!replayed).then_some(processed),
                         total: None,
                     });
                     // Snapshot while admission is excluded by the writer. Admission marks
@@ -7993,9 +8009,56 @@ pub fn repair_operations_tx(
     Ok(changed)
 }
 
+/// Reconcile every receipt with the complete canonical fold at this writer cut.
+/// Exact rows with a matching known-key logical cache receive no attempted DML.
+/// Damaged, stale or inconsistently cached rows are removed by rowid.
+/// This still scans complete input/receipt inventories and can rewrite every row.
 pub fn rebuild_operations_tx(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute("DELETE FROM operations", [])?;
-    for (id, (request_digest, canonical_claim_id, state)) in expected_operations(transaction)? {
+    let mut expected = expected_operations(transaction)?;
+    // `operations` is an ordinary rowid table. Inspect raw values: damaged NULL/BLOB or
+    // invalid UTF-8 identities must not make a typed reader overlook a stale receipt.
+    // Finish discovery and drop the statement before applying any mutations.
+    let obsolete = {
+        let mut statement = transaction.prepare(
+            "SELECT o.rowid, o.id, o.request_digest, o.canonical_claim_id, o.state,
+                    CASE WHEN typeof(o.id)='text' AND typeof(o.request_digest)='text'
+                           AND typeof(o.canonical_claim_id)='text' AND typeof(o.state)='text'
+                         THEN cached.row_json IS json_array(o.canonical_claim_id,o.id,o.request_digest,o.state)
+                         ELSE 0 END
+             FROM operations AS o
+             LEFT JOIN projection_digest_operation_rows AS cached ON cached.operation_id=o.id",
+        )?;
+        let mut rows = statement.query([])?;
+        // The joined comparison uses exactly refresh_operation's SQLite JSON encoding.
+        // CASE keeps NULL/BLOB storage out of json_array; raw byte comparisons below
+        // still reject invalid UTF-8 TEXT rather than granting it canonical authority.
+        let mut obsolete = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id = match row.get_ref(1)? {
+                rusqlite::types::ValueRef::Text(bytes) => std::str::from_utf8(bytes).ok(),
+                _ => None,
+            };
+            let canonical = id.and_then(|id| expected.get(id));
+            let correct = if let Some((digest, claim, state)) = canonical {
+                let exact_row = matches!(row.get_ref(2)?, rusqlite::types::ValueRef::Text(bytes) if bytes == digest.as_bytes())
+                    && matches!(row.get_ref(3)?, rusqlite::types::ValueRef::Text(bytes) if bytes == claim.as_bytes())
+                    && matches!(row.get_ref(4)?, rusqlite::types::ValueRef::Text(bytes) if bytes == state.as_bytes());
+                exact_row && row.get::<_, bool>(5)?
+            } else {
+                false
+            };
+            if correct {
+                expected.remove(id.expect("a matching receipt has a valid text identity"));
+            } else {
+                obsolete.push(row.get::<_, i64>(0)?);
+            }
+        }
+        obsolete
+    };
+    for rowid in obsolete {
+        transaction.execute("DELETE FROM operations WHERE rowid=?1", [rowid])?;
+    }
+    for (id, (request_digest, canonical_claim_id, state)) in expected {
         transaction.execute(
             "INSERT INTO operations(id, request_digest, canonical_claim_id, state) VALUES (?1, ?2, ?3, ?4)",
             params![id, request_digest, canonical_claim_id, state],

@@ -49,6 +49,7 @@ name = "phone_client"
 test = true
 
 [dev-dependencies]
+st3-schema = { path = "../st3-schema" }
 st3 = { path = "../st3" }
 tempfile = "3"
 axum = { version = "0.8", features = ["ws"] }
