@@ -104,8 +104,14 @@ function Lane({ args }: { args: ExploreArgs }) {
     <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root {...stylex.props(styles.thread)}>{turnBlocks.map((block, index) => <React.Fragment key={block.id}><Block block={block} previous={turnBlocks[index - 1]} turn={args.turn} kind={args.recommended && block.kind === 'System' ? 'K3' : args.kind} meta={args.meta} marker={args.recommended && block.kind === 'System'} />{index === 7 ? <div data-work-fixture {...stylex.props(styles.work)}><WorkLogV1 turn={workTurn} /></div> : null}</React.Fragment>)}</ThreadPrimitive.Root></EmbraceRuntimeProvider>
   </section>
 }
-function Explorer(args: ExploreArgs) {
-  const [, updateArgs] = useArgs<ExploreArgs>()
+function Explorer(initialArgs: ExploreArgs) {
+  const [, updateStoryArgs] = useArgs<ExploreArgs>()
+  const [probeArgs, setProbeArgs] = React.useState(initialArgs)
+  const args = initialArgs.probe ? probeArgs : initialArgs
+  // Probe interactions belong to their own mount, not Storybook's arg lifecycle.
+  const updateArgs = initialArgs.probe
+    ? (patch: Partial<ExploreArgs>) => setProbeArgs(current => ({ ...current, ...patch }))
+    : updateStoryArgs
   const turns = args.compareT ? dimensions.T.map(choice => choice.id) : [args.turn]
   const kinds = args.compareK ? dimensions.K.map(choice => choice.id) : [args.kind]
   const metas = args.compareM ? dimensions.M.map(choice => choice.id) : [args.meta]
