@@ -60,7 +60,8 @@ try {
     const guard = await strictStoryGuard(page, base)
     const row = { id, scheme, width, height: 900, pass: false }
     try {
-      await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}`)}`, { waitUntil: 'networkidle' })
+      // The guard awaits strict storyFinished; unrelated network idleness is not play readiness.
+      await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}`)}`, { waitUntil: 'domcontentloaded' })
       await guard.check()
       if (!guard.records.every(record => record.finished.every(event => event.payload.storyId === id))) {
         throw new Error('storyFinished evidence belongs to a different story')
