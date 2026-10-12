@@ -218,10 +218,12 @@ const withoutOutputData: TranscriptStoryData = { sync: { _tag: 'Live', since: no
 ] }
 /** One leading glyph per work row (visual language 2.5); a running row shows its state through the glyph colour. */
 const workGlyphProblems = (rows: readonly HTMLElement[]) => {
-  const leads = rows.map(row => row.querySelectorAll<HTMLElement>('[data-work-glyph]'))
-  const problems = leads.flatMap((lead, index) => lead.length === 1 && lead[0]!.querySelectorAll('svg').length === 1 ? [] : [`row ${index} has ${lead.length === 1 ? lead[0]!.querySelectorAll('svg').length : lead.length} leading glyphs`])
-  const running = leads.find(lead => lead[0]?.dataset.workGlyph === 'running')?.[0], settled = leads.find(lead => lead[0]?.dataset.workGlyph === 'read')?.[0]
-  return running !== undefined && settled !== undefined && getComputedStyle(running).color === getComputedStyle(settled).color ? [...problems, 'running glyph is not tinted'] : problems
+  // Every glyph before the label counts, wrapped in the lead slot or not.
+  const leading = (row: HTMLElement) => { const label = row.querySelector('span[title]')!; return [...row.querySelectorAll('svg[data-icon]')].filter(svg => svg.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).length }
+  const problems = rows.flatMap((row, index) => leading(row) === 1 && row.querySelectorAll('[data-work-glyph] svg[data-icon]').length === 1 ? [] : [`row ${index} has ${leading(row)} leading glyphs`])
+  const lead = (glyph: string) => rows.map(row => row.querySelector<HTMLElement>(`[data-work-glyph="${glyph}"]`)).find(Boolean)
+  const running = lead('running'), settled = lead('read')
+  return running && settled && getComputedStyle(running).color === getComputedStyle(settled).color ? [...problems, 'running glyph is not tinted'] : problems
 }
 /** Silent success, failure and in-flight calls retain both disclosure stages even without output. */
 export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={withoutOutputData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
@@ -233,7 +235,8 @@ export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.p
   await expect(workGlyphProblems(rows)).toEqual([])
   // Control: a second leading glyph and an untinted running glyph are both rejected, then restored.
   const readLead = rows[0]!.querySelector<HTMLElement>('[data-work-glyph]')!, runningLead = rows[2]!.querySelector<HTMLElement>('[data-work-glyph]')!
-  const extra = readLead.appendChild(readLead.querySelector('svg')!.cloneNode(true))
+  const extra = readLead.querySelector('svg')!.cloneNode(true) as SVGSVGElement
+  readLead.after(extra)
   runningLead.style.color = getComputedStyle(readLead).color
   await expect(workGlyphProblems(rows)).toEqual(['row 0 has 2 leading glyphs', 'running glyph is not tinted'])
   extra.remove()
