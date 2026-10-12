@@ -1,5 +1,5 @@
 // Generated; do not edit. Inputs: src/schema.ts, src/bindings.ts, src/projection.ts, src/generator.ts, src/registry.ts, ../schema-registry/rust/Cargo.toml, ../schema-registry/rust/src/lib.rs, ../schema-registry/rust/src/numbers.rs, ../schema-registry/rust/src/runtime.rs, ../schema-registry/rust/src/bin/schema-registry-rust.rs, rust/Cargo.lock, package.json, ../../.oxfmtrc.json.
-// Regenerate: pnpm run generate; sha256=98ec91e43a5014363c3be94a7f06271f093511e84d57e41c793cffcb7a6df2df
+// Regenerate: pnpm run generate; sha256=432af657e02502dee2a6f3f1dfdddeae98bd9abfa988515b3f1ec1d47cf90344
 pub mod __schema_registry_runtime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error { Invalid(String) }
@@ -309,7 +309,7 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyMissionName { fn des
 pub struct AgentTraceRuntimeV1WhyMissionRun(String);
 impl AgentTraceRuntimeV1WhyMissionRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^[0-9a-f]{32}$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:[0-9a-f]{32}|mission-run\\/(?:[a-z0-9][a-z0-9._-]*\\/)+[0-9a-f]{32})$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: minLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyMissionRun: pattern".into())); }
@@ -340,7 +340,7 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1WhyStepName { fn deseri
 pub struct AgentTraceRuntimeV1WhyStepRun(String);
 impl AgentTraceRuntimeV1WhyStepRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^[0-9a-f]{32}$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^(?:work-)?[0-9a-f]{32}$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: minLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1WhyStepRun: pattern".into())); }
@@ -503,7 +503,7 @@ impl<'de> serde::Deserialize<'de> for AgentTraceRuntimeV1HowIssuanceVariant0Tag 
 pub struct AgentTraceRuntimeV1HowIssuanceVariant0StepRun(String);
 impl AgentTraceRuntimeV1HowIssuanceVariant0StepRun { #[must_use] pub fn as_str(&self) -> &str { &self.0 }
 pub(crate) fn validate(value: &str) -> Result<(), self::__schema_registry_runtime::Error> {
-static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^step-run\\/[0-9a-f]{32}\\/[a-z0-9][a-z0-9._-]*$").expect("schema pattern"));
+static PATTERN_2: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new("^step-run\\/(?:work-)?[0-9a-f]{32}\\/[a-z0-9][a-z0-9._-]*$").expect("schema pattern"));
 if value.is_empty() { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: minLength".into())); }
 if !self::__schema_registry_runtime::is_js_trimmed(value) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: pattern".into())); }
 if value.is_empty() || value.contains(['\r', '\n']) { return Err(self::__schema_registry_runtime::Error::Invalid("AgentTraceRuntimeV1HowIssuanceVariant0StepRun: pattern".into())); }

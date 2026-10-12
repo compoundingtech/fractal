@@ -198,6 +198,15 @@ impl Drop for Daemon {
 
 #[tokio::test]
 async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
+    check_trace_claim_complete(false).await;
+}
+
+#[tokio::test]
+async fn ad_hoc_post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
+    check_trace_claim_complete(true).await;
+}
+
+async fn check_trace_claim_complete(ad_hoc: bool) {
     use st3::agent_trace::issuer::{self, Facts};
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
@@ -214,13 +223,31 @@ mission "trace-check" state="ready" {
     }).unwrap();
     daemon.store.apply_as(&intent, &preview.subject_tokens, "trace-mission", Some("person/avery")).unwrap();
     daemon.start().await;
-    let opened = daemon.ok(&["missions", "start", "trace-check", "--workspace",
-        root.path().to_str().unwrap(), "--as", "person/avery"]).await;
-    let run = opened["mission_run"]["subject"].as_str().unwrap();
+    let opened = if ad_hoc {
+        daemon.ok(&["work", "start", "Check trace lifecycle", "--as", ALDER]).await
+    } else {
+        daemon.ok(&["missions", "start", "trace-check", "--workspace",
+            root.path().to_str().unwrap(), "--as", "person/avery"]).await
+    };
+    let run = if ad_hoc { opened["run"].as_str().unwrap() }
+        else { opened["mission_run"]["subject"].as_str().unwrap() };
     let reconciler = st3::reconcile::Reconciler::new(
         daemon.store.clone(), Arc::new(NoRuntime), "example".into(), Arc::new(Notify::new()),
     );
     reconciler.reconcile_once().unwrap();
+    // The process-free reconciler advances mission readiness but has no physical PTY.
+    // Restore the fixture's explicit live harness observation before claiming work.
+    for (kind, fields) in [
+        ("runtime.observed", json!({"runtime_id":"example/alder",
+            "incarnation_id":"alder-one","status":"running","reachability":"local"})),
+        ("harness.observed", json!({"incarnation_id":"alder-one","state":"ready"})),
+    ] {
+        daemon.store.append_claim(&ClaimInput {
+            subject: ALDER.into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
     let run_view = daemon.store.mission_run_steps(run, false).unwrap().unwrap();
     let step = run_view.steps[0].subject.as_str();
     let path = root.path().join("agent-trace.json");

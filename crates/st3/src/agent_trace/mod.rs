@@ -1,10 +1,10 @@
 //! Agent Trace runtime/v1 is owned by the agent-trace schema registry.
 //! `generated.rs` is the standalone generated binding, copied without modification.
-//! Generator input fingerprint: 98ec91e43a5014363c3be94a7f06271f093511e84d57e41c793cffcb7a6df2df.
-//! Binding bytes SHA-256: 7068b6cdbf6094b198b84a944722a8e84ab24a855cf420ba8ce1ee0f7c45aadc.
+//! Generator input fingerprint: 432af657e02502dee2a6f3f1dfdddeae98bd9abfa988515b3f1ec1d47cf90344.
+//! Binding bytes SHA-256: 46c1374c9fa1c4be0f588c1755e0536a6e9ce9987bca45e9f1ce301e35d0a6b2.
 //! Runtime documents are private local execution context, not public display text.
 //! Source authority: `agent-trace-runtime/v1`, dotfiles `flakes/agent-trace/generated/AgentTraceRuntimeV1.rs`.
-//! Source revision: dotfiles f8584c6f419a6edcee103e96cdd5c6243e8a8ceb.
+//! Source revision: dotfiles 52c711cd30b4b68e7b4bc03fb8c2539be5cbca66.
 
 #[rustfmt::skip]
 #[allow(dead_code, clippy::all, clippy::pedantic)]
@@ -22,7 +22,7 @@ mod tests {
     fn vendored_authority_has_not_been_hand_edited() {
         assert_eq!(
             hex::encode(Sha256::digest(include_bytes!("generated.rs"))),
-            "7068b6cdbf6094b198b84a944722a8e84ab24a855cf420ba8ce1ee0f7c45aadc",
+            "46c1374c9fa1c4be0f588c1755e0536a6e9ce9987bca45e9f1ce301e35d0a6b2",
             "re-vendor the generated authority; never edit its definition by hand",
         );
     }
