@@ -175,6 +175,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
               const accountEvidence = `${account.label} · ${account.provider} · ${account.plan} · ${quotaStateLabels[account.state]}`
               const amountEvidence = amount.value === undefined ? 'Tokens Unreported' : `${amount.value} ${amount.unit === 'usd' ? 'USD' : 'tokens'}`
               const resetEvidence = `${reset === '—' ? 'Governing reset Unreported' : `Governing reset ${reset}`}${governing?.resetAt === undefined ? '' : ` · ${governing.resetAt}`} · ${account.resetCount === undefined ? 'Reset count Unreported' : `${account.resetCount} reported resets`}`
+              const moreEvidence = `Open all ${account.windows.length} windows, amount and reset evidence for ${account.label}`
               return <Row key={row.id} id={row.id} textValue={account.label} data-quota-row={account.id} data-quota-account-label={account.label} data-quota-state={account.state} {...stylex.props(usageMeterGrid.row, styles.row)}>
                 <Cell data-quota-cell="account" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
                   <div {...stylex.props(styles.accountLine)} title={accountEvidence}>
@@ -192,10 +193,10 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
                 </Cell>)}
                 <Cell data-quota-cell="amount" textValue={amountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.amountColumn)}><span title={amountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.amount)}><span aria-hidden="true">{amountText(amount.value, amount.unit)}</span><VisuallyHidden><span data-quota-full-value>{amountEvidence}</span></VisuallyHidden></span></Cell>
                 <Cell data-quota-cell="more" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
-                  <Button title={`Open all ${account.windows.length} windows, amount and reset evidence for ${account.label}`} onPress={() => props.onOpenUsage(account.id)} data-quota-more={omitted} {...stylex.props(styles.moreButton)}>
-                    <span data-quota-more-count {...stylex.props(styles.fullCount)}>+{omitted}</span>
-                    <span data-quota-more-count {...stylex.props(styles.foldedSecondaryCount)}>+{foldedCount}</span>
-                    <VisuallyHidden><span data-quota-more-description>{` Open all ${account.windows.length} windows, amount and reset evidence for ${account.label}`}</span></VisuallyHidden>
+                  <Button onPress={() => props.onOpenUsage(account.id)} data-quota-more={omitted} {...stylex.props(styles.moreButton)}>
+                    <span title={moreEvidence} data-quota-more-count {...stylex.props(styles.fullCount)}>+{omitted}</span>
+                    <span title={moreEvidence} data-quota-more-count {...stylex.props(styles.foldedSecondaryCount)}>+{foldedCount}</span>
+                    <VisuallyHidden><span data-quota-more-description>{` ${moreEvidence}`}</span></VisuallyHidden>
                   </Button>
                 </Cell>
               </Row>
