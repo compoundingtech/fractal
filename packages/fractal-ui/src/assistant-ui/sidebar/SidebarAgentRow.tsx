@@ -120,6 +120,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const host = item.host
   const metadata = React.useMemo(() => sidebarRowDescription(item), [item])
   const titleId = React.useId()
+  const statusWordId = React.useId()
   const descriptionId = React.useId()
   const ownerId = item.parentRef?.replace(/^agent\//, '') ?? item.id
   const clock: SidebarClock = { now: now! }
@@ -151,7 +152,10 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const durationField = item.duration._tag === 'Unknown' ? null : <span data-row-field="total-duration"><SidebarDuration duration={item.duration} /></span>
   const lastTurnField = item.lastTurn._tag === 'Unknown' ? null : <span data-row-field="last-turn"><SidebarTime at={item.lastTurn.at} {...clock} kind={item.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>
   const content = <>
-    <span data-row-column="title" {...stylex.props(styles.title, variant === 'SR-2' && item.children.length > 0 && styles.hasChildren)}>{rowGlyph === 'SG-2' && <span aria-hidden="true" {...stylex.props(styles.statusWord)}>{item.statusLabel}</span>}<span id={titleId} data-row-column="title-text" {...stylex.props(styles.name)}><Highlight value={title} query={query} /></span></span>
+    <span data-row-column="title" {...stylex.props(styles.title, variant === 'SR-2' && item.children.length > 0 && styles.hasChildren)}>{rowGlyph === 'SG-2' && <span id={statusWordId} data-row-column="status-word" {...stylex.props(styles.statusWord)}>{item.statusLabel}</span>}<span id={titleId} data-row-column="title-text" {...stylex.props(styles.name)}><Highlight value={title} query={query} /></span></span>
+  </>
+  // The subtitle and SR-3 metadata are painted siblings of the row button, not its children: the button's visible text stays exactly its name (label-in-name) and every fact remains in the description.
+  const subtitle = <>
     {variant !== 'SR-1' && <SidebarRowSignals>
       {rowLayout === 'SR2-C' && <span data-row-field="status-label" data-row-retention="7">{item.statusLabel}</span>}
       {extraSignals.includes('X-work') && item.description !== undefined && <span data-row-field="current-work" data-row-signal="X-work" data-row-retention="2">{item.description}</span>}
@@ -162,7 +166,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       {extraSignals.includes('X-model') && (item.model ?? item.harness) !== undefined && <span data-row-signal="X-model" data-row-retention="1">{item.model ?? item.harness}</span>}
       {extraSignals.includes('X-pr') && (item.pullRequest ?? item.branch ?? item.worktree) !== undefined && <span data-row-signal="X-pr" data-row-retention="0">{item.pullRequest === undefined ? item.branch ?? item.worktree : `#${item.pullRequest.number}`}</span>}
     </SidebarRowSignals>}
-    <span aria-hidden="true" {...stylex.props(styles.metadata, variant !== 'SR-3' && styles.hidden)}>{[item.description, item.harness, item.model, item.branch, item.worktree, item.pullRequest === undefined ? undefined : `PR #${item.pullRequest.number}`].filter((part): part is string => part !== undefined).join(' / ')}</span>
+    <span {...stylex.props(styles.metadata, variant !== 'SR-3' && styles.hidden)}>{[item.description, item.harness, item.model, item.branch, item.worktree, item.pullRequest === undefined ? undefined : `PR #${item.pullRequest.number}`].filter((part): part is string => part !== undefined).join(' / ')}</span>
   </>
   const rowStyle = stylex.props(styles.row)
   return <div ref={hoverLifetime} data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') { clearTimeout(hoverTimer.current); setHoverOpen(false) }; if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() } }}>
@@ -171,7 +175,8 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
       <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
       <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>
       {/* The visible title is the whole name (label-in-name); status and every reported fact live in the hidden description. The custom hover card is the only hover disclosure, so no native title appears in this subtree. */}
-      {inTree ? <div aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} {...rowStyle}>{content}</div> : <Button aria-labelledby={titleId} aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button>}
+      {inTree ? <div aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} {...rowStyle}>{content}</div> : <Button aria-labelledby={rowGlyph === 'SG-2' ? `${statusWordId} ${titleId}` : titleId} aria-describedby={descriptionId} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button>}
+      {subtitle}
       <VisuallyHidden><span id={descriptionId} data-row-description>{metadata}</span></VisuallyHidden>
       <div {...stylex.props(styles.actions)}>
         <DialogTrigger><TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}><VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={() => setHoverOpen(false)} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden><Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger><Popover triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={item} {...clock} /></Dialog></Popover></DialogTrigger>
@@ -211,7 +216,7 @@ const styles = stylex.create({
   timeCovered: { position: 'relative', visibility: 'hidden' },
   quickOpen: { position: 'absolute', insetInlineEnd: 0, insetBlock: 0, zIndex: 2, visibility: 'visible', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, boxSizing: 'border-box', padding: s.zero, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', ':hover': { backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   metric: { display: 'inline-flex', alignItems: 'baseline', gap: s.sm, flexShrink: 0 }, scope: { fontSize: t.microSize, color: ink.fgSoft },
-  metadata: { gridColumn: '1 / -1', gridRow: '3', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fgSoft, fontSize: t.denseSize },
+  metadata: { gridColumn: '2 / -1', gridRow: '3', pointerEvents: 'none', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fgSoft, fontSize: t.denseSize },
   actions: { display: 'contents' }, iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, minHeight: g.controlSm, borderWidth: 0, padding: s.zero, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   menuButton: { gridColumn: '1', gridRow: '2', width: g.icon, opacity: 0 }, menuVisible: { opacity: 1 }, menuSingle: { gridColumn: '3', gridRow: '1' },
   childrenToggle: { gridColumn: '3', gridRow: '2', gap: s.xs2, width: g.controlSm }, childrenSingle: { gridRow: '1' }, childrenTop: { gridRow: '1', width: 'max-content', minWidth: g.icon },

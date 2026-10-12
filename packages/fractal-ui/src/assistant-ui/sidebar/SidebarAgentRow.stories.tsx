@@ -59,10 +59,8 @@ async function assertRowNames(canvasElement: HTMLElement) {
     const title = row.querySelector('[data-row-column="title-text"]')!.textContent!
     await expect(title).toBe(fixture.title)
     await expect(button).toHaveAccessibleName(fixture.title)
-    // Label-in-name: the Button's exposed visible text is exactly its name; the subtitle facts are aria-hidden and live in the description.
-    const exposed = button.cloneNode(true) as HTMLElement
-    for (const hidden of exposed.querySelectorAll('[aria-hidden="true"]')) hidden.remove()
-    await expect(exposed.textContent!.trim()).toBe(fixture.title)
+    // Label-in-name: the button's own visible text is exactly its name; subtitle facts are painted siblings and live in the description.
+    await expect(button.textContent).toBe(fixture.title)
     await expect(button).toHaveAccessibleDescription(sidebarRowDescription(fixture))
     await expect(button).toHaveAccessibleDescription(/Status: /)
     if (fixture.needsMe === true) await expect(button).toHaveAccessibleDescription(/Needs your attention/)
@@ -93,8 +91,16 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
     for (let node: HTMLElement | null = field; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
   }
   const row = canvasElement.querySelector<HTMLElement>('[data-testid="taste-agent-row"]')!
-  for (const field of [...row.querySelectorAll<HTMLElement>(':is([data-row-column], [data-row-field], [data-row-signal])')]) {
-    await userEvent.hover(field)
+  // Resolve, before any card opens, the element that actually receives the pointer at each painted field (subtitle fields pass input through to the row button).
+  const targets = [...row.querySelectorAll<HTMLElement>(':is([data-row-column], [data-row-field], [data-row-signal])')].flatMap(field => {
+    const box = field.getBoundingClientRect()
+    return box.width === 0 || box.height === 0 ? [] : [document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2) as HTMLElement]
+  })
+  await expect(targets.length).toBeGreaterThan(0)
+  for (const target of targets) {
+    await expect(row.contains(target)).toBe(true)
+    for (let node: HTMLElement | null = target; node !== null; node = node.parentElement) await expect(node.hasAttribute('title')).toBe(false)
+    await userEvent.hover(target)
     await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(1))
   }
   await userEvent.unhover(row)
