@@ -75,7 +75,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
     return () => observer.disconnect()
   }, [expanded, meta, block.id])
   const time = <time data-turn-time dateTime={block.at} title={exact(block.at)} {...stylex.props(styles.time)}>{clock(block.at)}</time>
-  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`Copy ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy)}>{copied ? 'Copied' : <Icon name="copy" />}</Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? exact(block.at) : 'Copy message'}</Tooltip></TooltipTrigger>
+  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy)}>{copied ? 'Copied' : <Icon name="copy" scale="status" />}</Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? exact(block.at) : 'Copy message'}</Tooltip></TooltipTrigger>
   const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time>{time}</span></> : null}</span>
   const content = seat
     ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
@@ -126,7 +126,7 @@ function Explorer(args: ExploreArgs) {
       <div data-control-k3-stacked {...stylex.props(styles.stackedInputControl)}><span data-input-title><span data-input-title-run>Sender<br />Wrapped title</span></span></div>
       <FocusRemountControl />
       <div data-control-missing-time>Reply without its own timestamp.</div>
-      <div data-control-nested-card {...stylex.props(styles.inputFrame)}><article {...stylex.props(styles.inputFrame)}><header>Duplicate card header</header>Nested input.</article></div>
+      <div data-control-nested-card data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Projected sender/time</header><article data-fractal-card {...stylex.props(styles.inputFrame)}><header data-message-header>Duplicate card header</header>Nested input.</article></div>
       <div data-control-covered-line {...stylex.props(styles.block)}><p>First line under a toolbar.</p><div data-seat-meta-overlay {...stylex.props(styles.seatMeta, styles.coveredLine)}>Covering metadata</div></div>
       <span data-control-unicode-glyph>↪</span>
       <strong data-control-heavy-sender>Heavy sender</strong>
@@ -171,7 +171,7 @@ const styles = stylex.create({
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
   seatMeta: { position: 'absolute', bottom: '100%', right: 0, height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
-  coveredLine: { top: 0, bottom: 'auto' },
+  coveredLine: { top: 0, bottom: 'auto', left: 0, right: 'auto' },
   collapsedMeta: { position: 'absolute', right: 0, top: 0, display: 'flex', gap: s.md, alignItems: 'center', height: g.toolRow },
   divider: { position: 'absolute', bottom: '100%', left: 0, right: 0, textAlign: 'center', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   summary: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, lineHeight: g.toolRow, whiteSpace: 'nowrap', borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { flex: '1 1 auto', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
@@ -237,7 +237,8 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await expect(lane.querySelector('[data-turn-content] [data-testid="answer-meta"], [data-turn-content] [data-testid="message-time"], [data-turn-content] footer')).toBeNull()
     for (const block of lane.querySelectorAll<HTMLElement>('[data-turn-block]')) {
       await expect(parseFloat(getComputedStyle(block).borderTopWidth)).toBe(0)
-      await expect(block.querySelector('article article')).toBeNull()
+      await expect(block.querySelector('[data-fractal-card] [data-fractal-card]')).toBeNull()
+      if (block.querySelector('[data-fractal-card]') !== null) await expect(block.querySelectorAll('[data-message-header]')).toHaveLength(1)
       for (const prose of block.querySelectorAll('[data-message-content] p')) await expect(getComputedStyle(prose).color).toBe(getComputedStyle(block).color)
       for (const header of block.querySelectorAll('[data-message-header]')) {
         if (block.getAttribute('data-turn-structure') !== `T${3}`) await expect(header.querySelector('svg')).not.toBeNull()
@@ -288,7 +289,8 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   await expect(stackedControl.querySelector<HTMLElement>('[data-input-title-run]')!.getClientRects().length).toBeGreaterThan(1)
   const nestedControl = canvasElement.querySelector<HTMLElement>('[data-control-nested-card]')!
   await expect(parseFloat(getComputedStyle(nestedControl).borderTopWidth)).toBeGreaterThan(0)
-  await expect(nestedControl.querySelector('article')).not.toBeNull()
+  await expect(nestedControl.querySelector('[data-fractal-card] [data-fractal-card]')).not.toBeNull()
+  await expect(nestedControl.querySelectorAll('[data-message-header]')).toHaveLength(2)
   const coveredControl = canvasElement.querySelector('[data-control-covered-line]')!
   await expect(coveredControl.querySelector('[data-seat-meta-overlay]')!.getBoundingClientRect().bottom).toBeGreaterThan(coveredControl.querySelector('p')!.getBoundingClientRect().top)
   await expect(lastLineRects(coveredControl as HTMLElement).some(line => intersects(coveredControl.querySelector('[data-seat-meta-overlay]')!.getBoundingClientRect(), line))).toBe(true)
