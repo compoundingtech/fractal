@@ -354,8 +354,23 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   await expect(overlapsPreceding()).toBe(false)
   const wrappedHeader = canvasElement.querySelector('[data-control-header-wrap]')!
   await expect(headerCollisions(wrappedHeader.querySelector('[data-message-header]')!, wrappedHeader.querySelector('[data-message-subject]')!).length).toBeGreaterThan(0)
-  const dottedSender = canvasElement.querySelector('[data-lane] [data-agent-id="Workspace.Review"]')
-  if (dottedSender !== null) await expect(dottedSender).toHaveAttribute('title', 'Workspace.Review')
+  for (const header of canvasElement.querySelectorAll('[data-lane] [data-message-header]')) await expect(header.querySelector('[title]')).toBeNull()
+  // The dotted identity is one focus stop named by its full identity; the kit tooltip shows it once on hover and on keyboard focus.
+  const identity = canvasElement.querySelector<HTMLElement>('[data-lane] [data-agent-id="Workspace.Review"] [data-agent-id-trigger]')
+  if (identity !== null) {
+    const tooltips = () => Array.from(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).filter(tip => tip.textContent === 'Workspace.Review')
+    await expect(identity).toHaveAccessibleName('Workspace.Review')
+    await userEvent.hover(identity)
+    await waitFor(() => expect(tooltips()).toHaveLength(1))
+    await userEvent.unhover(identity)
+    await waitFor(() => expect(tooltips()).toHaveLength(0))
+    await userEvent.keyboard('{Shift}')
+    identity.focus()
+    await waitFor(() => expect(tooltips()).toHaveLength(1))
+    await expect(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).toHaveLength(1)
+    identity.blur()
+    await waitFor(() => expect(tooltips()).toHaveLength(0))
+  }
   if (canvasElement.ownerDocument.defaultView!.innerWidth <= 440) {
     await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
   }
@@ -405,7 +420,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
     block.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch' }))
     await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('0'))
-    const extraStops = Array.from(block.querySelectorAll<HTMLElement>('button, a[href], [tabindex]')).filter(element => element !== copy && !element.hasAttribute('aria-expanded') && element.tabIndex >= 0 && element.getClientRects().length > 0)
+    const extraStops = Array.from(block.querySelectorAll<HTMLElement>('button, a[href], [tabindex]')).filter(element => element !== copy && !element.hasAttribute('aria-expanded') && !element.hasAttribute('data-agent-id-trigger') && element.tabIndex >= 0 && element.getClientRects().length > 0)
     await expect(extraStops).toHaveLength(0)
   }
   const focusControl = canvasElement.querySelector<HTMLElement>('[data-control-focus]')!

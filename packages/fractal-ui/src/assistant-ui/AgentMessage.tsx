@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Disclosure, DisclosurePanel, VisuallyHidden } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, Focusable, VisuallyHidden } from 'react-aria-components'
+import { Tooltip } from './composition/Controls'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import { Icon, type IconName } from './composition/Icons'
 import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
@@ -46,8 +47,15 @@ export interface AgentMessageProps {
 }
 
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels.
- * The path is one non-wrapping run; containers truncate it and the title carries the full identity. */
-export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id} title={id}>{id.includes('.') ? <><span aria-hidden="true" {...stylex.props(styles.agentPath)}>{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></> : id}</span>
+ * The path is one non-wrapping run that containers truncate. With `tooltip`, the run is one focus stop
+ * named by the full identity and the kit tooltip shows that identity on hover and keyboard focus. */
+export const AgentIdHierarchy = ({ id, tooltip = false }: { readonly id: string; readonly tooltip?: boolean }) => {
+  const nameId = React.useId()
+  if (!id.includes('.')) return <span data-agent-id={id}>{id}</span>
+  const path = <span aria-hidden="true" {...stylex.props(styles.agentPath)}>{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span>
+  if (!tooltip) return <span data-agent-id={id}>{path}<VisuallyHidden>{id}</VisuallyHidden></span>
+  return <span data-agent-id={id}><Tooltip label={id}><Focusable><span tabIndex={0} role="img" aria-labelledby={nameId} data-agent-id-trigger {...stylex.props(styles.agentTrigger)}>{path}</span></Focusable></Tooltip><VisuallyHidden id={nameId}>{id}</VisuallyHidden></span>
+}
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
 const MessageBody = ({ text, foreground = false }: { readonly text: string; readonly foreground?: boolean }) => {
@@ -93,8 +101,8 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
   const counterpart = variant._tag === 'Outgoing' ? to : from
   return <MessageFrame variant={variant} frameStyles={frameStyles} label={variant._tag === 'Outgoing' ? `Message to ${to ?? ''}` : `Message from ${from}`} subject={subject} header={<>
     {headerGlyph?._tag !== 'Hidden' ? <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name={headerGlyph?._tag === 'Icon' ? headerGlyph.name : variant._tag === 'Human' ? 'person' : 'message'} scale="status" /></span> : null}
-    <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span><strong {...stylex.props(styles.sender)}>{counterpart !== undefined ? <AgentIdHierarchy id={counterpart} /> : null}</strong>{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta)}> → <AgentIdHierarchy id={to} /></span> : null}{via !== undefined ? <span {...stylex.props(styles.meta)}> · <span>{({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span></span> : null}</span>
-    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <span {...stylex.props(styles.meta)} title={`Reply to ${replyTo}`}><Icon name="arrow-left" scale="status" /></span> : null}
+    <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span><strong {...stylex.props(styles.sender)}>{counterpart !== undefined ? <AgentIdHierarchy id={counterpart} tooltip /> : null}</strong>{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta)}> → <AgentIdHierarchy id={to} tooltip /></span> : null}{via !== undefined ? <span {...stylex.props(styles.meta)}> · <span>{({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span></span> : null}</span>
+    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <Tooltip label={`Reply to ${replyTo}`}><Focusable><span tabIndex={0} role="img" aria-label={`Reply to ${replyTo}`} {...stylex.props(styles.meta, styles.agentTrigger)}><Icon name="arrow-left" scale="status" /></span></Focusable></Tooltip> : null}
     {delivery?._tag === 'BroadcastCopy' ? <span {...stylex.props(styles.chip)}>broadcast · {delivery.recipients} seats</span> : arrivedWhileWorking ? <span {...stylex.props(styles.chip)}>arrived while working</span> : null}
     {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label={`Copy id`} {...stylex.props(styles.headerAction, styles.copy)} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}
     {id !== undefined && (onCopyId === undefined || onCopy !== undefined) ? <span {...stylex.props(styles.visuallyHidden)}>message/<AgentIdHierarchy id={id} /></span> : null}
@@ -186,6 +194,7 @@ const styles = stylex.create({
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   counterpart: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   agentPath: { display: 'inline-flex', alignItems: 'center', flexWrap: 'nowrap', whiteSpace: 'nowrap', verticalAlign: 'top', maxWidth: '100%' },
+  agentTrigger: { display: 'inline-flex', alignItems: 'center', maxWidth: '100%', verticalAlign: 'top', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid' } },
   direction: { flex: '0 0 auto', width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
   sender: { color: textVars.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium },
   time: { marginLeft: 'auto', flex: '0 0 auto', whiteSpace: 'nowrap', textAlign: 'right' },
