@@ -1672,14 +1672,46 @@ pub fn mission_order(world: &World, system: bool) -> Vec<&Mission> {
         .iter()
         .filter(|mission| system || !hidden_by_default(mission))
         .collect::<Vec<_>>();
-    missions.sort_by_key(|mission| (mission.word, mission.title.to_lowercase()));
+    missions.sort_by_key(|mission| (display_rank(mission.word), mission.title.to_lowercase()));
     missions
+}
+
+/// The order the list reads in: what is running first, then what waits on the person, then what
+/// is stuck, then what is paused, then what is finished (Nathan, 2026-10-11: the list was hard to
+/// navigate, with running work between stuck work and the paused).
+fn display_rank(word: Word) -> u8 {
+    match word {
+        Word::Working => 0,
+        Word::Queued => 1,
+        Word::Decision => 2,
+        Word::Stalled => 3,
+        Word::Unstaffed => 4,
+        Word::Unclaimed => 5,
+        Word::Watching => 6,
+        Word::Held => 7,
+        Word::Idle => 8,
+        Word::Failed => 9,
+        Word::Cancelled => 10,
+        Word::Done => 11,
+        Word::NotStarted => 12,
+    }
 }
 
 /// Missions a person rarely looks for: st's own, ones nobody has started, and failures from before
 /// today, which age out of the list (Nathan, 2026-10-02). `x` shows them.
 fn hidden_by_default(mission: &Mission) -> bool {
-    mission.system || mission.word == Word::NotStarted || failed_before_today(mission)
+    mission.system
+        || mission.word == Word::NotStarted
+        || failed_before_today(mission)
+        || finished_before_today(mission)
+}
+
+/// A mission that finished or was stopped before today: done is not news the next day.
+fn finished_before_today(mission: &Mission) -> bool {
+    matches!(mission.word, Word::Done | Word::Cancelled)
+        && chrono::DateTime::parse_from_rfc3339(&mission.updated_at).is_ok_and(|at| {
+            at.with_timezone(&chrono::Local).date_naive() < chrono::Local::now().date_naive()
+        })
 }
 
 /// A failed mission whose last change was before today, on this machine's clock. A failure with
@@ -1779,6 +1811,10 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
             (
                 count(|mission| !mission.system && failed_before_today(mission)),
                 "failed before today",
+            ),
+            (
+                count(|mission| !mission.system && finished_before_today(mission)),
+                "finished before today",
             ),
         ]
         .into_iter()
