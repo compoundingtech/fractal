@@ -79,7 +79,7 @@ export const ContextPanel = ({ lane, compact = false, showUnavailableReasons = t
     </svg>
     <div data-chart-axis-label {...stylex.props(styles.axis)}>{compact ? <><span>{usesTurns ? `Turn ${firstIndex}` : clock.format(start)}</span><span>{axisLabel}</span><span>{usesTurns ? `Turn ${lastIndex}` : clock.format(end)}</span></> : <><span>{clock.format(start)}</span><span>UTC · ● measured · ○ estimated</span><span>{clock.format(end)}</span></>}</div>
     {!compact && lane.compactions.length > 0 && <ol {...stylex.props(styles.compactions)} aria-label="Compaction context changes">{lane.compactions.map((compaction, index) => <li key={`${compaction.ts}-${index}`}><time dateTime={new Date(compaction.ts).toISOString()}>{clock.format(compaction.ts)}</time>{compaction.before!==null&&compaction.after!==null?` · ${Math.round(compaction.before)}% → ${Math.round(compaction.after)}%`:compaction.before!==null?` · Before ${Math.round(compaction.before)}%`:compaction.after!==null?` · After ${Math.round(compaction.after)}%`:''}</li>)}</ol>}
-    {points.some(point=>point.estimated)&&<p {...stylex.props(styles.note, styles.unknownNote)}>Hollow points estimate context from billed input and cache tokens.</p>}
+    {points.some(point=>point.estimated)&&<p {...stylex.props(styles.note)}>Hollow points estimate context from billed input and cache tokens.</p>}
   </div>
 }
 
@@ -89,7 +89,7 @@ export const ContextPanelPending = ({ compact = false, footprint }: { readonly c
   <DetailsSkeletonPlot compact={compact} />
   <div {...stylex.props(styles.axis)}>{footprint.axis.map((label, index) => <span key={index}><span {...stylex.props(styles.pendingText)}>{label}</span></span>)}</div>
   {!compact && footprint.compactions.length > 0 && <ol {...stylex.props(styles.compactions)}>{footprint.compactions.map((label, index) => <li key={index}><span {...stylex.props(styles.pendingText)}>{label}</span></li>)}</ol>}
-  {footprint.estimated && <p {...stylex.props(styles.note, styles.unknownNote)}><span {...stylex.props(styles.pendingText)}>Hollow points estimate context from billed input and cache tokens.</span></p>}
+  {footprint.estimated && <p {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Hollow points estimate context from billed input and cache tokens.</span></p>}
 </div>
 
 const styles = stylex.create({

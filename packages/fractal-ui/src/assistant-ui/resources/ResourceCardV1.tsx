@@ -79,7 +79,7 @@ export function WholeResourceMeta({ children, numeric = false, styles: callerSty
   return <span ref={observeFit} data-details-resource-meta data-resource-meta={numeric ? 'numeric' : 'descriptive'} {...stylex.props(styles.wholeMetaSlot, numeric && styles.numericMeta, callerStyles)}><span data-resource-meta-value aria-hidden="true" {...stylex.props(styles.wholeMetaValue, styles.hiddenMeta)}>{children}</span></span>
 }
 /** A detail line paints `resource.detail` under the title when it carries reported facts that hover must not hide; it describes the open action. */
-export function ResourceCardV1({ resource, variant = 'RC-1', titlePriority = false, titleLines = 1, icon, detailLine = false, onOpen }: { resource: TasteResource; variant?: ResourceVariant; state?: TasteState; titlePriority?: boolean; titleLines?: 1 | 'wrap'; icon?: IconName; onOpen?: (resource: TasteResource, file?: TasteFile) => void } & ({ detailLine?: false } | { detailLine: true; titlePriority: true; icon: IconName })) {
+export function ResourceCardV1({ resource, variant = 'RC-1', titlePriority = false, titleLines = 1, icon, detailLine = false, onOpen }: { resource: TasteResource; variant?: ResourceVariant; state?: TasteState; titlePriority?: boolean; titleLines?: 1 | 'wrap'; icon?: IconName; onOpen?: (resource: TasteResource, file?: TasteFile) => void } & ({ detailLine?: false } | { detailLine: boolean; titlePriority: true; icon: IconName })) {
   const detailId = React.useId()
   const added = sumCounts(resource.files, 'added')
   const removed = sumCounts(resource.files, 'removed')

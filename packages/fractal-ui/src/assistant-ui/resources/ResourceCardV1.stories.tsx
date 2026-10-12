@@ -21,7 +21,6 @@ const resource: ResourceData = {
 interface Args { scheme: 'dark' | 'light' }
 const meta = {
   title: 'Fractal UI/Resources/Resource Card',
-  component: ResourceCardV1,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Resource card hover and standalone dialog: the hover card is the only hover disclosure and the dialog keeps the full detail as its description.' } } },
   args: { scheme: 'dark' },
   argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } },
