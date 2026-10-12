@@ -176,7 +176,7 @@ export const QuestionSummary = ({ request, ariaLabel, now, locale, timeZone }: {
     return <section {...stylex.props(styles.summary)} aria-label={ariaLabel ?? 'Question outcome'}>
       <Disclosure>{({ isExpanded }) => <>
         <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{age !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta, styles.summaryAge)}>{age}</time> : null}<span aria-hidden="true" {...stylex.props(styles.summaryChevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span></Button>
-        <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<details><summary>Original questions</summary><OriginalQuestions request={request} /></details></> : null}</DisclosurePanel>
+        <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<OriginalQuestionsDisclosure request={request} /></> : null}</DisclosurePanel>
       </>}</Disclosure>
     </section>
   }
@@ -185,8 +185,17 @@ export const QuestionSummary = ({ request, ariaLabel, now, locale, timeZone }: {
   const footer = (state._tag === 'answered-elsewhere' ? [`Answered in ${state.where}`, age, state.draftDiscarded ? 'your unsent web draft was discarded' : undefined] : state._tag === 'expired' ? [age, state.autoAnswer !== undefined ? 'auto-selected (timeout)' : 'continued without an answer'] : state._tag === 'cancelled' ? [state.reason, age] : state._tag === 'chat-redirected' ? [state.message, age] : []).filter(Boolean).join(' · ')
   return <section {...stylex.props(styles.summary)} aria-label={ariaLabel ?? 'Question outcome'}><strong {...stylex.props(styles.sender)}>{stateLabel(request)}</strong>{answers !== undefined ? <AnswerList request={request} answers={answers} /> : request.questions.map(q => <p key={q.id}>{q.prompt}</p>)}
     {footer !== '' ? <p {...stylex.props(styles.meta)}>{footer}</p> : null}
-    <details><summary>Original questions</summary><OriginalQuestions request={request} /></details>
+    <OriginalQuestionsDisclosure request={request} />
   </section>
+}
+
+function OriginalQuestionsDisclosure({ request }: { readonly request: QuestionRequestView }) {
+  return <details><summary onKeyDown={event => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    const details = event.currentTarget.parentElement
+    if (details instanceof HTMLDetailsElement) details.open = !details.open
+  }}>Original questions</summary><OriginalQuestions request={request} /></details>
 }
 
 export const NeedsYouBar = ({ requests, ariaLabel = 'Needs you', expanded, onToggle, transcriptVisibility = 0, children }: { readonly requests: readonly QuestionRequestView[]; readonly ariaLabel?: string; readonly expanded: boolean; readonly onToggle: () => void; readonly transcriptVisibility?: number; readonly children?: React.ReactNode }) => {
