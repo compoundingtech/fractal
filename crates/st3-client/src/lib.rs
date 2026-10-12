@@ -1348,6 +1348,7 @@ impl Client {
         let started = tokio::time::Instant::now();
         let deadline = started + self.outage_wait;
         let mut pause = Duration::from_millis(100);
+        let mut announced = false;
         loop {
             let attempt = self.request_once::<Envelope<Page>>(
                 Method::GET,
@@ -1393,6 +1394,18 @@ impl Client {
                     }
                     outcome => outcome,
                 };
+            }
+            // An unreachable daemon is announced once, as for every other request.
+            if let Err(ClientError::Unreachable(outage)) = &outcome
+                && self.announce_outage_wait
+                && !announced
+            {
+                eprintln!(
+                    "st: {}; retrying for up to {}s",
+                    outage.summary(),
+                    self.outage_wait.as_secs()
+                );
+                announced = true;
             }
             tokio::time::sleep(pause.min(deadline - now)).await;
             pause = (pause * 2).min(Duration::from_secs(1));
