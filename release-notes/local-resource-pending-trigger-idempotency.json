@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Replace local resource pending triggers with indexed idempotent writes.",
+  "summary": "Defensively avoid duplicate local resource pending-trigger inserts.",
   "replay": {
     "status": "none",
     "detail": "Resource observation and canonical graph replay semantics do not change. The existing pending queue is flushed at open; this change does not retry previously invalid replica records."
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "A failed opening transaction rolls back trigger replacement and marker together. Exact-ID recovery of the two reported internal invalid records needs a separately reviewed bounded envelope retry path; this change provides no repair command or automatic retry."
+    "detail": "A failed opening transaction rolls back trigger replacement and marker together. The old-SQL record INSERT before-control returned success on the first hosted run, so the reported conflict cause remains unknown. Exact-ID recovery of the two reported internal invalid records needs a separately reviewed bounded envelope retry path; this change provides no repair command or automatic retry."
   }
 }

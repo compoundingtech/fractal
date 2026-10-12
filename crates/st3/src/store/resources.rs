@@ -744,13 +744,51 @@ END;
                  DELETE FROM meta WHERE key='resource_pending_trigger_version';",
             ).unwrap();
             transaction.execute_batch(OLD_PENDING_TRIGGERS).unwrap();
+            for name in ["resource_observations_insert", "resource_observations_delete",
+                         "resource_observations_record_insert", "resource_observations_record_update"] {
+                let sql: String = transaction.query_row(
+                    "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?1",
+                    [name], |row| row.get(0),
+                ).unwrap();
+                assert!(sql.contains("INSERT OR IGNORE INTO local_resource_projection_pending"),
+                    "old trigger missing its original INSERT OR IGNORE: {name}: {sql}");
+                assert!(!sql.contains("NOT EXISTS"), "old trigger was already replaced: {name}: {sql}");
+            }
             transaction.execute("INSERT INTO local_resource_projection_pending(subject) VALUES(?1)", [subject]).unwrap();
-            // Preserve the deployed trigger body as the before-control. A success here rejects
-            // the proposed outer-UPSERT collision mechanism instead of proving that mechanism.
-            let before = record_upsert(&transaction, &claim.id);
-            assert!(before.as_ref().is_err_and(|error| error.to_string().contains(
+            assert_eq!(pending_count(&transaction, subject), 1);
+            let prior_record: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM replica_records WHERE record_ref='record/pending-control'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(prior_record, 0);
+            // Hosted #2352 at 553ee13d returned Ok(1) here on all three tries. This rejects
+            // the proposed conflict mechanism for the old record INSERT branch.
+            assert_eq!(record_upsert(&transaction, &claim.id).unwrap(), 1);
+            assert_eq!(pending_count(&transaction, subject), 1);
+            let record_claim: String = transaction.query_row(
+                "SELECT claim_id FROM replica_records WHERE record_ref='record/pending-control'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(record_claim, claim.id);
+
+            // This is a distinct, UNRUN old-trigger UPDATE hypothesis. A success must fail
+            // this control and reject that mechanism; no either-outcome fallback is allowed.
+            let update = record_upsert(&transaction, &claim.id);
+            assert!(update.as_ref().is_err_and(|error| error.to_string().contains(
                 "UNIQUE constraint failed: local_resource_projection_pending.subject")),
-                "old trigger did not reproduce the hypothesized pending conflict: {before:?}");
+                "old UPDATE trigger did not reproduce the hypothesized pending conflict: {update:?}");
+
+            // These old-trigger claim INSERT/DELETE expectations have not run on this source.
+            // The lower-level graph append keeps pending seeded until the whole probe rolls back.
+            let inserted = append_claim_record_tx(
+                &transaction, &store.origin, subject, "resource.observed", None,
+                &claim.body, &[], None,
+            ).unwrap();
+            assert_ne!(inserted.id, claim.id);
+            assert_eq!(pending_count(&transaction, subject), 1);
+            assert_eq!(transaction.execute("DELETE FROM claims WHERE id=?1", [&inserted.id]).unwrap(), 1);
+            assert_eq!(pending_count(&transaction, subject), 1);
+
             transaction.rollback().unwrap();
         }
         // Persist the old definitions and missing marker separately from the rolled-back probe.
