@@ -42,6 +42,14 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -599,6 +607,9 @@ pub struct MissionSpec {
     /// How long a run may go without progress before it is reported as stalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     /// Whether a completed run is reported too.
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
@@ -2017,7 +2028,31 @@ pub struct MessageView {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+    /// A long body's reference, `blob/<sha256>`, when `content` is only its preview. Absent for
+    /// a message whose `content` is the whole text, and on daemons that predate long bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    /// The length in bytes of the whole body, with `body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
+    /// The member holding the body's file, such as `host/laptop`, with `body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_origin: Option<String>,
     pub created_index: u64,
+}
+
+impl MessageView {
+    /// A long body as the attachment record it is kept as: a file on the member that took the
+    /// send, fetched from there like an image. See [`crate::message_body`].
+    pub fn body_attachment(&self) -> Option<MessageAttachment> {
+        Some(MessageAttachment {
+            sha256: crate::message_body::parse_reference(self.body_ref.as_deref()?)?.to_owned(),
+            media_type: crate::message_body::MEDIA_TYPE.into(),
+            name: None,
+            size: self.body_bytes?,
+            origin: self.body_origin.clone()?,
+        })
+    }
 }
 
 /// The daemon's answer to a message send, and what a send's idempotency key landed as. Older
@@ -2449,6 +2484,9 @@ pub struct StepRunView {
     pub worker_reported: bool,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// The submitting incarnation for this attempt; absent in older submission claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_incarnation: Option<String>,
     pub claim_expires_at_unix_ms: Option<u128>,
     /// The seat whose claim a revision dropped when it carried this ready step
     /// into the current generation, until that seat claims it again.
@@ -2486,6 +2524,28 @@ pub struct StepRunView {
     pub not_before_unix_ms: Option<u128>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+/// Compare an immutable submission receipt with the expected author and result.
+/// Unknown incarnations (including legacy receipts) never establish a match.
+pub fn work_submission_matches(
+    claim: &ClaimRecord,
+    subject: &str,
+    attempt: u32,
+    actor: &str,
+    incarnation: Option<&str>,
+    evidence: &[String],
+) -> bool {
+    let Some(incarnation) = incarnation.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    claim.kind == "work.submitted"
+        && claim.subject == subject
+        && claim.actor.as_deref() == Some(actor)
+        && fields.get("attempt").and_then(Value::as_u64) == Some(u64::from(attempt))
+        && fields.get("submitted_incarnation").and_then(Value::as_str) == Some(incarnation)
+        && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
 }
 
 pub fn fresh_context_operation(step: &StepRunView) -> String {
@@ -2779,6 +2839,9 @@ pub struct MissionRunReportRequest {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Override the mission's stall reporting policy; omission inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_stalls: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     pub idempotency_key: String,
@@ -2792,6 +2855,9 @@ pub struct MissionRunReportView {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     /// Whether this request changed it.

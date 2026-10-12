@@ -66,12 +66,27 @@ pub struct SmalltalkRuntime {
     pub(crate) arrangement_list: super::owner_lists::OwnerList,
     /// Each selected person's summary row, published by the same refresher.
     pub(crate) summary_list: super::summary_list::SummaryList,
+    /// The current missions list, while a refresher keeps it published.
+    pub(crate) published_missions: published_list::PublishedList<mission_list::MissionRows>,
+    /// The current work list, while a refresher keeps it published.
+    pub(crate) published_work: published_list::PublishedList<work_list::WorkRows>,
     #[cfg(test)]
     pub(crate) agent_resources_builds: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) agent_resources_refolded_cards: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) agent_resources_largest_fold: std::sync::atomic::AtomicUsize,
+    /// Direct current-work reads, which an enabled work list never makes.
+    #[cfg(test)]
+    pub(crate) direct_work_reads: std::sync::atomic::AtomicUsize,
+    /// Seats whose queue order a work fold read; runs a warm fold looked up in its reverse
+    /// index; and the seats the last fold read.
+    #[cfg(test)]
+    pub(crate) seat_order_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) seat_lookups: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) last_seats_read: std::sync::Mutex<BTreeSet<String>>,
 }
 
 #[derive(Clone)]
@@ -199,6 +214,7 @@ impl Runtime for SmalltalkRuntime {
         agent_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
+        directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
         if let Some(views) = &self.ivm_views {
             // Registered stores run this on every open; each view's schema hook must
@@ -233,6 +249,7 @@ impl Runtime for SmalltalkRuntime {
         custom::open(transaction)?;
         resources::open(transaction)?;
         glass_heads::open(transaction)?;
+        directive_notes::flush(transaction)?;
         agent_messages::open(transaction)?;
         arrangements::open(transaction)?;
         limits::open_limits(transaction)?;
@@ -350,6 +367,7 @@ impl Runtime for SmalltalkRuntime {
         custom::flush(transaction).map_err(internal)?;
         resources::flush(transaction).map_err(internal)?;
         glass_heads::flush(transaction).map_err(internal)?;
+        directive_notes::flush(transaction).map_err(internal)?;
         agent_messages::flush(transaction).map_err(internal)?;
         limits::flush_limits(transaction).map_err(internal)?;
         reapply_local_work_lease_renewals_tx(transaction)
@@ -382,6 +400,10 @@ impl Runtime for SmalltalkRuntime {
         self.glass_list.forget();
         self.arrangement_list.forget();
         self.summary_list.forget();
+        // Projections replaced without a new claim: the lists fold from nothing, dropping any
+        // fold under way, before the windows that read them are told to reread.
+        self.published_missions.forget();
+        self.published_work.forget();
         self.published_views.invalidate();
         self.agent_page_refs_cache
             .lock()
@@ -456,7 +478,7 @@ impl Runtime for SmalltalkRuntime {
 /// at once rather than on the next read.
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
-const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.arrangements.v2";
+const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.person-directive-notes.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub(crate) fn compatibility_digest(registry_digest: &str) -> String {

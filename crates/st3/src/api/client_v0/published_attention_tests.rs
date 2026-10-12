@@ -241,34 +241,23 @@ async fn summary_windows_serve_the_published_row_of_their_selection() {
 }
 
 /// The published counts of a selection are the counts its window would compute for itself:
-/// alerts and gated missions from the published attention rows equal those from the attention
-/// items, for each person and for every person, a gate's mission counted active once.
+/// alerts from the published attention rows equal those from the attention items, for each
+/// person and for every person, and an update is no alert.
 #[test]
-fn published_attention_counts_are_the_native_counts() {
+fn published_attention_alerts_are_the_native_alerts() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::test_state_named(root.path(), "summary-counts");
     custom(&state, "custom/garden/review/v1/ada", "person/ada");
     custom(&state, "custom/garden/review/v1/robin", "person/robin");
     let now = client_now_ms();
-    let rows = crate::api::client_attention_resources_at(&state.store, None, false, now).unwrap();
-    let mut rows = rows;
-    // A human gate's row names its mission; an update is no alert.
-    rows.push(json!({"person_id":"person/ada","alert":true,"attention_kind":"human-gate",
-        "mission_id":"mission/orchard"}));
-    rows.push(json!({"person_id":"person/ada","alert":false,"attention_kind":"person-step"}));
+    let mut rows = crate::api::client_attention_resources_at(&state.store, None, false, now).unwrap();
     for person in [None, Some("person/ada"), Some("person/robin"), Some("person/visitor")] {
         let items = state.store.attention_snapshot(person, now).unwrap();
-        let native = (
-            items.iter().filter(|item| item.is_alert()).count(),
-            items.iter().filter(|item| item.kind == "human-gate")
-                .filter_map(|item| item.mission.clone()).collect::<BTreeSet<_>>(),
-        );
-        let published = summary::published_attention_counts(&rows[..rows.len() - 2], person);
-        assert_eq!(published, native, "{person:?}");
+        let native = items.iter().filter(|item| item.is_alert()).count();
+        assert_eq!(summary::published_attention_alerts(&rows, person), native, "{person:?}");
     }
-    let (alerts, gates) = summary::published_attention_counts(&rows, Some("person/ada"));
-    assert_eq!(alerts, 2);
-    assert_eq!(gates, BTreeSet::from(["mission/orchard".to_owned()]));
+    rows.push(json!({"person_id":"person/ada","alert":false,"attention_kind":"person-step"}));
+    assert_eq!(summary::published_attention_alerts(&rows, Some("person/ada")), 1);
 }
 
 /// As the daemon starts the refresher computes the counts every summary shares with no window

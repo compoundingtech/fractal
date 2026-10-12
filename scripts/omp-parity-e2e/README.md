@@ -1,7 +1,7 @@
 # OMP conversation parity proof
 
 Runs an isolated, real st3 daemon, its client HTTP API, the shared TypeScript
-conversation renderer, and interactive stui. Requires binaries containing the
+conversation renderer, and the interactive terminal UI (`st ui`). Requires binaries containing the
 incremental/keyset and OMP parity changes, including the live palette affordance
 for opening a saved `session/...` id. It never launches OMP, calls a model, modifies
 an original transcript, or simulates a live OMP process.
@@ -9,7 +9,7 @@ an original transcript, or simulates a live OMP process.
 From the repository root, with previously built binaries:
 
 ```bash
-scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/st3" --stui "$PWD/target/debug/stui" --out "$PWD/tmp/omp-parity-e2e"
+scripts/omp-parity-e2e/run --st3 "$PWD/target/debug/st3" --out "$PWD/tmp/omp-parity-e2e"
 ```
 
 Optional: add `--corpus /absolute/path/to/session.jsonl` for private first-page

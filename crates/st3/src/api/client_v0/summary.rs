@@ -2,7 +2,7 @@
 //! one snapshot; the contract stays the same when the shared IVM source takes over.
 use super::*;
 use crate::store::summary_list::{SummaryInputs, SummaryShared};
-use st3_ui_model::missions::{Display, Word};
+use st3_ui_model::missions::Display;
 
 pub(super) fn working(agent: &Value) -> bool {
     agent["state"] == "running"
@@ -10,17 +10,10 @@ pub(super) fn working(agent: &Value) -> bool {
         && agent["fault"].is_null()
         && agent["delivery"]["state"] != "stale"
 }
+/// A mission that is really running or about to: stuck, paused and finished runs, and ones that
+/// only wait on a person, are counted elsewhere.
 pub(super) fn active(mission: &st3_ui_model::missions::Mission) -> bool {
-    !mission.system
-        && matches!(
-            mission.word,
-            Word::Working
-                | Word::Queued
-                | Word::Decision
-                | Word::Stalled
-                | Word::Unstaffed
-                | Word::Unclaimed
-        )
+    !mission.system && mission.word.is_active()
 }
 
 pub(super) fn native(
@@ -37,13 +30,8 @@ pub(super) fn native(
     let attention = state.store.attention_snapshot(person.as_deref(), now)?;
     // What needs the person is what waits on their answer: an update asks nothing.
     let alerts = attention.iter().filter(|item| item.is_alert()).count();
-    let gates = attention
-        .iter()
-        .filter(|item| item.kind == "human-gate")
-        .filter_map(|item| item.mission.clone())
-        .collect::<BTreeSet<_>>();
     let shared = shared(state, session, request, snapshot, now, windows, commits)?;
-    Ok(vec![row(person.as_deref(), alerts, &gates, &shared)?])
+    Ok(vec![row(person.as_deref(), alerts, &shared)?])
 }
 
 /// What every selection's summary shares at `snapshot`: each mission and whether it is active,
@@ -82,9 +70,9 @@ fn shared(
             false,
         ))
     };
-    // Mission active membership cannot depend on which agent owns a ready queue:
-    // unstaffed, queued and unclaimed all count. Native runtime/harness activity
-    // therefore reuses this lean mission input instead of rereading every step.
+    // Mission active membership cannot depend on which agent owns a ready queue: a step that
+    // waits its turn counts. Native runtime/harness activity therefore reuses this lean
+    // mission input instead of rereading every step.
     let missions = if let Some(windows) = windows {
         let mut internal = request.clone();
         internal.collection = "summary-missions".into();
@@ -151,19 +139,13 @@ fn shared(
     })
 }
 
-/// One selection's summary row: what needs `person` (its `alerts`, and the missions of its
-/// human gates) beside the counts every selection shares.
-fn row(
-    person: Option<&str>,
-    alerts: usize,
-    gates: &BTreeSet<String>,
-    shared: &SummaryShared,
-) -> anyhow::Result<Value> {
-    // A mission waiting on the person's gate is active whatever its own word says.
+/// One selection's summary row: what needs `person` (its `alerts`) beside the counts every
+/// selection shares.
+fn row(person: Option<&str>, alerts: usize, shared: &SummaryShared) -> anyhow::Result<Value> {
     let active = shared
         .missions
         .iter()
-        .filter(|(id, system, active)| !system && (*active || gates.contains(id)))
+        .filter(|(_, system, active)| !system && *active)
         .count();
     let mut value = json!({"person_id":person,"alerts":alerts,"needs_you":alerts,"working_agents":shared.working_agents,"active_missions":active,"machines":shared.machines});
     value["revision"] = json!(smallclaims::hash::canonical_hash(&value)?);
@@ -178,22 +160,12 @@ fn row(
 }
 
 /// What needs `person` (every person, for none) in published attention rows, counted as from
-/// the attention items they were made of: the alerts, and the missions of the human gates.
-pub(super) fn published_attention_counts(
-    rows: &[Value],
-    person: Option<&str>,
-) -> (usize, BTreeSet<String>) {
-    let rows = rows
-        .iter()
+/// the attention items they were made of: the alerts.
+pub(super) fn published_attention_alerts(rows: &[Value], person: Option<&str>) -> usize {
+    rows.iter()
         .filter(|row| person.is_none_or(|person| row["person_id"] == person))
-        .collect::<Vec<_>>();
-    let alerts = rows.iter().filter(|row| row["alert"] == true).count();
-    let gates = rows
-        .iter()
-        .filter(|row| row["attention_kind"] == "human-gate")
-        .filter_map(|row| row["mission_id"].as_str().map(str::to_owned))
-        .collect();
-    (alerts, gates)
+        .filter(|row| row["alert"] == true)
+        .count()
 }
 
 /// The row of `person` from the newest shared counts and attention publication, with the
@@ -206,8 +178,8 @@ pub(in crate::api) fn published_row(
 ) -> Option<(u64, u128, Value)> {
     let (shared, _) = store.summary_shared()?;
     let attention = store.newest_attention_list().1?;
-    let (alerts, gates) = published_attention_counts(&attention.rows, person);
-    let row = row(person, alerts, &gates, &shared).ok()?;
+    let alerts = published_attention_alerts(&attention.rows, person);
+    let row = row(person, alerts, &shared).ok()?;
     Some((shared.cut, shared.published_at_unix_ms, row))
 }
 
@@ -339,11 +311,11 @@ pub(in crate::api) fn refresh_published(
         return Ok(false);
     };
     for person in &selections {
-        let (alerts, gates) = published_attention_counts(&attention.rows, person.as_deref());
+        let alerts = published_attention_alerts(&attention.rows, person.as_deref());
         let row = crate::store::summary_list::SummaryRow {
             cut: shared.cut,
             published_at_unix_ms: shared.published_at_unix_ms,
-            row: row(person.as_deref(), alerts, &gates, &shared)?,
+            row: row(person.as_deref(), alerts, &shared)?,
         };
         changed |= store.publish_summary_row(generation, person, Some(row));
     }

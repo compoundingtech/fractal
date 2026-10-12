@@ -38,6 +38,14 @@ discoverable rather than surprising.
 This pass answers three questions: what is happening, what needs Alex, and how does Alex launch
 new work?
 
+### Current person context: `note`
+
+Run `st note --help`, `st note`, and `st note --json` through the trusted local Unix socket. Check author, time, optional UTC expiry, revision and a clear empty state. A person's read returns their own current note; a harness defaults to its agent identity and reads only people it works for or who own it.
+
+Inspect `st note set --help` and `st note clear --help`; exercise these only against disposable state as the configured person. Set takes nonblank text bounded to 4096 UTF-8 bytes and optional `--expires-at RFC3339`; clear removes the current note. Neither command accepts another target person, and agents cannot write. Confirm expiry removes a note from reads.
+
+Notes inform, never assign work, approve gates, answer person asks or grant authority. Slice A provides explicit reads only, without launch delivery, notifications or UI. Publishing requires anchored membership and all active members advertising `features.person_directive_note=1`; fence legacy peers from replication before enabling notes, because advertisements do not prove complete legacy-peer discovery.
+
 ### 1. `now` — one bounded operational answer
 
 Why: this should be the first command a person runs, not a dashboard assembled from five other
@@ -371,11 +379,19 @@ converge known contradictions without rewriting history.
 st doctor --help
 st doctor
 st doctor --strict
+st doctor --developer
 st repair --help
 st repair dry-run --help
 st repair dry-run
 st repair apply --help
 ```
+
+Ordinary `st doctor` also reports the daemon's own `build-tools` check; a machine that only
+runs st can ignore its warning. `--developer` separately checks this account's login PATH for
+source-build tools, without contacting the daemon, compiling a crate, or looking up credentials.
+Use `--developer --strict` to fail when a source-build tool is absent. It cannot be combined
+with `--performance`. When the local daemon is down, a person at a terminal is told to run `st`
+or `st setup`; seats and native drivers keep their existing recovery text.
 
 Apply nothing unless the dry-run reports a real, understood plan. Check pass/warn/fail semantics,
 exit status, evidence, remediation, stable repair classes, approval token, and zero-change retry.

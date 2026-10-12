@@ -11,6 +11,8 @@ pub mod archive;
 pub mod backup;
 pub mod blobs;
 pub mod boot;
+/// Git-backed change metadata and exact-OID atomic state transitions.
+pub mod changes;
 pub(crate) mod checkout;
 pub mod claude_channel;
 pub mod client;
@@ -23,6 +25,8 @@ pub(crate) mod disk;
 pub mod delivery_hold;
 pub mod driver_hook;
 pub mod environment;
+/// Offline signed gate observations in immutable git notes refs.
+pub mod evidence;
 pub(crate) mod external_sessions;
 pub(crate) mod native_views;
 pub(crate) mod conversation_header;
@@ -45,6 +49,7 @@ pub mod hooks;
 pub mod incremental;
 pub mod lane;
 pub mod mailbox;
+pub mod message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
 pub mod maintenance;
 pub(crate) mod memory;
@@ -111,3 +116,5 @@ pub use model::{NormalizedIntent, St3Error};
 
 /// Shared authentication and transport for daemon GitHub callers.
 mod github_http;
+
+pub mod evidence_url;
