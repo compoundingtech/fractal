@@ -1050,6 +1050,10 @@ fn repair_checkpoint_extrema_index_is_added_on_reopen_without_receipt_changes() 
             .execute_batch("DROP INDEX checkpoint_claims_operation_digest")
             .unwrap();
     }
+    // An older/raw read-only store cannot install missing schema: refuse, never skip.
+    let old_readonly = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert!(expected_operation(&old_readonly, "op/target").is_err());
+    drop(old_readonly);
     let reopened = Store::open(&path, "alder", Arc::new(Plain)).unwrap();
     assert_eq!(rows(&reopened), before);
     assert_keyed_oracle(&reopened.readers.get(), "op/target");
@@ -1062,4 +1066,81 @@ fn repair_checkpoint_extrema_index_is_added_on_reopen_without_receipt_changes() 
         18
     );
     assert!(reopened.readers.get().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='checkpoint_claims_operation_digest')", [], |row| row.get::<_,bool>(0)).unwrap());
+    drop(reopened);
+    let readonly = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_keyed_oracle(&readonly, "op/target");
+    drop(readonly);
+    // The ordinary SQLite scratch copy carries the installed index into immutable readers.
+    let copy_path = dir.path().join("scratch.sqlite");
+    let source = Connection::open(&path).unwrap();
+    source.execute("VACUUM INTO ?1", [copy_path.to_str().unwrap()]).unwrap();
+    drop(source);
+    let uri = format!("file:{}?immutable=1", copy_path.display());
+    let immutable = Connection::open_with_flags(uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI).unwrap();
+    assert_keyed_oracle(&immutable, "op/target");
+}
+
+
+#[test]
+#[ignore = "explicit private first-open index size characterization"]
+fn checkpoint_covering_index_build_characterization() {
+    // Raw synthetic checkpoint metadata only, using the production physical schema and
+    // bundled SQLite. This measures the CREATE INDEX + COMMIT portion of first open,
+    // not full Store initialization or production writer-return latency.
+    for count in [615_894_i64, 1_000_000] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpoint-index.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        crate::sqlite::observe(&mut connection);
+        connection.execute_batch(SCHEMA).unwrap();
+        connection.execute_batch("DROP INDEX checkpoint_claims_operation_digest").unwrap();
+        connection.create_scalar_function("fixture_digest", 1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let n = context.get::<i64>(0)?;
+                Ok(hex::encode(Sha256::digest(n.to_be_bytes())))
+            }).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        connection.execute(
+            "WITH RECURSIVE n(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM n WHERE value+1<?1)
+             INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,actor,
+                 predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
+             SELECT fixture_digest(value),'fixture',value,fixture_digest(value),
+                 'note/checkpoint','example.note',NULL,'[]','op/'||fixture_digest(value/8),
+                 fixture_digest(value%3),1791676800000,'checkpoint/2026-10-11' FROM n", [count],
+        ).unwrap();
+        connection.execute_batch("COMMIT; PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        let rows: i64 = connection.query_row("SELECT COUNT(*) FROM checkpoint_claims", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, count);
+        let used_pages = |c: &Connection| -> i64 {
+            let pages: i64 = c.pragma_query_value(None, "page_count", |r| r.get(0)).unwrap();
+            let free: i64 = c.pragma_query_value(None, "freelist_count", |r| r.get(0)).unwrap();
+            pages-free
+        };
+        let page_size: i64 = connection.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+        let before = used_pages(&connection);
+        let start = SCHEMA.find("CREATE INDEX IF NOT EXISTS checkpoint_claims_operation_digest").unwrap();
+        let end = start + SCHEMA[start..].find(';').unwrap() + 1;
+        let index_sql = &SCHEMA[start..end];
+        let timer = std::time::Instant::now();
+        let scope = crate::sqlite::work::SqliteWorkScope::start();
+        connection.execute_batch(&format!("BEGIN IMMEDIATE; {index_sql} COMMIT;")).unwrap();
+        let work = scope.finish();
+        let elapsed_ms = timer.elapsed().as_secs_f64()*1000.0;
+        let footprint = (used_pages(&connection)-before)*page_size;
+        assert!(footprint>0);
+        let indexed: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM checkpoint_claims INDEXED BY checkpoint_claims_operation_digest
+             WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(indexed,count); // All synthetic rows qualify: conservative eligible-row count.
+        eprintln!("checkpoint covering first-open characterization {}", json!({
+            "table_rows":count,"indexed_rows":indexed,"build_and_commit_ms":elapsed_ms,
+            "allocated_live_page_delta_bytes":footprint,"page_size":page_size,
+            "statements":work.statements,"vm_steps":work.vm_steps,"fullscan_steps":work.fullscan_steps,
+            "sorts":work.sorts,"autoindex_rows":work.autoindex_rows,
+            "scope":"synthetic fixed-width hash keys; index DDL+COMMIT only, excludes population/full Store open/managed writer return",
+        }));
+    }
 }

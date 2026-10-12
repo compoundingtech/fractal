@@ -7953,7 +7953,9 @@ const CHECKPOINT_OPERATION_KEYED_QUERY: &str =
          AND json_type(body,'$._operation.request_digest')='text'
          AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))";
 
-/// What `expected_operations` holds for one operation, read through the operation index.
+/// What `expected_operations` holds for one operation, read through the operation indexes.
+/// Requires the current schema installed by Store::open/open_memory before readers are exposed.
+/// Read-only/immutable copies must retain that schema; an older raw connection fails closed.
 pub fn expected_operation(
     connection: &Connection,
     operation_id: &str,
