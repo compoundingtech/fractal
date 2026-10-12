@@ -255,6 +255,44 @@ pub(crate) fn interrupted() -> bool {
     check().is_err()
 }
 
+/// Wait for a store's asynchronous mutex from a blocking worker with the same cancellation
+/// and remaining deadline as reader admission. Mutex release or cancellation wakes the thread.
+pub(crate) fn lock<T>(
+    mutex: &tokio::sync::Mutex<T>,
+) -> Result<tokio::sync::MutexGuard<'_, T>, crate::error::Error> {
+    struct WakeThread(std::thread::Thread);
+    impl std::task::Wake for WakeThread {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let budget = current();
+    check()?;
+    let waker = Waker::from(Arc::new(WakeThread(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut acquire = std::pin::pin!(mutex.lock());
+    let mut cancellation = budget.as_ref().map(ReadBudget::cancellation);
+    loop {
+        check()?;
+        if let Some(cancellation) = &mut cancellation {
+            let _ = std::pin::Pin::new(cancellation).poll(&mut context);
+        }
+        if let Poll::Ready(guard) = acquire.as_mut().poll(&mut context) {
+            check()?;
+            return Ok(guard);
+        }
+        check()?;
+        if let Some(budget) = &budget {
+            std::thread::park_timeout(budget.remaining());
+        } else {
+            std::thread::park();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
