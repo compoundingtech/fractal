@@ -16,7 +16,7 @@ import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as 
 
 const at = '2026-01-15T12:00:00Z'
 const now = Date.parse(at) + 12000
-const answer: TextItem & { role: 'assistant' } = { _tag: 'Text', id: 'critique/answer', role: 'assistant', at, streaming: false, text: Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1}: Keep the reading lane stable while reviewing the selected resource.`).join('\n\n') }
+const answer: TextItem & { role: 'assistant' } = { _tag: 'Text', id: 'critique/answer', role: 'assistant', attachments: [], at, streaming: false, text: Array.from({ length: 30 }, (_, index) => `Paragraph ${index + 1}: Keep the reading lane stable while reviewing the selected resource.`).join('\n\n') }
 const next: TextItem & { role: 'assistant' } = { ...answer, id: 'critique/next', text: 'The selection and keyboard focus are preserved.' }
 const work: WorkLogTurn = { running: true, failed: false, interrupted: false, durationMs: undefined, calls: [
   { id: 'critique/read', kind: 'read', title: 'Read selected resource', status: 'success', startedAt: at, endedAt: '2026-01-15T12:00:02Z', detail: 'The selected resource has a stable identity.' },
@@ -67,6 +67,7 @@ type Story = StoryObj<typeof meta>
 
 export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  await canvas.findAllByTestId('agent-message')
   const thinking = await canvas.findByRole('button', { name: 'Thinking' })
   await userEvent.click(thinking)
   await expect(thinking).toHaveAttribute('aria-expanded', 'true')
