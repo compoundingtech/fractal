@@ -57,6 +57,12 @@ priority = 100
 filter = 'package(st3) and (test(/^action_coverage::/) or test(/^fleet::action_coverage_/))'
 retries = 0
 
+# Claim-derived state must agree on its first delivery schedule. A retry must not hide a
+# failing generated permutation; these tests run in the required PR and merge-group gate.
+[[profile.ci.overrides]]
+filter = 'package(st3) and test(/^store::tests::activity_purity_tests::/)'
+retries = 0
+
 # Keep both measured control intervals visible even when the idle positive passes.
 # A CPU regression or a broken busy negative must remain a failure without retry.
 [[profile.ci.overrides]]
