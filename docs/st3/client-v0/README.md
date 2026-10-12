@@ -1926,3 +1926,20 @@ matching, even when the expected incarnation is also missing. A summary is not r
 
 The optional claim field changes the registry digest. Older members keep new-field submissions
 as waiting records until upgrade; see [rolling upgrades](../replication.md#rolling-upgrades-and-waiting-claims).
+
+### Optional terminal owner route
+
+`GET /v1/client/terminals/{id}/route` requires `terminal.read`. Its ordinary envelope
+contains `TerminalRoute`: `terminal_id`, `runtime_incarnation`, `owner_host_id`,
+and optional `fabric: { node, service }`. The service is `st3/client/FLEET_ID`.
+The descriptor and envelope snapshot come from one graph read, selecting the current
+runtime owner and its sealed current membership. This read does not dial the owner.
+Absent or ambiguous owner Fabric advertisements omit `fabric`.
+
+A paired client may use this authenticated descriptor to reach the owner's ordinary
+client service. It must keep the terminal subject and incarnation, authenticate with
+the same delegated credential, and obtain that owner's attachment capability and
+snapshot fences. A gateway capability or snapshot does not authorize an owner request.
+The owner independently enforces `terminal.read` and `terminal.control`.
+Older daemons may return not-found for this optional endpoint; the existing gateway
+terminal API remains available with its original fences.

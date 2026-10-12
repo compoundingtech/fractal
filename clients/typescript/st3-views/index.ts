@@ -7,3 +7,4 @@ export * from './deviceSigning.ts';
 export * from './clientName.ts';
 export * from './time.ts';
 export * from './conversationContent.ts';
+export * from './terminalRoute.ts';

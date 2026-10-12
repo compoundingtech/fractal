@@ -157,3 +157,10 @@ assert.equal(routeLabel({ kind: 'none', fellBack: false, why: '' }), 'Not connec
   assert.equal(carrier.snapshot.phase, 'dialing');
   state.waits.at(-1).resolve(); await again;
 }
+
+// The fabric-only setting also governs an absent target, before any network attempt.
+{
+  const selected = selectRoute('fabric', false, 'https://gateway.example', { phase: 'off' }, false);
+  assert.equal(selected.baseUrl, null);
+  assert.match(selected.issue, /No fabric target/);
+}

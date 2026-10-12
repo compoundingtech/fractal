@@ -36,13 +36,17 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   const { feed, status, canControlTerminal, actions } = useStore();
   const [screen, setScreen] = useState<Screen | null>(null);
   const [issue, setIssue] = useState(''), [notice, setNotice] = useState('');
+  const [terminalRoute, setTerminalRoute] = useState('');
+  const [terminalReady, setTerminalReady] = useState(false);
   const [ctrl, setCtrl] = useState(false), [typing, setTyping] = useState(false);
   const [area, setArea] = useState({ width: 0, height: 0 });
   const incarnation = useRef(''), keyboard = useRef<TextInput>(null), scroller = useRef<ScrollView>(null);
-  const live = useRef({ screen, status, ctrl });
-  live.current = { screen, status, ctrl };
+  const selectedTerminal = useRef(terminalId);
+  if (selectedTerminal.current !== terminalId) { selectedTerminal.current = terminalId; incarnation.current = ''; }
+  const live = useRef({ screen, ready: terminalReady, ctrl });
+  live.current = { screen, ready: terminalReady, ctrl };
   const headerHeight = useHeaderHeight();
-  const canType = canControlTerminal && status === 'online' && !issue;
+  const canType = canControlTerminal && terminalReady && !issue;
 
   // The store's actions change identity on every render; one queue serves the screen's life,
   // so keys stay in order.
@@ -53,7 +57,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
     cause => setNotice(`Some keys were not confirmed; look at the screen before typing on: ${errorText(cause)}`),
   ), [terminalId]);
   const send = useCallback((bytes: string) => {
-    if (!incarnation.current || live.current.status !== 'online') { setNotice('Offline; keys are not sent.'); return; }
+    if (!incarnation.current || !live.current.ready) { setNotice('Offline; keys are not sent.'); return; }
     queue.push(bytes);
   }, [queue]);
   const type = (text: string) => {
@@ -69,8 +73,10 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
 
   useFocusEffect(useCallback(() => {
     if (!feed) return;
-    incarnation.current = '';
     const follow = feed.followTerminal(terminalId, {
+      expectedIncarnation: incarnation.current || undefined,
+      onRoute: setTerminalRoute,
+      onReady: setTerminalReady,
       onScreen: next => {
         if (!incarnation.current) {
           incarnation.current = next.runtime_incarnation;
@@ -111,7 +117,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
 
   useLayoutEffect(() => {
     navigation.setOptions({
-      title: route.params.title ? `${route.params.title} · terminal` : 'Terminal',
+      title: (route.params.title ? `${route.params.title} · terminal` : 'Terminal') + (terminalRoute ? ` · ${terminalRoute}` : ''),
       unstable_headerRightItems: () => canControlTerminal ? [
         { type: 'menu' as const, label: 'Terminal', icon: { type: 'sfSymbol' as const, name: 'ellipsis.circle' as const }, menu: { items: [
           { type: 'action' as const, label: 'Fit to this phone', onPress: fitToPhone },
@@ -120,7 +126,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
         { type: 'button' as const, label: 'Keyboard', icon: { type: 'sfSymbol' as const, name: 'keyboard' as const }, onPress: () => (typing ? keyboard.current?.blur() : keyboard.current?.focus()) },
       ] : [],
     });
-  }, [navigation, route.params.title, canControlTerminal, fitToPhone, send, typing]);
+  }, [navigation, route.params.title, terminalRoute, canControlTerminal, fitToPhone, send, typing]);
 
   // A swipe over a program that reads the mouse turns its wheel; over a full-screen program
   // that does not, it presses the arrows. The plain shell has no history here to scroll.
@@ -169,7 +175,7 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
     </View>
     <View style={styles.strip}>
       <T dim style={styles.stripText}>
-        {status !== 'online' ? 'offline · the last frame' : !canControlTerminal ? 'read-only: this phone was paired without terminal control' : typing ? 'typing into the terminal' : 'tap the screen to type'}
+        {!terminalReady ? 'offline · the last frame' : !canControlTerminal ? 'read-only: this phone was paired without terminal control' : typing ? 'typing into the terminal' : 'tap the screen to type'}
         {screen ? ` · ${screen.columns}×${screen.rows}` : ''}
       </T>
       {canType && screen && contentHeight < area.height * 0.8 ? <Pressable onPress={fitToPhone} hitSlop={8}><T style={styles.stripText} color={theme.accent}>fit to phone</T></Pressable> : null}

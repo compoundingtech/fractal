@@ -48,10 +48,15 @@ export async function withFreshTerminalFence<T>(
 
 export const TERMINAL_RESTARTED = 'Terminal restarted; reopen it before sending input.';
 export type TerminalFollowHandlers = {
+  /** Hold this pin across a gateway/carrier rebuild. */
+  expectedIncarnation?: string;
   /** Each screen replaces the one before it. */
   onScreen: (screen: TerminalScreen) => void;
   /** A problem to show; an empty string clears it. */
   onIssue: (issue: string) => void;
+  /** Route and failure reason persist independently of stream issues. */
+  onRoute?: (route: string) => void;
+  onReady?: (ready: boolean) => void;
 };
 
 /** The app's foreground state, such as `ForegroundGate`. */
