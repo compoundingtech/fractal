@@ -107,7 +107,8 @@ describe('ConversationPane kit composition', () => {
     expect(html).not.toContain('sequences')
     expect(html).not.toContain('Older history unavailable')
     expect(html).toContain('data-testid="history-boundary"')
-    expect(html).toContain('Earlier messages not loaded')
+    expect(html).toContain('Start of conversation')
+    expect(html).not.toContain('Load earlier messages')
   })
 
   it('uses the kit skeleton for the cold first-observation wait, not left-flush text', () => {

@@ -356,7 +356,8 @@ describe('ConversationPane conversation demand', () => {
     expect(container.querySelector('[data-testid="user-message"]')?.textContent).toContain('Keep the row projection readable')
     expect(container.querySelector('[data-testid="agent-message"]')?.querySelector('strong')?.textContent).toBe('visible rows')
     expect(container.querySelector('[data-testid="work-log"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="history-boundary"]')?.textContent).toContain('Earlier messages not loaded')
+    expect(container.querySelector('[data-testid="history-boundary"]')?.textContent).toContain('Start of conversation')
+    expect(container.querySelector('[data-testid="history-boundary"] button')).toBeNull()
     // The unsupported omp event and the truncation marker never become rows or internal wording.
     expect(paneText()).not.toContain('credential_pin')
     expect(paneText()).not.toContain('sequences')

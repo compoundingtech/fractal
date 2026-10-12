@@ -260,23 +260,42 @@ export const UnavailableWithComposer: Story = { render: args => <UnavailableComp
   await expect(input).toHaveValue('Still here')
 } }
 export const UnavailableWithComposerLight: Story = { ...UnavailableWithComposer, args: { scheme: 'light' } }
-const loadEarlier = fn()
-export const HasOlderWithLoad: Story = { args: { history: { _tag: 'HasOlder', onLoadEarlier: loadEarlier } }, play: async ({ canvasElement }) => {
-  const canvas = within(canvasElement)
-  loadEarlier.mockClear()
-  await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
-  await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
-  await expect(loadEarlier).toHaveBeenCalledTimes(1)
-} }
-export const HasOlderWithLoadLight: Story = { ...HasOlderWithLoad, args: { ...HasOlderWithLoad.args, scheme: 'light' } }
-export const HasOlderWithoutLoad: Story = { args: { history: { _tag: 'HasOlder' } }, play: async ({ canvasElement }) => {
+const loadOlder = fn()
+export const MoreHistory: Story = { args: { history: { _tag: 'More', loadOlder } }, beforeEach: () => { loadOlder.mockClear() }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
+  const viewport = canvas.getByTestId('transcript-scroll')
+  viewport.focus()
+  await userEvent.keyboard('{PageUp}')
+  await waitFor(() => expect(loadOlder).toHaveBeenCalledTimes(1))
+  await expect(canvas.queryByTestId('history-boundary')).toBeNull()
   await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
 } }
-export const HasOlderLight: Story = { ...HasOlderWithoutLoad, args: { ...HasOlderWithoutLoad.args, scheme: 'light' } }
+export const MoreHistoryLight: Story = { ...MoreHistory, args: { ...MoreHistory.args, scheme: 'light' } }
+export const CompleteHistory: Story = { args: { history: { _tag: 'Complete' } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await canvas.findByRole('button', { name: /Worked for 24s/ })
+  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Start of conversation')
+  await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
+} }
+export const CompleteHistoryLight: Story = { ...CompleteHistory, args: { ...CompleteHistory.args, scheme: 'light' } }
+export const LoadingHistory: Story = { args: { history: { _tag: 'Loading' } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(await canvas.findByTestId('history-boundary')).toHaveTextContent('Loading earlier messages…')
+  await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('The row projection now keeps')
+  await expect(within(canvas.getByTestId('history-boundary')).queryByRole('button')).toBeNull()
+} }
+export const LoadingHistoryLight: Story = { ...LoadingHistory, args: { ...LoadingHistory.args, scheme: 'light' } }
+const retryHistory = fn()
+export const FailedHistory: Story = { args: { history: { _tag: 'Failed', retry: retryHistory } }, play: async ({ canvasElement }) => {
+  retryHistory.mockClear()
+  const canvas = within(canvasElement)
+  await expect(await canvas.findByTestId('history-boundary')).toHaveTextContent('Earlier messages could not be loaded.')
+  await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('The row projection now keeps')
+  await userEvent.click(canvas.getByRole('link', { name: 'Try again' }))
+  await expect(retryHistory).toHaveBeenCalledTimes(1)
+} }
+export const FailedHistoryLight: Story = { ...FailedHistory, args: { ...FailedHistory.args, scheme: 'light' } }
 export const PendingSend: Story = { args: { state: 'pending-send' }, play: async ({ canvasElement }) => {
   const prompt = await within(canvasElement).findByTestId('user-message')
   await expect(prompt).toHaveAttribute('data-send-state', 'pending')
@@ -484,9 +503,9 @@ const promptlessData: TranscriptStoryData = {
   sync: { _tag: 'Live', since: now },
   turns: fixture('settled', 'promptless').turns.map(({ prompt, ...turn }) => turn),
 }
-export const MidTurnHistory: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'HasOlder' }} /></main>, play: async ({ canvasElement }) => {
+export const MidTurnHistory: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={promptlessData} onOpenTool={() => {}} onRetry={() => {}} history={{ _tag: 'Complete' }} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await expect(await canvas.findByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
+  await expect(await canvas.findByTestId('history-boundary')).toHaveTextContent('Start of conversation')
   await expect(await canvas.findByTestId('agent-message')).toHaveTextContent('The row projection now keeps')
   await expect(canvas.queryByTestId('user-message')).toBeNull()
   await expect(canvasElement.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(1)

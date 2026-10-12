@@ -446,9 +446,9 @@ describe('ConversationPane composition activation', () => {
     expect(text()).not.toContain('credential_pin')
     expect(text()).not.toContain('title_change')
 
-    // Native HasOlder owns the single quiet in-lane history row.
+    // Native truncation does not invent a fetch action for this read-only source.
     const boundary = container.querySelector('[data-testid="history-boundary"]')!
-    expect(boundary.textContent).toContain('Earlier messages not loaded')
+    expect(boundary.textContent).toContain('Start of conversation')
     expect(text()).not.toContain('sequences')
     expect(text()).not.toContain('Older history unavailable')
     expect(container.querySelector('[data-testid="history-boundary"] button')).toBeNull()
