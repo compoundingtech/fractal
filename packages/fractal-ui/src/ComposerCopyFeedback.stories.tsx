@@ -78,21 +78,25 @@ const play: Story['play'] = async ({ canvasElement, args }) => {
       await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('check-glyph'))
       await expect(status).toHaveTextContent('Copied')
       await waitFor(() => expect(tooltip()).toHaveTextContent('Copied'))
+      // Leaving the button dismisses the tooltip early; the glyph, name and announcement keep the acknowledgement across a rerender.
       await rerender()
       await expect(button).toHaveAccessibleName(`${name}: Copied`)
-      await expect(tooltip()).toHaveTextContent('Copied')
+      await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('check-glyph'))
       await waitFor(() => expect(button).toHaveAccessibleName(name), { timeout: 2200 })
       await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('copy-glyph'))
       await expect(status).toHaveTextContent('')
       await waitFor(() => expect(tooltip()).toBeNull())
-      // Keyboard copy keeps focus on the action while it copies and acknowledges.
+      // Keyboard copy keeps focus on the action; Escape dismisses the Copied tooltip without cancelling the acknowledgement.
       button.focus()
       await userEvent.keyboard('{Enter}')
       await waitFor(() => expect(button).toHaveAccessibleName(`${name}: Copied`))
       await expect(button).toHaveFocus()
       await waitFor(() => expect(tooltip()).toHaveTextContent('Copied'))
+      await userEvent.keyboard('{Escape}')
+      await waitFor(() => expect(tooltip()).toBeNull())
+      await expect(button).toHaveAccessibleName(`${name}: Copied`)
+      await expect(button).toHaveFocus()
       await waitFor(() => expect(button).toHaveAccessibleName(name), { timeout: 2200 })
-      await waitFor(() => expect(tooltip()?.textContent ?? '').not.toContain('Copied'))
       button.blur()
       // Passing negative control: a rejected operation never claims success, including after rerender.
       denied = true

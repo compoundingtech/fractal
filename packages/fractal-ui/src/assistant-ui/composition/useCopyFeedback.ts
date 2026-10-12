@@ -8,6 +8,7 @@ const feedbackDuration = 1500
 export function useCopyFeedback(source: string, action: CopyAction) {
   const [state, setState] = React.useState<CopyState>({ tag: 'ready' })
   const [tooltipOpen, setTooltipOpen] = React.useState(false)
+  const [held, setHeld] = React.useState(false)
   const timer = React.useRef<number | undefined>(undefined)
   const mounted = React.useRef(true)
   const pending = React.useRef(false)
@@ -24,7 +25,8 @@ export function useCopyFeedback(source: string, action: CopyAction) {
       await action()
       if (!mounted.current) return
       setState({ tag: 'copied', source })
-      timer.current = window.setTimeout(() => setState({ tag: 'ready' }), feedbackDuration)
+      setHeld(true)
+      timer.current = window.setTimeout(() => { setState({ tag: 'ready' }); setHeld(false) }, feedbackDuration)
     } catch {
       if (mounted.current) setState({ tag: 'failed' })
     } finally {
@@ -32,7 +34,7 @@ export function useCopyFeedback(source: string, action: CopyAction) {
     }
   }
   const copied = state.tag === 'copied' && state.source === source
-  /** Props for the shared `Tooltip`: it reads "Copied" and stays open for the acknowledgement, even after a pointer press closed it. */
-  const tooltip = (label: string) => ({ label: copied ? 'Copied' : label, isOpen: copied || tooltipOpen, onOpenChange: setTooltipOpen })
+  /** Props for the shared `Tooltip`: it opens reading "Copied" for the acknowledgement, even after a press closed it; Escape, blur or pointer leave dismiss it early. */
+  const tooltip = (label: string) => ({ label: copied ? 'Copied' : label, isOpen: (copied && held) || tooltipOpen, onOpenChange: (open: boolean) => { setTooltipOpen(open); if (!open) setHeld(false) } })
   return { state, copied, copy, tooltip, announcement: copied ? 'Copied' : '' }
 }
