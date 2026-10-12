@@ -166,7 +166,7 @@ describe('ConversationPane kit composition', () => {
   it('keeps the composer with its draft slot and a send reason while the conversation cannot be read', () => {
     const { html } = notFound()
     expect(html).toContain('textarea')
-    expect(html).toContain('This view cannot send messages.')
+    expect(html).toContain('Conversation not found')
   })
 
   it('keeps rendering the transcript when the sync status is not Live, with the honest SyncLine', () => {
