@@ -331,6 +331,8 @@ pub fn run(context: Context) -> Result<()> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
+    ui.drafts_path = super::drafts_store::path();
+    ui.load_drafts();
     if glass.is_some() { ui.resource_sidebar.load(&person); }
     ui.resource_sidebar.observe(&ui.world);
     ui.build = true;
@@ -1506,6 +1508,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_terminal_hold();
         ui.step_default_view();
         ui.step_terminal_tabs();
+        ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
         terminal.draw(|frame| {
@@ -1655,6 +1658,7 @@ pub fn run(context: Context) -> Result<()> {
         ));
     }
     save_cache(cache_path.as_deref(), &person, &model);
+    ui.flush_drafts();
     Ok(())
 }
 
