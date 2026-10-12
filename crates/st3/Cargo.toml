@@ -119,3 +119,7 @@ path = "tests/api_accept.rs"
 [[test]]
 name = "gate_teardown"
 path = "tests/gate_teardown.rs"
+
+[[test]]
+name = "reconcile_projection_observation"
+path = "tests/reconcile_projection_observation.rs"
