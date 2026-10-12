@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
+import { Icon } from './assistant-ui/composition/Icons.tsx'
 import { Button, Cell, Column, Row, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex.ts'
 import type { QuotaAccount, QuotaDrawerProps, QuotaSortKey, QuotaWindow } from './quota-design-types.ts'
@@ -110,7 +111,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
       </div>
       <div data-quota-scroll {...stylex.props(styles.scroll)}>
         <div role="toolbar" aria-label="Sort quota" {...stylex.props(styles.sortHeader)}>
-          {quotaSortKeys.map(key => <Button key={key} data-quota-sort={key} aria-label={`Sort by ${sortLabels[key]}: ${sortNames[key]}`} aria-pressed={props.sort.key === key} aria-keyshortcuts="s S" onPress={() => props.onSort({ key, direction: key === props.sort.key ? props.sort.direction === 'descending' ? 'ascending' : 'descending' : key === 'account' ? 'ascending' : 'descending' })} {...stylex.props(styles.sortButton, props.sort.key === key && styles.activeSort)}>{sortLabels[key]}<span aria-hidden="true" {...stylex.props(styles.sortArrow)}>{props.sort.key === key ? props.sort.direction === 'descending' ? '↓' : '↑' : '↕'}</span></Button>)}
+          {quotaSortKeys.map(key => <Button key={key} data-quota-sort={key} aria-label={`Sort by ${sortLabels[key]}: ${sortNames[key]}`} aria-pressed={props.sort.key === key} aria-keyshortcuts="s S" onPress={() => props.onSort({ key, direction: key === props.sort.key ? props.sort.direction === 'descending' ? 'ascending' : 'descending' : key === 'account' ? 'ascending' : 'descending' })} {...stylex.props(styles.sortButton, props.sort.key === key && styles.activeSort)}>{sortLabels[key]}<span aria-hidden="true" {...stylex.props(styles.sortArrow)}>{<Icon name={props.sort.key === key ? props.sort.direction === 'descending' ? 'chevron-down' : 'send' : 'swap'} size={10} />}</span></Button>)}
         </div>
         <Table aria-label="Account quotas" selectionMode="none" aria-busy={props.status.kind === 'loading'} onRowAction={key => {
           const row = rows.find(value => value.id === key)

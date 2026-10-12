@@ -2,6 +2,7 @@ import * as React from 'react'
 import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
+import { Icon } from './assistant-ui/composition/Icons.tsx'
 import { Button, Cell, Column, Row, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { UsageMeterCell, UsageMeterFact, UsageMeterHistory, UsageMeterRow, UsageMeterSortKey, UsageMeterTableProps } from './usage-meter-types'
@@ -93,7 +94,7 @@ export const UsageMeterRowDetail = ({ row, history, onClose }: { readonly row: U
     <Facts facts={window.facts} />
   </section>)}
   <h4 {...stylex.props(styles.title)}>Resets</h4>
-  <p title={resetEvidence(row)} {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</p>
+  <p title={resetEvidence(row)} {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}><Icon name="swap" size={10} />{row.resetCount}</span>}</p>
   <Facts facts={row.detail.resets} />
   {history !== undefined && <UsageMeterHistoryChart history={history} />}
 </section>
@@ -141,7 +142,7 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
     }} {...stylex.props(usageMeterGrid.table, styles.table)}>
       <TableHeader {...stylex.props(usageMeterGrid.header)}>
         {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting textValue={column.label} data-usage-meter-column={column.id} {...stylex.props(usageMeterGrid.column, styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
-          {({ sortDirection }) => <span title={column.label} {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === 'ascending' ? '↑' : sortDirection === 'descending' ? '↓' : ''}</span></span>}
+          {({ sortDirection }) => <span title={column.label} {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === undefined ? null : <Icon name={sortDirection === 'ascending' ? 'send' : 'chevron-down'} size={10} />}</span></span>}
         </Column>)}
       </TableHeader>
       <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
@@ -151,7 +152,7 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
           return <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
           <Cell textValue={accountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={accountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}><span aria-hidden="true">{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}><span data-usage-meter-account-prefix {...stylex.props(styles.compactPrefix)}><span dir="ltr">{row.compactIdentity.prefix}</span></span><span data-usage-meter-account-name {...stylex.props(styles.compactAccount)}>{row.compactIdentity.account}</span></span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{accountEvidence}</span></VisuallyHidden></span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
-          <Cell textValue={resetDescription} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={resetDescription} {...stylex.props(styles.reset)}><span aria-hidden="true">{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{resetDescription}</span></VisuallyHidden></span></Cell>
+          <Cell textValue={resetDescription} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={resetDescription} {...stylex.props(styles.reset)}><span aria-hidden="true">{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}><Icon name="swap" size={10} />{row.resetCount}</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{resetDescription}</span></VisuallyHidden></span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Button aria-label={`Show all windows and evidence for ${row.label}`} aria-expanded={selected?.id === row.id} onPress={() => onSelect(row.id)} {...stylex.props(styles.moreButton)}>
             <span {...stylex.props(styles.wideCount)}>+{row.omitted}</span><span {...stylex.props(styles.narrowCount)}>+{row.omitted + (row.comparison === undefined ? 0 : 1)}</span>

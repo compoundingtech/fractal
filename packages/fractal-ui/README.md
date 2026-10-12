@@ -195,6 +195,16 @@ fit the stated height without scrolling and that each cell's x-offset matches it
 header within 1px. The browser runner repeats this proof and injects a 6px cell
 translation in each story; every misalignment control must fail the same proof.
 
+Every quota story also disables the real refresh action and proves that the
+controlled snapshot cannot change, restores the action, then asserts both
+snapshot transitions after React rerenders. Empty and matrix stories carry
+the same control. Strict static Storybook lifecycle checks run these stories
+at 440 and 1440 viewport widths in light and dark.
+
+`src/quota-geometry.stylex.ts` holds the shared pixel geometry tokens; production
+surfaces and story frames use the same values. Sort and reset glyphs use the
+existing SVG icon family. Missing readings are explicitly unreported.
+
 History uses the supplied calendar buckets, exposes exact measured values and
 unknown token classes, and marks the unfinished bucket. Cost compares rate-card
 usage value with invoiced/list subscription price for **last 30 days, normalized**;
