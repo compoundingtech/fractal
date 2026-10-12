@@ -173,9 +173,22 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
     )?;
     gateway.store.bind_fleet(fleet)?;
     gateway.store.pin_fleet_anchor(member.public())?;
-    gateway
-        .store
-        .import_replication("owner-demo", &owner.store.export_replication(0)?)?;
+    // Legacy graph import copies claims, not their sealed member signatures. Transfer the
+    // owner's admission and endpoint envelopes through the ordinary verified exchange.
+    let exchange = owner.store.export_replication_exchange(
+        fleet,
+        &smallclaims::replication::ReplicationInventory::default(),
+    )?;
+    gateway.store.receive_replication_exchange("owner-demo", fleet, &exchange)?;
+    gateway.store.validate_replication_backlog()?;
+    gateway.store.project_replication_backlog()?;
+    let membership = gateway.store.fleet_view_sealed()?;
+    anyhow::ensure!(
+        membership.members.iter().any(|member| member.name == "owner-demo"
+            && member.state == "current"
+            && member.endpoints.iter().any(|endpoint| endpoint["node"] == node)),
+        "the isolated gateway must see the owner's sealed admission and endpoint: {membership:?}"
+    );
     owner.fleet_id = Some(fleet.into());
     gateway.fleet_id = Some(fleet.into());
     let owner_socket = owner.state_dir.join("st.sock");
