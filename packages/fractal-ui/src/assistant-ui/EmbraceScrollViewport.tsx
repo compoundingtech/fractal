@@ -1,6 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button } from 'react-aria-components'
+import { Button, ButtonContext, GridList, GridListItem, ListLayout, Virtualizer } from 'react-aria-components'
+import { ScrollController, type ScrollAnchor } from './embrace-virtual/ScrollController'
+import { measuredListLayoutOptions } from './composition/virtual-layout'
 import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers } from './composition-tokens.stylex'
 
 const rowSelector = '[data-item-id], [data-embrace-entry-id]'
@@ -17,7 +19,7 @@ function pressScrollOwner(lane: HTMLElement): HTMLElement {
 }
 
 /** Scroll state a conversation keeps while it stays on a surface. */
-export interface ViewportState { readonly top: number; readonly following: boolean; readonly unread: boolean }
+export interface ViewportState { readonly top: number; readonly following: boolean; readonly unread: boolean; readonly anchor?: ScrollAnchor }
 
 /** Per-surface memory, one entry per conversation. Owners drop closed keys and dispose on unmount. */
 export class ViewportStore {
@@ -351,8 +353,178 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   </div>
 })
 
+export interface VirtualViewportHandle { readonly jumpTo: (id: string) => void }
+export type VirtualViewportHistory =
+  | { readonly _tag: 'Complete' }
+  | { readonly _tag: 'More'; readonly loadOlder: () => void }
+  | { readonly _tag: 'Loading' }
+  | { readonly _tag: 'Failed'; readonly retry: () => void }
+
+/** RAC owns the bounded collection; the controller owns id-keyed measured anchoring. */
+export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
+  items, renderItem, history, boundary, empty, stateKey, scrollToBottomKey, ref, contentProps, ...props
+}: Omit<EmbraceScrollViewportProps, 'items' | 'children'> & {
+  readonly items: readonly T[]
+  readonly renderItem: (item: T) => React.ReactNode
+  readonly history: VirtualViewportHistory
+  readonly boundary: React.ReactNode
+  readonly empty: React.ReactNode
+  readonly ref?: React.Ref<VirtualViewportHandle>
+}) {
+  const store = React.useContext(ViewportStoreContext)
+  const state = stateKey === undefined ? undefined : store?.get(stateKey)
+  const [layout] = React.useState(() => new ListLayout())
+  const [unread, setUnread] = React.useState(state?.unread ?? false)
+  const unreadRef = React.useRef(unread)
+  unreadRef.current = unread
+  const [controller] = React.useState(() => new ScrollController({
+    layout,
+    initial: state?.anchor ?? (state !== undefined && !state.following
+      ? { _tag: 'Reading', entry: null, offset: 0, scrollTop: state.top }
+      : { _tag: 'Following' }),
+    setUnread: value => { unreadRef.current = value; setUnread(value) },
+    save: anchor => {
+      if (stateKey !== undefined) store?.save(stateKey, {
+        anchor, top: anchor._tag === 'Reading' ? anchor.scrollTop : 0,
+        following: anchor._tag === 'Following', unread: unreadRef.current,
+      })
+    },
+  }))
+  const element = React.useRef<HTMLDivElement | null>(null)
+  const current = React.useRef(history)
+  current.current = history
+  const request = React.useRef({ first: items[0]?.id, moreCalled: false })
+  if (request.current.first !== items[0]?.id) {
+    request.current = { first: items[0]?.id, moreCalled: false }
+  }
+  const insideBoundary = React.useRef(false)
+  const prefetch = React.useCallback((olderIntent = false, scrolled = false) => {
+    const viewport = element.current
+    if (viewport === null) return
+    const inside = viewport.scrollTop <= viewport.clientHeight * 1.5
+    const entered = inside && !insideBoundary.current
+    insideBoundary.current = inside
+    if (!inside) return
+    const source = current.current
+    // Suppress automatic Loading -> More repeats, but never strand an empty
+    // page: a new upward gesture or leaving/re-entering the boundary can page.
+    if (source._tag === 'More' && (entered && scrolled || olderIntent)) request.current.moreCalled = false
+    if (source._tag === 'More' && !request.current.moreCalled) {
+      request.current.moreCalled = true
+      source.loadOlder()
+    }
+  }, [])
+  const attach = React.useCallback((viewport: HTMLDivElement | null) => {
+    element.current = viewport
+    if (viewport === null) return
+    const cleanup = controller.attach(viewport)
+    let contentHeight = viewport.scrollHeight
+    let viewportHeight = viewport.clientHeight
+    // Intent is independent of scroll events: at the top edge there may be
+    // nothing left to scroll, but the reader can still request the next page.
+    const olderGesture = () => {
+      controller.read()
+      prefetch(true)
+    }
+    let draggingScrollbar = false
+    let pointerY = 0
+    let dragRequested = false
+    let touchY: number | undefined
+    let touchRequested = false
+    const onPointerDown = (event: PointerEvent) => {
+      draggingScrollbar = event.target === viewport && event.pointerType !== 'touch'
+      pointerY = event.clientY
+      dragRequested = false
+    }
+    const onPointerMove = (event: PointerEvent) => {
+      if (draggingScrollbar && !dragRequested && event.clientY < pointerY) {
+        dragRequested = true
+        olderGesture()
+      }
+      pointerY = event.clientY
+    }
+    const onPointerUp = () => { draggingScrollbar = false }
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches[0]?.clientY
+      touchRequested = false
+    }
+    const onTouchMove = (event: TouchEvent) => {
+      const y = event.touches[0]?.clientY
+      if (y !== undefined && touchY !== undefined && y > touchY && !touchRequested) {
+        touchRequested = true
+        olderGesture()
+      }
+      touchY = y
+    }
+    const onTouchEnd = () => { touchY = undefined }
+    const onScroll = () => {
+      const geometryChanged = contentHeight !== viewport.scrollHeight || viewportHeight !== viewport.clientHeight
+      contentHeight = viewport.scrollHeight
+      viewportHeight = viewport.clientHeight
+      // Scroll events observe only boundary entry. Reflow is never a gesture.
+      prefetch(false, !geometryChanged)
+    }
+    const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) olderGesture() }
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.target instanceof HTMLElement) || event.target.closest('input,textarea,[contenteditable="true"]')) return
+      if (event.key === 'PageUp' || event.key === 'Home' || event.key === 'ArrowUp') olderGesture()
+    }
+    viewport.addEventListener('scroll', onScroll, { passive: true })
+    viewport.addEventListener('touchstart', onTouchStart, { passive: true })
+    viewport.addEventListener('touchmove', onTouchMove, { passive: true })
+    viewport.addEventListener('touchend', onTouchEnd, { passive: true })
+    viewport.addEventListener('touchcancel', onTouchEnd, { passive: true })
+    viewport.addEventListener('wheel', onWheel, { passive: true })
+    viewport.addEventListener('keydown', onKey)
+    viewport.addEventListener('pointerdown', onPointerDown)
+    viewport.ownerDocument.addEventListener('pointermove', onPointerMove, { passive: true })
+    viewport.ownerDocument.addEventListener('pointerup', onPointerUp)
+    viewport.ownerDocument.addEventListener('pointercancel', onPointerUp)
+    return () => {
+      cleanup?.()
+      viewport.removeEventListener('scroll', onScroll)
+      viewport.removeEventListener('touchstart', onTouchStart)
+      viewport.removeEventListener('touchmove', onTouchMove)
+      viewport.removeEventListener('touchend', onTouchEnd)
+      viewport.removeEventListener('touchcancel', onTouchEnd)
+      viewport.removeEventListener('wheel', onWheel)
+      viewport.removeEventListener('keydown', onKey)
+      viewport.removeEventListener('pointerdown', onPointerDown)
+      viewport.ownerDocument.removeEventListener('pointermove', onPointerMove)
+      viewport.ownerDocument.removeEventListener('pointerup', onPointerUp)
+      viewport.ownerDocument.removeEventListener('pointercancel', onPointerUp)
+      element.current = null
+    }
+  }, [controller, prefetch])
+  const command = React.useRef(scrollToBottomKey)
+  React.useLayoutEffect(() => {
+    if (scrollToBottomKey !== undefined && command.current !== scrollToBottomKey) controller.jump()
+    command.current = scrollToBottomKey
+    controller.afterRowsChange(items, history._tag !== 'More' || items.length === 0 ? '__fractal_history__' : undefined)
+    prefetch()
+  }, [controller, items, history._tag, prefetch, scrollToBottomKey])
+  React.useImperativeHandle(ref, () => ({ jumpTo: controller.jumpTo }), [controller])
+  const collection = React.useMemo(() => [
+    ...((history._tag !== 'More' || items.length === 0) ? [{ id: '__fractal_history__', item: undefined }] : []),
+    ...items.map(item => ({ id: item.id, item })),
+  ], [items, history._tag])
+  return <div {...stylex.props(styles.frame)}>
+    <Virtualizer layout={layout} layoutOptions={measuredListLayoutOptions} shouldObserveItemSize>
+      <GridList {...props} ref={attach} items={collection} dependencies={[renderItem, boundary, empty, contentProps]} keyboardNavigationBehavior="tab" render={domProps => <div {...domProps} aria-busy={history._tag === 'Loading'} />} style={{ ...props.style, overflowAnchor: 'none' }}>
+        {row => <GridListItem id={row.id} textValue={row.id} {...stylex.props(styles.virtualRow)}>
+          <div data-embrace-entry-id={row.id} {...contentProps}>
+            <ButtonContext.Provider value={null}>{row.item === undefined ? <>{boundary}{items.length === 0 ? empty : null}</> : renderItem(row.item)}</ButtonContext.Provider>
+          </div>
+        </GridListItem>}
+      </GridList>
+    </Virtualizer>
+    <Button onPress={controller.jump} hidden={!unread} {...stylex.props(styles.jump)}>New messages ↓</Button>
+  </div>
+}
+
 const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
+  virtualRow: { outlineStyle: 'none', display: 'flow-root', minWidth: 0 },
   // A visible jump control gets its own dock, never covering a reader's current line.
   jump: { flexShrink: 0, marginInline: 'auto', marginBlock: spaceVars.md, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
 })

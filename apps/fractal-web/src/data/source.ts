@@ -131,7 +131,7 @@ export interface Fleet {
   readonly agents: readonly Agent[]
 }
 
-/** The loaded conversation window; older history is a boundary, not an available fetch operation. */
+/** The retained conversation window; native truncation is provenance, not an available older-page fetch. */
 export interface ConversationPage {
   readonly items: readonly ConversationItem[]
   readonly hasOlder: boolean

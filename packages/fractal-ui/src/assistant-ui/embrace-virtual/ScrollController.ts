@@ -1,4 +1,5 @@
 import type { ListLayout } from 'react-aria-components'
+import { layoutKeyAtOffset, scrollToLayoutKey } from '../composition/virtual-layout'
 
 /** The source transcript persists a mode or a stable entry, never a numeric bottom. */
 export type ScrollAnchor =
@@ -10,7 +11,7 @@ export type ScrollAnchor =
       readonly scrollTop: number
     }
 
-type Row = { readonly id: string }
+type Row = { readonly id: string; readonly version?: string }
 type ReadingPosition = { readonly key: string; readonly offset: number }
 
 const FOLLOW_SLACK = 48
@@ -34,6 +35,37 @@ export class ScrollController {
   private rows: readonly Row[] = []
   private rowKeys = new Set<string>()
   private geometry = { contentHeight: 0, viewportHeight: 0 }
+  private pressed: ReadingPosition | undefined
+  private pendingJump: string | undefined
+  private leadingKey: string | undefined
+
+  /** An older-navigation command owns the viewport before RAC scrolls/focuses. */
+  readonly read = () => {
+    this.following = false
+    this.pendingJump = undefined
+    this.pendingAnchor = undefined
+    this.restoring = false
+    this.userInputAt = performance.now()
+    this.userScrolling = true
+    if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
+    this.restoreFrame = undefined
+    this.captureAnchor()
+  }
+
+  readonly jumpTo = (key: string) => {
+    if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
+    this.restoreFrame = undefined
+    this.pressed = undefined
+    this.pendingJump = key
+    this.following = false
+    this.restoring = false
+    this.pendingAnchor = { key, offset: 0 }
+    this.restore()
+  }
+
+  readonly position = (): ScrollAnchor => this.following
+    ? { _tag: 'Following' }
+    : { _tag: 'Reading', entry: this.anchor?.key ?? null, offset: this.anchor?.offset ?? 0, scrollTop: this.element?.scrollTop ?? 0 }
 
   constructor(
     private readonly options: {
@@ -51,6 +83,8 @@ export class ScrollController {
   }
 
   readonly jump = () => {
+    this.pendingJump = undefined
+    this.pressed = undefined
     this.following = true
     this.restoring = false
     this.pendingAnchor = undefined
@@ -66,6 +100,7 @@ export class ScrollController {
     if (element === null) return
     this.element = element
     const onUserInput = () => {
+      this.pendingJump = undefined
       this.userInputAt = performance.now()
       this.userScrolling = true
       this.pendingAnchor = undefined
@@ -77,12 +112,16 @@ export class ScrollController {
       const resized =
         element.scrollHeight !== this.geometry.contentHeight ||
         element.clientHeight !== this.geometry.viewportHeight
-      if (resized && performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS) return
-      if (this.restoring || this.pendingAnchor !== undefined) return
+      if (this.restoring || this.pendingJump !== undefined || this.pressed !== undefined) return
+      if (this.pendingAnchor?.key === this.leadingKey && this.pendingAnchor !== undefined) return
+      if (this.pendingAnchor !== undefined && !this.userScrolling) return
+      if (resized && this.following) return
       if (!this.userScrolling && performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS)
         return
       this.captureAnchor()
-      this.following =
+      // Measurement may extend the bottom after a fling. Geometry is not a
+      // request to leave follow mode, or to enter it while reading history.
+      if (!resized) this.following =
         element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_SLACK
       if (this.following) this.options.setUnread(false)
       this.savePosition()
@@ -93,8 +132,12 @@ export class ScrollController {
     }
     let resizeFrame: number | undefined
     const observer = new ResizeObserver(() => {
-      // Scroll writes inside RO can synchronously remount RAC rows and resize its
-      // sizer again. Coalesce them into the next frame rather than a resize loop.
+      // Correct visible geometry before paint; RAC's measured layout can settle
+      // in the next frame, so retain the id/offset until the next reader input.
+      if (this.pressed !== undefined) this.pendingAnchor = this.pressed
+      else if (!this.following && this.anchor !== undefined && this.pendingAnchor === undefined) this.pendingAnchor = this.anchor
+      if (this.pendingAnchor !== undefined || this.restoring) this.restore()
+      else if (this.following) element.scrollTop = element.scrollHeight
       if (resizeFrame !== undefined) return
       resizeFrame = requestAnimationFrame(() => {
         resizeFrame = undefined
@@ -106,6 +149,29 @@ export class ScrollController {
     observer.observe(element)
     const sizer = element.firstElementChild
     if (sizer !== null) observer.observe(sizer)
+    const press = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return
+      const row = event.target.closest<HTMLElement>('[data-embrace-entry-id]')
+      const key = row?.dataset['embraceEntryId']
+      if (row !== null && row !== undefined && key !== undefined && element.contains(row)) {
+        this.pressed = { key, offset: row.getBoundingClientRect().top - element.getBoundingClientRect().top }
+      }
+    }
+    const release = () => {
+      if (this.pressed === undefined) return
+      this.pressed = undefined
+      if (this.following) {
+        this.pendingAnchor = undefined
+        element.scrollTop = element.scrollHeight
+      } else {
+        this.captureAnchor()
+        this.pendingAnchor = this.anchor
+      }
+    }
+    element.addEventListener('pointerdown', press, true)
+    element.ownerDocument.addEventListener('pointerup', release, true)
+    element.ownerDocument.addEventListener('pointercancel', release, true)
+    element.ownerDocument.defaultView?.addEventListener('blur', release)
     const inputs = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const
     for (const type of inputs) element.addEventListener(type, onUserInput, { passive: true })
     element.addEventListener('scroll', onScroll, { passive: true })
@@ -116,6 +182,10 @@ export class ScrollController {
       if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
       this.restoreFrame = undefined
       for (const type of inputs) element.removeEventListener(type, onUserInput)
+      element.removeEventListener('pointerdown', press, true)
+      element.ownerDocument.removeEventListener('pointerup', release, true)
+      element.ownerDocument.removeEventListener('pointercancel', release, true)
+      element.ownerDocument.defaultView?.removeEventListener('blur', release)
       element.removeEventListener('scroll', onScroll)
       element.removeEventListener('scrollend', onScrollEnd)
       if (!this.restoring) this.savePosition()
@@ -144,13 +214,22 @@ export class ScrollController {
     let nearestTop = Infinity
     for (const candidate of element.querySelectorAll<HTMLElement>('[data-embrace-entry-id]')) {
       const rect = candidate.getBoundingClientRect()
-      if (rect.bottom > top && rect.top < nearestTop) {
+      if (rect.bottom > top && rect.top < top + element.clientHeight && rect.top < nearestTop) {
         nearest = candidate
         nearestTop = rect.top
       }
     }
     const key = nearest?.dataset['embraceEntryId']
-    if (key !== undefined) this.anchor = { key, offset: nearestTop - top }
+    if (key !== undefined && this.rowKeys.has(key)) {
+      this.anchor = { key, offset: nearestTop - top }
+    } else {
+      const leading = this.leadingKey === undefined ? null : this.options.layout.getLayoutInfo(this.leadingKey)
+      const match = leading !== null && element.scrollTop < leading.rect.y + leading.rect.height
+        ? { key: this.leadingKey!, info: leading }
+        : layoutKeyAtOffset(this.options.layout, this.rows, element.scrollTop)
+      if (match !== undefined) this.anchor = { key: String(match.key), offset: match.info.rect.y - element.scrollTop }
+    }
+    if (this.pendingAnchor !== undefined) this.pendingAnchor = this.anchor
   }
 
   private scheduleRestore() {
@@ -189,7 +268,7 @@ export class ScrollController {
       info !== null &&
       element.scrollHeight >= info.rect.y + Math.min(info.rect.height, element.clientHeight)
     ) {
-      element.scrollTop = info.rect.y - anchor.offset
+      scrollToLayoutKey(this.options.layout, key, element, anchor.offset)
       const target = element.querySelector<HTMLElement>(
         `[data-embrace-entry-id="${CSS.escape(key)}"]`,
       )
@@ -200,22 +279,58 @@ export class ScrollController {
         this.pendingAnchor = this.anchor
         this.restoring = false
         this.savePosition()
+        if (this.pendingJump === key) this.pendingJump = undefined
       }
     }
     if (this.restoring) this.scheduleRestore()
   }
 
   /** Call after a commit that changes the generic entry collection. */
-  afterRowsChange(rows: readonly Row[]) {
+  afterRowsChange(rows: readonly Row[], leadingKey?: string) {
     const previous = this.rows
     const previousFirst = this.firstKey
+    const previousLeading = this.leadingKey
+    this.leadingKey = leadingKey
     this.rows = rows
     this.firstKey = rows[0]?.id
-    if (previous !== rows) {
+    if (previous !== rows || previousLeading !== leadingKey) {
       this.rowKeys.clear()
       for (const row of rows) this.rowKeys.add(row.id)
+      if (leadingKey !== undefined) this.rowKeys.add(leadingKey)
+    }
+    if (leadingKey !== undefined && previousLeading !== leadingKey && !this.following && this.element?.scrollTop === 0) {
+      // The logical top includes the inline history state, not a focused turn
+      // below it. Keep that edge stable while the collection adopts the marker.
+      this.anchor = { key: leadingKey, offset: 0 }
+      this.pendingAnchor = this.anchor
+      this.scheduleRestore()
+    }
+    if (previousLeading !== undefined && previousLeading !== leadingKey && this.firstKey !== undefined) {
+      // Removing a loading/error marker leaves the first loaded row at the top.
+      if (this.anchor?.key === previousLeading) this.anchor = { key: this.firstKey, offset: 0 }
+      if (this.pendingAnchor?.key === previousLeading) this.pendingAnchor = this.anchor
+    }
+    // News survives a held row action. Pinning affects geometry, not delivery.
+    if (previous.length > 0 && previous !== rows && !this.restoring) {
+      const start = rows.findIndex(row => row.id === previous[0]?.id)
+      if (start < 0 || rows.length - start !== previous.length ||
+        previous.some((row, index) => row.id !== rows[start + index]?.id ||
+          (row.version === undefined ? row !== rows[start + index] : row.version !== rows[start + index]?.version))) {
+        if (!this.following || this.pressed !== undefined) this.options.setUnread(true)
+      }
     }
     if (this.restoring && this.element !== null && rows.length > 0) this.restore()
+    if (this.pendingJump !== undefined) {
+      this.pendingAnchor = { key: this.pendingJump, offset: 0 }
+      this.restore()
+      return
+    }
+    if (this.pressed !== undefined) {
+      this.pendingAnchor = this.pressed
+      this.restore()
+      this.scheduleRestore()
+      return
+    }
     if (this.following) {
       this.options.setUnread(false)
       if (this.element !== null) this.element.scrollTop = this.element.scrollHeight
@@ -234,13 +349,6 @@ export class ScrollController {
     } else if (this.pendingAnchor !== undefined) {
       this.restore()
     }
-    if (previous.length === 0 || previous === rows || this.restoring) return
-    const start = rows.findIndex((row) => row.id === previous[0]?.id)
-    if (
-      start < 0 ||
-      rows.length - start !== previous.length ||
-      previous.some((row, index) => row !== rows[start + index])
-    ) this.options.setUnread(true)
   }
 }
 
