@@ -3000,7 +3000,7 @@ fn client_agent_resources_from_status(
         })
     })?;
     crate::otel::roster_phase("card_presentation", || {
-        client_agent_cards_presented(store, history, snapshot_index, status, &queues)
+        client_agent_cards_presented(store, history, snapshot_index, status, &queues, changed.map(|(names, _)| names))
     })
 }
 
@@ -3017,6 +3017,7 @@ fn client_agent_cards_presented(
     snapshot_index: u64,
     status: StatusResponse,
     queues: &CardQueues<'_>,
+    selected: Option<&BTreeSet<String>>,
 ) -> anyhow::Result<Vec<Value>> {
     let agent_subjects = status
         .subjects
@@ -3046,7 +3047,7 @@ fn client_agent_cards_presented(
         Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
         Err(error) => return Err(error),
     };
-    store.record_agent_roster_fault_read(history, &agent_subjects, mailbox_faults.is_none(), changed.map(|(names, _)| names));
+    store.record_agent_roster_fault_read(history, &agent_subjects, mailbox_faults.is_none(), selected);
     // An optional fault read cannot discard current status, usage, queues or other card fields.
     // Retain even a known null fault; a card never published before states that it is unknown.
     let previous_faults = if mailbox_faults.is_none() {
