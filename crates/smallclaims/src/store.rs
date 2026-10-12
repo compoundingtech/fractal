@@ -424,17 +424,14 @@ mod projection_failure_diagnostic_tests {
     }
 }
 
-/// The graph's tables: the claim log and its batches, operations, documents and blobs, replica
-/// envelopes and records, peers, fleet invites and checkpoints. A runtime adds its own.
-pub const SCHEMA: &str = r#"
+macro_rules! core_schema {
+    ($begin:literal, $end:literal) => {
+        concat!(r#"
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
-
--- Install the core objects with one durable commit, after the connection PRAGMAs.
-BEGIN IMMEDIATE;
-
+"#, $begin, r#"
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -721,8 +718,16 @@ ON checkpoint_claims(operation_id) WHERE operation_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS checkpoint_claims_operation_digest
 ON checkpoint_claims(operation_id, request_digest, id)
 WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL;
-COMMIT;
-"#;
+"#, $end)
+    };
+}
+
+/// The graph's tables and connection PRAGMAs. Existing stores retain per-statement commits.
+pub const SCHEMA: &str = core_schema!("", "");
+
+/// Install an empty store's core objects atomically, after the connection PRAGMAs.
+/// Contains BEGIN IMMEDIATE and COMMIT; cannot run inside an open transaction.
+pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 18;";
@@ -916,15 +921,26 @@ impl Store {
     /// Check and migrate the schema, then create the graph's tables, the runtime's, and the
     /// triggers that keep digests current.
     fn create_schema(connection: &Connection, runtime: &dyn Runtime) -> Result<()> {
+        // Only an empty database can batch DDL without changing upgrade progress or locking
+        // ordinary reopens. Determine this before any migration or schema hook creates objects.
+        let fresh: bool = connection.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+            [],
+            |row| row.get(0),
+        )?;
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
-        connection.execute_batch(SCHEMA)?;
+        connection.execute_batch(if fresh { FRESH_SCHEMA } else { SCHEMA })?;
         connection.execute_batch(&fleet_generation_schema())?;
         idempotency::initialize(connection)?;
         events::initialize(connection)?;
         inventory_generation::initialize(connection)?;
         connection.execute_batch(principals::PRINCIPAL_SCHEMA)?;
-        runtime.create_schema(connection)?;
+        if fresh {
+            runtime.create_schema_for_fresh_store(connection)?;
+        } else {
+            runtime.create_schema(connection)?;
+        }
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
