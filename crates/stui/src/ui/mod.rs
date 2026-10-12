@@ -6078,7 +6078,6 @@ impl Ui {
             }
             Hit::Help => self.help = !self.help,
             Hit::Answer(index) => self.answering = Some(index),
-            Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Alert(agent, AlertTap::Box) => self.open_alerts(&agent),
             Hit::Voice => {
                 self.editing = true;

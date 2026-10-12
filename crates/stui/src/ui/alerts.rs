@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn open_selects_the_alert_in_now() {
         let mut ui = with_alerts(vec![prompt("attention/a", &[]), prompt("attention/b", &[])]);
-        ui.click(Hit::Alert("attention/b".into(), AlertTap::Open));
+        ui.open_alert("attention/b");
         assert_eq!(ui.tab, 0);
         assert_eq!(ui.attention_focus().as_deref(), Some("attention/b"));
     }

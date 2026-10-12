@@ -12,8 +12,6 @@ use ratatui::text::{Line, Span};
 /// What a click on an alert's line or badge does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlertTap {
-    /// Open the alert's whole card in Now, where every kind is answered.
-    Open,
     /// Open the alerts box: Home over the glass, on the agent's first alert. The `Hit` names the
     /// agent, not an alert.
     Box,
