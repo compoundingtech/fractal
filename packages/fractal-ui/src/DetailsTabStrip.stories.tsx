@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Button } from './kit'
+import { Button } from 'react-aria-components'
 import { Workbench, type WorkbenchProps } from './assistant-ui/workbench/Workbench'
 import { paneTabIdentity } from './assistant-ui/workbench/TabStrip'
 import { group, paneKey, parsePaneKey, split, type WorkbenchPane } from './assistant-ui/workbench/workbench-model'
@@ -13,7 +13,7 @@ import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
-import { surfaceVars as surface } from './assistant-ui/composition-tokens.stylex'
+import { surfaceVars as surface, textVars as text, spaceVars as space, typeVars as type, radiusVars as radius } from './assistant-ui/composition-tokens.stylex'
 
 const panes: readonly WorkbenchPane[] = [
   { uri: 'agent:worker-1', view: 'details' },
@@ -33,6 +33,7 @@ const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', height: 520, minHeight: 0, overflow: 'hidden', backgroundColor: surface.canvas },
   comparison: { display: 'flex', flexWrap: 'wrap', gap: 16, backgroundColor: surface.canvas },
   controls: { display: 'flex', flexShrink: 0, alignItems: 'center' },
+  control: { color: text.fgMuted, backgroundColor: surface.transparent, borderWidth: 0, borderRadius: radius.control, paddingInline: space.sm, paddingBlock: space.xs, fontFamily: type.fontSans, fontSize: type.metaSize, cursor: 'pointer' },
 })
 
 /** Only production components are mounted; the CSF render callback owns host observations. */
@@ -78,7 +79,7 @@ const meta = {
     const cases = comparison ? (['dark', 'light'] as const).flatMap(scheme => [159, 160, 800].map(width => ({ scheme, width }))) : [{ scheme: args.scheme, width: mountedWidth }]
     // AllStates renders several stages, so each is a labelled region rather than a duplicate main landmark.
     return <div {...stylex.props(comparison && styles.comparison)}>{cases.map(({ scheme, width }) => <section key={`${scheme}-${width}`} aria-label={`${scheme} ${width}px`} data-testid="tab-strip-stage" style={{ width }} {...stylex.props(styles.root, ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
-      <header {...stylex.props(styles.controls)}><Button size="sm" variant="quiet" onPress={() => setState('loading')}>Loading details</Button><Button size="sm" variant="quiet" onPress={() => setState('error')}>Fail details</Button></header>
+      <header {...stylex.props(styles.controls)}><Button {...stylex.props(styles.control)} onPress={() => setState('loading')}>Loading details</Button><Button {...stylex.props(styles.control)} onPress={() => setState('error')}>Fail details</Button></header>
       <DetailsLabelContext.Provider value={`${scheme} ${width}px `}><ThemePortal><Workbench {...args} scheme={scheme} workspaceId={`${args.workspaceId}-${scheme}-${width}`} layout={layout} focusedPaneKey={focused} onPaneSelect={setFocused} onLayoutChange={setLayout} renderPane={renderPane} /></ThemePortal></DetailsLabelContext.Provider>
     </section>)}</div>
   },
