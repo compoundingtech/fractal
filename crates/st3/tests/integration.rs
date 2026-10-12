@@ -19,6 +19,7 @@ mod claude_idle;
 mod client_creation;
 mod client_glasses;
 mod client_presence;
+mod client_only;
 mod client_v0_cli;
 mod client_v0_contract;
 mod cli_inventory_process;
@@ -98,6 +99,7 @@ mod subagents_seat;
 mod terminal_attach;
 mod terminal_binding;
 mod version;
+mod typed_keys;
 
 #[test]
 fn every_test_file_is_built() {
