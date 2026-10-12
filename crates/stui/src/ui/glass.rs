@@ -2072,6 +2072,8 @@ impl Ui {
     /// A pane whose subject st no longer lists. Unknown while its list is still loading.
     fn subject_gone(&self, pane: &Pane) -> bool {
         match pane {
+            // Saved and child sessions are not members of the agent inventory.
+            Pane::Agent(Some(id)) if id.starts_with("session/") => false,
             Pane::Terminal(id) if id.starts_with("terminal/") => false,
             Pane::Agent(Some(id)) | Pane::Terminal(id) => self
                 .world
