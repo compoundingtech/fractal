@@ -21,38 +21,47 @@ const next: TextItem & { role: 'assistant' } = { ...answer, id: 'critique/next',
 const work: WorkLogTurn = { running: true, failed: false, interrupted: false, durationMs: undefined, calls: [
   { id: 'critique/read', kind: 'read', title: 'Read selected resource', status: 'success', startedAt: at, endedAt: '2026-01-15T12:00:02Z', detail: 'The selected resource has a stable identity.' },
   { id: 'critique/run', kind: 'run', title: 'Check a longer command label with complete arguments', argsSummary: 'printf ready', status: 'success', startedAt: at, endedAt: '2026-01-15T12:00:12Z', detail: 'ready' },
+  { id: 'critique/cancelled', kind: 'read', title: 'Compare every retained workspace snapshot', status: 'interrupted', startedAt: at, endedAt: '2026-01-15T12:59:59Z' },
+  { id: 'critique/failed', kind: 'edit', title: 'Apply the reviewed migration to every retained workspace snapshot and verify each resulting identity before release', status: 'error', startedAt: at, endedAt: '2026-01-15T23:59:00Z', detail: 'The retained workspace snapshot changed during review.' },
   { id: 'critique/wait', kind: 'read', title: 'Await the next observation', status: 'running', startedAt: at },
 ] }
 const hint = 'Messages can be sent once this conversation loads.'
-const failures = ['none', 'answer-meta', 'cold-composer', 'tool-rows', 'thinking', 'row-fade'] as const
+const draft = 'Keep this retained draft'
+const failures = ['none', 'answer-meta', 'cold-composer', 'cold-slab', 'retained-reason', 'tool-rows', 'tool-overflow', 'thinking', 'row-fade'] as const
 type Failure = typeof failures[number]
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
   narrow: { width: g.polishNarrow },
   transcript: { height: g.transcriptFrameHeight },
-  controls: { display: 'flex', gap: s.md, paddingBlock: s.lg },
+  controls: { display: 'flex', flexWrap: 'wrap', gap: s.md, paddingBlock: s.lg },
 })
 
 function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { scheme?: Scheme; narrow?: boolean; failure?: Failure }) {
   const root = React.useRef<HTMLElement>(null)
   const [revision, rerender] = React.useState(0)
+  const [locked, setLocked] = React.useState(false)
   // Deliberately restore one old behavior after the production tree re-renders.
   // Each selectable negative control must break its corresponding measured assertion.
   React.useLayoutEffect(() => {
     if (revision === 0 || root.current === null) return
     const element = <T extends HTMLElement>(selector: string) => root.current!.querySelector<T>(selector)!
     if (failure === 'answer-meta') { element('[data-testid="answer-meta"]').style.height = 'auto'; element('[data-testid="answer-meta"]').style.opacity = '1' }
-    if (failure === 'cold-composer') element('[data-testid="composer-placeholder"]').textContent = 'Message'
+    if (failure === 'cold-composer') element('[aria-label="Cold composer example"] [data-testid="composer-placeholder"]').textContent = 'Message'
+    if (failure === 'cold-slab') element('[aria-label="Cold slab composer example"] form').style.flexDirection = 'column'
+    if (failure === 'retained-reason' && locked) { const reason = element('[aria-label="Retained draft example"] [data-testid="composer-reason"]'); reason.style.display = 'none'; element('[aria-label="Retained draft example"] textarea').removeAttribute('aria-describedby') }
     if (failure === 'tool-rows') { element('[data-row-disclosure]').parentElement!.style.display = 'flex'; element('[data-row-disclosure]').parentElement!.lastElementChild!.textContent = 'OK · 2s' }
+    if (failure === 'tool-overflow') element('[data-tool-status="interrupted"] [data-call-state]').textContent = 'Interrupted · 59m 59s · retained after cancellation'
     if (failure === 'thinking') element('[data-testid="thinking-body"]').style.borderLeftWidth = '0'
     if (failure === 'row-fade') element('[data-tool-status="success"] > button').style.transitionDuration = '0s'
-  }, [failure, revision])
+  }, [failure, revision, locked])
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
-    <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><span>{failure}</span></div>
+    <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><Button onPress={() => setLocked(true)}>Lock retained draft</Button><span>{failure}</span></div>
     <section aria-label="Answer example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [answer, next], onNew: async () => {} }}><Transcript title="Review answers" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={[{ id: 'critique', items: [answer, next], work: { ...work, calls: [], running: false } }]} /></EmbraceRuntimeProvider></section>
     <section aria-label="Tool row example"><WorkLogV1 turn={work} hideLiveRow /></section>
     <section aria-label="Thinking example"><ThinkingEntry text="Compare **reported rows** with the input, then review the retained selection." /></section>
     <section aria-label="Cold composer example"><EmbraceRuntimeProvider options={{ messages: [], isDisabled: true, onNew: async () => {} }}><EmbraceComposer variant="C1" disabledReason={hint} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Cold slab composer example"><EmbraceRuntimeProvider options={{ messages: [], isDisabled: true, onNew: async () => {} }}><EmbraceComposer variant="C2" disabledReason={hint} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Retained draft example"><EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><EmbraceComposer variant="C1" disabledReason={locked ? hint : undefined} /></EmbraceRuntimeProvider></section>
   </main>
 }
 const meta = {
@@ -69,37 +78,56 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const thinking = await canvas.findByRole('button', { name: 'Thinking' })
   await userEvent.click(thinking)
   await expect(thinking).toHaveAttribute('aria-expanded', 'true')
-  await userEvent.click(canvas.getByRole('button', { name: 'Apply selected regression' }))
+  const retained = canvas.getByRole('region', { name: 'Retained draft example' })
+  const retainedField = within(retained).getByRole('textbox')
+  await userEvent.type(retainedField, draft)
+  await expect(retainedField).toHaveValue(draft)
+  const apply = canvas.getByRole('button', { name: 'Apply selected regression' })
+  await userEvent.click(apply)
   await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
 
-  // 4: clipping-aware hidden geometry, then pointer and keyboard reveal.
+  // 4: hidden metadata reserves no height; hover and keyboard focus on Copy reveal it.
   const answers = await canvas.findAllByTestId('agent-message')
+  await expect(answers[0]).not.toHaveAttribute('tabindex')
   const metadata = within(answers[0]!).getByTestId('answer-meta')
+  const copy = within(answers[0]!).getByRole('button', { name: 'Copy answer' })
   await expect(metadata.getBoundingClientRect().height).toBe(0)
   await expect(getComputedStyle(metadata).opacity).toBe('0')
   await expect(getComputedStyle(metadata).transitionDuration).toBe(reduced ? '0s' : '0.2s')
+  await expect(copy).toBeEnabled()
   await userEvent.hover(answers[0]!)
   await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(24))
   await waitFor(() => expect(getComputedStyle(metadata).opacity).toBe('1'))
   await userEvent.unhover(answers[0]!)
   await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(0))
-  answers[0]!.focus()
+  apply.focus()
+  for (let step = 0; step < 8 && document.activeElement !== copy; step++) await userEvent.tab()
+  await expect(copy).toHaveFocus()
   await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(24))
-  await userEvent.tab()
-  await expect(within(answers[0]!).getByRole('button', { name: 'Copy answer' })).toHaveFocus()
-  canvas.getByRole('button', { name: 'Apply selected regression' }).focus()
+  await waitFor(() => expect(getComputedStyle(metadata).opacity).toBe('1'))
+  apply.focus()
   await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(0))
 
-  // 9: a single compact shape; the cold reason belongs to the empty field.
-  const cold = canvas.getByRole('region', { name: 'Cold composer example' })
-  const composer = within(cold).getByTestId('kit-composer')
-  await expect(within(cold).getByTestId('composer-placeholder')).toHaveTextContent(hint)
-  await expect(composer.getBoundingClientRect().height).toBeLessThanOrEqual(50)
-  await expect(within(cold).getByRole('textbox')).toBeDisabled()
-  await expect(within(cold).getByRole('button', { name: 'Send' })).toBeDisabled()
+  // 9: empty disabled composers keep one compact row with the reason in the placeholder.
+  for (const name of ['Cold composer example', 'Cold slab composer example']) {
+    const cold = canvas.getByRole('region', { name })
+    await expect(within(cold).getByTestId('composer-placeholder')).toHaveTextContent(hint)
+    await expect(getComputedStyle(cold.querySelector('form')!).flexDirection).toBe('row')
+    await expect(within(cold).getByTestId('kit-composer').getBoundingClientRect().height).toBeLessThanOrEqual(50)
+    await expect(within(cold).getByRole('textbox')).toHaveAccessibleDescription(hint)
+    await expect(within(cold).getByRole('button', { name: 'Send' })).toBeDisabled()
+  }
 
-  // 10, 12: fixed disclosure column independent of label and result width.
+  // 9: a retained draft that becomes read-only keeps a visible, described reason.
+  await userEvent.click(canvas.getByRole('button', { name: 'Lock retained draft' }))
+  await waitFor(() => expect(retainedField).toBeDisabled())
+  await expect(retainedField).toHaveValue(draft)
+  await expect(within(retained).getByTestId('composer-reason')).toHaveTextContent(hint)
+  await expect(within(retained).getByTestId('composer-reason').getBoundingClientRect().height).toBeGreaterThan(0)
+  await expect(retainedField).toHaveAccessibleDescription(hint)
+
+  // 10, 12: fixed disclosure and result columns, including the longest statuses.
   const rows = canvasElement.querySelectorAll<HTMLElement>('[data-tool-status="success"] > button')
   await expect(rows).toHaveLength(2)
   await expect(rows[0]!).not.toHaveTextContent('OK')
@@ -107,7 +135,15 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(rows[1]!.lastElementChild).toHaveTextContent('12s')
   const columns = Array.from(rows, row => row.querySelector('[data-row-disclosure]')!.getBoundingClientRect().left)
   await expect(Math.abs(columns[0]! - columns[1]!)).toBeLessThan(1)
-  await expect(canvasElement.querySelector('[data-tool-status="running"]')).toHaveTextContent('Running')
+  await expect(canvasElement.querySelector('[data-tool-status="running"] [data-call-state]')).toHaveTextContent('Running')
+  await expect(canvasElement.querySelector('[data-tool-status="interrupted"] [data-call-state]')).toHaveTextContent('Interrupted · 59m 59s')
+  await expect(canvasElement.querySelector('[data-tool-status="error"] [data-call-state]')).toHaveTextContent('Failed · 23h 59m')
+  for (const state of canvasElement.querySelectorAll<HTMLElement>('[data-call-state]')) {
+    const row = state.parentElement!
+    await expect(state.scrollWidth).toBeLessThanOrEqual(state.clientWidth)
+    await expect(state.getBoundingClientRect().right).toBeLessThanOrEqual(row.getBoundingClientRect().right)
+    await expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
+  }
   await expect(getComputedStyle(rows[0]!).transitionDuration).toBe(reduced ? '0s' : '0.15s')
   await userEvent.click(rows[0]!)
   await expect(rows[0]!).toHaveAttribute('aria-expanded', 'true')
