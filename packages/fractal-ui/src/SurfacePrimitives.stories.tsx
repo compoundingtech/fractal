@@ -184,7 +184,8 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(tooltip).toHaveTextContent('Search this thread')
   await expect(tooltip).not.toHaveTextContent('Search messages')
   await expect(search).toHaveAccessibleDescription(`Search this thread ${args.shortcut}`)
-  await expect(within(tooltip).getByText(args.shortcut!)).toBeVisible()
+  // The tooltip enters from opacity 0; visibility settles once the entry animation ends.
+  await waitFor(() => expect(within(tooltip).getByText(args.shortcut!)).toBeVisible())
   await expect(tooltip.closest('[data-scheme]')).toBe(root)
   await assertMotion(tooltip)
   const tooltipStyle = getComputedStyle(tooltip)
