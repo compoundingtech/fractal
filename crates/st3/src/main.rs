@@ -4240,6 +4240,11 @@ enum MessageCommand {
     /// A message is a direct connection: it wakes the recipient agent for a full turn,
     /// which rereads its context. A reply that only acknowledges or reports is `--kind silent`.
     Reply(MessageReplyArgs),
+    /// Wait up to a deadline for a reply from one sender, and print the reply or `no reply`.
+    ///
+    /// The reply is marked read for the waiting seat, so native delivery does not hand it over
+    /// again as a separate turn. Without `--after` only messages sent after the wait began count.
+    Wait(MessageWaitArgs),
     /// Close exact messages after their related action is complete.
     Archive(MessageArchiveArgs),
     /// Archive unread mail past an age threshold as each recipient.
@@ -4414,6 +4419,26 @@ struct MessageReplyArgs {
     /// replied to, the words and attachments, as for `send`.
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+struct MessageWaitArgs {
+    /// The seat waiting for the reply; defaults to the non-empty ST_AGENT value.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as")]
+    actor: Option<String>,
+    /// Whose reply to wait for, for example `person/ada`.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "from")]
+    sender: String,
+    /// Count a reply sent after this message, for a question sent just before the wait began.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Message)))]
+    #[arg(long)]
+    after: Option<String>,
+    /// How long to wait, such as 30s or 2m, at most 10m (issue the wait again for longer). Zero
+    /// checks once and returns.
+    #[arg(long, default_value = "30s")]
+    timeout: String,
 }
 
 #[derive(Args)]
@@ -16905,6 +16930,29 @@ async fn run_message(
             };
             print_message_receipt(&receipt, json_output)
         }
+        MessageCommand::Wait(args) => {
+            let actor = message_list_identity(args.actor, std::env::var("ST_AGENT").ok())?;
+            reject_foreign_agent_actor(&actor)?;
+            let sender = normalize_message_subject(&args.sender);
+            let timeout = parse_timeout(&args.timeout)?;
+            anyhow::ensure!(
+                timeout <= MAX_REPLY_WAIT,
+                "a wait lasts at most 10m; issue it again to wait longer"
+            );
+            let after = match args.after.as_deref() {
+                Some(reference) => Some(read_message(client, reference).await?.created_index),
+                None => None,
+            };
+            let reply = wait_for_reply(client, &actor, &sender, after, timeout).await?;
+            let reply = match reply {
+                Some(message) => {
+                    Some(read_message_after_lifecycle(client, &message.subject, &actor, false).await?)
+                }
+                None => None,
+            };
+            sync_message_projection(client).await?;
+            print_reply_wait(reply.as_ref(), json_output)
+        }
         MessageCommand::Cleanup { all, actor, older_than, dry_run } => {
             if let Some(actor) = actor.as_deref() {
                 reject_foreign_agent_actor(actor)?;
@@ -17670,6 +17718,127 @@ fn normalize_message_reference(reference: &str) -> String {
     };
     let reference = urlencoding::decode(reference).unwrap_or(std::borrow::Cow::Borrowed(reference));
     reference.trim_start_matches("message/").to_owned()
+}
+
+/// The earliest message to `actor` from `sender` that arrived after `after`.
+fn earliest_reply(messages: Vec<MessageView>, sender: &str, after: u64) -> Option<MessageView> {
+    messages
+        .into_iter()
+        .filter(|message| {
+            message.from == sender
+                && message.created_index > after
+                && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+        })
+        .min_by_key(|message| message.created_index)
+}
+
+async fn unread_replies(client: &Client, actor: &str, sender: &str, after: u64) -> Result<Option<MessageView>> {
+    let mut candidates = Vec::new();
+    for_each_message(client, Some(actor), false, |message| {
+        candidates.push(message);
+        Ok(())
+    })
+    .await?;
+    Ok(earliest_reply(candidates, sender, after))
+}
+
+/// The longest one wait holds a tool call and a connection; a longer wait is issued again.
+const MAX_REPLY_WAIT: Duration = Duration::from_secs(600);
+
+/// The least time between two reads of the event feed by one wait, so a busy store cannot make a
+/// waiting seat poll.
+const REPLY_WAIT_PACE: Duration = Duration::from_millis(500);
+
+/// Whether an event may be new mail from `sender` to `actor`. An event whose body names its
+/// endpoints is judged by them; one that does not is a candidate the message itself settles.
+fn may_be_reply(event: &EventRecord, actor: &str, sender: &str) -> bool {
+    if event.kind != "message.sent" || !event.subject.starts_with("message/") {
+        return false;
+    }
+    let endpoint = |name: &str| event.body.pointer(&format!("/fields/{name}")).and_then(Value::as_str);
+    endpoint("to").is_none_or(|to| to == actor) && endpoint("from").is_none_or(|from| from == sender)
+}
+
+/// Wait until `sender` writes to `actor` or the deadline passes. The graph's event feed wakes the
+/// wait, but only a `message.sent` event addressed to the seat from the sender costs a read, and
+/// that read is the one message it names, never the mailbox. The mailbox is listed once, and only
+/// for `--after`, to find a reply that landed before the wait began. Event reads are paced.
+async fn wait_for_reply(
+    client: &Client,
+    actor: &str,
+    sender: &str,
+    after: Option<u64>,
+    timeout: Duration,
+) -> Result<Option<MessageView>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    // Capture the index before looking, so a message that lands during the look is still on the
+    // event feed from this cursor.
+    let health: Value = client.get("/v1/health").await?;
+    let started = health["store_index"]
+        .as_u64()
+        .context("the daemon health response has no store index")?;
+    let floor = after.unwrap_or(started);
+    if after.is_some()
+        && let Some(message) = unread_replies(client, actor, sender, floor).await?
+    {
+        return Ok(Some(message));
+    }
+    let mut cursor = started;
+    let mut event_feed = LocalEventFeed::default();
+    let mut last_read: Option<tokio::time::Instant> = None;
+    loop {
+        let mut remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Some(last) = last_read {
+            let pause = REPLY_WAIT_PACE.saturating_sub(last.elapsed()).min(remaining);
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+                remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            }
+        }
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        last_read = Some(tokio::time::Instant::now());
+        let wait_ms = remaining.as_millis().clamp(1, 30_000);
+        let page = event_feed
+            .read(client, &format!("after={cursor}&wait=true&timeout_ms={wait_ms}"))
+            .await?;
+        for event in &page.items {
+            if event.store_index <= floor || !may_be_reply(event, actor, sender) {
+                continue;
+            }
+            let message = read_message(client, &event.subject).await?;
+            if message.from == sender
+                && message.to == actor
+                && message.created_index > floor
+                && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+            {
+                return Ok(Some(message));
+            }
+        }
+        if let Some(scanned) = page.next_after {
+            cursor = cursor.max(scanned);
+        }
+        // A full page means more events are waiting: read the next one without a pause.
+        if page.items.len() >= 200 {
+            last_read = None;
+        }
+    }
+}
+
+fn print_reply_wait(reply: Option<&MessageView>, json_output: bool) -> Result<()> {
+    match (reply, json_output) {
+        (Some(message), true) => print_value(&json!({"reply": true, "message": message}), true),
+        (None, true) => print_value(&json!({"reply": false}), true),
+        (Some(message), false) => {
+            println!("{}", message.content);
+            Ok(())
+        }
+        (None, false) => {
+            println!("no reply");
+            Ok(())
+        }
+    }
 }
 
 async fn sync_message_projection(client: &Client) -> Result<()> {
