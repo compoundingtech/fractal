@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { VisuallyHidden } from 'react-aria-components'
 import { ThreadHeader } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { useConversationSync, useNow } from '../data/react.tsx'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
@@ -7,6 +8,7 @@ import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-v
 export const WorkspaceThreadHeader = ({ agentRef, ...props }: React.ComponentProps<typeof ThreadHeader> & { readonly agentRef: string }) => {
   const observation = useConversationSync(agentRef)
   const now = useNow()
+  const descriptionId = React.useId()
   const description = observation === undefined ? 'Conversation synchronization pending' : syncLine({ ...observation, label: 'conversation', now })?.text ?? 'Conversation is up to date'
-  return <div data-workspace-header title={description} style={{ display: 'contents' }}><ThreadHeader {...props} /></div>
+  return <div data-workspace-header role="group" aria-label="Conversation header" aria-describedby={descriptionId} style={{ display: 'contents' }}><ThreadHeader {...props} /><VisuallyHidden><span id={descriptionId}>{description}</span></VisuallyHidden></div>
 }
