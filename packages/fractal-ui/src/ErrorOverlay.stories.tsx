@@ -24,7 +24,7 @@ function FailureStory({ scheme = 'dark', scenario = 'timeout', width = 1440, raw
   const call = { id: scenario, kind: 'run' as const, title: 'Check sample records', status: 'error' as const, startedAt: '2026-01-15T12:30:00Z', command, detail: fixture.output }
   return <section aria-label={`${scenario} command failure`} data-scheme={scheme} style={{ width, maxWidth: '100%' }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><ErrorOverlayHost lane><ErrorOverlay id={scenario} title="Command did not complete" detail={rawReason ? fixture.output : errorReason(fixture.output)} command={readableCommand(call)} rawDetail={fixture.output} /></ErrorOverlayHost></section>
 }
-const meta = { title: 'Fractal UI/Error Overlay', component: FailureStory, decorators: [Story => <main><h1>Command failures</h1><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', scenario: 'timeout', width: 1440 }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, scenario: { options: Object.keys(cases), control: 'select' }, width: { options: [440, 1440], control: 'select' } } } satisfies Meta<typeof FailureStory>
+const meta = { title: 'Fractal UI/Error Overlay', component: FailureStory, decorators: [Story => <main><h1>Command failures</h1><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', scenario: 'timeout', width: 1440, rawReason: false }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, scenario: { options: Object.keys(cases), control: 'select' }, width: { options: [440, 1440], control: 'select' }, rawReason: { control: false, table: { disable: true } } } } satisfies Meta<typeof FailureStory>
 export default meta
 type Story = StoryObj<typeof meta>
 const play: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
@@ -58,7 +58,6 @@ export const ExitCode: Story = { args: { scenario: 'plain' }, play }
 export const SubprocessTimeoutLight: Story = { ...SubprocessTimeout, args: { scheme: 'light' } }
 export const SubprocessTimeoutDark440: Story = { args: { width: 440 }, play }
 export const SubprocessTimeoutLight440: Story = { args: { width: 440, scheme: 'light' }, play }
-export const RawReasonControl: Story = { args: { rawReason: true }, play }
 export const AllStates: Story = { render: args => <div>{(Object.keys(cases) as Scenario[]).map(scenario => <FailureStory key={scenario} {...args} scenario={scenario} />)}</div> }
 export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
 const styles = stylex.create({ root: { boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans } })

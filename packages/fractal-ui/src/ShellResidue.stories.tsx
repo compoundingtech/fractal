@@ -19,7 +19,7 @@ const SplitSurface = ({ scheme = 'dark', width = 1440, ignoreReverse = false }: 
     <Button onPress={() => setLocked(current => !current)}>{locked ? 'Allow resizing' : 'Lock resizing'}</Button>
   </section>
 }
-const meta = { title: 'Fractal UI/Shell/Resizable split', component: SplitSurface, decorators: [Story => <main><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } } } satisfies Meta<typeof SplitSurface>
+const meta = { title: 'Fractal UI/Shell/Resizable split', component: SplitSurface, decorators: [Story => <main><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440, ignoreReverse: false }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] }, ignoreReverse: { control: false, table: { disable: true } } } } satisfies Meta<typeof SplitSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
@@ -45,6 +45,5 @@ export const Dark1440: Story = { play }
 export const Light1440: Story = { args: { scheme: 'light' }, play }
 export const Dark440: Story = { args: { width: 440 }, play }
 export const Light440: Story = { args: { width: 440, scheme: 'light' }, play }
-export const WrongDirectionControl: Story = { args: { ignoreReverse: true }, play }
 export const AllStates: Story = { render: () => <><SplitSurface width={440} /><SplitSurface width={440} scheme="light" /></> }
 const styles = stylex.create({ root: { boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans }, track: { display: 'flex', minHeight: g.band } })

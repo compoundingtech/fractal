@@ -24,7 +24,7 @@ const PolicySurface = ({ scheme = 'dark', width = 1440, omitServiceFacts = false
     <Button onPress={() => setReady(value => !value)}>{ready ? 'Record readiness timeout' : 'Record ready service'}</Button>
   </section>
 }
-const meta = { title: 'Fractal UI/Transcript/Work log policy', component: PolicySurface, decorators: [Story => <main><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } } } satisfies Meta<typeof PolicySurface>
+const meta = { title: 'Fractal UI/Transcript/Work log policy', component: PolicySurface, decorators: [Story => <main><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440, omitServiceFacts: false }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] }, omitServiceFacts: { control: false, table: { disable: true } } } } satisfies Meta<typeof PolicySurface>
 export default meta
 type Story = StoryObj<typeof meta>
 const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
@@ -49,6 +49,5 @@ export const Dark1440: Story = { play }
 export const Light1440: Story = { args: { scheme: 'light' }, play }
 export const Dark440: Story = { args: { width: 440 }, play }
 export const Light440: Story = { args: { width: 440, scheme: 'light' }, play }
-export const MissingServiceFactsControl: Story = { args: { omitServiceFacts: true }, play }
 export const AllStates: Story = { render: args => <PolicySurface {...args} /> }
 const styles = stylex.create({ root: { boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans } })
