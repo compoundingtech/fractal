@@ -19,6 +19,7 @@ mod claude_idle;
 mod client_creation;
 mod client_glasses;
 mod client_presence;
+mod client_only;
 mod client_v0_cli;
 mod client_v0_contract;
 mod cli_inventory_process;
@@ -77,6 +78,7 @@ mod human_gates;
 mod idle_budget;
 mod log_diet;
 mod message_send_once;
+mod message_wait;
 mod messaging_faults;
 mod mission_cancellation;
 mod no_st2_seat;
@@ -92,11 +94,13 @@ mod recorder_report;
 mod revision_seats;
 mod seat_queue_perf;
 mod startup_readiness;
+mod stui_slo_history;
 mod subagent_publisher;
 mod subagents_seat;
 mod terminal_attach;
 mod terminal_binding;
 mod version;
+mod typed_keys;
 
 #[test]
 fn every_test_file_is_built() {
