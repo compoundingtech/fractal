@@ -45,13 +45,13 @@ function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { schem
   React.useLayoutEffect(() => {
     if (revision === 0 || root.current === null) return
     const element = <T extends HTMLElement>(selector: string) => root.current!.querySelector<T>(selector)!
-    if (failure === 'answer-meta') { element('[data-testid="answer-meta"]').style.height = 'auto'; element('[data-testid="answer-meta"]').style.opacity = '1' }
+    if (failure === 'answer-meta') element('[data-testid="message-header"]').style.order = '1'
     if (failure === 'cold-composer') element('[aria-label="Cold composer example"] [data-testid="composer-placeholder"]').textContent = 'Message'
     if (failure === 'cold-slab') element('[aria-label="Cold slab composer example"] form').style.flexDirection = 'column'
     if (failure === 'retained-reason' && locked) { const reason = element('[aria-label="Retained draft example"] [data-testid="composer-reason"]'); reason.style.display = 'none'; element('[aria-label="Retained draft example"] textarea').removeAttribute('aria-describedby') }
-    if (failure === 'tool-rows') { element('[data-row-disclosure]').parentElement!.style.display = 'flex'; element('[data-row-disclosure]').parentElement!.lastElementChild!.textContent = 'OK · 2s' }
-    if (failure === 'tool-overflow') element('[data-tool-status="interrupted"] [data-call-state]').textContent = 'Interrupted · 59m 59s · retained after cancellation'
-    if (failure === 'thinking') element('[data-testid="thinking-body"]').style.borderLeftWidth = '0'
+    if (failure === 'tool-rows') element('[data-tool-status="success"] [data-call-duration]').textContent = 'OK · 2s'
+    if (failure === 'tool-overflow') element('[data-tool-status="interrupted"] [data-call-word]').textContent = 'Interrupted after the retained cancellation request'
+    if (failure === 'thinking') element('[data-testid="thinking-body"]').style.marginInlineStart = '0'
     if (failure === 'row-fade') element('[data-tool-status="success"] > button').style.transitionDuration = '0s'
   }, [failure, revision, locked])
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
@@ -87,27 +87,31 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
 
-  // 4: hidden metadata reserves no height; hover and keyboard focus on Copy reveal it.
+  // 4: Copy and time live in the 16px header line above the body; there is no footer row and no extra Tab stop.
   const answers = await canvas.findAllByTestId('agent-message')
   await expect(answers[0]).not.toHaveAttribute('tabindex')
-  const metadata = within(answers[0]!).getByTestId('answer-meta')
+  const header = within(answers[0]!).getByTestId('message-header')
   const copy = within(answers[0]!).getByRole('button', { name: 'Copy answer' })
-  await expect(metadata.getBoundingClientRect().height).toBe(0)
-  await expect(getComputedStyle(metadata).opacity).toBe('0')
-  await expect(getComputedStyle(metadata).transitionDuration).toBe(reduced ? '0s' : '0.2s')
-  await expect(copy).toBeEnabled()
+  const markdown = within(answers[0]!).getByTestId('markdown')
+  await expect(header).toContainElement(copy)
+  await expect(header).toContainElement(answers[0]!.querySelector('time'))
+  await expect(header.getBoundingClientRect().height).toBe(16)
+  await expect(header.getBoundingClientRect().bottom).toBeLessThanOrEqual(markdown.getBoundingClientRect().top)
+  await expect(answers[0]!.getBoundingClientRect().bottom - markdown.getBoundingClientRect().bottom).toBeLessThanOrEqual(2)
+  await expect(answers[1]).toHaveAttribute('data-run-continuation', 'true')
+  await expect(within(answers[1]!).queryByTestId('message-header')).toBeNull()
+  await expect(getComputedStyle(copy).opacity).toBe('0')
+  await expect(getComputedStyle(copy).transitionDuration).toBe(reduced ? '0s' : '0.15s')
   await userEvent.hover(answers[0]!)
-  await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(24))
-  await waitFor(() => expect(getComputedStyle(metadata).opacity).toBe('1'))
+  await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
   await userEvent.unhover(answers[0]!)
-  await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(0))
+  await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('0'))
   apply.focus()
   for (let step = 0; step < 8 && document.activeElement !== copy; step++) await userEvent.tab()
   await expect(copy).toHaveFocus()
-  await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(24))
-  await waitFor(() => expect(getComputedStyle(metadata).opacity).toBe('1'))
+  await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
   apply.focus()
-  await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(0))
+  await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('0'))
 
   // 9: empty disabled composers keep one compact row with the reason in the placeholder.
   for (const name of ['Cold composer example', 'Cold slab composer example']) {
@@ -127,35 +131,48 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(within(retained).getByTestId('composer-reason').getBoundingClientRect().height).toBeGreaterThan(0)
   await expect(retainedField).toHaveAccessibleDescription(hint)
 
-  // 10, 12: fixed disclosure and result columns, including the longest statuses.
-  const rows = canvasElement.querySelectorAll<HTMLElement>('[data-tool-status="success"] > button')
-  await expect(rows).toHaveLength(2)
-  await expect(rows[0]!).not.toHaveTextContent('OK')
-  await expect(rows[0]!.lastElementChild).toHaveTextContent('2s')
-  await expect(rows[1]!.lastElementChild).toHaveTextContent('12s')
-  const columns = Array.from(rows, row => row.querySelector('[data-row-disclosure]')!.getBoundingClientRect().left)
-  await expect(Math.abs(columns[0]! - columns[1]!)).toBeLessThan(1)
-  await expect(canvasElement.querySelector('[data-tool-status="running"] [data-call-state]')).toHaveTextContent('Running')
-  await expect(canvasElement.querySelector('[data-tool-status="interrupted"] [data-call-state]')).toHaveTextContent('Interrupted · 59m 59s')
-  await expect(canvasElement.querySelector('[data-tool-status="error"] [data-call-state]')).toHaveTextContent('Failed · 23h 59m')
-  for (const state of canvasElement.querySelectorAll<HTMLElement>('[data-call-state]')) {
-    const row = state.parentElement!
-    await expect(state.scrollWidth).toBeLessThanOrEqual(state.clientWidth)
-    await expect(state.getBoundingClientRect().right).toBeLessThanOrEqual(row.getBoundingClientRect().right)
-    await expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth)
+  // 10, 12: success rows show the duration only; every chevron and duration column is pinned to the row end.
+  const tools = canvas.getByRole('region', { name: 'Tool row example' })
+  const row = (status: string) => tools.querySelector<HTMLElement>(`[data-tool-status="${status}"]`)!.firstElementChild as HTMLElement
+  const rows = Array.from(tools.querySelectorAll<HTMLElement>('[data-tool-status]'), entry => entry.firstElementChild as HTMLElement)
+  await expect(rows).toHaveLength(5)
+  const success = tools.querySelectorAll<HTMLElement>('[data-tool-status="success"] > button')
+  await expect(success).toHaveLength(2)
+  await expect(success[0]!).not.toHaveTextContent('OK')
+  await expect(success[0]!.querySelector('[data-call-duration]')).toHaveTextContent(/^2s$/)
+  await expect(success[1]!.querySelector('[data-call-duration]')).toHaveTextContent(/^12s$/)
+  await expect(row('running').querySelector('[data-call-duration]')).toHaveTextContent(/^Running$/)
+  await expect(row('interrupted').querySelector('[data-call-word]')).toHaveTextContent(/^Interrupted$/)
+  await expect(row('interrupted').querySelector('[data-call-duration]')).toHaveTextContent(/^59m 59s$/)
+  await expect(row('error').querySelector('[data-call-word]')).toHaveTextContent(/^Failed$/)
+  await expect(row('error').querySelector('[data-call-duration]')).toHaveTextContent(/^23h 59m$/)
+  const chevron = rows[0]!.children[3]!.getBoundingClientRect().left
+  for (const entry of rows) {
+    const box = entry.getBoundingClientRect()
+    const duration = entry.querySelector<HTMLElement>('[data-call-duration]')!
+    const word = entry.querySelector<HTMLElement>('[data-call-word]')!
+    await expect(box.height).toBe(24)
+    await expect(Math.abs(entry.children[3]!.getBoundingClientRect().left - chevron)).toBeLessThan(0.5)
+    await expect(Math.abs(duration.getBoundingClientRect().right - box.right)).toBeLessThan(0.5)
+    await expect(duration.getBoundingClientRect().width).toBe(80)
+    await expect(duration.scrollWidth).toBeLessThanOrEqual(duration.clientWidth)
+    await expect(word.scrollWidth).toBeLessThanOrEqual(word.clientWidth)
+    await expect(entry.scrollWidth).toBeLessThanOrEqual(entry.clientWidth)
   }
-  await expect(getComputedStyle(rows[0]!).transitionDuration).toBe(reduced ? '0s' : '0.15s')
-  await userEvent.click(rows[0]!)
-  await expect(rows[0]!).toHaveAttribute('aria-expanded', 'true')
+  await expect(getComputedStyle(success[0]!).transitionDuration).toBe(reduced ? '0s' : '0.15s')
+  await userEvent.click(success[0]!)
+  await expect(success[0]!).toHaveAttribute('aria-expanded', 'true')
   await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('stable identity')
 
-  // 11: inspect actual rendered Markdown, not just its parent.
+  // 11: Thinking is a work row; its framed body starts on the text column and renders muted 13px Markdown.
   await expect(parseFloat(getComputedStyle(thinking).fontSize)).toBe(14)
+  await expect(thinking.getBoundingClientRect().height).toBe(24)
   const body = canvas.getByTestId('thinking-body')
-  await expect(parseFloat(getComputedStyle(body).borderLeftWidth)).toBe(1)
+  await expect(body.getBoundingClientRect().left - thinking.getBoundingClientRect().left).toBe(22)
+  await expect(parseFloat(getComputedStyle(body).borderTopWidth)).toBe(1)
   const paragraph = body.querySelector('p')!
   await expect(parseFloat(getComputedStyle(paragraph).fontSize)).toBe(13)
-  await expect(getComputedStyle(paragraph).color).toBe(getComputedStyle(thinking).color)
+  await expect(getComputedStyle(paragraph).color).toBe(getComputedStyle(thinking.querySelector('[data-call-title]')!).color)
   await expect(getComputedStyle(thinking).transitionDuration).toBe(reduced ? '0s' : '0.15s')
   await userEvent.click(thinking)
   await expect(canvas.queryByTestId('thinking-body')).toBeNull()

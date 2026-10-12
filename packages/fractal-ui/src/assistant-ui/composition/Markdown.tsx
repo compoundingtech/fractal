@@ -183,20 +183,29 @@ function CodeFence({ node }: React.ComponentProps<'pre'> & ExtraProps) {
 const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => function Heading({ children }: React.ComponentProps<'h3'>) {
   return <Tag {...stylex.props(styles.heading, styles.prose)}><InlineText>{children}</InlineText></Tag>
 }
+/** Nesting depth, so a list inside a list item gets the indent, rail and open marker. */
+const ListDepth = React.createContext(0)
+/** Quoted prose reads muted all the way down, including its paragraphs and list items. */
+const quoteInk = stylex.createTheme(textColor, { fgSoft: textColor.fgMuted, fg: textColor.fgMuted })
+function MarkdownList({ ordered, start, children }: { readonly ordered: boolean; readonly start?: number; readonly children?: React.ReactNode }) {
+  const depth = React.useContext(ListDepth)
+  const props = { 'data-list-depth': depth, ...stylex.props(styles.list, styles.prose, ordered ? styles.orderedList : styles.unorderedList, depth > 0 && styles.nestedList, depth > 0 && !ordered && styles.nestedUnordered) }
+  return <ListDepth.Provider value={depth + 1}>{ordered ? <ol start={start} {...props}>{children}</ol> : <ul {...props}>{children}</ul>}</ListDepth.Provider>
+}
 const MARKDOWN_COMPONENTS: Components = {
   h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
   p: Paragraph,
   span: ({ children, node }) => <span data-streaming-tail={node?.properties['data-streaming-tail'] || undefined} aria-hidden={node?.properties['aria-hidden'] === true || undefined} {...stylex.props(node?.properties['data-streaming-tail'] === true && styles.streamingTail)}>{children}</span>,
   strong: ({ children }) => <strong {...stylex.props(styles.strong)}><InlineText>{children}</InlineText></strong>,
   em: ({ children }) => <em {...stylex.props(styles.emphasis)}><InlineText>{children}</InlineText></em>,
-  ul: ({ children }) => <ul {...stylex.props(styles.list, styles.prose, styles.unorderedList)}>{children}</ul>,
-  ol: ({ children, start }) => <ol start={start} {...stylex.props(styles.list, styles.prose, styles.orderedList)}>{children}</ol>,
+  ul: ({ children }) => <MarkdownList ordered={false}>{children}</MarkdownList>,
+  ol: ({ children, start }) => <MarkdownList ordered start={start}>{children}</MarkdownList>,
   li: ({ children }) => <li {...stylex.props(styles.listItem)}><InlineText>{children}</InlineText></li>,
   a: MarkdownLink,
   code: InlineCode,
   img: DeferredImage,
   pre: CodeFence,
-  blockquote: ({ children }) => <blockquote {...stylex.props(styles.blockquote)}>{children}</blockquote>,
+  blockquote: ({ children }) => <blockquote {...stylex.props(styles.blockquote, quoteInk)}>{children}</blockquote>,
   table: ({ children }) => <div role="region" aria-label="Markdown table" tabIndex={0} {...stylex.props(styles.tableScroll)}><table {...stylex.props(styles.table)}>{children}</table></div>,
   th: ({ children, style }) => <th {...stylex.props(styles.cell, styles.tableHeading, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
   td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
@@ -298,15 +307,18 @@ export function completeStreamingTail(source: string): string {
 }
 
 const styles = stylex.create({
-  markdown: { display: 'flow-root', minWidth: 0, maxWidth: '100%' },
+  // Blocks are separated by one 8px gap and carry no outer margin, so the last child ends flush.
+  markdown: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0, maxWidth: '100%' },
   image: { maxWidth: '100%', height: 'auto' },
   imagePlaceholder: { display: 'inline-flex', alignItems: 'center', gap: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, color: textColor.fgSoft, backgroundColor: surface.controlFill, fontSize: t.metaSize },
   imageAction: { borderWidth: 0, padding: s.xs, backgroundColor: surface.transparent, color: status.runningFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   prose: { maxWidth: g.proseMax, fontSize: t.bodySize, lineHeight: t.bodyLeading },
-  heading: { margin: 0, marginBlockStart: s.xxl, marginBlockEnd: s.md, fontSize: t.headingSize, lineHeight: t.headingLeading, fontWeight: t.weightSemibold, color: textColor.fg },
-  list: { margin: 0, marginBlockEnd: s.proseGap, paddingInlineStart: s.xxl, listStylePosition: 'outside' },
+  heading: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading, fontWeight: t.weightSemibold, color: textColor.fg },
+  list: { margin: 0, paddingInlineStart: g.textColumn, listStylePosition: 'outside' },
   unorderedList: { listStyleType: 'disc' }, orderedList: { listStyleType: 'decimal' },
-  listItem: { display: 'list-item', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft },
+  nestedList: { marginBlockStart: s.xs2, paddingInlineStart: s.xxl, borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.rail },
+  nestedUnordered: { listStyleType: 'circle' },
+  listItem: { display: 'list-item', marginBlockStart: { default: s.xs2, ':first-child': 0 }, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft, '::marker': { color: textColor.fgMuted } },
   strong: { fontWeight: t.weightBold, color: textColor.fg },
   emphasis: { fontStyle: 'italic' },
   syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
@@ -315,8 +327,8 @@ const styles = stylex.create({
   syntaxLiteral: { color: status.attention },
   syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
   syntaxDeleted: { color: status.dangerFg },
-  blockquote: { margin: 0, marginBlockEnd: s.proseGap, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong },
-  tableScroll: { maxWidth: '100%', overflowX: 'auto', marginBlockEnd: s.proseGap, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
+  tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft },
   cell: { paddingInline: s.md, paddingBlock: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, verticalAlign: 'top' },
   tableHeading: { backgroundColor: surface.raised, fontWeight: t.weightSemibold, color: textColor.fg },
@@ -325,12 +337,12 @@ const styles = stylex.create({
   codeLanguage: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fgMuted },
   codeButton: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: textColor.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: textColor.fgMuted } },
   codeButtonSelected: { backgroundColor: surface.rowActive, borderColor: border.borderStrong, color: textColor.fg },
-  codePre: { margin: 0, padding: s.md, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  codePre: { margin: 0, paddingBlock: s.md, paddingInline: s.lg, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   codeWrapped: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   copyStatus: { display: 'block', paddingInline: s.md, paddingBlock: s.xs, color: status.dangerFg, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  codeBlock: { minWidth: 0, maxWidth: '100%', margin: 0, marginBlockEnd: s.proseGap, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, overflow: 'hidden' },
-  codeText: { fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, color: textColor.fgSoft },
-  paragraph: { margin: 0, marginBlockEnd: s.proseGap, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft, overflowWrap: 'anywhere' },
+  codeBlock: { minWidth: 0, maxWidth: '100%', margin: 0, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, overflow: 'hidden' },
+  codeText: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.codeLeading, color: textColor.fgSoft },
+  paragraph: { margin: 0, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: textColor.fgSoft, overflowWrap: 'anywhere' },
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
   link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },

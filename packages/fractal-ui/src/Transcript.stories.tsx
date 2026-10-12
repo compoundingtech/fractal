@@ -62,7 +62,7 @@ export const Settled: Story = { play: async ({ canvasElement }) => {
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
   await expect(fold).toHaveAttribute('aria-expanded', 'false')
   await expect(canvasElement.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
-  await expect(canvasElement.querySelector('[data-testid="answer-meta"]')).not.toBeNull()
+  await expect(canvasElement.querySelector('[data-testid="message-header"] time')).not.toBeNull()
   await expect(canvasElement.querySelector('[data-testid="live-work"]')).toBeNull()
 } }
 export const SettledLight: Story = { ...Settled, args: { scheme: 'light' } }
@@ -80,7 +80,8 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   await waitFor(() => expect(previews[0]!.querySelector('[data-syntax-token~="keyword"]')).not.toBeNull())
   await expect(previews[0]).toHaveTextContent('export const visibleRows')
   await expect(previews[1]).toHaveTextContent('selection retained')
-  await expect(canvas.getByTestId('work-log-divider')).toBeInTheDocument()
+  await expect(canvasElement.querySelector('[data-testid="work-log"] hr')).toBeNull()
+  await expect(canvas.getByTestId('work-log-children')).toContainElement(canvas.getByTestId('thinking-entry'))
   await expect(canvas.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'false')
   const empty = canvasElement.querySelector('[data-tool-status="success"]:last-child')!
   await expect(empty.querySelector('button')).toBeNull()
@@ -119,7 +120,7 @@ export const Streaming: Story = { args: { state: 'streaming' }, play: async ({ c
   await expect(canvas.getByRole('status', { name: 'Response in progress' })).toBeInTheDocument()
   await expect(canvas.getByRole('progressbar', { name: 'Run in progress' })).toHaveAttribute('aria-valuetext', 'Running')
   await expect(canvasElement.querySelectorAll('[data-streaming-tail="true"]')).toHaveLength(1)
-  await expect(canvasElement.querySelector('[data-testid="answer-meta"]')).toBeNull()
+  await expect(canvasElement.querySelector('[aria-label="Copy answer"]')).toBeNull()
   await expect(canvas.getByRole('button', { name: /Working/ })).toBeDisabled()
 } }
 export const StreamingLight: Story = { ...Streaming, args: { state: 'streaming', scheme: 'light' } }
@@ -149,7 +150,7 @@ export const CatchingUp: Story = { args: { state: 'catching-up' }, play: async (
   await canvas.findByTestId('transcript-turn')
   await expect(canvas.getByRole('progressbar', { name: 'Thread synchronization' })).toHaveAttribute('aria-valuenow', '32')
   await expect(canvas.getByRole('progressbar', { name: 'Thread synchronization' })).toHaveAttribute('aria-valuemax', '64')
-  await expect(canvas.getByTestId('answer-meta')).toBeInTheDocument()
+  await expect(canvas.getAllByTestId('message-header').length).toBeGreaterThan(0)
 } }
 export const CatchingUpLight: Story = { ...CatchingUp, args: { state: 'catching-up', scheme: 'light' } }
 export const Reconnecting: Story = { args: { state: 'reconnecting' } }
@@ -182,13 +183,16 @@ export const SettledAnswerMeta: Story = { render: args => <AnswerMetadataStory s
   await expect(answers).toHaveLength(3)
   await expect(answers[0]!.querySelector('time')?.getAttribute('datetime')).toBe('2026-01-15T12:00:24.000Z')
   await expect(answers[1]!.querySelector('time')).toBeNull()
-  await expect(answers[2]!.querySelector('[data-testid="answer-meta"]')).toBeNull()
-  const footer = answers[0]!.querySelector('[data-testid="answer-meta"]')!
+  await expect(answers[2]!.querySelector('[aria-label="Copy answer"]')).toBeNull()
+  const header = within(answers[0]!).getByTestId('message-header')
+  const copy = within(answers[0]!).getByRole('button', { name: 'Copy answer' })
   const prose = answers[0]!.querySelector('[data-testid="markdown"]')!
-  await expect(footer.getBoundingClientRect().top).toBeGreaterThanOrEqual(prose.getBoundingClientRect().bottom)
-  await expect(footer.getBoundingClientRect().height).toBe(0)
+  await expect(header.getBoundingClientRect().bottom).toBeLessThanOrEqual(prose.getBoundingClientRect().top)
+  await expect(header.getBoundingClientRect().height).toBe(16)
+  await expect(header).toContainElement(answers[0]!.querySelector('time'))
+  await expect(getComputedStyle(copy).opacity).toBe('0')
   await userEvent.hover(answers[0]!)
-  await waitFor(() => expect(getComputedStyle(footer).opacity).toBe('1'))
+  await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
   const clipboard = navigator.clipboard
   const original = Object.getOwnPropertyDescriptor(clipboard, 'writeText')
   let copied = ''
