@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Bind Fractal composer submissions and retries to their original session and draft revision, upload native image attachments, and retain editable drafts through explicit offline and authorization recovery.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, columns, indexes or triggers."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Fractal web captures session-bound outbox payloads and attachment identities. Composer availability distinguishes offline transport, missing grants and revoked authorization. Recovery never automatically resends. No storage schema, checkpoint, CLI or harness protocol change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}

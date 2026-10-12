@@ -3,6 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
+import type * as ComposerSend from './composerSend.ts'
 
 const state = vi.hoisted(() => ({ tag: 'Waiting' }))
 vi.mock('@stylexjs/stylex', () => ({
@@ -16,7 +17,10 @@ vi.mock('../data/react.tsx', () => ({
   useDataSource: () => ({}), useConversation: () => state.tag === 'Waiting' ? { _tag: 'Waiting' } : { _tag: 'Unavailable', reason: 'failed', detail: 'example' },
   useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0,
 }))
-vi.mock('./composerSend.ts', () => ({ composerSendBinding: () => ({ runtime: {}, disabledReason: 'Waiting for access' }) }))
+vi.mock('./composerSend.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof ComposerSend>()),
+  composerSendBinding: () => ({ runtime: {}, availability: { _tag: 'Unavailable' }, disabledReason: 'Waiting for access' }),
+}))
 vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx', () => ({ EmbraceRuntimeProvider: ({ children }: { children: React.ReactNode }) => children }))
 vi.mock('../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx', () => ({ Transcript: () => <section>Transcript</section> }))
 vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx', () => ({ EmbraceComposer: () => <textarea aria-label="Message" /> }))
