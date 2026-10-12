@@ -12,6 +12,8 @@ import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from
 import type { TraceSeries, TraceSubagent, TraceUnknownReason } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
 import { accumulationParts, TraceCoverageNote } from './DetailsCharts'
+import { DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable'
+import { traceCoverageState } from './trace-series'
 
 export type DetailsResourceForm = 'R1' | 'R2' | 'R3'
 export type DetailsEmptyRule = 'E1' | 'E2' | 'E3'
@@ -75,7 +77,7 @@ function visible(items: DetailsValue<readonly DetailsResource[]>, rule: DetailsE
 }
 
 
-/** E3 explains a section without known values once, in human language, never as an Unknown value. */
+/** Collection provenance stays in the missing-value tooltip. */
 const humanSubagentReasons: Readonly<Record<TraceUnknownReason, string>> = {
   'no-provider': 'This source doesn’t report subagent breakdowns.',
   'not-covered': 'Subagent breakdowns aren’t tracked for this session.',
@@ -91,6 +93,8 @@ const humanSectionReasons: Readonly<Partial<Record<DetailsSection['title'], stri
 }
 function unavailableReason(section: DetailsSection, trace: TraceSeries, empty: DetailsEmptyRule): string {
   if (section.items._tag === 'Unknown' && section.unavailableReason !== undefined) return section.unavailableReason
+  if (section.title === 'Subagents' && trace.subagents._tag === 'Unknown' && trace.subagents.detail !== undefined) return trace.subagents.detail
+  if (section.title === 'History' && trace.history._tag === 'Unknown' && trace.history.detail !== undefined) return trace.history.detail
   const subagentReason = trace.subagents._tag === 'Unknown' ? trace.subagents.reason : 'no-provider'
   if (empty !== 'E3') return section.title === 'Subagents' ? humanSubagentReasons[subagentReason] : `This source doesn’t report ${section.title.toLowerCase()} yet.`
   return section.title === 'Subagents' ? humanSubagentReasons[subagentReason] : humanSectionReasons[section.title] ?? `This source doesn’t report ${section.title.toLowerCase()}.`
@@ -159,30 +163,41 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
   const hasObserved = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
   const showBreakdown = section.title !== 'Subagents' || visible(section.items, empty)
   const subagentWindow=section.title==='Subagents'?accumulationParts(trace.subagentsWindow):undefined
-  const hasUnavailableNote = showBreakdown && section.items._tag === 'Unknown'
+  const collectionReason = showBreakdown && section.items._tag === 'Unknown' ? unavailableReason(section, trace, empty) : undefined
+  const observedReason = section.title === 'Subagents' && observedSubagents?.items._tag === 'Unknown'
+    ? observedSubagents.unavailableReason ?? 'This source doesn’t report st subagent resources.' : undefined
   const missingStatus = section.title === 'Subagents' && observedSubagents?.items._tag === 'Known'
     && observedSubagents.items.value.some(resource => resource.agent?.status === 'unobserved')
-  const partialNote = hasUnavailableNote ? undefined
-    : missingStatus ? "Status isn't reported for st resources."
-    : empty === 'E3' ? missingLineCountsNote(section) : undefined
+  const partialNote = missingStatus ? "Status isn't reported for st resources." : missingLineCountsNote(section)
+  const windowReason = section.title === 'Subagents' && showBreakdown && subagentWindow === undefined
+    ? trace.subagentsWindow._tag === 'Unknown' ? trace.subagentsWindow.detail ?? `Traced-session accumulation window: ${trace.subagentsWindow.reason}.` : 'Traced-session accumulation window is unreported.'
+    : undefined
+  const countReason = section.title === 'Subagents' && showBreakdown && trace.subagents._tag === 'Known' && trace.subagentCount._tag === 'Unknown'
+    ? trace.subagentCount.detail ?? `Traced-session total count: ${trace.subagentCount.reason}.` : undefined
+  const coverage = traceCoverageState(trace.coverage)
+  const coverageReason = section.title === 'Subagents'
+    ? coverage._tag === 'Unavailable' ? `Attribution coverage: ${coverage.reason}.`
+      : coverage._tag === 'PartialUnreported' ? 'The attributed fraction is unreported.' : undefined
+    : undefined
+  const missingReason = [collectionReason, observedReason, partialNote, windowReason, countReason, coverageReason].filter(reason => reason !== undefined).join(' ')
   return <div aria-hidden={pending || undefined} inert={pending} data-details-skeleton={pending ? section.title : undefined} {...stylex.props(styles.contentShell)}>
     <div {...stylex.props(styles.content, pending && styles.skeletonHidden)}>
       {section.title === 'Subagents' && hasObserved && observedSubagents !== undefined && <>
-        <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>Observed st resources</p></SkeletonLine>
         <SectionItems section={observedSubagents} now={now} form={form} open={open} pending={pending} />
       </>}
       {showBreakdown && <>
-        {section.title === 'Subagents' && <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>Traced-session breakdown</p></SkeletonLine>}
-        {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>{subagentWindow===undefined?'Traced-session accumulation window is unreported.':`Traced sessions · ${subagentWindow.join('')}`}</p></SkeletonLine>}
-        {section.title === 'Subagents' && trace.subagents._tag === 'Known' && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>{trace.subagentCount._tag === 'Known' ? `Showing ${trace.subagents.value.length} of ${trace.subagentCount.value} traced sessions` : `Showing ${trace.subagents.value.length} traced sessions · Total count is unreported`}</p></SkeletonLine>}
+        {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>Traced sessions · {subagentWindow === undefined ? <MissingDetailsValue label="Traced-session accumulation window" reason={windowReason ?? 'Traced-session accumulation window is unreported.'} /> : subagentWindow.join('')}</p></SkeletonLine>}
+        {section.title === 'Subagents' && trace.subagents._tag === 'Known' && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>Showing {trace.subagents.value.length} of {trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : <MissingDetailsValue label="Total traced-session count" reason={countReason ?? 'Traced-session total count is unreported.'} />} traced sessions</p></SkeletonLine>}
         {section.items._tag === 'Unknown'
-          ? <SkeletonLine pending={pending}><p data-details-reason={section.title} {...stylex.props(styles.metaLine, styles.reason)}>{unavailableReason(section, trace, empty)}</p></SkeletonLine>
+          ? null
           : section.items.value.length === 0
-            ? <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>{section.title === 'Subagents' && trace.coverage._tag !== 'Complete' ? 'No traced sessions retained.' : 'None'}</p></SkeletonLine>
+            ? <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>None</p></SkeletonLine>
             : <SectionItems section={section} now={now} form={form} open={open} pending={pending} />}
       </>}
-      {partialNote !== undefined && <SkeletonLine pending={pending}><p data-details-partial-note {...stylex.props(styles.metaLine, styles.reason)}>{partialNote}</p></SkeletonLine>}
-      {section.title === 'Subagents' && <SkeletonLine pending={pending}><TraceCoverageNote trace={trace} /></SkeletonLine>}
+      {partialNote !== undefined && <SkeletonLine pending={pending}><p data-details-partial-note {...stylex.props(styles.metaLine)}><MissingDetailsValue label={`${section.title} metadata`} reason={partialNote} /></p></SkeletonLine>}
+      {section.title === 'Subagents' && (coverage._tag === 'Partial' || coverage._tag === 'NotCovered') && <SkeletonLine pending={pending}><TraceCoverageNote trace={trace} /></SkeletonLine>}
+      {section.title === 'Subagents' && coverage._tag === 'PartialUnreported' && <SkeletonLine pending={pending}><p data-details-coverage {...stylex.props(styles.metaLine)}>Partial · <MissingDetailsValue label="Attributed fraction" reason={coverageReason ?? 'The attributed fraction is unreported.'} /></p></SkeletonLine>}
+      {missingReason !== '' && <SkeletonLine pending={pending}><DetailsUnavailable reason={missingReason} /></SkeletonLine>}
     </div>
   </div>
 }
@@ -307,7 +322,6 @@ const styles = stylex.create({
   count: { fontFamily: t.fontMono, fontSize: t.microSize, color: ink.fgFaint, flexShrink: 0 },
   body: { display: 'flex', flexDirection: 'column', gap: s.sm, paddingInline: s.xxl, paddingBottom: s.md, minWidth: 0 },
   metaLine: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
-  reason: { color: ink.fgSoft },
   allHidden: { padding: s.md },
   entry: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   agentEntry: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0 },

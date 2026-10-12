@@ -136,7 +136,7 @@ function assertIndependent(root: HTMLElement, tokenLabel = 'Cumulative tokens ·
   const section = spend(root)
   const tokenRow = section.querySelector('[data-details-token-label]')?.closest('div')
   requireContract(tokenRow?.querySelector('[data-details-token-label]')?.textContent === tokenLabel, 'Token scope inherited monetary scope')
-  requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&section.querySelector('[data-details-partial-note]')?.textContent==="Accumulation window isn't reported by this source.", 'Token accumulation window was fabricated')
+  requireContract(!tokenRow?.querySelector('[data-details-token-period]')&&!tokenRow?.textContent?.includes('all time')&&tokenRow?.querySelector('button[aria-label="Cumulative tokens accumulation window: unavailable"]')?.textContent==='—', 'Token accumulation window was fabricated')
   const monetaryRow = Array.from(section.querySelectorAll('dt')).find(item => item.textContent?.startsWith('Total · self'))?.closest('div')
   const monetaryText = monetaryRow?.textContent
   requireContract(typeof monetaryText === 'string', 'Monetary accumulation window inherited token window')

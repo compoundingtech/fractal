@@ -4,6 +4,7 @@ import { accentVars as accent, borderVars as border, spaceVars as space, textVar
 import { clock, money } from './chart.ts'
 import type { ChartLane as Lane, TraceChartProjection } from './adapter.ts'
 import { DetailsInk, DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
+import { DetailsUnavailable, MissingDetailsValue } from '../DetailsUnavailable.tsx'
 export interface CompactSpendProps {
   readonly lane: Lane
   /** Role aggregates when the provider cannot attribute marks to individual descendants. */
@@ -46,25 +47,34 @@ export const CompactSpend = ({ lane, descendantSpend, showUnavailableReasons = t
   const partial = (lane.totalUsd._tag === 'Known' && Math.abs(retainedRoot - lane.totalUsd.value) > 0.005) || (descendantUsd._tag === 'Known' && Math.abs(retainedDescendants - descendantUsd.value) > 0.005)
   const hasSeries = lane.cumulativeValues.length > 0
   const hasDescendantSeries = descendantSpend.cumulativeValues.length > 0
+  const missing = [
+    ...(showTotals && lane.totalUsd._tag === 'Unknown' ? [lane.totalUsd.detail ?? lane.totalUsd.reason] : []),
+    ...(showTotals && descendantUsd._tag === 'Unknown' ? [descendantUsd.detail ?? descendantUsd.reason] : []),
+    ...(!hasSeries ? ['Session spend series was not retained.'] : []),
+    ...(!hasDescendantSeries ? ['Descendant spend series was not retained.'] : []),
+  ]
   return <div {...stylex.props(styles.root)} aria-label="Session and descendant spend">
-    {showTotals && <div data-details-data-row={lane.totalUsd._tag === 'Known' || descendantUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.totals)}>{lane.totalUsd._tag === 'Known' && <span {...stylex.props(styles.session)}>Main session <strong>{money.format(lane.totalUsd.value)}</strong></span>}{descendantUsd._tag === 'Known' && <span {...stylex.props(styles.descendants)}>Subagents <strong>{money.format(descendantUsd.value)}</strong></span>}</div>}
-    {showTotals && showUnavailableReasons && (lane.totalUsd._tag === 'Unknown' || descendantUsd._tag === 'Unknown') && <p {...stylex.props(styles.note, styles.unknownNote)}>Unreported spend totals are omitted.</p>}
-    {hasSeries || (!showUnavailableReasons && hasDescendantSeries) ? <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and descendant API-equivalent spend">
+    {showTotals && <div data-details-data-row={lane.totalUsd._tag === 'Known' || descendantUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}>Main session <strong>{lane.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane.totalUsd.detail ?? lane.totalUsd.reason}/>}</strong></span><span {...stylex.props(styles.descendants)}>Subagents <strong>{descendantUsd._tag === 'Known' ? money.format(descendantUsd.value) : <MissingDetailsValue label="Subagent spend" reason={descendantUsd.detail ?? descendantUsd.reason}/>}</strong></span></div>}
+    {hasSeries || hasDescendantSeries ? <svg {...stylex.props(styles.chart)} viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Cumulative session and descendant API-equivalent spend">
       {hasSeries && <path d={path([lane.cumulativeValues])} fill="none" stroke={accent.primary} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />}
       {hasDescendantSeries && <path d={path(descendantSeries)} fill="none" stroke={text.fgSoft} strokeWidth={1.5} strokeDasharray="4 2" vectorEffect="non-scaling-stroke" />}
-    </svg> : showUnavailableReasons && <p {...stylex.props(styles.note, styles.unknownNote)}>Session spend series was not retained.</p>}
-    {showUnavailableReasons && !hasDescendantSeries && <p {...stylex.props(styles.note, styles.unknownNote)}>Descendant spend series was not retained.</p>}
-    {(hasSeries || (!showUnavailableReasons && hasDescendantSeries)) && <div {...stylex.props(styles.axis)}><span>{clock.format(start)}</span><span>UTC</span><span>{clock.format(end)}</span></div>}
+    </svg> : <span {...stylex.props(styles.note)}>Spend series <MissingDetailsValue label="Spend series" reason="Session and descendant spend series were not retained."/></span>}
+    {hasSeries && !hasDescendantSeries && <span {...stylex.props(styles.note)}>Subagent series <MissingDetailsValue label="Subagent spend series" reason="Descendant spend series was not retained."/></span>}
+    {!hasSeries && hasDescendantSeries && <span {...stylex.props(styles.note)}>Main session series <MissingDetailsValue label="Main session spend series" reason="Session spend series was not retained."/></span>}
+    {(hasSeries || hasDescendantSeries) && <div {...stylex.props(styles.axis)}><span>{clock.format(start)}</span><span>UTC</span><span>{clock.format(end)}</span></div>}
     <p {...stylex.props(styles.note)}>API-equivalent · retained role observations{partial ? ' · chart and reported accumulation windows differ' : ''}</p>
+    {showUnavailableReasons && missing.length > 0 && <DetailsUnavailable reason={missing.join(' · ')}/>}
 </div>
 }
 
 /** Loading twin of CompactSpend: same wrappers, gaps and 4:1 chart box, ink instead of values. */
-export const CompactSpendPending = ({showTotals=true}:{readonly showTotals?:boolean}): ReactNode => <div {...stylex.props(styles.root)}>
+export const CompactSpendPending = ({showTotals=true,footprint={series:true,descendants:true,partial:false}}:{readonly showTotals?:boolean;readonly footprint?:{readonly series:boolean;readonly descendants:boolean;readonly partial:boolean}}): ReactNode => <div aria-hidden="true" inert {...stylex.props(styles.root)}>
   {showTotals&&<div {...stylex.props(styles.totals)}><span {...stylex.props(styles.session)}><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span><span {...stylex.props(styles.descendants)}><span {...stylex.props(styles.pendingText)}>Subagents <strong>$0.00</strong></span></span></div>}
-  <DetailsSkeletonPlot spend />
-  <div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div>
-  <p {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent · role aggregates</span></p>
+  {footprint.series || footprint.descendants ? <DetailsSkeletonPlot spend /> : <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Spend series —</span></span>}
+  {footprint.series && !footprint.descendants && <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Subagent series —</span></span>}
+  {!footprint.series && footprint.descendants && <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Main session series —</span></span>}
+  {(footprint.series || footprint.descendants) && <div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div>}
+  <p {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent · retained role observations{footprint.partial ? ' · chart and reported accumulation windows differ' : ''}</span></p>
 </div>
 
 
@@ -75,6 +85,5 @@ const styles = stylex.create({
   chart: { display: 'block', width: '100%', height: 'auto', aspectRatio: '4 / 1' },
   note: { margin: 0, color: text.fgMuted, fontSize: type.denseSize },
   pendingText: { color: 'transparent', backgroundImage: `linear-gradient(${border.borderStrong}, ${border.borderStrong})`, backgroundSize: `100% ${space.md}`, backgroundPosition: 'center', backgroundRepeat: 'no-repeat', boxDecorationBreak: 'clone' },
-  unknownNote: { color: text.fgSoft },
   axis: { display: 'flex', justifyContent: 'space-between', color: text.fgMuted, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums' },
 })

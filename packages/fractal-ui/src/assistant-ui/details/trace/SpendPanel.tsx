@@ -5,6 +5,7 @@ import { areaPath, baseline, CHART_HEIGHT, CHART_INSET, CHART_WIDTH, clock, line
 import type { ChartScene as AgentTraceScene, ChartLane as Lane } from './adapter.ts'
 import { DetailsInk, DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
 import type { TraceCostSplit } from '../trace-series.ts'
+import { DetailsUnavailable, MissingDetailsValue } from '../DetailsUnavailable.tsx'
 type SpendComponents = { readonly input: number; readonly cacheRead: number; readonly cacheWrite: number; readonly output: number }
 const SPEND_COMPONENTS: ReadonlyArray<{ readonly id: keyof SpendComponents; readonly label: string; readonly color: string }> = [
   { id: 'input', label: 'Input', color: accent.primary },
@@ -40,10 +41,14 @@ export const SpendPanel = ({ lane, componentsKnown = true, showUnavailableReason
   const lastComponents = attributed ? componentSamples.at(-1)?.components : reportedComponents
   const componentTotals = lastComponents !== undefined && hasComponents(lastComponents) ? SPEND_COMPONENTS.map((component) => ({ ...component, value: lastComponents[component.id] })) : []
   const attributedTotal = componentTotals.reduce((total, component) => total + component.value, 0)
+  const missing = [
+    ...(showTotals && lane?.totalUsd._tag !== 'Known' ? [lane?.totalUsd._tag === 'Unknown' ? lane.totalUsd.detail ?? lane.totalUsd.reason : 'Session spend total was not supplied.'] : []),
+    ...(!hasSeries ? ['Session spend series was not retained.'] : []),
+    ...(componentTotals.length === 0 ? ['Provider does not supply component attribution.'] : []),
+  ]
   return <div {...stylex.props(styles.root)}>
-    <div data-details-data-row={showTotals && lane?.totalUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.header)}>{showTotals && lane?.totalUsd._tag === 'Known' && <span>Main session <strong>{money.format(lane.totalUsd.value)}</strong></span>}<span {...stylex.props(styles.note)}>API-equivalent</span></div>
-    {showTotals && showUnavailableReasons && lane?.totalUsd._tag === 'Unknown' && <p {...stylex.props(styles.note, styles.unknownNote)}>Unreported session spend total is omitted.</p>}
-    {attributed || (!showUnavailableReasons && hasSeries) ? <>
+    <div data-details-data-row={showTotals && lane?.totalUsd._tag === 'Known' ? true : undefined} {...stylex.props(styles.header)}>{showTotals && <span>Main session <strong>{lane?.totalUsd._tag === 'Known' ? money.format(lane.totalUsd.value) : <MissingDetailsValue label="Main session spend" reason={lane?.totalUsd._tag === 'Unknown' ? lane.totalUsd.detail ?? lane.totalUsd.reason : 'Session spend total was not supplied.'}/>}</strong></span>}<span {...stylex.props(styles.note)}>API-equivalent</span></div>
+    {hasSeries ? <>
       <svg {...stylex.props(styles.chart)} viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} preserveAspectRatio="none" role="img" aria-label={attributed ? 'Cumulative API-equivalent spend split by input, cache read, cache write and output' : 'Cumulative main-session API-equivalent spend'}>
         <path d={`M${CHART_INSET} ${baseline}H${CHART_WIDTH - CHART_INSET}`} stroke={border.borderStrong} />
         {attributed && SPEND_COMPONENTS.map((component, componentIndex) => {
@@ -54,26 +59,29 @@ export const SpendPanel = ({ lane, componentsKnown = true, showUnavailableReason
         <path d={totalPath} fill="none" stroke={text.fg} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
       </svg>
       <div {...stylex.props(styles.axis)}><span>{clock.format(start)}</span><span>UTC</span><span>{clock.format(end)}</span></div>
-    </> : showUnavailableReasons && <div {...stylex.props(styles.unknown)}><p {...stylex.props(styles.note, styles.unknownNote)}>Provider does not supply component attribution.</p></div>}
+    </> : <span {...stylex.props(styles.note)}>Spend series <MissingDetailsValue label="Spend series" reason="Session spend series was not retained."/></span>}
+    {componentTotals.length === 0 && <span {...stylex.props(styles.note)}>Spend split <MissingDetailsValue label="Four-way spend split" reason="Provider does not supply component attribution."/></span>}
     {componentTotals.length > 0 && <dl {...stylex.props(styles.breakdown)} aria-label="Four-way session spend split">{componentTotals.map((component) => <div key={component.id} {...stylex.props(styles.component)}>
       <dt {...stylex.props(styles.label)}>{component.label}</dt>
       <dd {...stylex.props(styles.bar)}><svg {...stylex.props(styles.splitBar)} viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true"><rect width={100} height={8} fill={surface.rowActive} /><rect width={attributedTotal > 0 ? component.value / attributedTotal * 100 : 0} height={8} fill={component.color} /></svg></dd>
       <dd {...stylex.props(styles.value)}>{money.format(component.value)}</dd>
     </div>)}</dl>}
-    {partial && (attributed || (!showUnavailableReasons && hasSeries)) && <p {...stylex.props(styles.note)}>Chart and split show retained observations; reported accumulation windows may differ.</p>}
+    {partial && hasSeries && <p {...stylex.props(styles.note)}>Chart and split show retained observations; reported accumulation windows may differ.</p>}
+    {showUnavailableReasons && missing.length > 0 && <DetailsUnavailable reason={missing.join(' · ')}/>}
   </div>
 }
 
 /** Loading twin of SpendPanel: same wrappers, gaps and chart box, ink instead of values. */
-export const SpendPanelPending = ({showTotals=true}:{readonly showTotals?:boolean}): ReactNode => <div {...stylex.props(styles.root)}>
+export const SpendPanelPending = ({showTotals=true,footprint={series:true,split:true,partial:false}}:{readonly showTotals?:boolean;readonly footprint?:{readonly series:boolean;readonly split:boolean;readonly partial:boolean}}): ReactNode => <div aria-hidden="true" inert {...stylex.props(styles.root)}>
   <div {...stylex.props(styles.header)}>{showTotals&&<span><span {...stylex.props(styles.pendingText)}>Main session <strong>$0.00</strong></span></span>}<span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>API-equivalent</span></span></div>
-  <DetailsSkeletonPlot />
-  <div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div>
-  <dl {...stylex.props(styles.breakdown)}>{SPEND_COMPONENTS.map((component) => <div key={component.id} {...stylex.props(styles.component)}>
+  {footprint.series ? <><DetailsSkeletonPlot /><div {...stylex.props(styles.axis)}><span><DetailsInk ch={5} /></span><span><span {...stylex.props(styles.pendingText)}>UTC</span></span><span><DetailsInk ch={5} /></span></div></> : <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Spend series —</span></span>}
+  {!footprint.split && <span {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Spend split —</span></span>}
+  {footprint.split && <dl {...stylex.props(styles.breakdown)}>{SPEND_COMPONENTS.map((component) => <div key={component.id} {...stylex.props(styles.component)}>
     <dt {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>{component.label}</span></dt>
     <dd {...stylex.props(styles.bar)}><span {...stylex.props(styles.pendingBar)} /></dd>
     <dd {...stylex.props(styles.value)}><DetailsInk ch={5} /></dd>
-  </div>)}</dl>
+  </div>)}</dl>}
+  {footprint.partial && footprint.series && <p {...stylex.props(styles.note)}><span {...stylex.props(styles.pendingText)}>Chart and split show retained observations; reported accumulation windows may differ.</span></p>}
 </div>
 
 const styles = stylex.create({
@@ -82,7 +90,6 @@ const styles = stylex.create({
   chart: { display: 'block', width: '100%', height: 'auto', aspectRatio: '320 / 112' },
   note: { margin: 0, color: text.fgMuted, fontSize: type.denseSize },
   pendingText: { color: 'transparent', backgroundImage: `linear-gradient(${border.borderStrong}, ${border.borderStrong})`, backgroundSize: `100% ${space.md}`, backgroundPosition: 'center', backgroundRepeat: 'no-repeat', boxDecorationBreak: 'clone' },
-  unknownNote: { color: text.fgSoft },
   axis: { display: 'flex', justifyContent: 'space-between', color: text.fgMuted, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums' },
   breakdown: { display: 'flex', flexDirection: 'column', gap: space.xs, margin: 0 },
   component: { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr) max-content', gap: space.md, alignItems: 'center', fontVariantNumeric: 'tabular-nums' },
@@ -91,5 +98,4 @@ const styles = stylex.create({
   splitBar: { display: 'block', height: space.md, width: '100%' },
   pendingBar: { display: 'block', height: space.md, width: '100%', backgroundColor: surface.rowActive },
   value: { margin: 0, fontVariantNumeric: 'tabular-nums' },
-  unknown: { display: 'flex', flexDirection: 'column', gap: space.md },
 })

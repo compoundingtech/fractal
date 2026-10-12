@@ -4,6 +4,7 @@ import { accentVars as accent, borderVars as border, spaceVars as space, statusV
 import { baseline, CHART_HEIGHT, CHART_INSET, CHART_WIDTH, clock, linePath, xFor, yFor } from './chart.ts'
 import type { ChartScene as AgentTraceScene, ChartLane as Lane } from './adapter.ts'
 import { DetailsSkeletonPlot } from '../DetailsSkeleton.tsx'
+import { DetailsUnavailable, MissingDetailsValue } from '../DetailsUnavailable.tsx'
 
 export interface ContextPanelProps { readonly scene: AgentTraceScene; readonly lane: Lane; readonly compact?: boolean; readonly showUnavailableReasons?: boolean }
 
@@ -47,7 +48,7 @@ export const ContextPanel = ({ lane, compact = false, showUnavailableReasons = t
   const samples = usesTurns ? turnSamples : lane.samples
   const sampleKind = usesTurns ? 'turn' : 'bucket'
   const points = samples.flatMap((sample, index) => sample.contextPercent === null ? [] : [{ ts: sample.ts, index: 'turnIndex' in sample ? sample.turnIndex : index + 1, value: sample.contextPercent, estimated: sample.isContextEstimated }])
-  if (points.length === 0) return showUnavailableReasons ? <p {...stylex.props(styles.note, styles.unknownNote)}>No {sampleKind} context samples retained.</p> : null
+  if (points.length === 0) return <div {...stylex.props(styles.root)}><span {...stylex.props(styles.note)}>Context series <MissingDetailsValue label="Context series" reason={`No ${sampleKind} context samples retained.`}/></span>{showUnavailableReasons && <DetailsUnavailable reason={`No ${sampleKind} context samples retained.`}/>}</div>
   const start = points[0]!.ts
   const end = points.at(-1)!.ts
   const maximumPoint = points.reduce((maximum, point) => point.value > maximum.value ? point : maximum, points[0]!)
@@ -97,7 +98,6 @@ const styles = stylex.create({
   chart: { display: 'block', width: '100%', height: 'auto', aspectRatio: '320 / 112', overflow: 'visible' },
   compact: { aspectRatio: '320 / 64' },
   note: { margin: 0, color: text.fgMuted, fontSize: type.denseSize },
-  unknownNote: { color: text.fgSoft },
   pendingText: { color: surface.transparent, backgroundImage: `linear-gradient(${border.borderStrong}, ${border.borderStrong})`, backgroundSize: `100% ${space.md}`, backgroundPosition: 'center', backgroundRepeat: 'no-repeat', boxDecorationBreak: 'clone' },
   axis: { display: 'flex', justifyContent: 'space-between', gap: space.xs, color: text.fgMuted, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums' },
   compactions: { listStyle: 'none', margin: 0, padding: 0, color: text.fgMuted, fontSize: type.denseSize },

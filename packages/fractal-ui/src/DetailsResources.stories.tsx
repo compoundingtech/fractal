@@ -103,9 +103,9 @@ function assertHuman(pane: HTMLElement) {
   requireContract(!/\bUnknown\b|\b(no-provider|not-covered|not-attributed|out-of-retention)\b|Some values (?:aren't|aren’t) reported|Some details (?:aren't|aren’t) available|Not observed/i.test(pane.innerText), 'Details exposes a tag or generic missing-data value')
   requireContract(!/(?:\+|−)0\b|\b1 compactions\b|claude-opus|claude-sonnet|gpt-\d/i.test(pane.innerText), 'Details exposes zero diff counts, wrong plural or unsanitized model')
   for (const section of pane.querySelectorAll('section')) {
-    const notes = [...section.querySelectorAll<HTMLElement>('[data-details-partial-note]')].filter(shown)
-    if (pane.querySelector('[data-details-empty="E3"]')) requireContract(notes.length <= 1 && [...section.querySelectorAll<HTMLElement>('[data-details-reason]')].filter(shown).length <= 1, 'Section repeats its missing-data explanation')
-    requireContract(notes.every(note => !/Some values|Some details/i.test(note.textContent ?? '') && /Scope|Accumulation window|Line counts|Status|Turn samples|cost|tokens|counts|samples|window|context/i.test(note.textContent ?? '')), 'Partial explanation does not identify its missing field')
+    const notes = [...section.querySelectorAll<HTMLElement>('[data-details-unavailable]')].filter(shown)
+    requireContract(notes.length <= 1, 'Section repeats its missing-data explanation')
+    requireContract([...section.querySelectorAll('[data-details-missing-value]')].every(value=>value.textContent==='—'&&value.getAttribute('aria-label')?.endsWith(': unavailable')), 'Partial explanation does not identify its missing field')
     const disclosure = section.querySelector('button[aria-expanded]')
     requireContract(!disclosure || disclosure.querySelector('svg'), 'Section disclosure lacks a kit chevron')
     requireContract(![...section.querySelectorAll('button')].some(button => /^(Hide|×)/.test(button.textContent ?? '')), 'Section duplicates its disclosure affordance')
@@ -137,7 +137,7 @@ function contrast(element: Element) {
 }
 function assertCraft(pane: HTMLElement, item: Case) {
   assertHuman(pane)
-  for (const reason of pane.querySelectorAll<HTMLElement>('[data-details-reason]')) if (shown(reason)) requireContract(contrast(reason) >= 4.5, 'Unavailable explanation contrast below 4.5:1')
+  for (const reason of pane.querySelectorAll<HTMLElement>('[data-details-unavailable]')) if (shown(reason)) requireContract(contrast(reason) >= 4.5, 'Unavailable explanation contrast below 4.5:1')
   for (const name of ['Workspace', 'Pull requests', 'CI runs']) {
     const section = pane.querySelector(`section[aria-label="${name}"]`), heading = section?.querySelector('[data-details-heading]'), meta = section?.querySelector('[data-resource-meta]')
     if (heading && meta) requireContract(contrast(heading) > contrast(meta), 'Resource heading is no stronger than metadata')
@@ -148,7 +148,7 @@ function assertCraft(pane: HTMLElement, item: Case) {
     requireContract(!pane.querySelector('[data-details-source-note]'), 'New agent repeats source unavailability')
     for (const section of pane.querySelectorAll('section')) requireContract(section.querySelector('strong,dd,[data-details-data-row],[data-details-resource-row],svg[role="img"]'), 'New agent offers an empty disclosure')
   }
-  if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label="${name}"] [data-details-reason]`), 'Unknown source omits a field-specific explanation')
+  if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label="${name}"] [data-details-missing-value]`), 'Unknown source omits a field-specific explanation')
   const history = pane.querySelector('section[aria-label="History"]')
   if (item.state === 'busy' || item.state === 'idle') requireContract(history?.querySelector('button[aria-label^="Open Incarnation"]'), 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
@@ -283,8 +283,7 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
   if (meter.tokensScope._tag === 'Unknown') {
     requireContract(!/including subagents|excludes subagents|this agent|observed agent incarnations/i.test(label), 'Unreported total makes an unproven scope claim')
     if (meter.usdScope._tag === 'Unknown') requireContract(!spend.querySelector('[aria-label="Subagent spend breakdown"],[aria-label="Session and descendant spend"]'), 'Unreported monetary total makes an unproven breakdown claim')
-    const notes = spend.querySelectorAll('[data-details-partial-note]')
-    requireContract(notes.length === 1 && notes[0]?.textContent === "Scope of this total isn't reported by this source.", 'Unreported token total lacks its exact scope explanation')
+    requireContract(spend.querySelector('button[aria-label="Cumulative tokens scope: unavailable"]')?.textContent==='—', 'Unreported token total lacks its exact scope explanation')
   } else {
     requireContract(label === `Cumulative tokens · ${meter.tokensScope._tag === 'Self' ? 'this agent' : meter.tokensScope._tag === 'AgentIncarnations' ? 'observed agent incarnations' : 'this agent + subagents'}`, 'Reported token scope is absent from its inline label')
     if (meter.tokensWindow._tag === 'Known') {
@@ -292,7 +291,7 @@ function assertScope(pane: HTMLElement, trace: TraceSeries) {
       if (window._tag === 'AllTime') requireContract(period === 'all time', 'Reported all-time window is absent')
       else if (window._tag === 'Interval') { const from = new Date(window.fromMs).toISOString(), to = new Date(window.toMs).toISOString(); requireContract(period.includes(from.slice(0, 10)) && period.includes(from.slice(11, 16)) && period.includes(to.slice(11, 16)) && period.includes('UTC'), 'Reported accumulation interval is absent from its separate date line') }
       else requireContract(period.includes(window.label), 'Reported accumulation window label is absent')
-    } else requireContract(spend.textContent?.includes("Accumulation window isn't reported by this source.") && !spend.textContent.includes('all time'), 'Unreported accumulation window claims all-time scope')
+    } else requireContract(spend.querySelector('button[aria-label="Cumulative tokens accumulation window: unavailable"]')?.textContent==='—'&&!spend.textContent?.includes('all time'), 'Unreported accumulation window claims all-time scope')
   }
 }
 function assertContext(pane: HTMLElement, trace: TraceSeries) {
@@ -378,7 +377,7 @@ export const TraceContracts: Story = { args: { cases: [...sourceCases, example('
     assertHuman(pane); assertContext(pane, trace)
     if (!item.name.includes('/')) return
     const spend = pane.querySelector('section[aria-label="Spend"]')!, text = spend.textContent ?? '', amounts = text.match(/\$\d[\d,.]*/g) ?? []
-    if (item.name.includes('/unknown/')) requireContract(amounts.length === 0 && /Unreported.*omitted/i.test(text), 'Unknown spend source renders inferred currency')
+    if (item.name.includes('/unknown/')) requireContract(amounts.length === 0 && spend.querySelector('[data-details-missing-value]'), 'Unknown spend source renders inferred currency')
     else if (item.name.includes('/zero/')) requireContract(amounts.length > 0 && amounts.every(amount => amount === '$0.00'), 'Known zero spend is absent or fabricated')
     else requireContract(meter.mainUsd._tag === 'Known' && text.includes(`$${meter.mainUsd.value.toFixed(2)}`), 'Known source spend total is omitted')
   })

@@ -10,6 +10,7 @@ import { adaptTrace } from './trace/adapter.ts'
 import { CompactSpend, CompactSpendPending } from './trace/CompactSpend.tsx'
 import { ContextPanel, ContextPanelPending, contextPanelFootprint, type ContextPanelFootprint } from './trace/ContextPanel.tsx'
 import { SpendPanel, SpendPanelPending } from './trace/SpendPanel.tsx'
+import { DetailsUnavailable, MissingDetailsValue } from './DetailsUnavailable.tsx'
 export interface DetailsChartsProps {
   readonly trace: TraceSeries
   readonly context: 'C1' | 'C2' | 'C3'
@@ -17,11 +18,11 @@ export interface DetailsChartsProps {
   readonly empty?: DetailsEmptyRule
   /** Render an unwrapped body for a parent's independently collapsible section. */
   readonly section?: 'context' | 'spend'
-  /** Brand-new consolidates unavailable-source explanations outside the sections. */
+  /** Suppress the section summary when its parent supplies the single unavailable line. */
   readonly showUnavailableReasons?: boolean
 }
 
-const UnknownSeries = ({ reason }: { readonly reason: string }): ReactNode => <p data-details-reason={reason} {...stylex.props(styles.unknown)}>{reason}</p>
+const missingReason = (fact: TraceFact<unknown>): string => fact._tag === 'Unknown' ? fact.detail ?? fact.reason : 'Context occupancy could not be derived from the reported values.'
 
 const seriesExplanation: Record<TraceUnknownReason, string> = {
   'no-provider': 'The current source does not provide historical samples.',
@@ -32,20 +33,22 @@ const seriesExplanation: Record<TraceUnknownReason, string> = {
   failed: 'Historical samples could not be loaded.',
 }
 
-const ContextMeter = ({ trace, showUnavailableReasons }: { readonly trace: TraceSeries; readonly showUnavailableReasons: boolean }): ReactNode => {
+const ContextMeter = ({ trace }: { readonly trace: TraceSeries }): ReactNode => {
   const percentage = contextPercent(trace.meters.context)
+  const { compactions, lastCompactionMs } = trace.meters.context
+  const occupancyReason = Object.values(trace.meters.context).filter(fact => fact._tag === 'Unknown').map(missingReason).join(' · ') || 'Context occupancy could not be derived from the reported values.'
   return <div {...stylex.props(styles.contextSnapshot)}>
-    <div data-details-data-row={percentage!==undefined?true:undefined} {...stylex.props(styles.numberRow)}>{percentage!==undefined&&<strong>{Math.round(percentage)}%</strong>}</div>
-    {percentage === undefined ? showUnavailableReasons && <UnknownSeries reason="Context occupancy unavailable" /> : <div {...stylex.props(styles.track)} role="meter" aria-label="Context occupancy" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0,Math.min(100,percentage))} aria-valuetext={`${Math.round(percentage)} percent`}><div {...stylex.props(styles.fill(`${Math.max(0, Math.min(100, percentage))}%`))} /></div>}
-    <div data-details-data-row={trace.meters.context.compactions._tag==='Known'||trace.meters.context.lastCompactionMs._tag==='Known'?true:undefined} {...stylex.props(styles.numberRow)}>{trace.meters.context.compactions._tag==='Known'&&<span>Compactions {compactNumber.format(trace.meters.context.compactions.value)}</span>}{trace.meters.context.lastCompactionMs._tag==='Known'&&<span>Last {clock.format(trace.meters.context.lastCompactionMs.value)} UTC</span>}</div>
+    <div data-details-data-row={percentage !== undefined ? true : undefined} {...stylex.props(styles.numberRow)}>{percentage !== undefined ? <strong>{Math.round(percentage)}%</strong> : <span>Context occupancy <MissingDetailsValue label="Context occupancy" reason={occupancyReason} /></span>}</div>
+    {percentage !== undefined && <div {...stylex.props(styles.track)} role="meter" aria-label="Context occupancy" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.max(0, Math.min(100, percentage))} aria-valuetext={`${Math.round(percentage)} percent`}><div {...stylex.props(styles.fill(`${Math.max(0, Math.min(100, percentage))}%`))} /></div>}
+    <div data-details-data-row={compactions._tag === 'Known' || lastCompactionMs._tag === 'Known' ? true : undefined} {...stylex.props(styles.numberRow)}><span>Compactions {compactions._tag === 'Known' ? compactNumber.format(compactions.value) : <MissingDetailsValue label="Compactions" reason={missingReason(compactions)} />}</span><span>Last {lastCompactionMs._tag === 'Known' ? `${clock.format(lastCompactionMs.value)} UTC` : <MissingDetailsValue label="Last compaction" reason={missingReason(lastCompactionMs)} />}</span></div>
   </div>
 }
 
 /** Loading twin of ContextMeter: formatted footprints wrap naturally under text-shaped ink. */
-const ContextMeterPending = ({ footprint, showUnavailableReasons }: { readonly footprint: DetailsPendingShape['context']['meter']; readonly showUnavailableReasons: boolean }): ReactNode => <div {...stylex.props(styles.contextSnapshot)}>
-  <div {...stylex.props(styles.numberRow)}>{footprint.percentage !== undefined && <strong><span {...stylex.props(styles.pendingText)}>{footprint.percentage}</span></strong>}</div>
-  {footprint.percentage !== undefined ? <div {...stylex.props(styles.track)} /> : showUnavailableReasons && <p {...stylex.props(styles.unknown)}><span {...stylex.props(styles.pendingText)}>Context occupancy unavailable</span></p>}
-  <div {...stylex.props(styles.numberRow)}>{footprint.compactions !== undefined && <span><span {...stylex.props(styles.pendingText)}>{footprint.compactions}</span></span>}{footprint.lastCompaction !== undefined && <span><span {...stylex.props(styles.pendingText)}>{footprint.lastCompaction}</span></span>}</div>
+const ContextMeterPending = ({ footprint }: { readonly footprint: DetailsPendingShape['context']['meter'] }): ReactNode => <div {...stylex.props(styles.contextSnapshot)}>
+  <div {...stylex.props(styles.numberRow)}><strong><span {...stylex.props(styles.pendingText)}>{footprint.percentage ?? 'Context occupancy —'}</span></strong></div>
+  {footprint.percentage !== undefined && <div {...stylex.props(styles.track)} />}
+  <div {...stylex.props(styles.numberRow)}><span><span {...stylex.props(styles.pendingText)}>{footprint.compactions ?? 'Compactions —'}</span></span><span><span {...stylex.props(styles.pendingText)}>{footprint.lastCompaction ?? 'Last —'}</span></span></div>
 </div>
 
 
@@ -70,11 +73,12 @@ const totalLabel=(trace:TraceSeries):string=>`${trace.meters.spend.totalUsdCover
 /** Both row props and pending footprints normalize only the malformed row's coverage. */
 const coverageLabel=(coverage:TraceCoverageState):string|undefined=>{
  const state=traceCoverageState(coverage)
- return state._tag==='Complete'?undefined:state._tag==='PartialUnreported'?'Partial':state._tag==='Partial'?`Partial · ${Math.min(99,Math.floor(state.attributedFraction*100))}% attributed`:state._tag==='NotCovered'?`Not tracked for ${state.harnessName}`:'Attribution coverage unavailable'
+ return state._tag==='Complete'?undefined:state._tag==='PartialUnreported'?'Partial':state._tag==='Partial'?`Partial · ${Math.min(99,Math.floor(state.attributedFraction*100))}% attributed`:state._tag==='NotCovered'?`Not tracked for ${state.harnessName}`:'—'
 }
 export const TraceCoverageNote = ({trace,coverage=trace.coverage}:{readonly trace:TraceSeries;readonly coverage?:TraceCoverage}):ReactNode => {
  const state=traceCoverageState(coverage)
  if(state._tag==='Complete')return null
+ if(state._tag==='Unavailable')return <span {...stylex.props(styles.tokenWindow)}><MissingDetailsValue label="Attribution coverage" reason={state.reason}/></span>
  if(state._tag==='NotCovered')return <TooltipTrigger delay={0}><Button data-details-coverage {...stylex.props(styles.coverageTrigger)}>{coverageLabel(state)}</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>Spend is recorded only for OMP sessions today.</Tooltip></TooltipTrigger>
  return <p data-details-coverage {...stylex.props(styles.scopeNote)}>{coverageLabel(state)}</p>
 }
@@ -84,23 +88,21 @@ const MetricWindow = ({ parts, pending = false, tokens = false }: { readonly par
   <span data-details-metric-period={pending?undefined:true} data-details-token-period={pending||!tokens ? undefined : true} {...stylex.props(styles.tokenWindow)}>{parts.map((part,index)=><span key={index}>{index>0?<wbr/>:null}<span {...stylex.props(styles.windowPart)}><span {...stylex.props(pending&&styles.pendingText)}>{part}</span></span></span>)}</span>
 
 const UsdRow = ({trace,metric,label,fact,scope,window,coverage}:{readonly trace:TraceSeries;readonly metric:string;readonly label:string;readonly fact:TraceFact<number>;readonly scope:TraceSpendScope;readonly window:TraceFact<TraceAccumulationWindow>;readonly coverage:TraceCoverage}):ReactNode => {
- if(fact._tag!=='Known')return null
  const parts=accumulationParts(window)
- return <div data-details-metric={metric} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}>{label}{scopeLabel(scope)}{parts!==undefined&&<MetricWindow parts={parts}/>}<TraceCoverageNote trace={trace} coverage={coverage}/></dt><dd {...stylex.props(styles.amount)}>{money.format(fact.value)}</dd></div>
+ return <div data-details-metric={metric} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}>{label}{scopeLabel(scope)}{scope._tag==='Unknown'&&<MissingDetailsValue label={`${label} scope`} reason={scope.reason}/>} {parts!==undefined?<MetricWindow parts={parts}/>:<span {...stylex.props(styles.tokenWindow)}><MissingDetailsValue label={`${label} accumulation window`} reason={missingReason(window)}/></span>}<TraceCoverageNote trace={trace} coverage={coverage}/></dt><dd {...stylex.props(styles.amount)}>{fact._tag==='Known'?money.format(fact.value):<MissingDetailsValue label={label} reason={missingReason(fact)}/>}</dd></div>
 }
-const SpendMeter = ({ trace, showUnavailableReasons }: { readonly trace: TraceSeries; readonly showUnavailableReasons: boolean }): ReactNode => {
+const SpendMeter = ({ trace }: { readonly trace: TraceSeries }): ReactNode => {
   const spend = trace.meters.spend
   const tokenLabel = tokenScopeLabel(trace)
   return <div {...stylex.props(styles.body)}><dl {...stylex.props(styles.spendSnapshot)} aria-label="Trace spend meters">
     <UsdRow trace={trace} metric="total-usd" label={spend.totalUsdCoverage._tag==='Complete'?'Total':'Recorded spend'} fact={spend.totalUsd} scope={spend.usdScope} window={spend.usdWindow} coverage={spend.totalUsdCoverage}/>
     <UsdRow trace={trace} metric="main-usd" label="Main session" fact={spend.mainUsd} scope={spend.mainUsdScope} window={spend.mainUsdWindow} coverage={spend.mainUsdCoverage}/>
     <UsdRow trace={trace} metric="subagent-usd" label={spend.subagentUsdCoverage._tag==='Partial'?'Attributed subagents':'Subagents'} fact={spend.subagentUsd} scope={spend.subagentUsdScope} window={spend.subagentUsdWindow} coverage={spend.subagentUsdCoverage}/>
-    {spend.tokens._tag==='Known'&&<div {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}><span data-details-token-label>{tokenLabel.label}</span>{tokenLabel.window!==undefined&&<MetricWindow parts={tokenLabel.window} tokens/>}</dt><dd {...stylex.props(styles.tokens)}>{compactNumber.format(spend.tokens.value)}</dd></div>}
+    <div {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}><span data-details-token-label>{tokenLabel.label}</span>{spend.tokensScope._tag==='Unknown'&&<MissingDetailsValue label="Cumulative tokens scope" reason={spend.tokensScope.reason}/>}<span {...stylex.props(styles.tokenWindow)}>{tokenLabel.window!==undefined?<MetricWindow parts={tokenLabel.window} tokens/>:<MissingDetailsValue label="Cumulative tokens accumulation window" reason={missingReason(spend.tokensWindow)}/>}</span></dt><dd {...stylex.props(styles.tokens)}>{spend.tokens._tag==='Known'?compactNumber.format(spend.tokens.value):<MissingDetailsValue label="Cumulative tokens" reason={missingReason(spend.tokens)}/>}</dd></div>
   </dl>
-  {showUnavailableReasons&&spend.tokensScope._tag==='Unknown'&&spend.tokens._tag==='Known'&&<p data-details-scope-note {...stylex.props(styles.scopeNote)}>Scope of this total isn't reported by this source.</p>}
   <TraceCoverageNote trace={trace}/>
-  {trace.subagents._tag==='Known'&&trace.subagents.value.length>0&&<p data-details-subagent-spend-window {...stylex.props(styles.scopeNote)}>Traced sessions · {accumulationParts(trace.subagentsWindow)?.join('')??'Accumulation window is unreported.'}</p>}
-  {showUnavailableReasons&&[spend.totalUsd,spend.mainUsd,spend.subagentUsd,spend.tokens].some(fact=>fact._tag==='Unknown')&&<UnknownSeries reason="Unreported spend metrics are omitted" />}{trace.subagents._tag === 'Known' && trace.subagents.value.length > 0 && <dl {...stylex.props(styles.spendSnapshot)} aria-label="Subagent spend breakdown">{trace.subagents.value.map((child) => <div key={child.sessionId} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}>{child.label._tag==='Known'?child.label.value:child.sessionId}</dt><dd {...stylex.props(styles.amount)}>{money.format(child.usd)}</dd></div>)}</dl>}</div>
+  {trace.subagents._tag==='Known'&&trace.subagents.value.length>0&&<p data-details-subagent-spend-window {...stylex.props(styles.scopeNote)}>Traced sessions · {accumulationParts(trace.subagentsWindow)?.join('')??<MissingDetailsValue label="Traced sessions accumulation window" reason={missingReason(trace.subagentsWindow)}/>}</p>}
+  {trace.subagents._tag === 'Known' && trace.subagents.value.length > 0 && <dl {...stylex.props(styles.spendSnapshot)} aria-label="Subagent spend breakdown">{trace.subagents.value.map((child) => <div key={child.sessionId} {...stylex.props(styles.spendRow)}><dt {...stylex.props(styles.label)}>{child.label._tag==='Known'?child.label.value:child.sessionId}</dt><dd {...stylex.props(styles.amount)}>{money.format(child.usd)}</dd></div>)}</dl>}</div>
 }
 
 /** Loading twin of SpendMeter for the populated (attributed, subagent-bearing) shape. */
@@ -147,64 +149,40 @@ export const hasDetailsChartData = ({ trace, context, spend, section, empty = 'E
   return section === 'spend' ? spendData : contextData || spendData
 }
 
-const PartialNote = ({ reason }: { readonly reason: string }): ReactNode => <p data-details-partial-note {...stylex.props(styles.unknown)}>{reason}</p>
-
-const tokenScopeReason = (trace: TraceSeries): string | undefined => {
-  const { tokens, tokensScope, tokensWindow } = trace.meters.spend
-  if (tokens._tag !== 'Known') return undefined
-  return tokensScope._tag === 'Unknown' ? "Scope of this total isn't reported by this source."
-    : tokensWindow._tag === 'Unknown' ? "Accumulation window isn't reported by this source." : undefined
-}
-const SectionReason = ({ section, trace }: { readonly section: 'context' | 'spend'; readonly trace: TraceSeries }): ReactNode => {
-  const facts = section === 'context' ? Object.values(trace.meters.context) : [trace.meters.spend.totalUsd, trace.meters.spend.mainUsd, trace.meters.spend.subagentUsd, trace.meters.spend.tokens]
-  const label = section === 'context' ? 'Context' : 'Spend'
-  const reason = facts.some(fact => fact._tag === 'Unknown' && fact.reason === 'loading') ? `${label} values are still loading.`
-    : facts.some(fact => fact._tag === 'Unknown' && fact.reason === 'failed') ? `${label} values could not be loaded.`
-    : facts.some(fact => fact._tag === 'Unknown' && fact.reason === 'out-of-retention') ? `${label} values are no longer retained.`
-    : `This source does not report ${section} values.`
-  return <p data-details-reason={`${section} values unavailable`} {...stylex.props(styles.unknown)}>{reason}</p>
+const sectionMissingReasons = (trace: TraceSeries, section: 'context' | 'spend'): readonly string[] => {
+  if (section === 'context') return Object.values(trace.meters.context).filter(fact => fact._tag === 'Unknown').map(missingReason)
+  const spend = trace.meters.spend
+  const facts = [spend.totalUsd, spend.mainUsd, spend.subagentUsd, spend.tokens, spend.usdWindow, spend.mainUsdWindow, spend.subagentUsdWindow, spend.tokensWindow]
+  const scopes = [spend.usdScope, spend.mainUsdScope, spend.subagentUsdScope, spend.tokensScope]
+  const coverage = [trace.coverage, spend.totalUsdCoverage, spend.mainUsdCoverage, spend.subagentUsdCoverage]
+  return [...facts.filter(fact => fact._tag === 'Unknown').map(missingReason), ...scopes.flatMap(scope => scope._tag === 'Unknown' ? [scope.reason] : []), ...coverage.flatMap(state => state._tag === 'Unavailable' ? [state.reason] : []), ...(trace.subagents._tag === 'Known' && trace.subagents.value.length > 0 && trace.subagentsWindow._tag === 'Unknown' ? [missingReason(trace.subagentsWindow)] : [])]
 }
 
 /** Meters and drawing evidence share one portable Known/Unknown contract. */
-export const DetailsCharts = ({ trace, context, spend, section, empty = 'E1', showUnavailableReasons = true }: DetailsChartsProps): ReactNode => {
+export const DetailsCharts = ({ trace, context, spend, section, showUnavailableReasons = true }: DetailsChartsProps): ReactNode => {
   const projection = adaptTrace(trace)
-  const seriesReason = trace.series._tag === 'Unknown' ? seriesExplanation[trace.series.reason] : 'No historical samples were retained.'
+  const seriesReason = trace.series._tag === 'Unknown' ? trace.series.detail ?? seriesExplanation[trace.series.reason] : 'No historical samples were retained.'
   const spendProjection = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? undefined : projection
   const spendReason = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? 'Session spend scope is not attributed' : seriesReason
-  if (empty === 'E3') {
-    const contextData = hasDetailsChartData({ trace, context, spend, section: 'context', empty })
-    const spendData = hasDetailsChartData({ trace, context, spend, section: 'spend', empty })
-    const meters = trace.meters.spend
-    const spendNote = tokenScopeReason(trace)
-    const contextBody = <div {...stylex.props(styles.body)} data-details-chart={context}>
-      {contextData ? <>
-        <ContextMeter trace={trace} showUnavailableReasons={false} />
-        {context !== 'C1' && projection !== undefined && <ContextPanel scene={projection.scene} lane={projection.lane} compact={context === 'C2'} showUnavailableReasons={false} />}
-      </> : <SectionReason section="context" trace={trace} />}
-    </div>
-    // Charts supplement reported meter rows rather than replacing them.
-    const compactSeries = spend === 'S2' && spendProjection !== undefined && (spendProjection.lane.cumulativeValues.length > 0 || spendProjection.descendantSpend.cumulativeValues.length > 0)
-    const panelSeries = spend === 'S3' && spendProjection !== undefined && spendProjection.lane.cumulativeValues.length > 0
-    const spendBody = <div {...stylex.props(styles.body)} data-details-chart={spend}>
-      {spendData ? <>
-        {hasSpendMeterData(trace) && <SpendMeter trace={trace} showUnavailableReasons={false} />}
-        {compactSeries && <CompactSpend lane={spendProjection.lane} descendantSpend={spendProjection.descendantSpend} showTotals={false} showUnavailableReasons={false} />}
-        {panelSeries && <SpendPanel scene={spendProjection.scene} lane={spendProjection.lane} {...(hasReportedSplit(trace) && meters.split._tag === 'Known' ? { split: meters.split.value } : {})} componentsKnown={hasReportedSplit(trace)} showTotals={false} showUnavailableReasons={false} />}
-        {spend === 'S3' && !panelSeries && hasReportedSplit(trace) && <SpendPanel {...(meters.split._tag === 'Known' ? { split: meters.split.value } : {})} componentsKnown showUnavailableReasons={false} showTotals={false} />}
-        {spendNote !== undefined && <PartialNote reason={spendNote} />}
-      </> : <><TraceCoverageNote trace={trace}/><SectionReason section="spend" trace={trace} /></>}
-    </div>
-    if (section === 'context') return contextBody
-    if (section === 'spend') return spendBody
-    return <div {...stylex.props(styles.root)}><section aria-label="Context"><h3 {...stylex.props(styles.heading)}>Context</h3>{contextBody}</section><section aria-label="Spend"><h3 {...stylex.props(styles.heading)}>Spend</h3>{spendBody}</section></div>
-  }
+  const contextSamples = projection?.lane.turnSamples !== undefined && (context === 'C2' || projection.lane.samples.length === 0) ? projection.lane.turnSamples : projection?.lane.samples
+  const contextSeries = context !== 'C1' && contextSamples?.some(sample => sample.contextPercent !== null) === true
+  const compactSeries = spend === 'S2' && spendProjection !== undefined && (spendProjection.lane.cumulativeValues.length > 0 || spendProjection.descendantSpend.cumulativeValues.length > 0)
+  const panelSeries = spend === 'S3' && spendProjection !== undefined && spendProjection.lane.cumulativeValues.length > 0
+  const contextReasons = [...sectionMissingReasons(trace, 'context'), ...(context !== 'C1' && !contextSeries ? [seriesReason] : [])]
+  const spendReasons = [...sectionMissingReasons(trace, 'spend'), ...(spend !== 'S1' && !compactSeries && !panelSeries ? [spendReason] : []), ...(compactSeries && spendProjection !== undefined && (spendProjection.lane.cumulativeValues.length === 0 || spendProjection.descendantSpend.cumulativeValues.length === 0) ? ['Session or descendant spend series was not retained.'] : []), ...(spend === 'S3' && !hasReportedSplit(trace) ? ['Attributed component samples were not supplied.'] : [])]
   const contextBody = <div {...stylex.props(styles.body)} data-details-chart={context}>
-    <ContextMeter trace={trace} showUnavailableReasons={showUnavailableReasons} />
-    {context !== 'C1' && (projection ? <ContextPanel scene={projection.scene} lane={projection.lane} compact={context === 'C2'} showUnavailableReasons={showUnavailableReasons} /> : showUnavailableReasons && <UnknownSeries reason={`Context series · ${seriesReason}`} />)}
+    <ContextMeter trace={trace} />
+    {context !== 'C1' && (contextSeries && projection !== undefined ? <ContextPanel scene={projection.scene} lane={projection.lane} compact={context === 'C2'} showUnavailableReasons={false} /> : <span {...stylex.props(styles.label)}>Context series <MissingDetailsValue label="Context series" reason={seriesReason}/></span>)}
+    {showUnavailableReasons && contextReasons.length > 0 && <DetailsUnavailable reason={[...new Set(contextReasons)].join(' · ')}/>}
   </div>
   const spendBody = <div {...stylex.props(styles.body)} data-details-chart={spend}>
-    <SpendMeter trace={trace} showUnavailableReasons={showUnavailableReasons} />
-    {spend !== 'S1' && (spendProjection ? spend === 'S2' ? <CompactSpend lane={spendProjection.lane} descendantSpend={spendProjection.descendantSpend} showTotals={false} showUnavailableReasons={showUnavailableReasons} /> : <SpendPanel scene={spendProjection.scene} lane={spendProjection.lane} componentsKnown={trace.meters.spend.split._tag === 'Known'} showTotals={false} showUnavailableReasons={showUnavailableReasons} /> : <>{showUnavailableReasons&&<UnknownSeries reason={`Spend series · ${spendReason}`} />}{showUnavailableReasons&&spend === 'S3' && <UnknownSeries reason="Four-way spend split is unavailable because attributed component samples were not supplied." />}</>)}
+    <SpendMeter trace={trace} />
+    {compactSeries && <CompactSpend lane={spendProjection!.lane} descendantSpend={spendProjection!.descendantSpend} showTotals={false} showUnavailableReasons={false}/>}
+    {panelSeries && <SpendPanel lane={spendProjection!.lane} {...(hasReportedSplit(trace) && trace.meters.spend.split._tag === 'Known' ? {split:trace.meters.spend.split.value} : {})} componentsKnown={hasReportedSplit(trace)} showTotals={false} showUnavailableReasons={false}/>}
+    {spend !== 'S1' && !compactSeries && !panelSeries && !(spend === 'S3' && hasReportedSplit(trace)) && <span {...stylex.props(styles.label)}>Spend series <MissingDetailsValue label="Spend series" reason={spendReason}/></span>}
+    {spend === 'S3' && !panelSeries && !hasReportedSplit(trace) && <span {...stylex.props(styles.label)}>Spend split <MissingDetailsValue label="Four-way spend split" reason={trace.meters.spend.split._tag === 'Unknown' ? missingReason(trace.meters.spend.split) : 'Valid session-attributed spend components were not supplied.'}/></span>}
+    {spend === 'S3' && !panelSeries && hasReportedSplit(trace) && trace.meters.spend.split._tag === 'Known' && <SpendPanel split={trace.meters.spend.split.value} componentsKnown showTotals={false} showUnavailableReasons={false}/>}
+    {showUnavailableReasons && spendReasons.length > 0 && <DetailsUnavailable reason={[...new Set(spendReasons)].join(' · ')}/>}
   </div>
   if (section === 'context') return contextBody
   if (section === 'spend') return spendBody
@@ -221,6 +199,7 @@ export interface DetailsPendingShape {
     }
     readonly compactPanel: ContextPanelFootprint | undefined
     readonly fullPanel: ContextPanelFootprint | undefined
+    readonly unavailable?: boolean
   }
   readonly spend: {
     readonly rows: readonly { readonly label: string; readonly window?: readonly string[]|undefined; readonly coverage?:string|undefined; readonly value: string; readonly tokens: boolean }[]
@@ -228,6 +207,8 @@ export interface DetailsPendingShape {
     readonly subagentWindow?:string|undefined
     readonly partialNote?: string | undefined
     readonly coverage?: string | undefined
+    readonly compactChart?: { readonly series: boolean; readonly descendants: boolean; readonly partial: boolean }
+    readonly fullChart?: { readonly series: boolean; readonly split: boolean; readonly partial: boolean }
   }
 }
 
@@ -235,6 +216,11 @@ export const pendingShapeFromTrace = (trace: TraceSeries): DetailsPendingShape =
   const projection = adaptTrace(trace)
   const { compactions, lastCompactionMs } = trace.meters.context
   const percentage = contextPercent(trace.meters.context)
+  const spendProjection = trace.meters.spend.mainUsdScope._tag === 'Unknown' ? undefined : projection
+  const retainedUsd = spendProjection?.lane.cumulativeValues.at(-1)?.usd ?? 0
+  const retainedDescendants = spendProjection?.descendantSpend.cumulativeValues.at(-1)?.usd ?? 0
+  const mainPartial = spendProjection?.lane.totalUsd._tag === 'Known' && Math.abs(retainedUsd - spendProjection.lane.totalUsd.value) > 0.005
+  const descendantPartial = spendProjection?.descendantSpend.totalUsd._tag === 'Known' && Math.abs(retainedDescendants - spendProjection.descendantSpend.totalUsd.value) > 0.005
   return {
     context: {
       meter: {
@@ -244,18 +230,21 @@ export const pendingShapeFromTrace = (trace: TraceSeries): DetailsPendingShape =
       },
       compactPanel: projection !== undefined ? contextPanelFootprint(projection.lane, true) : undefined,
       fullPanel: projection !== undefined ? contextPanelFootprint(projection.lane, false) : undefined,
+      unavailable: sectionMissingReasons(trace, 'context').length > 0,
     },
     spend: {
       rows: [
-        ...(trace.meters.spend.totalUsd._tag==='Known'?[{label:totalLabel(trace),window:accumulationParts(trace.meters.spend.usdWindow),coverage:coverageLabel(trace.meters.spend.totalUsdCoverage),value:money.format(trace.meters.spend.totalUsd.value),tokens:false}]:[]),
-        ...(trace.meters.spend.mainUsd._tag==='Known'?[{label:`Main session${scopeLabel(trace.meters.spend.mainUsdScope)}`,window:accumulationParts(trace.meters.spend.mainUsdWindow),coverage:coverageLabel(trace.meters.spend.mainUsdCoverage),value:money.format(trace.meters.spend.mainUsd.value),tokens:false}]:[]),
-        ...(trace.meters.spend.subagentUsd._tag==='Known'?[{label:`${trace.meters.spend.subagentUsdCoverage._tag==='Partial'?'Attributed subagents':'Subagents'}${scopeLabel(trace.meters.spend.subagentUsdScope)}`,window:accumulationParts(trace.meters.spend.subagentUsdWindow),coverage:coverageLabel(trace.meters.spend.subagentUsdCoverage),value:money.format(trace.meters.spend.subagentUsd.value),tokens:false}]:[]),
-        ...(trace.meters.spend.tokens._tag==='Known'?[{...tokenScopeLabel(trace),value:compactNumber.format(trace.meters.spend.tokens.value),tokens:true}]:[]),
+        {label:totalLabel(trace)+(trace.meters.spend.usdScope._tag==='Unknown'?' —':''),window:accumulationParts(trace.meters.spend.usdWindow)??['—'],coverage:coverageLabel(trace.meters.spend.totalUsdCoverage),value:trace.meters.spend.totalUsd._tag==='Known'?money.format(trace.meters.spend.totalUsd.value):'—',tokens:false},
+        {label:`Main session${scopeLabel(trace.meters.spend.mainUsdScope)}${trace.meters.spend.mainUsdScope._tag==='Unknown'?' —':''}`,window:accumulationParts(trace.meters.spend.mainUsdWindow)??['—'],coverage:coverageLabel(trace.meters.spend.mainUsdCoverage),value:trace.meters.spend.mainUsd._tag==='Known'?money.format(trace.meters.spend.mainUsd.value):'—',tokens:false},
+        {label:`${trace.meters.spend.subagentUsdCoverage._tag==='Partial'?'Attributed subagents':'Subagents'}${scopeLabel(trace.meters.spend.subagentUsdScope)}${trace.meters.spend.subagentUsdScope._tag==='Unknown'?' —':''}`,window:accumulationParts(trace.meters.spend.subagentUsdWindow)??['—'],coverage:coverageLabel(trace.meters.spend.subagentUsdCoverage),value:trace.meters.spend.subagentUsd._tag==='Known'?money.format(trace.meters.spend.subagentUsd.value):'—',tokens:false},
+        {label:tokenScopeLabel(trace).label+(trace.meters.spend.tokensScope._tag==='Unknown'?' —':''),window:accumulationParts(trace.meters.spend.tokensWindow)??['—'],value:trace.meters.spend.tokens._tag==='Known'?compactNumber.format(trace.meters.spend.tokens.value):'—',tokens:true},
       ],
       subagents: trace.subagents._tag==='Known'?trace.subagents.value.map(child=>({label:child.label._tag==='Known'?child.label.value:child.sessionId,value:money.format(child.usd)})):[],
-      subagentWindow:`Traced sessions · ${accumulationParts(trace.subagentsWindow)?.join('')??'Accumulation window is unreported.'}`,
-      partialNote: tokenScopeReason(trace),
+      subagentWindow:`Traced sessions · ${accumulationParts(trace.subagentsWindow)?.join('')??'—'}`,
+      partialNote: sectionMissingReasons(trace, 'spend').length > 0 ? 'Unavailable —' : undefined,
       coverage: coverageLabel(trace.coverage),
+      compactChart: { series: (spendProjection?.lane.cumulativeValues.length ?? 0) > 0, descendants: (spendProjection?.descendantSpend.cumulativeValues.length ?? 0) > 0, partial: mainPartial || descendantPartial },
+      fullChart: { series: (spendProjection?.lane.cumulativeValues.length ?? 0) > 0, split: hasReportedSplit(trace), partial: mainPartial },
     },
   }
 }
@@ -266,24 +255,28 @@ export const pendingShapeFromTrace = (trace: TraceSeries): DetailsPendingShape =
  * ratios, row counts) so arrival cannot shift either section; the pane's one
  * SyncLine connection status is the only announced loading text.
  */
-export const DetailsChartsPending = ({ context, spend, section, shape, empty = 'E1' }: {
+export const DetailsChartsPending = ({ context, spend, section, shape }: {
   readonly context: 'C1' | 'C2' | 'C3'
   readonly spend: 'S1' | 'S2' | 'S3'
   readonly section?: 'context' | 'spend'
   readonly shape: DetailsPendingShape
-  /** E3 retains the spend meter above populated charts; E1 keeps its chart-only shape. */
+  /** Empty policy does not alter the reported meter geometry. */
   readonly empty?: DetailsEmptyRule
 }): ReactNode => {
   const panelFootprint = context === 'C2' ? shape.context.compactPanel : shape.context.fullPanel
   const contextBody = <div aria-hidden="true" inert data-details-skeleton="context" data-details-chart={context} {...stylex.props(styles.body)}>
-    <ContextMeterPending footprint={shape.context.meter} showUnavailableReasons={empty !== 'E3'} />
+    <ContextMeterPending footprint={shape.context.meter} />
     {context !== 'C1' && panelFootprint !== undefined && <ContextPanelPending compact={context === 'C2'} footprint={panelFootprint} />}
+    {context !== 'C1' && panelFootprint === undefined && <span {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>Context series —</span></span>}
+    {(shape.context.unavailable === true || shape.context.meter.percentage === undefined || shape.context.meter.compactions === undefined || shape.context.meter.lastCompaction === undefined || (context !== 'C1' && panelFootprint === undefined)) && <p {...stylex.props(styles.unknown)}><span {...stylex.props(styles.pendingText)}>Unavailable —</span></p>}
   </div>
   const spendBody = <div aria-hidden="true" data-details-skeleton="spend" data-details-chart={spend} {...stylex.props(styles.body)}>
     <SpendMeterPending footprint={shape.spend} />
-    {spend === 'S2' && <CompactSpendPending showTotals={false}/>}
-    {spend === 'S3' && <SpendPanelPending showTotals={false}/>}
-    {empty === 'E3' && shape.spend.partialNote !== undefined && <p {...stylex.props(styles.unknown)}><span {...stylex.props(styles.pendingText)}>{shape.spend.partialNote}</span></p>}
+    {spend === 'S2' && (shape.spend.compactChart === undefined || shape.spend.compactChart.series || shape.spend.compactChart.descendants ? <CompactSpendPending showTotals={false} {...(shape.spend.compactChart === undefined ? {} : {footprint:shape.spend.compactChart})}/> : <span {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>Spend series —</span></span>)}
+    {spend === 'S3' && shape.spend.fullChart?.series === false && !shape.spend.fullChart.split && <span {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>Spend series —</span></span>}
+    {spend === 'S3' && shape.spend.fullChart?.series === false && !shape.spend.fullChart.split && <span {...stylex.props(styles.label)}><span {...stylex.props(styles.pendingText)}>Spend split —</span></span>}
+    {spend === 'S3' && (shape.spend.fullChart === undefined || shape.spend.fullChart.series || shape.spend.fullChart.split) && <SpendPanelPending showTotals={false} {...(shape.spend.fullChart === undefined ? {} : {footprint:shape.spend.fullChart})}/>}
+    {(shape.spend.partialNote !== undefined || (spend === 'S2' && shape.spend.compactChart !== undefined && (!shape.spend.compactChart.series || !shape.spend.compactChart.descendants)) || (spend === 'S3' && shape.spend.fullChart !== undefined && (!shape.spend.fullChart.series || !shape.spend.fullChart.split))) && <p {...stylex.props(styles.unknown)}><span {...stylex.props(styles.pendingText)}>Unavailable —</span></p>}
   </div>
   if (section === 'context') return contextBody
   if (section === 'spend') return spendBody
