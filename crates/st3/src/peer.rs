@@ -293,7 +293,7 @@ impl ClientRelay {
         {
             return view.clone();
         }
-        let view = Arc::new(store.fleet_view_sealed().unwrap_or_default());
+        let view = store.fleet_view_sealed().unwrap_or_default();
         *cached = Some((std::time::Instant::now(), view.clone()));
         view
     }

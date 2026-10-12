@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Reuse generation-keyed sealed fleet membership views across client and replication reads (#2444).",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or fleet membership fold changes; the cache reuses the sealed view at the same fleet generation."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Normal store open adds local fleet-generation triggers for envelope detach/delete and signature updates. No schema-version change, data rewrite, or persistent view cache; older builds ignore the additional triggers."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or digest rule changes and no coordinated fleet upgrade required."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Fleet status and membership JSON retain their existing fields and sealed-reader semantics; sharing the view does not change client or peer protocols."
+  },
+  "downtime": {
+    "status": "unknown",
+    "detail": "Normal daemon restart; duration not measured for this change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or store repair steps required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The cache is process-local and discarded on restart; normal binary rollback remains unchanged."
+  }
+}

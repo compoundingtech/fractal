@@ -45,6 +45,8 @@ mod receive_writer_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
+mod sealed_view_cache_tests;
+#[cfg(test)]
 mod repair_operation_tests;
 mod binary_payloads;
 pub mod events;
@@ -739,6 +741,8 @@ pub struct Store {
     pub admission: Mutex<()>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// The sealed read view shared by callers at the same fleet generation.
+    sealed_view_cache: Mutex<Option<(i64, Arc<crate::fleet::FleetView>)>>,
     /// The member part of the trust roots, folded at the `fleet_generation` shown.
     pub roots_cache: Mutex<Option<(i64, MemberRoots)>>,
     /// Serializes projection passes while they lend the writer back between chunks.
@@ -997,6 +1001,7 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             admission: Mutex::new(()),
             membership_cache: Mutex::new(None),
+            sealed_view_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
             projection: Mutex::new(()),
             replication_timers: ReplicationTimers::default(),
@@ -1971,13 +1976,32 @@ impl Store {
 
     /// The fleet as its sealed envelopes show it, without taking the writer, for reads. A local
     /// membership claim shows once the next exchange seals its batch.
-    pub fn fleet_view_sealed(&self) -> Result<crate::fleet::FleetView> {
-        // Membership reads the sealed envelope rows directly; no inventory or graph digest
-        // is needed for this view.
-        let connection = self.readers.get();
-        Ok(crate::fleet::FleetView::from_membership(
-            &fleet_membership_tx(&connection)?,
-        ))
+    pub fn fleet_view_sealed(&self) -> Result<Arc<crate::fleet::FleetView>> {
+        // Serialize cache fills so concurrent readers share the view, not just its key.
+        let mut cache = self
+            .sealed_view_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = fleet_generation(&self.readers.get())?;
+        if let Some((folded_at, view)) = cache.as_ref()
+            && *folded_at == current
+        {
+            return Ok(Arc::clone(view));
+        }
+        // A raw reader takes a snapshot per statement. On a miss, pin a reader before
+        // reading the authoritative generation and folding, so a concurrent seal cannot
+        // publish a view under the wrong key. Reentry preserves an existing read snapshot.
+        // Unlike fleet_membership, this path never seals or requests the writer.
+        let (folded_at, view) = self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let generation = fleet_generation(&connection)?;
+            let view = Arc::new(crate::fleet::FleetView::from_membership(
+                &fleet_membership_tx(&connection)?,
+            ));
+            Ok((generation, view))
+        })?;
+        *cache = Some((folded_at, Arc::clone(&view)));
+        Ok(view)
     }
 
     /// Read the already admitted membership for client projections. Seeding a
@@ -2263,12 +2287,20 @@ fn fleet_generation_schema() -> String {
          CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_update
          AFTER UPDATE OF batch_id ON replica_envelopes
          WHEN NEW.batch_id IS NOT NULL AND {update_envelope} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_detach
+         AFTER UPDATE OF batch_id ON replica_envelopes
+         WHEN OLD.batch_id IS NOT NEW.batch_id AND {delete_envelope} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_delete AFTER DELETE ON replica_envelopes
+         WHEN {delete_envelope} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_insert
          AFTER INSERT ON replica_envelope_signatures
          WHEN {insert_signature} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_delete
          AFTER DELETE ON replica_envelope_signatures
          WHEN {delete_signature} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_update
+         AFTER UPDATE OF writer, sequence, envelope_hash, member_key ON replica_envelope_signatures
+         WHEN {insert_signature} OR {delete_signature} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_insert AFTER INSERT ON meta
          WHEN NEW.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_update AFTER UPDATE ON meta
@@ -2277,6 +2309,7 @@ fn fleet_generation_schema() -> String {
          WHEN OLD.key='fleet_anchor_key' BEGIN {bump} END;",
         insert_envelope = carries_fleet_claims("NEW"),
         update_envelope = carries_fleet_claims("NEW"),
+        delete_envelope = carries_fleet_claims("OLD"),
         insert_signature = signs_fleet_claims("NEW"),
         delete_signature = signs_fleet_claims("OLD"),
     )
