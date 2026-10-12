@@ -522,7 +522,16 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     controller.afterRowsChange(items, hasBoundary ? '__fractal_history__' : undefined, sourceIds)
     prefetch()
   })
-  React.useImperativeHandle(ref, () => ({ jumpTo: controller.jumpTo }), [controller])
+  // A jump resolves against the next committed render; request one so an
+  // absent target settles Missing even when the host commits nothing else.
+  const [, requestJumpCommit] = React.useReducer((count: number) => count + 1, 0)
+  React.useImperativeHandle(ref, () => ({
+    jumpTo: (id: string) => {
+      const result = controller.jumpTo(id)
+      requestJumpCommit()
+      return result
+    },
+  }), [controller])
   const collection = React.useMemo(() => [
     ...(hasBoundary ? [{ id: '__fractal_history__', item: undefined }] : []),
     ...items.map(item => ({ id: item.id, item })),
