@@ -516,6 +516,9 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await exactlyOne('identity tooltip on touch tap')
     identity.blur()
     await waitFor(() => expect(tooltips()).toHaveLength(0))
+    // React Aria's useHover ignores mouse pointerenter for 500ms after any touch pointerup (an iOS emulation guard), so a
+    // later hover check would see no hover. Outlast that window; the package lib is ES2022 (no Promise.withResolvers).
+    await new Promise(resolve => view.setTimeout(resolve, 600))
   }
 }
 const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
