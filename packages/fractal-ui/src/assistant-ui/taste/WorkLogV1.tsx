@@ -9,7 +9,7 @@ import type { WorkKind, WorkLogCall, WorkLogTurn } from './work-log'
 import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, workLogOutputLanguage } from './work-log'
 
 /** One glyph per kind; the status shows through the same slot (running spinner, failure mark), never a second icon. */
-export const workKindGlyph: Readonly<Record<WorkKind, IconName>> = { read: 'search', run: 'drawer', edit: 'pencil', eval: 'code', agent: 'agents' }
+export const workKindGlyph: Readonly<Record<WorkKind, IconName>> = { read: 'search', run: 'drawer', edit: 'pencil', eval: 'eval', agent: 'subagents' }
 export const workCallGlyph = (call: Pick<WorkLogCall, 'kind' | 'status'>): IconName =>
   call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : workKindGlyph[call.kind]
 /** Non-success outcomes only, from harness facts: success stays silent and an exit code shows only when reported. */
