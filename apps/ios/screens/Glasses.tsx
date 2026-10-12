@@ -21,6 +21,7 @@ function openPane(navigation: Navigation, pane: PaneTarget) {
   if (pane.kind === 'agent') navigation.navigate('Conversation', { target: pane.id, title: pane.title });
   else if (pane.kind === 'mission') navigation.navigate('Mission', { id: pane.id, title: pane.title });
   else if (pane.kind === 'terminal') navigation.navigate('Terminal', { terminalId: pane.id, title: pane.title });
+  else if (pane.kind === 'resource') navigation.navigate('Resource', { id: pane.id, title: pane.title });
   else if (pane.kind === 'usage') navigation.navigate('Usage');
   else if (pane.kind === 'machine') navigationRef.navigate('Fleet', { screen: 'FleetRoot' });
 }
@@ -30,13 +31,13 @@ function paneGlyph(pane: PaneTarget): { glyph: string; color: string } {
   if (pane.needsYou) return { glyph: '◆', color: theme.person };
   // Agents and missions are marked as in their own lists: working, idle, broken…
   if (pane.status) return pane.status;
-  const glyphs: Record<PaneTarget['kind'], string> = { agent: '●', mission: '◇', machine: '▣', terminal: '⌨', usage: '$', other: '·' };
+  const glyphs: Record<PaneTarget['kind'], string> = { agent: '●', mission: '◇', machine: '▣', terminal: '⌨', usage: '$', resource: '◇', other: '·' };
   return { glyph: glyphs[pane.kind], color: theme.subtext0 };
 }
 
 function paneDetail(pane: PaneTarget): string {
   if (pane.gone) return 'gone';
-  if (pane.needsYou) return `${pane.kind} · needs you`;
+  if (pane.needsYou) return `${pane.kind} · alert`;
   if (pane.status) return `${pane.kind} · ${pane.status.word}`;
   return pane.kind === 'other' ? 'this app cannot show it yet' : pane.kind;
 }

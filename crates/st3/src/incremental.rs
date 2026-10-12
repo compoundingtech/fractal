@@ -168,7 +168,9 @@ fn visit_change_keys(
     };
     let fields: &[(&str, &str)] = match change.kind.as_str() {
         "message.sent" => &[("to", "mailbox:")],
+        "mission-run.report-to" => &[("report_to", "reports-to:")],
         "mission-run.created" => &[
+            ("report_to", "reports-to:"),
             ("root_mission_run", "children:"),
             ("parent_step_run", "children-of-step:"),
         ],
@@ -183,6 +185,12 @@ fn visit_change_keys(
         "subscription.mission-started" => &[("mission_run", "subscription-run:")],
         _ => &[],
     };
+    if change.kind == "intent.desired"
+        && let Some((_, agent)) = crate::github_watch::watch_parts(&change.subject)
+        && !emit("watches:", agent)
+    {
+        return false;
+    }
     for (name, prefix) in fields {
         if let Some(value) = field(name)
             && !emit(prefix, value)

@@ -148,6 +148,15 @@ pub fn run_controlled_paths(
         !claude_argv.is_empty(),
         "Claude driver '{runtime_id}' has no provider argv"
     );
+    let mut claude_argv = claude_argv;
+    if let Some(mode) = crate::access::AccessMode::from_environment()? {
+        let boundary = claude_argv.iter().position(|arg| arg == "--").unwrap_or(claude_argv.len());
+        let explicit_permissions = claude_argv[1..boundary].iter().any(|arg| {
+            matches!(arg.as_str(), "--dangerously-skip-permissions" | "--permission-mode")
+                || arg.starts_with("--permission-mode=")
+        });
+        claude_argv.splice(1..1, crate::access::claude_defaults(mode, explicit_permissions));
+    }
     let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
     let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
@@ -155,6 +164,7 @@ pub fn run_controlled_paths(
     install_signal_handler();
     let observer = SessionObserver::new(&paths.agent_dir, &identity, "claude", &runtime_id)?;
     let mut env = vec![
+        ("DISABLE_AUTOUPDATER".into(), "1".into()),
         (RUNTIME_ID_ENV.to_string(), runtime_id.clone()),
         (SESSION_ENV.to_string(), observer.session().to_string()),
         (SESSION_SEQ_ENV.to_string(), observer.seq().to_string()),
@@ -1853,7 +1863,14 @@ pub fn observe_hook_event(event: &str, payload: &serde_json::Value) -> Option<Ob
             Observation::new(Activity::Idle, BlockedOn::None, InputBuffer::Unknown)
                 .with_reason("sessionStart"),
         ),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(Observation::new(
+        // Compacting is a status of the seat, not a wait on anyone: it ends at the next tool use
+        // or turn when auto-compaction runs inside a turn, and at `SessionStart` (source
+        // `compact`) after a `/compact`, which reads as idle.
+        "PreCompact" => Some(
+            Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Unknown)
+                .with_reason("compaction"),
+        ),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(Observation::new(
             Activity::Active,
             BlockedOn::None,
             InputBuffer::Unknown,
@@ -1900,10 +1917,18 @@ pub fn observe_hook_event(event: &str, payload: &serde_json::Value) -> Option<Ob
             } else {
                 Ask::Permission
             };
+            // The tool the prompt asks to use. Its input is conversation content: a client reads
+            // the pending call from the seat's conversation, never from this replicated record.
+            let reason = payload
+                .get("tool_name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|tool| !tool.is_empty())
+                .unwrap_or("permissionRequest")
+                .to_owned();
             Some(
                 Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)
                     .with_ask(ask)
-                    .with_reason("permissionRequest"),
+                    .with_reason(reason),
             )
         }
         _ => None,
@@ -2350,6 +2375,17 @@ mod tests {
     }
 
     #[test]
+    fn a_permission_prompt_names_its_tool_and_keeps_its_input_out() {
+        let observed = observe_hook_event(
+            "PermissionRequest",
+            &serde_json::json!({"tool_name":"Bash","tool_input":{"command":"rm -r build"}}),
+        )
+        .unwrap();
+        assert_eq!(observed.blocked_on, BlockedOn::Human);
+        assert_eq!(observed.reason.as_deref(), Some("Bash"));
+    }
+
+    #[test]
     fn hook_events_map_to_observations_with_the_blocked_edges() {
         let none = serde_json::Value::Null;
 
@@ -2379,6 +2415,18 @@ mod tests {
 
         // Unmapped events say nothing rather than guessing.
         assert_eq!(observe_hook_event("Notification", &none), None);
+        // Compacting is a status, not a wait on anyone; the session that resumes after it reads
+        // as idle.
+        let compacting = observe_hook_event("PreCompact", &none).unwrap();
+        assert_eq!(compacting.state, Activity::Active);
+        assert_eq!(compacting.blocked_on, BlockedOn::None);
+        assert_eq!(compacting.reason.as_deref(), Some("compaction"));
+        assert_eq!(
+            observe_hook_event("SessionStart", &serde_json::json!({"source":"compact"}))
+                .unwrap()
+                .state,
+            Activity::Idle
+        );
         assert_eq!(observe_hook_event("SubagentStop", &none), None);
     }
 

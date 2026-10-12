@@ -42,6 +42,14 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -226,6 +234,33 @@ pub(crate) fn authored_launch(launch: &LaunchSpec) -> Vec<&str> {
     }
     authored.extend(provider);
     authored
+}
+
+/// Authored seat purpose, independent of the runtime's launch/restart lifecycle.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentLifecycle {
+    Standing,
+    Owner,
+    Bounded,
+}
+
+impl AgentLifecycle {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "standing" => Some(Self::Standing),
+            "owner" => Some(Self::Owner),
+            "bounded" => Some(Self::Bounded),
+            _ => None,
+        }
+    }
+}
+
+/// Read only the current declaration; neither runtime state nor environment supplies a default.
+pub fn declared_agent_lifecycle(desired: Option<&Value>) -> Option<AgentLifecycle> {
+    let child = desired?.get("children")?.as_array()?.iter()
+        .find(|child| child.get("name").and_then(Value::as_str) == Some("lifecycle"))?;
+    AgentLifecycle::parse(child.get("arguments")?.as_array()?.first()?.as_str()?)
 }
 
 /// Presentation is independent of the durable seat identity.
@@ -572,6 +607,9 @@ pub struct MissionSpec {
     /// How long a run may go without progress before it is reported as stalled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     /// Whether a completed run is reported too.
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
@@ -1734,6 +1772,14 @@ pub struct AttentionItemView {
     pub variant_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    /// The agent whose conversation this item belongs to: the agent that asked, whose work a
+    /// gate reviews, that planned a launch or proposed a revision, or the seat itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<String>,
+    /// The answers a person can give from a client, for a prompt its harness lets st answer:
+    /// `allow` and `deny` for a Claude permission prompt. Empty when it is answered at its source.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<String>,
     pub title: String,
     pub detail: String,
     /// The structured request a person-step ask carries.
@@ -1750,6 +1796,42 @@ pub struct AttentionItemView {
     pub requested_at_unix_ms: u128,
     #[serde(default)]
     pub actions: Vec<AttentionActionView>,
+}
+
+impl AttentionItemView {
+    /// Whether this item is an update: information its person asked for, which asks nothing.
+    pub fn is_update(&self) -> bool {
+        self.request
+            .as_ref()
+            .is_some_and(|request| request["type"] == "update")
+    }
+
+    /// Whether this item is an alert: it blocks or waits on an answer from its person.
+    pub fn is_alert(&self) -> bool {
+        attention_is_alert(&self.kind, self.is_update())
+    }
+
+    /// Every agent conversation this item shows in: its own, and for a login, every seat that
+    /// shares it, since one sign-in answers them all.
+    pub fn conversations(&self) -> Vec<String> {
+        let mut conversations = self.conversation.iter().cloned().collect::<Vec<_>>();
+        if self.kind == "harness-login" {
+            for seat in &self.targets {
+                if seat.starts_with("agent/") && !conversations.contains(seat) {
+                    conversations.push(seat.clone());
+                }
+            }
+        }
+        conversations
+    }
+}
+
+/// Whether an item of `kind` is an alert: it blocks or waits on its person. Asks, human gates,
+/// launch and revision approvals, agents' requests, harness prompts and logins, and a gate the
+/// person published that is broken all are. An update asks nothing, and a message stays in its
+/// conversation.
+pub fn attention_is_alert(kind: &str, update: bool) -> bool {
+    !update && kind != "unread-message"
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1955,6 +2037,10 @@ pub struct MessageView {
 pub struct MessageSendReceipt {
     #[serde(flatten)]
     pub message: MessageView,
+    /// This daemon's accepted delivery kind. Absent on pre-silent daemons: tags alone
+    /// cannot confirm that an older daemon honors silent delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// The key that names this message: a request with the same key and content returns it again.
     #[serde(default)]
     pub idempotency_key: String,
@@ -2374,6 +2460,9 @@ pub struct StepRunView {
     pub worker_reported: bool,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// The submitting incarnation for this attempt; absent in older submission claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_incarnation: Option<String>,
     pub claim_expires_at_unix_ms: Option<u128>,
     /// The seat whose claim a revision dropped when it carried this ready step
     /// into the current generation, until that seat claims it again.
@@ -2397,6 +2486,10 @@ pub struct StepRunView {
     pub progress_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_at_unix_ms: Option<u128>,
+    /// When st last nudged this attempt's holder for idling with nothing set to wake it, while
+    /// the step is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudged_at_unix_ms: Option<u128>,
     /// The `work complete` summary for the current attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_summary: Option<String>,
@@ -2407,6 +2500,28 @@ pub struct StepRunView {
     pub not_before_unix_ms: Option<u128>,
     pub created_at_unix_ms: u128,
     pub updated_at_unix_ms: u128,
+}
+
+/// Compare an immutable submission receipt with the expected author and result.
+/// Unknown incarnations (including legacy receipts) never establish a match.
+pub fn work_submission_matches(
+    claim: &ClaimRecord,
+    subject: &str,
+    attempt: u32,
+    actor: &str,
+    incarnation: Option<&str>,
+    evidence: &[String],
+) -> bool {
+    let Some(incarnation) = incarnation.filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let fields = claim.body.get("fields").unwrap_or(&claim.body);
+    claim.kind == "work.submitted"
+        && claim.subject == subject
+        && claim.actor.as_deref() == Some(actor)
+        && fields.get("attempt").and_then(Value::as_u64) == Some(u64::from(attempt))
+        && fields.get("submitted_incarnation").and_then(Value::as_str) == Some(incarnation)
+        && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
 }
 
 pub fn fresh_context_operation(step: &StepRunView) -> String {
@@ -2700,6 +2815,9 @@ pub struct MissionRunReportRequest {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Override the mission's stall reporting policy; omission inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_stalls: Option<bool>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     pub idempotency_key: String,
@@ -2713,6 +2831,9 @@ pub struct MissionRunReportView {
     pub report_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_after_ms: Option<u64>,
+    /// Whether silence is reported as a stall; older records default to true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub report_stalls: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub report_completed: bool,
     /// Whether this request changed it.
