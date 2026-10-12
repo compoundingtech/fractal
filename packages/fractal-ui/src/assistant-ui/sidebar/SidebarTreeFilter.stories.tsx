@@ -20,6 +20,8 @@ const emptyExpanded = new Set<Key>()
 const onExpandedChange = (_keys: Set<Key>) => {}
 const onRowContextMenu = (_item: Agent, event: React.MouseEvent) => event.preventDefault()
 const sampleCount = 10
+/** Asynchronous settling on a contended CI host; the samples themselves carry the measurements. */
+const settled = { timeout: 10_000 }
 /** Filter keystroke-to-next-frame p90 may be at most this multiple of the reference keystroke p90. */
 const ratioBudget = 3
 /** The synchronous regression control: a busy wait of this many reference p90s per keystroke. */
@@ -149,7 +151,7 @@ async function collect(root: HTMLElement, input: HTMLInputElement, key: 'filterS
   await expect(input.value).toBe('')
   for (let index = 0; index < sampleCount; index++) {
     await userEvent.type(input, index % 2 === 0 ? toggle : '{Backspace}')
-    await waitFor(() => expect(read(root, key)[before + index]?.renders).toBeDefined())
+    await waitFor(() => expect(read(root, key)[before + index]?.renders).toBeDefined(), settled)
   }
   await expect(input.value).toBe('')
   return read(root, key).slice(before)

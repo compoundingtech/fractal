@@ -52,6 +52,20 @@ function DragSessionObserver({ onChange }: { readonly onChange: (dragging: boole
   return null
 }
 
+interface RowContentProps<T extends SidebarTreeItem<T>> {
+  readonly item: T
+  readonly expanded: boolean
+  readonly pinned: boolean
+  readonly renderRow: SidebarTreeProps<T>['renderRow']
+}
+/**
+ * Host content re-renders only when its inputs change. RAC re-renders a row's TreeItem when the
+ * virtualizer repositions it or the tree re-renders; a retained item at a new offset reuses its content.
+ */
+const RowContent = React.memo(function RowContent<T extends SidebarTreeItem<T>>({ item, expanded, pinned, renderRow }: RowContentProps<T>) {
+  return renderRow(item, { depth: item.depth, expanded, pinned })
+}) as <T extends SidebarTreeItem<T>>(props: RowContentProps<T>) => React.ReactNode
+
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
 export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProps<T>) {
   const { direction } = useLocale()
@@ -316,7 +330,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const row = (item: T, expanded: boolean, pinned: boolean) => <div {...stylex.props(styles.row)} style={{ paddingInlineStart: `calc(${s.lg} * ${item.depth})` }}>
     {Array.from({ length: item.depth }, (_, depth) => <span key={depth} aria-hidden {...stylex.props(styles.guide)} style={{ insetInlineStart: `calc(${s.lg} * ${depth} + ${s.sm})` }} />)}
     {item.children?.length ? pinned ? <span data-pinned-chevron {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</span> : <Button slot="chevron" {...stylex.props(styles.chevron)}>{expanded ? '⌄' : '›'}</Button> : null}
-    <div {...stylex.props(styles.content)}>{props.renderRow(item, { depth: item.depth, expanded, pinned })}</div>
+    <div {...stylex.props(styles.content)}><RowContent item={item} expanded={expanded} pinned={pinned} renderRow={props.renderRow} /></div>
     {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
   </div>
   const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>

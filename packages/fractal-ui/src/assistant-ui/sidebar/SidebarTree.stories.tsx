@@ -58,6 +58,8 @@ const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, paramet
 export default meta
 type Story = StoryObj<typeof meta>
 const frames = async () => { await document.fonts.ready; for (let i = 0; i < 6; i++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
+/** Asynchronous settling (reveal retries, ResizeObserver delivery) on a contended CI host; assertions are unchanged. */
+const settled = { timeout: 10_000 }
 const examples = (canvas: HTMLElement) => [canvas.querySelector('[data-example="sticky"]')!, canvas.querySelector('[data-example="control"]')!] as const
 const viewport = (example: Element) => example.querySelector('[role="treegrid"]') as HTMLElement
 const stack = (example: Element) => example.querySelector('[data-sidebar-pinned-stack]') as HTMLElement
@@ -74,7 +76,7 @@ export const StickyChain: Story = { render: pair, play: async ({ canvasElement }
 export const PushOutBoundary: Story = { render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement); await frames()
   await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal boundary' }))
-  await waitFor(() => expect(real(yes, 'north.a.a.a.a.a.a.69')).not.toBeNull())
+  await waitFor(() => expect(real(yes, 'north.a.a.a.a.a.a.69')).not.toBeNull(), settled)
   await frames()
   const last = real(yes, 'north.a.a.a.a.a.a.69')!
   const boundary = viewport(yes).scrollTop + last.getBoundingClientRect().bottom - viewport(yes).getBoundingClientRect().top
@@ -95,8 +97,8 @@ export const PushOutBoundary: Story = { render: pair, play: async ({ canvasEleme
 } }
 export const DepthCap: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); await expect(yes.querySelector('[data-sidebar-breadcrumb]')).not.toBeNull(); await expect(stack(yes).getBoundingClientRect().height).toBeLessThanOrEqual(viewport(yes).clientHeight * 0.4); await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeLessThanOrEqual(4); await expect(no.querySelector('[data-sidebar-breadcrumb]')).toBeNull() } }
 export const AccessibleRows: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); for (const example of [yes, no]) { await expect(within(example as HTMLElement).getAllByRole('treegrid')).toHaveLength(1); await expect(within(example as HTMLElement).getAllByRole('row')).toHaveLength(example.querySelectorAll('[data-sidebar-tree-key]').length); await expect(stack(example).querySelectorAll('[role="row"]')).toHaveLength(0); await expect(stack(example).getAttribute('aria-hidden')).toBe('true') } await expect(yes.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0); await expect(no.querySelectorAll('[data-pinned-key]').length).toBe(0) } }
-export const PinnedClick: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const pin = [...yes.querySelectorAll('[data-pinned-key]')].at(-1) as HTMLElement; const key = pin.dataset.pinnedKey!; await userEvent.click(pin); await waitFor(() => expect(document.activeElement).toBe(real(yes, key))); await frames(); await expect(clear(yes, real(yes, key)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
-export const FocusAndReveal: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const top = stack(yes).dataset.topKey!; real(yes, top)!.focus(); await frames(); await expect(clear(yes, real(yes, top)!)).toBe(true); await userEvent.keyboard('{ArrowDown}'); await frames(); await expect(clear(yes, document.activeElement as HTMLElement)).toBe(true); await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal review' })); await waitFor(() => expect(real(yes, deepKey)).not.toBeNull()); await frames(); await expect(clear(yes, real(yes, deepKey)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
+export const PinnedClick: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const pin = [...yes.querySelectorAll('[data-pinned-key]')].at(-1) as HTMLElement; const key = pin.dataset.pinnedKey!; await userEvent.click(pin); await waitFor(() => expect(document.activeElement).toBe(real(yes, key)), settled); await frames(); await expect(clear(yes, real(yes, key)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
+export const FocusAndReveal: Story = { render: pair, play: async ({ canvasElement }) => { const [yes, no] = examples(canvasElement); await frames(); await scroll(yes); await scroll(no); const top = stack(yes).dataset.topKey!; real(yes, top)!.focus(); await frames(); await expect(clear(yes, real(yes, top)!)).toBe(true); await userEvent.keyboard('{ArrowDown}'); await frames(); await expect(clear(yes, document.activeElement as HTMLElement)).toBe(true); await userEvent.click(within(yes as HTMLElement).getByRole('button', { name: 'Reveal review' })); await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled); await frames(); await expect(clear(yes, real(yes, deepKey)!)).toBe(true); await expect(no.querySelector('[data-pinned-key]')).toBeNull() } }
 export const VisibleFocusDoesNotJump: Story = { render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
   await frames()
@@ -162,8 +164,8 @@ export const CollapseFilterReorder: Story = { render: pair, play: async ({ canva
 export const ColdRevealBeforeMeasurement: Story = { render: () => <Pair cold />, play: async ({ canvasElement }) => {
   const yes = canvasElement.querySelector('[data-example="sticky"]')!
   const no = canvasElement.querySelector('[data-example="control"]')!
-  await waitFor(() => expect(real(yes, deepKey)).not.toBeNull())
-  await waitFor(() => expect((yes as HTMLElement).dataset.firstRevealClear).toBe('true'))
+  await waitFor(() => expect(real(yes, deepKey)).not.toBeNull(), settled)
+  await waitFor(() => expect((yes as HTMLElement).dataset.firstRevealClear).toBe('true'), settled)
   await frames()
   await expect(real(yes, deepKey)!.getBoundingClientRect().height).toBe(32)
   await expect(clear(yes, real(yes, deepKey)!)).toBe(true)
@@ -177,7 +179,7 @@ export const RevealUnvisitedAncestors: Story = { render: pair, play: async ({ ca
   await frames()
   for (const example of [yes, no]) {
     await userEvent.click(within(example as HTMLElement).getByRole('button', { name: 'Reveal unvisited branch' }))
-    await waitFor(() => expect(real(example, 'south.a.a.a.a.a.a.35')).not.toBeNull())
+    await waitFor(() => expect(real(example, 'south.a.a.a.a.a.a.35')).not.toBeNull(), settled)
     await frames()
   }
   await expect(clear(yes, real(yes, 'south.a.a.a.a.a.a.35')!)).toBe(true)

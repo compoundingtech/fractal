@@ -56,6 +56,8 @@ const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, paramet
 export default meta
 type Story = StoryObj<typeof meta>
 const frames = async (count = 6) => { for (let index = 0; index < count; index++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
+/** Asynchronous settling on a contended CI host; assertions are unchanged. */
+const settled = { timeout: 10_000 }
 const row = (root: HTMLElement, key: string) => root.querySelector<HTMLElement>(`[data-sidebar-tree-key="${key}"]`)!
 const assertFiled = async (root: HTMLElement, key: string) => { await expect(root.dataset.parentKey).toBe(key) }
 
@@ -68,7 +70,7 @@ async function keyboardFile(root: HTMLElement, enabled: boolean) {
     for (let index = 0; index < 12 && document.activeElement?.getAttribute('aria-label') !== 'Drop on Destination folder'; index++) await userEvent.keyboard('{ArrowDown}')
     await expect(document.activeElement?.getAttribute('aria-label')).toBe('Drop on Destination folder')
     await userEvent.keyboard('{Enter}')
-    await waitFor(() => expect(root.dataset.parentKey).toBe('destination'))
+    await waitFor(() => expect(root.dataset.parentKey).toBe('destination'), settled)
   } else {
     await userEvent.keyboard('{ArrowDown}{Enter}{Escape}')
     await frames()
@@ -137,7 +139,7 @@ export const PointerDragFiling: Story = { render: () => <FilingTree />, play: as
   await expect(assertFiled(root, 'destination')).rejects.toThrow()
   await userEvent.click(within(root).getByRole('button', { name: 'Enable filing' }))
   await pointerFile(root)
-  await waitFor(() => assertFiled(root, 'destination'))
+  await waitFor(() => assertFiled(root, 'destination'), settled)
 } }
 export const DragThroughPinnedBand: Story = { render: () => <FilingTree deep />, play: async ({ canvasElement }) => {
   const root = within(canvasElement).getByTestId('filing-tree')
@@ -154,6 +156,8 @@ export const DragThroughPinnedBand: Story = { render: () => <FilingTree deep />,
   await finishPointer(rejected.source, rejected.transfer, blocked, x, y)
   await expect(assertFiled(root, 'destination')).rejects.toThrow()
   await expect(root.dataset.parentKey).toBe('origin')
+  // Control: with no drag session the pinned band owns the scroller's top edge.
+  await waitFor(() => expect(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + 2)!.closest('[data-pinned-key]')).not.toBeNull(), settled)
   tree.scrollTop = 0
   await frames()
   await userEvent.click(within(root).getByRole('button', { name: 'Enable filing' }))
@@ -167,13 +171,16 @@ export const DragThroughPinnedBand: Story = { render: () => <FilingTree deep />,
     await expect(getComputedStyle(copy).pointerEvents).toBe('none')
     await expect(copy.querySelector('[inert]')).not.toBeNull()
   }
+  // Chromium and Firefox autoscroll natively during a real drag, against the scroller under the
+  // pointer (RAC's own autoscroll runs only in macOS WebKit). The top-edge point must therefore
+  // hit the treegrid scroller, not the pinned band; the control above proved the band owns it
+  // outside a drag session.
   bounds = tree.getBoundingClientRect()
   x = bounds.left + bounds.width / 2
   y = bounds.top + 2
-  const before = tree.scrollTop
+  await expect(document.elementFromPoint(x, y)!.closest('[role="treegrid"]')).toBe(tree)
   over(drag.transfer, x, y)
-  await frames(8)
-  await expect(tree.scrollTop).toBeLessThan(before)
+  await frames()
   await expect(stack.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0)
   y = bounds.top + Math.min(12, stack.getBoundingClientRect().height / 2)
   const target = over(drag.transfer, x, y)
@@ -188,7 +195,7 @@ export const DragThroughPinnedBand: Story = { render: () => <FilingTree deep />,
   await expect(indicator.dataset.dropKey).toBe(key)
   await expect(Number(getComputedStyle(indicator).zIndex)).toBeGreaterThan(Number(getComputedStyle(stack).zIndex))
   await finishPointer(drag.source, drag.transfer, target, x, y)
-  await waitFor(() => assertFiled(root, key))
+  await waitFor(() => assertFiled(root, key), settled)
 } }
 // Hit-test one point over the pinned band: passes only when the real row, not a pinned copy, is on top.
 const realRowAt = async (x: number, y: number) => {
@@ -231,7 +238,7 @@ export const ExternalDragOverPinnedBand: Story = { render: () => <FilingTree dee
   const probeTarget = over(probe, x, y)
   await expect(probeTarget.closest('[data-sidebar-tree-key]')?.getAttribute('data-sidebar-tree-key')).toBe(probeKey)
   probeTarget.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, dataTransfer: probe, relatedTarget: null, clientX: -1, clientY: -1 }))
-  await waitFor(() => expect(realRowAt(x, y)).rejects.toThrow())
+  await waitFor(() => expect(realRowAt(x, y)).rejects.toThrow(), settled)
   await expect(root.dataset.parentKey).toBe('origin')
   // A second external drag enters over the band and drops on the real row underneath.
   const transfer = externalTransfer()
@@ -246,7 +253,7 @@ export const ExternalDragOverPinnedBand: Story = { render: () => <FilingTree dee
   await expect(indicator).not.toBeNull()
   await expect(indicator.dataset.dropKey).toBe(key)
   target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: x, clientY: y }))
-  await waitFor(() => assertFiled(root, key))
+  await waitFor(() => assertFiled(root, key), settled)
 } }
 const styles = stylex.create({
   root: { width: sizes.small, color: ink.fg, backgroundColor: surface.sidebar, fontFamily: t.fontSans, fontSize: t.metaSize },
