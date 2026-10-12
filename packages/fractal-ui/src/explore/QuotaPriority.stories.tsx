@@ -3,7 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
-import { Button, Dialog, DialogTrigger, Popover } from 'react-aria-components'
+import { Button, Dialog, DialogTrigger, Popover, VisuallyHidden } from 'react-aria-components'
+import { Tooltip } from '../assistant-ui/composition/Controls'
 import { UsageMeterReading, UsageMeterRowDetail, type UsageMeterRow } from '../UsageMeterTable'
 import { usageMeterGridVars } from '../UsageMeterGrid.stylex'
 import { baselineTheme } from '../assistant-ui/neutral-theme'
@@ -32,9 +33,9 @@ function AccountRow({ row, args, onSelect }: { row: UsageMeterRow; args: Args; o
   const extraCount = row.omitted + (!full && row.comparison ? 1 : 0)
   const reset = row.reset === 'Unreported' ? '—' : row.reset.replace(/\s/g, '')
   return <div role="row" data-priority-row={row.id} data-stale={row.stale || undefined} data-visible-count={full ? 5 : 3} {...stylex.props(styles.row)}>
-    <div role="cell" data-priority="1" {...stylex.props(styles.cell, styles.accountCell)}><Button aria-label={`Account ${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} onPress={() => onSelect(row.id)} {...stylex.props(styles.account)}><span data-line-run title={row.identity}>{row.identity}</span></Button></div>
+    <div role="cell" data-priority="1" {...stylex.props(styles.cell, styles.accountCell)}><Tooltip label={row.identity}><Button aria-label={`Account ${row.label}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} aria-describedby={`${args.D}-${row.id}-identity`} onPress={() => onSelect(row.id)} {...stylex.props(styles.account)}><span data-line-run>{row.identity}</span></Button></Tooltip><VisuallyHidden id={`${args.D}-${row.id}-identity`}>{row.identity}</VisuallyHidden></div>
     <div role="cell" data-priority="2" data-reading aria-label={`Primary ${row.governing.label} · ${row.governing.text}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} {...stylex.props(styles.cell)}><UsageMeterReading meter={governing} stale={row.stale} compact /></div>
-    <div role="cell" data-priority="3" data-reset aria-label={row.reset === 'Unreported' ? 'Reset unreported' : `Primary reset: ${row.reset}`} title={row.reset === 'Unreported' ? 'Reset unreported' : `Primary reset: ${row.reset}`} {...stylex.props(styles.cell, styles.reset)}><span data-line-run>{reset}</span></div>
+    <div role="cell" data-priority="3" data-reset aria-label={row.reset === 'Unreported' ? 'Reset unreported' : `Primary reset: ${row.reset}`} {...stylex.props(styles.cell, styles.reset)}><span data-line-run>{reset}</span></div>
     {full && <div role="cell" data-priority="4" data-reading={args.D === 'D1' ? undefined : ''} aria-label={`Secondary ${row.comparison?.label} · ${row.comparison?.text}`} {...stylex.props(styles.cell)}>{comparison && <UsageMeterReading meter={comparison} stale={row.stale} compact />}</div>}
     {(args.D === 'D3' || full) && <div role="cell" data-priority={full ? '5' : undefined} data-overflow-cell {...stylex.props(styles.cell)}><DialogTrigger><Button aria-label={`Show ${extraCount} secondary windows for ${row.label}`} data-overflow-count={extraCount} {...stylex.props(styles.more)}>+{extraCount}</Button><Popover {...stylex.props(...baselineTheme, args.scheme === 'light' && lightTheme, styles.popover)}><Dialog aria-label={`Secondary windows for ${row.label}`} {...stylex.props(styles.dialog)}>{({ close }) => <><h3 {...stylex.props(styles.heading)}>{row.label}</h3>{!full && row.comparison && <UsageMeterReading meter={row.comparison} stale={row.stale} compact />}{row.detail.windows.filter(window => window.id !== `${row.id}-primary` && window.id !== `${row.id}-secondary`).map(window => <UsageMeterReading key={window.id} meter={window.meter} stale={row.stale} compact />)}<Button onPress={close} {...stylex.props(styles.button)}>Close readings</Button></>}</Dialog></Popover></DialogTrigger></div>}
   </div>
@@ -98,6 +99,7 @@ function assertTables(canvas: HTMLElement) {
     expect(rows.length).toBe(accounts.length)
     const bare = sidebar.dataset.bar === 'B2' && width !== 320
     expect(sidebar.querySelectorAll('[data-reading] [data-usage-meter-bar]').length === 0).toBe(bare)
+    expect(sidebar.querySelectorAll('[data-quota-table] [title]:not([data-usage-meter-tone] [title])').length).toBe(0)
     const firstColumns = Array.from(rows[0]!.children).map(cell => cell.getBoundingClientRect().left)
     for (const row of rows) {
       expect(Math.round(row.getBoundingClientRect().height)).toBe(22)
@@ -155,6 +157,11 @@ export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({
       await waitFor(() => { expect(canvasElement.querySelector('[data-sidebar]')?.getAttribute('data-drop')).toBe(drop.id); expect(canvasElement.querySelector('[data-sidebar]')?.getAttribute('data-bar')).toBe(bar.id) })
       assertTables(canvasElement)
     }
+    const north = canvas.getByRole('button', { name: 'Account North studio' })
+    expect(north).toHaveAccessibleDescription('gh/north-studio')
+    await userEvent.keyboard('{Shift}'); north.focus()
+    expect(await within(document.body).findByRole('tooltip')).toHaveTextContent('gh/north-studio')
+    await userEvent.keyboard('{Escape}'); await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
     await userEvent.click(canvas.getByRole('button', { name: 'Show 2 secondary windows for North studio' }))
     const dialog = await within(document.body).findByRole('dialog', { name: 'Secondary windows for North studio' })
     expect(within(dialog).getByText('41%')).toBeVisible(); expect(within(dialog).getByText('18%')).toBeVisible()
