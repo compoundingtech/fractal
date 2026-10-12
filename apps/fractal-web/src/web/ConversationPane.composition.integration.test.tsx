@@ -871,6 +871,16 @@ describe('ConversationPane composition activation', () => {
     expect(container.querySelectorAll('[data-testid="transcript-message"]')).toHaveLength(0)
   })
 
+  it('names the actual recipient and active session in the existing kit composer', async () => {
+    source.sendEnabled = true
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: scenario, hasOlder: false, sessionId: 'session/active', observation: { empty: false },
+    } }
+    await mount()
+    expect(source.composerProps.at(-1)?.targetLabel).toBe('Example Agent (agent/selected) · Session session/active')
+    expect(container.querySelector('textarea')?.getAttribute('aria-label')).toBe('Message to Example Agent (agent/selected) · Session session/active')
+  })
+
   it.each(['running', 'completed'] as const)('renders no unavailable cancel control or raw state text while %s', async status => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: [scenario[0]!, { _tag: 'Status', id: 'run-status', status, at: at(1) }],

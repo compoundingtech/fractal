@@ -7,13 +7,17 @@ import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/com
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNow } from '../data/react.tsx'
 import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
-import { composerSendBinding, type SendRefusal } from './composerSend.ts'
+import { useConnectionNotice } from './ConnectionBanner.tsx'
+import { composerSendBinding, createComposerSubmissionCapture, type SendRefusal } from './composerSend.ts'
+import { createComposerAttachmentAdapter } from './composerAttachments.ts'
 import { geometryVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import { composerHistoryAtom, recallAvailable, submittedHistory } from './composerHistory.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
-import type { ConversationPage, Feed } from '../data/source.ts'
-import type * as Atom from 'effect/reactivity/Atom'
+import type { ConversationPage, Feed, NetworkReachability } from '../data/source.ts'
+import * as Atom from 'effect/reactivity/Atom'
+import { serializeDraft } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-composer/draft.ts'
+const assumedOnline = Atom.make<NetworkReachability>({ _tag: 'Online' })
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
@@ -99,23 +103,40 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   const source = useDataSource()
   const now = useNow()
   const observation = useConversationSync(agentRef)
+  const network = useAtomValue(source.network ?? assumedOnline)
   const grants = useGrants()
   const [refusal, setRefusal] = React.useState<SendRefusal>()
   const registry = React.useContext(RegistryContext)
   const historyNamespace = `${source.gateway ?? source.mode}:${agentRef}`
   const historySegments = useAtomValue(composerHistoryAtom(historyNamespace))
   const history = React.useMemo(() => submittedHistory(historyNamespace, registry), [historyNamespace, registry])
+  const submissionCapture = React.useMemo(() => createComposerSubmissionCapture(history.capture), [history])
   const historyAvailable = recallAvailable(historySegments.length, state._tag === 'Observed' ? state.items : [])
   const historySource = React.useMemo(() => ({ available: historyAvailable, get: history.get }), [historyAvailable, history])
+  const attachmentAdapter = React.useMemo(() => source.attachments === undefined ? undefined
+    : createComposerAttachmentAdapter(source.attachments), [source.attachments])
   const binding = composerSendBinding({
     source, agentRef, grants,
+    online: network._tag === 'Online',
+    sessionId: feed._tag === 'Observed' ? feed.value.sessionId : undefined,
     readable: state._tag === 'Observed',
     items: state._tag === 'Observed' ? state.items : [],
     refusal, onRefused: setRefusal,
-    onSending: history.capture,
+    onSending: submissionCapture.dispatching,
   })
   const retryConversation = source.retryConversation
-  return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
+  return <EmbraceRuntimeProvider key={agentRef} options={{
+    ...binding.runtime,
+    adapters: attachmentAdapter === undefined ? undefined : { attachments: attachmentAdapter },
+    onNew: async message => {
+      const attachments = (message.attachments ?? []).map(attachment => ({
+        ...attachment, id: attachmentAdapter?.nativeId(attachment.id) ?? attachment.id,
+      }))
+      attachmentAdapter?.submitted(attachments.map(attachment => attachment.id))
+      await binding.runtime.onNew({ ...message, attachments })
+    },
+    isRunning: state._tag === 'Observed' && state.isRunning,
+  }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     <Transcript
@@ -130,7 +151,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       onOpenTool={onOpenTool}
       onRetrySync={state._tag === 'Unavailable' || retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       onLoadImage={(src) => { const url = openableImageUrl(src); if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer') }}
-      onRetrySend={grants.messageSend === 'granted' ? (id) => {
+      onRetrySend={grants.messageSend === 'granted' && binding.disabledReason === undefined ? (id) => {
         if (feed._tag !== 'Observed') return
         const item = feed.value.items.find(item => item.id === id)
         if (item !== undefined) void binding.retry(item)
@@ -147,7 +168,12 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
-      <EmbraceComposer variant="C1" readingColumn showHistory historySource={historySource} disabledReason={binding.disabledReason} />
+      <EmbraceComposer variant="C1" readingColumn targetLabel={`${agentName} (${agentRef})${feed._tag === 'Observed' && feed.value.sessionId !== undefined ? ` · Session ${feed.value.sessionId}` : ''}`} showHistory historySource={historySource}
+        onSendDraft={draft => submissionCapture.submitting(serializeDraft(draft).content)}
+        sendDisabled={binding.disabledReason !== undefined}
+        disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found'
+          : binding.availability._tag === 'Offline' || binding.availability._tag === 'Revoked'
+            ? undefined : binding.disabledReason} />
     </div>
   </EmbraceRuntimeProvider>
 })

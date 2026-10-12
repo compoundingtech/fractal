@@ -45,6 +45,7 @@ import {
 import {
   type ConversationPage,
   type AttachmentPort,
+  type AttachmentSendRequest,
   type ConversationPortResult,
   type DataSource,
   type NetworkReachability,
@@ -96,6 +97,8 @@ interface RetainedConversation extends RetainedFeed<ConversationPage> {
 
 interface PendingSend {
   item: TextItem
+  readonly request: AttachmentSendRequest
+  refusal?: Extract<ConversationPortResult<never>, { _tag: 'Refused' }>
 }
 /** Terminal-only presentation and recovery policy; unrelated feeds keep their existing verdicts. */
 const terminalUnavailable = (error: AttachFailure): Feed<never> => {
@@ -724,6 +727,7 @@ export const liveSource = ({
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
     let lastSendId: string | undefined
+    let sessionId: string | undefined
     let painted = false
     let publishedItems: ConversationPage['items'] = []
     let changedFrom = Infinity
@@ -742,6 +746,7 @@ export const liveSource = ({
       } else changedFrom = Math.min(changedFrom, projection.changedFrom)
       return {
         items,
+        ...(sessionId === undefined ? {} : { sessionId }),
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
         change: { from: publishedItems, index: changedFrom },
@@ -768,6 +773,7 @@ export const liveSource = ({
           Stream.map((event) => {
             if (event._tag !== 'Observed') return event
             ux?.().switchDataReady(ref)
+            sessionId = event.value.sessionId ?? sessionId
             const previousSize = timeline.size
             timeline.apply(event.value)
             // Entries are identity-deduplicated by the retained timeline, not counted per chunk.
@@ -785,7 +791,19 @@ export const liveSource = ({
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
       const id = `pending/${idempotencyKey}`
+      const previousRefusal = pending.get(id)?.refusal
+      if (request._tag === 'Resend' && previousRefusal?.error?.retryable === false
+        && previousRefusal.reason !== 'stale-fence' && previousRefusal.reason !== 'ungranted'
+        && previousRefusal.error.code !== 'issuer-required') return previousRefusal
+      // Capture once, before any await. Retry belongs to this outbox submission,
+      // never to the current composer/recipient/session or caller-owned mutable arrays.
+      const original = pending.get(id)?.request
+      const captured = original ?? structuredClone(request)
+      request = request._tag === 'Resend'
+        ? { ...captured, _tag: 'Resend', idempotencyKey }
+        : captured
       const local: PendingSend = {
+        request: captured,
         item: {
           _tag: 'Text', id, role: 'user',
           text: request.parameters.content ?? '',
@@ -832,9 +850,15 @@ export const liveSource = ({
         }
         const result = await submit()
         if (result._tag === 'Success' && result.value.status === 'rejected') {
-          local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.' } }
+          local.item = { ...local.item, sendState: { _tag: 'Failed', reason: 'rejected', detail: 'The message action was rejected.', retryable: false } }
         } else if (result._tag === 'Refused') {
-          local.item = { ...local.item, sendState: { _tag: 'Failed', reason: result.reason, detail: result.detail } }
+          local.refusal = result
+          local.item = { ...local.item, sendState: {
+            _tag: 'Failed', reason: result.reason, detail: result.detail,
+            ...(result.error === undefined ? {} : { code: result.error.code }),
+            retryable: result.reason !== 'invalid' && (result.reason === 'stale-fence' || result.reason === 'ungranted'
+              || result.error?.code === 'issuer-required' || result.error?.retryable !== false),
+          } }
         } else if (result._tag === 'Success' && result.value.status === 'completed') {
           const affected = result.value.affected_ids.filter((affected) => affected.startsWith('message/'))
           if (affected.length > 0) timeline.keepOwnSendId(affected, id)

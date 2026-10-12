@@ -1317,7 +1317,12 @@ describe('optimistic conversation sends', () => {
         gateway.fleet([agent])
         yield* settle
         gateway.staleSendFence = true
-        const refused = yield* Effect.promise(() => live.source.attachments!.send(request))
+        const contextual = { ...request, parameters: {
+          ...request.parameters, session_id: 'session/original', title: 'Original subject',
+          in_reply_to: 'message/original', tags: ['original'],
+          attachments: [{ blob: `blob/${'b'.repeat(64)}`, media_type: 'image/png', name: 'original.png' }],
+        } } as const
+        const refused = yield* Effect.promise(() => live.source.attachments!.send(contextual))
         expect(refused).toMatchObject({
           _tag: 'Refused', reason: 'stale-fence', detail: 'The observed snapshot belongs to an old gateway store.',
           error: { code: 'stale-fence' },
@@ -1337,7 +1342,8 @@ describe('optimistic conversation sends', () => {
         })
         yield* settle
         expect((yield* Effect.promise(() => live.source.attachments!.send({
-          ...request, _tag: 'Resend', idempotencyKey: first.idempotency_key,
+          ...request, id: 'action/changed', parameters: { ...request.parameters, session_id: 'session/changed' },
+          _tag: 'Resend', idempotencyKey: first.idempotency_key,
         })))._tag).toBe('Success')
         expect(gateway.messageActions[1]).toMatchObject({
           id: first.id, idempotency_key: first.idempotency_key, parameters: first.parameters,
