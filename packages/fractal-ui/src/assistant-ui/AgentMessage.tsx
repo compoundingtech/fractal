@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, VisuallyHidden } from 'react-aria-components'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import { Icon, type IconName } from './composition/Icons'
 import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
@@ -43,7 +43,7 @@ export interface AgentMessageProps {
 }
 
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels. */
-export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><span {...stylex.props(styles.visuallyHidden)}>{id}</span></span>
+export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}>{id.includes('.') ? <><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></> : id}</span>
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
 const MessageBody = ({ text, foreground = false }: { readonly text: string; readonly foreground?: boolean }) => {

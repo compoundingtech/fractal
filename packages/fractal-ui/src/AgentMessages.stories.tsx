@@ -597,6 +597,7 @@ export const HierarchyOutgoing: Story = {
       await expect(header.getBoundingClientRect().height).toBe(24)
       await expect(parseFloat(getComputedStyle(message).borderLeftWidth)).toBe(0)
       await expect(header.querySelector('time')).toBeNull()
+      await expect(header.querySelector('button[slot="trigger"]')?.textContent?.match(/\bReview\b/g) ?? []).toHaveLength(1)
       await expect(header.querySelector('[data-message-glyph] svg')).not.toBeNull()
       await expect(message.querySelector('[data-fractal-card]')).toBeNull()
       const opened = message.querySelector<HTMLElement>('[data-opened-body]')!
@@ -611,6 +612,10 @@ export const HierarchyOutgoing: Story = {
     header.style.height = '1rem'
     try { await expect(assertWorkRow()).rejects.toThrow() } finally { header.style.height = '' }
     const trigger = within(header).getByRole('button', { name: /To Review/ })
+    const duplicateId = document.createElement('span')
+    duplicateId.textContent = 'Review'
+    trigger.append(duplicateId)
+    try { await expect(assertWorkRow()).rejects.toThrow() } finally { duplicateId.remove() }
     const copy = within(header).getByRole('button', { name: 'Copy message' })
     trigger.focus()
     await userEvent.tab()
