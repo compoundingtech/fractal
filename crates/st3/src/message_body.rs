@@ -36,6 +36,17 @@ pub const MEDIA_TYPE: &str = "text/plain";
 pub const OWNER_STORE_DEFAULT_MB: u64 = 1024;
 /// The most one sender may have there, unless `ST3_MESSAGE_BODIES_ACTOR_MAX_MB` says otherwise.
 pub const ACTOR_STORE_DEFAULT_MB: u64 = 256;
+/// How long the owner keeps a body at most, if it chose to: `ST3_MESSAGE_BODIES_RETENTION_DAYS`.
+/// Unset, nothing ages out. A message whose body has aged out reads as its preview, with a note
+/// that the rest is no longer on its owner's machine.
+fn retention() -> Option<Duration> {
+    std::env::var("ST3_MESSAGE_BODIES_RETENTION_DAYS")
+        .ok()
+        .and_then(|days| days.parse::<u64>().ok())
+        .filter(|days| *days > 0)
+        .map(|days| Duration::from_secs(days.saturating_mul(24 * 3600)))
+}
+
 /// How long a body with no claim may sit before reconcile removes it.
 const ORPHAN_GRACE: Duration = Duration::from_secs(3600);
 
@@ -315,9 +326,13 @@ impl Bodies {
         let mut removed = 0;
         for file in self.files() {
             let old = file.modified.elapsed().is_ok_and(|age| age > ORPHAN_GRACE);
+            // Past a retention the owner chose, a body goes too. None is chosen by default.
+            let expired = retention().is_some_and(|keep| {
+                !file.temporary && file.modified.elapsed().is_ok_and(|age| age > keep)
+            });
             // An old temporary file is a write that never committed; a body is kept unless its
-            // message is known not to exist.
-            if old && (file.temporary || !names_a_body(&file)) {
+            // message is known not to exist, or the owner's retention has passed.
+            if expired || (old && (file.temporary || !names_a_body(&file))) {
                 let _ = fs::remove_file(self.root.join(&file.actor_dir).join(&file.id));
                 removed += 1;
             }

@@ -91,8 +91,10 @@ with the claim. The measured rows are 4 KiB and the two file-backed sizes.
 - The owner removes, at startup and hourly, a temporary file older than an hour and a body whose
   message the store says does not exist, such as one a checkpoint dropped. A read that fails
   deletes nothing. A file younger than an hour is left alone.
-- The owner keeps the file as long as it keeps its state directory. Nothing sweeps by age, unlike
-  an attachment's seven days.
+- The owner keeps the file as long as it keeps its state directory, unless it sets
+  `ST3_MESSAGE_BODIES_RETENTION_DAYS`: the hourly reconcile then removes a body older than that.
+  Unset, nothing sweeps by age, unlike an attachment's seven days. A message whose body has aged out
+  reads as its preview with a note that the rest is no longer on the owner's machine.
 - `st backup create` writes each body the member owns, with its message, sender and hash, after the
   claims, and declares archive version 2 (an archive with no bodies stays version 1, which a build
   without bodies restores; one with bodies it refuses cleanly); a body no claim names with that hash

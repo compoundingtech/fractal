@@ -218,6 +218,8 @@ impl Writer {
             "unsupported harness timeline driver `{}`",
             self.driver
         );
+        let claim_failure = (entry_type == EntryType::ToolResult && final_entry)
+            .then(|| crate::work_claim_failure::from_tool_result(&body)).flatten();
         let source_id = pseudonym("source", &source_id);
         let (mut body, redacted_bytes, redacted_items, truncated_items) =
             normalize_body(entry_type, &source_id, body);
@@ -291,6 +293,13 @@ impl Writer {
             observed_at_unix_ms,
             source_id: Some(source_id.clone()),
         });
+        if let Some(receipt) = claim_failure {
+            push_notice(&mut record, &self.driver, &self.incarnation_id,
+                &format!("{source_id}:work-claim-socket"), EntryType::Error,
+                json!({"code": crate::work_claim_failure::CODE,
+                    "message": receipt.reason(), "retryable": false,
+                    "details": receipt}), observed_at_unix_ms);
+        }
         if redacted_bytes > 0 || redacted_items > 0 {
             push_notice(
                 &mut record,
@@ -512,7 +521,10 @@ pub fn observe_codex(writer: &mut Writer, message: &Value, thread_id: &str) -> R
                 .unwrap_or(item_type);
             writer.append(format!("{item_id}:call"), Role::Assistant, EntryType::ToolCall, json!({"call_id": item_id, "name": name, "arguments": item.get("arguments").or_else(|| item.get("input")).cloned().unwrap_or(Value::Null)}), true)?;
             if final_entry {
-                writer.append(format!("{item_id}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": item_id, "status": if item.get("error").is_some_and(|value| !value.is_null()) {"error"} else {"success"}, "media_type": "application/json", "content": item.get("output").or_else(|| item.get("result")).cloned().unwrap_or(Value::Null)}), true)?;
+                let failed = item.get("error").is_some_and(|value| !value.is_null())
+                    || item.get("exitCode").and_then(Value::as_i64).is_some_and(|code| code != 0)
+                    || item["status"] == "failed";
+                writer.append(format!("{item_id}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": item_id, "status": if failed {"error"} else {"success"}, "media_type": "application/json", "content": item.get("aggregatedOutput").or_else(|| item.get("output")).or_else(|| item.get("result")).cloned().unwrap_or(Value::Null)}), true)?;
             }
         }
         // Provider reasoning is deliberately never projected as conversation content. Its
@@ -549,9 +561,9 @@ pub fn observe_claude(writer: &mut Writer, event: &str, payload: &Value) -> Resu
             let call = payload.get("tool_use_id").and_then(Value::as_str).unwrap_or("unknown");
             writer.append(format!("claude:{session}:{call}:call"), Role::Assistant, EntryType::ToolCall, json!({"call_id": call, "name": payload.get("tool_name").and_then(Value::as_str).unwrap_or("unknown"), "arguments": payload.get("tool_input").cloned().unwrap_or(Value::Null)}), true)?;
         }
-        "PostToolUse" => {
+        "PostToolUse" | "PostToolUseFailure" => {
             let call = payload.get("tool_use_id").and_then(Value::as_str).unwrap_or("unknown");
-            writer.append(format!("claude:{session}:{call}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": call, "status": if payload.get("error").is_some_and(|value| !value.is_null()) {"error"} else {"success"}, "media_type": "application/json", "content": payload.get("tool_response").cloned().unwrap_or(Value::Null)}), true)?;
+            writer.append(format!("claude:{session}:{call}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": call, "status": if event == "PostToolUseFailure" || payload.get("error").is_some_and(|value| !value.is_null()) {"error"} else {"success"}, "media_type": "application/json", "content": payload.get("tool_response").or_else(|| payload.get("error")).cloned().unwrap_or(Value::Null)}), true)?;
         }
         "Stop" => writer.append(format!("claude:{session}:stop:{}", source_id(payload, "stop")), Role::System, EntryType::Status, json!({"status": "completed"}), true)?,
         "StopFailure" => writer.append(format!("claude:{session}:failure:{}", source_id(payload, "failure")), Role::System, EntryType::Error, json!({"code": "harness-error", "message": safe_summary(payload), "retryable": false, "details": {}}), true)?,
@@ -1148,13 +1160,19 @@ fn normalize_body(entry_type: EntryType, source_id: &str, value: Value) -> (Valu
                 .unwrap_or(source_id);
             let arguments = value.get("arguments").cloned().unwrap_or(Value::Null);
             let bytes = serde_json::to_vec(&arguments).unwrap_or_default();
+            // Keep the placeholder stable, but null represents no withheld payload.
+            let redacted_bytes = if arguments.is_null() {
+                0
+            } else {
+                bytes.len() as u64
+            };
             (
                 json!({
                     "call_id": pseudonym("call", raw_call),
                     "name": safe_tool_name(value.get("name").and_then(Value::as_str)),
                     "arguments": {"redacted": true, "sha256": hex_digest(&bytes), "bytes": bytes.len()}
                 }),
-                bytes.len() as u64,
+                redacted_bytes,
                 omitted_keys(&value, &["call_id", "name", "arguments"]),
                 0,
             )
@@ -1166,6 +1184,11 @@ fn normalize_body(entry_type: EntryType, source_id: &str, value: Value) -> (Valu
                 .unwrap_or(source_id);
             let content = value.get("content").cloned().unwrap_or(Value::Null);
             let bytes = serde_json::to_vec(&content).unwrap_or_default();
+            let redacted_bytes = if content.is_null() {
+                0
+            } else {
+                bytes.len() as u64
+            };
             (
                 json!({
                     "call_id": pseudonym("call", raw_call),
@@ -1173,7 +1196,7 @@ fn normalize_body(entry_type: EntryType, source_id: &str, value: Value) -> (Valu
                     "media_type": "application/vnd.st3.redacted+json",
                     "content": {"redacted": true, "sha256": hex_digest(&bytes), "bytes": bytes.len()}
                 }),
-                bytes.len() as u64,
+                redacted_bytes,
                 omitted_keys(&value, &["call_id", "status", "media_type", "content"]),
                 0,
             )
@@ -1447,8 +1470,181 @@ fn compact_to_bounds(record: &mut Record) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
+mod claim_socket_tests {
+    use super::*;
+
+    #[test]
+    fn native_failed_claim_socket_output_retains_cause_but_redacts_tool_payload() {
+        let receipt = crate::work_claim_failure::Receipt {
+            actor: "agent/node.worker".into(), step_run: "step-run/sample/work".into(),
+            socket: "/tmp/st.sock".into(), os_error: libc::EPERM,
+            started_at_unix_ms: 1233, observed_at_unix_ms: 1234,
+        };
+        let output = format!("{}{}\nst: Operation not permitted (os error 1)\nprivate unrelated output",
+            crate::work_claim_failure::PREFIX, serde_json::to_string(&receipt).unwrap());
+        for driver in ["codex", "claude", "pi", "omp", "opencode"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut writer = Writer::new(root.path(), driver, "current");
+            let emit = |writer: &mut Writer| {
+                match driver {
+                    "codex" => observe_codex(writer, &json!({"method":"item/completed","params":{"item":{
+                        "type":"commandExecution","id":"claim-call","command":"st work claim",
+                        "exitCode":5,"status":"completed","aggregatedOutput":output,
+                    }}}), "thread-current"),
+                    "claude" => observe_claude(writer, "PostToolUseFailure", &json!({
+                        "session_id":"current","tool_use_id":"claim-call","error":output,
+                    })),
+                    _ => observe_channel_frame(writer, &json!({"type":"timeline","event":"tool_result","payload":{
+                        "toolCallId":"claim-call","isError":true,"content":[{"type":"text","text":output}],
+                    }})),
+                }.unwrap();
+            };
+            emit(&mut writer); emit(&mut writer);
+            let record = read(&timeline_path(root.path())).unwrap();
+            let failures = record.operations.iter().filter(|op|
+                op.entry_type == "error" && op.body["code"] == crate::work_claim_failure::CODE).collect::<Vec<_>>();
+            assert_eq!(failures.len(), 1, "{driver}");
+            assert_eq!(failures[0].body["details"], json!(receipt));
+            assert!(failures[0].body["message"].as_str().unwrap().contains("Operation not permitted"));
+            assert!(!serde_json::to_string(&record).unwrap().contains("private unrelated output"));
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_tool_payloads_keep_outbox_operations_without_redaction_notices() {
+        let temporary = tempfile::tempdir().unwrap();
+        crate::harness_events::enable(temporary.path(), "runtime-current").unwrap();
+        crate::harness_state::claim(
+            temporary.path(),
+            "example/seat",
+            "codex",
+            "provider-current",
+        )
+        .unwrap();
+        let mut writer = Writer::new(temporary.path(), "codex", "provider-current");
+        for (source, kind, body) in [
+            ("call-absent", EntryType::ToolCall, json!({"name":"exec"})),
+            (
+                "call-null",
+                EntryType::ToolCall,
+                json!({"name":"exec","arguments":null}),
+            ),
+            (
+                "result-absent",
+                EntryType::ToolResult,
+                json!({"status":"success"}),
+            ),
+            (
+                "result-null",
+                EntryType::ToolResult,
+                json!({"status":"success","content":null}),
+            ),
+        ] {
+            writer
+                .append(source, Role::Assistant, kind, body.clone(), true)
+                .unwrap();
+            // Repeating a finalized event still produces no additional operation.
+            writer
+                .append(source, Role::Assistant, kind, body, true)
+                .unwrap();
+        }
+        drop(writer);
+        let events = crate::harness_events::pending(temporary.path(), 100).unwrap();
+        let timeline: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "harness-timeline")
+            .collect();
+        assert_eq!(timeline.len(), 4);
+        for (event, (kind, payload)) in timeline.iter().zip([
+            ("tool_call", "arguments"),
+            ("tool_call", "arguments"),
+            ("tool_result", "content"),
+            ("tool_result", "content"),
+        ]) {
+            assert_eq!(event.payload["entryType"], kind);
+            assert_eq!(event.payload["operation"], "append");
+            assert_eq!(event.payload["finalEntry"], true);
+            assert_eq!(
+                event.payload["body"][payload],
+                json!({
+                    "redacted":true,"sha256":hex_digest(b"null"),"bytes":4
+                })
+            );
+        }
+        assert!(!timeline_path(temporary.path()).exists());
+    }
+
+    #[test]
+    fn real_tool_payloads_and_omitted_fields_still_publish_redaction_notices() {
+        let temporary = tempfile::tempdir().unwrap();
+        crate::harness_events::enable(temporary.path(), "runtime-current").unwrap();
+        crate::harness_state::claim(
+            temporary.path(),
+            "example/seat",
+            "codex",
+            "provider-current",
+        )
+        .unwrap();
+        let mut writer = Writer::new(temporary.path(), "codex", "provider-current");
+        for (source, kind, body) in [
+            (
+                "call",
+                EntryType::ToolCall,
+                json!({"name":"exec","arguments":{"private":"fixture-secret"}}),
+            ),
+            (
+                "result",
+                EntryType::ToolResult,
+                json!({"content":"fixture-secret"}),
+            ),
+            (
+                "omitted",
+                EntryType::ToolCall,
+                json!({"arguments":null,"extra":"fixture-secret"}),
+            ),
+        ] {
+            writer
+                .append(source, Role::Assistant, kind, body, true)
+                .unwrap();
+        }
+        let events = crate::harness_events::pending(temporary.path(), 100).unwrap();
+        let timeline: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "harness-timeline")
+            .collect();
+        assert_eq!(timeline.len(), 6);
+        let notices: Vec<_> = timeline
+            .iter()
+            .filter(|event| event.payload["entryType"] == "redaction")
+            .collect();
+        assert_eq!(notices.len(), 3);
+        assert!(
+            notices[..2]
+                .iter()
+                .all(|event| event.payload["body"]["withheld_bytes"].as_u64().unwrap() > 4)
+        );
+        assert_eq!(
+            notices[2].payload["body"],
+            json!({
+                "reason":"sensitive-content","withheld_bytes":0,"withheld_items":1
+            })
+        );
+        assert!(
+            !serde_json::to_string(
+                &timeline
+                    .iter()
+                    .map(|event| &event.payload)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+            .contains("fixture-secret")
+        );
+    }
 
     #[test]
     fn claude_stop_publishes_bounded_assistant_text_from_only_its_exact_transcript() {

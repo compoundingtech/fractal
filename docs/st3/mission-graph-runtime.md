@@ -224,7 +224,7 @@ When active revisions declare different limits, st uses the strictest limit. A l
 
 An exact idempotent retry returns its existing run before the capacity check. A direct start error lists the active run subjects.
 
-`report-to`, `stalled-after` and `report-completed` are optional and opt the mission's runs into [run reports](#run-reports).
+`report-to`, `report-stalls`, `stalled-after` and `report-completed` are optional and opt the mission's runs into [run reports](#run-reports).
 
 `revisions="human-only"` is optional and inherited by child steps. `revision-reviewer` requires that protection.
 
@@ -1000,7 +1000,9 @@ requesting changes, a custom choice, or feedback. A reply in words alone does no
 decision or a choice; `answer-required` lists the answer IDs. Feedback also accepts a plain
 `--summary`, so older clients can still send it. The `work.person-done` claim records the typed
 answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decline`,
-`request_changes`, `selected`, `custom` or `feedback`. The resumed origin step lists it in
+`request_changes`, `selected`, `custom`, `feedback` or `dismissed`. `--answer dismiss` (with an optional
+`--text` reason) sets any decision or choice aside without answering it: the asker is told the person
+dismissed it, and a request that defines its own `dismiss` answer keeps that meaning. The resumed origin step lists it in
 `person_answers` with the ask, respondent, time and summary; a person ask's own step does too,
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
@@ -1082,14 +1084,58 @@ completed event. Only an agent can be named. A person is reached through their o
 choice is recorded on the run's creation claim, so a later revision of the mission does not
 change who a running run reports to. A run with neither writes nothing extra and is never reported.
 
+A running run can be opted in, moved to another agent, or cleared without restarting it:
+
+```sh
+st missions report-to RUN --agent agent/ops/watcher --stalled-after 1h --as agent/ops/owner
+st missions report-to RUN --agent agent/ops/watcher --report-stalls false --as person/operator
+st missions report-to RUN --clear --as person/operator
+```
+
+Only a person or the agent that requested the run may change it, and only to an agent. Each
+call states the whole report, as `missions start --report-to` would: `--stalled-after` defaults
+to the mission's `stalled-after`, else 30 minutes; `--report-stalls true|false` defaults to the
+mission's `report-stalls`, else true; and the completed event is reported with
+`--report-completed` or when the mission asks for it. `--clear` reports the run to nobody, even
+when its mission names a reporter. The change is a `mission-run.report-to` claim on the run. Its
+latest one replaces what the creation claim recorded, and the creation claim itself is left
+alone, so declaring the run again as it was started is still a retry. A request that changes
+nothing writes nothing. The run reads it at its next evaluation. A stall is still measured from
+the run's last sign of life, so turning reports on for a run that is already quiet past its
+limit sends one `stalled` message, not one per pass. An event already reported to an earlier
+reporter is not sent again to a new one.
+
 The reporter gets one message from `daemon/runtime` for each of these events:
 
 | Event | When |
 | --- | --- |
 | failed | The run fails, including a mission `timeout`, and starts its cleanup. |
 | cancelled | The run is cancelled and starts its cleanup. |
-| stalled | The run has made no progress for `stalled-after` (30 minutes unless set). |
+| stalled | With `report-stalls=#true` (the default), the run has made no progress for `stalled-after` (30 minutes unless set). |
 | completed | The run completes, only with `report-completed`. |
+
+Set the mission property `report-stalls=#false` for a parent that intentionally waits until
+retirement while its schedule starts finite child runs:
+
+```kdl
+mission "daily-parent" state="ready" report-to="agent/ops/watcher" report-stalls=#false {
+  goal "Keep the daily schedule active until retirement."
+  step "retire" {
+    agentless
+    gate "retired" { field "state" "mission/daily-parent" is "retired" }
+  }
+  // Declare the schedule here; its child mission chooses its own report policy.
+}
+```
+
+The property is a Boolean and requires a `report-to` agent, even when explicitly true.
+False suppresses only this run's stall reports and removes its stall reporting deadline.
+Failure, cancellation and requested completion reports still apply. Child runs use their own
+mission's policy; schedules retain their timers, catch-up and no-overlap behavior. The field
+does not change schedule admission or schedule faults. `stalled-after` remains a positive
+duration even when stall reports are disabled. Older mission definitions and run claims
+without `report-stalls` / `report_stalls` keep stall reports enabled with the existing limit
+(30 minutes unless set).
 
 A stall is measured from the run's last sign of life: its last state change, any step's last
 change or progress record, and the end of any step's lease. A run in cleanup, and a run that
@@ -1106,10 +1152,77 @@ can contain anything a step printed.
 A reporter that is also assigned a step in the run is told like any other. A reporter that is
 not a running agent, because it is undeclared, stopped or retired, is not messaged. The run gets
 a `report-to` fault that says so, once, and st looks again only when the run is next evaluated,
-so nothing loops. The fault is closed when the reporter is told or the run ends.
+so nothing loops. The fault is closed when the reporter is told, the run's report is cleared, or the run ends.
 
 A nested run reports only if its own mission asks. A run that is terminated because the run above
 it ended is reported through the run above it.
+
+## Idle holders
+
+A run report tells the run's reporter. An idle-hold nudge tells the seat that holds the work.
+
+A seat is idle-holding when it holds a claimed step, its harness has finished its turn, and nothing
+will wake it. Its harness has finished when the driver reports it idle and quiet: no turn in
+flight, no open prompt, no unsent input, no background jobs, and no subagents st records for it.
+Nothing will wake it when no message to it is waiting for delivery and none of its waits holds.
+
+A wait is anything the seat has subscribed to that will wake it. Each source records its waits
+with a subject, when the wait last woke the seat (or when the wait began), and sometimes a time it
+is expected by:
+
+| Source | Subject | Expected by |
+| --- | --- | --- |
+| gh watch | the watched issue or pull request | the watch's `--until` |
+| person ask | the person step an asking step waits on | none |
+| gate | a submitted step that is verifying, or a step with a predicate `depends-on` | none |
+| scheduled retry | the step | the retry's not-before time |
+| depends-on | a step another seat holds that one of the seat's steps waits for | none |
+| report-to | an open run that reports to the seat | none |
+
+A wait holds until its expected-by time when it has one. Otherwise it holds for the quiet window,
+2 hours by default, after it last woke the seat. Only an event delivered to the seat restarts the
+clock. A delivered event wakes the seat anyway, which ends its idle period. A movement the source
+saw but did not deliver never extends a hold: a merge queue reordering, a new head with no check
+verdict yet, or another seat's progress on a step this seat depends on.
+
+After 30 minutes idle-holding, st sends the seat one message from `daemon/runtime`. The message
+names each held step with its title, goals and last progress line, says how long the seat has been
+idle, and lists the waits that have gone quiet, with each wait's subject and when it last moved.
+It asks the seat to continue the work, set a watch on what it waits for, or release the step.
+
+Some movements a source saw but did not deliver mean the seat must act. Today one source can tell:
+a watched pull request that leaves the merge queue without merging and is still out of it 5
+minutes later. GitHub briefly reports a queued pull request as out of the queue while the queue
+rebuilds; the 5-minute settle skips those. When this happens, an idle seat is nudged at once,
+without waiting out the 30 minutes. The nudge names the pull request and asks the seat to check it:
+still queued, ejected, or stuck.
+
+Back-off: a step gets at most one nudge per idle period. After a nudge, the next one waits until
+the seat has taken a turn and gone idle again, and a quiet nudge comes no sooner than 2 hours after
+the step's last nudge. An action nudge is not held by the 2 hours, but each action nudges a step at
+most once. Every nudge is recorded on the step as a `work.nudged` claim that names the message,
+the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and stui
+shows `nudged … ago` under the working step.
+
+Two daemon settings in `[reconcile]` tune this, and are read again without a restart:
+
+```toml
+[reconcile]
+idle_nudge_after = "30m"       # or "off"
+idle_nudge_quiet_watch = "2h"
+```
+
+The check runs inside the seat's existing wake evaluation, after the cheap conditions: a held
+step, an idle harness, the step's back-off and a quiet report. Its own asks, gates and retries
+hold the check before external sources. GitHub action checks use at most 400 timestamp-indexed
+observations per watched thread; the quiet check then stops at the first wait that holds. Pending
+input and subagents are checked only when a quiet deadline or an action can send a nudge. A seat
+that is not due yet records when it will be, so nothing polls.
+
+A disposable local message index records pending input and each source's delivered wakes. Claim
+writes maintain it, so the reads seek current state without walking retained mailbox history.
+First startup backfills it in resumable batches of at most 64 message subjects; reads never build
+it. See `release-notes/idle-hold-nudge.json` for measured startup and writer costs.
 
 ## Runtime sequence
 
@@ -1318,6 +1431,46 @@ receipt commits but before the provider starts can consume the message without d
 changing the launch ID explicitly requests a fresh attempt. No automatic boot instruction is added.
 Pi treats an `@`-prefixed argument as a file even after `--`; such text gets a leading newline to
 keep it a literal message.
+
+An OMP harness can declare `seed "/absolute/path/time_UUID.jsonl"` to migrate an owner-local
+native transcript on its first native launch only. The transcript's filename and header must
+name the same UUID, every transcript line must be valid JSON, and the file must belong to the
+launch owner. Validation is bounded to 8 MiB per line and 64 MiB total, with typed
+`SeedValidationLimitError` refusals before consuming the opportunity. The driver copies only
+that transcript into a seat-private managed inventory, then atomically records a typed `seeded`
+outcome before spawning the provider. Different seats never share a mutable transcript, and a
+repeat staging attempt never overwrites a provider's existing copy. Missing or corrupt input records
+no outcome. Other harnesses do not accept `seed`; authored session selectors and effective resume
+or continuation environment cannot be combined with it. The driver rejects these conflicts
+before accessing the daemon, staging inventory, or recording a first-launch outcome.
+
+Every first native launch, including one without a seed or deliberately fresh, records one
+seat-scoped `seeded` or `fresh` outcome. Its identity does not depend on the declaration,
+transcript path, account, or harness. An existing native binding always wins. Later edits,
+restarts, fresh-context actions, account changes, and refused continuations never re-arm the
+opportunity. Strict suspension resume keeps its exact session selection.
+When reconciliation supplies an exact native resume or continuation, it omits the declaration's
+wrapper seed argument and preserves the native selection environment. This gives generated
+continuation precedence without allowing an explicit seed/environment combination at the driver
+boundary.
+
+A `fresh` outcome never blocks later launches, including a restart before the first message
+or native binding; a later seed declaration is ignored and never rearms the opportunity.
+An unbound `seeded` outcome is explicitly incomplete: the driver records a durable
+`harness.diagnostic` warning with code `first-native-launch-incomplete` and prints the notice.
+It always proceeds fresh, whether seed is absent, still declared, or now points to an invalid
+file. It never validates, stages, or reseeds that declaration again. A person may acknowledge
+the incomplete attempt after inspecting it:
+
+```sh
+st agents acknowledge-seed AGENT --reason "Accept fresh after inspecting the interrupted import" --as ACTOR
+```
+
+The actor may default to the configured person, as for other seat controls. The command records
+`custom.agent.first-native-launch-acknowledged` with the receipt as evidence; it never deletes the
+receipt, restores the first-launch opportunity, or reseeds. Acknowledgement records acceptance
+and suppresses later incomplete notices; it is never required to permit a launch. Receipts,
+acknowledgements, notices, and native bindings survive checkpoint trim.
 
 A harness block cannot declare `prompt`. Parsing refuses it with `harness-prompt-removed`. Put the instruction in a step goal or send the seat a message.
 
@@ -1578,6 +1731,8 @@ agent "example/cos/standing/cos" {
 
 The subject is exactly `agent/example/cos/standing/cos`; placement does not change its identity.
 The seat's bare `fresh-context` node starts a new harness session before each step it claims, even when the step has no `fresh-context` node. Omit it when the seat should retain context across ordinary steps.
+Messages use sender-chosen `kind: silent | wake`, defaulting to wake for every seat. Silent messages wait for a real wake; see [silent messages](silent-messages.md).
+
 A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. When several live seats carry it, the first by subject takes them. Faults never go to a person's attention.
 
 Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault.

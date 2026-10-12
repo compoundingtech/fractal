@@ -69,6 +69,8 @@ pub enum ErrorCode {
     StaleFence,
     CursorGap,
     PageCursorExpired,
+    ProjectionDetailTooLarge,
+    ProjectionDetailInvalidSource,
     RateLimited,
     RuntimeNotLocal,
     RuntimeAuthorityIndeterminate,
@@ -317,6 +319,15 @@ pub struct Attention {
     pub attention_kind: String,
     pub source_id: String,
     pub person_id: String,
+    /// Whether this item blocks or waits on its person's answer; absent on older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert: Option<bool>,
+    /// The agent whose conversation this item belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    /// Every agent conversation this item shows in, starting with `conversation_id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation_ids: Vec<String>,
     pub requester_id: Option<String>,
     pub launch_id: Option<String>,
     pub variant_id: Option<String>,
@@ -936,6 +947,7 @@ pub struct MissionRunSummary {
     pub status: String,
     pub phase: String,
     pub progress: Value,
+    /// Step assignees and claimants are nullable ActorRef strings, not agent-only IDs.
     pub current_steps: Vec<Value>,
     pub must_act: String,
     pub state_since: String,
@@ -967,8 +979,10 @@ pub struct MissionStep {
     pub title: Option<String>,
     pub state: String,
     pub attempt: u32,
+    /// An ActorRef: agent, daemon, or person.
     #[serde(default)]
     pub assignee: Option<String>,
+    /// An ActorRef: agent, daemon, or person.
     #[serde(default)]
     pub claimant: Option<String>,
     #[serde(default)]
@@ -976,6 +990,8 @@ pub struct MissionStep {
     pub since: String,
     #[serde(default)]
     pub last_progress: Option<String>,
+    #[serde(default)]
+    pub progress_at: Option<String>,
     #[serde(default)]
     pub blocked_reason: Option<String>,
     #[serde(default)]
@@ -999,9 +1015,13 @@ pub struct MissionStep {
     pub wake: Option<MissionWake>,
     #[serde(default)]
     pub claim_expires_at: Option<String>,
+    /// When st last nudged this held step's holder for idling with nothing set to wake it.
+    #[serde(default)]
+    pub nudged_at: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionWake {
+    /// An ActorRef: agent, daemon, or person.
     pub assignee: String,
     pub assignee_state: String,
     pub incarnation_id: String,
@@ -1043,18 +1063,26 @@ pub struct Work {
     pub title: Option<String>,
     pub assigned_to: Option<String>,
     pub last_progress: Option<String>,
+    #[serde(default)]
+    pub progress_at: Option<String>,
     pub state: String,
     pub gate_kind: Option<String>,
     pub attempt: u32,
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
+    /// Submitting incarnation for this attempt; missing or null means unknown.
+    #[serde(default)]
+    pub submitted_incarnation: Option<String>,
     #[serde(default)]
     pub agentless: bool,
     #[serde(default)]
     pub claim_expires_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_started_at_unix_ms: Option<u64>,
+    /// When st last nudged this held step's holder for idling with nothing set to wake it.
+    #[serde(default)]
+    pub nudged_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub execution_elapsed_ms: u64,
     #[serde(default)]
@@ -1106,6 +1134,9 @@ pub struct Agent {
     pub ask: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The seat's status that is neither work nor a wait: `compacting`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<String>,
     pub host_id: Option<String>,
     pub last_activity_at: Option<String>,
     pub silent_since: Option<String>,
@@ -1151,11 +1182,24 @@ pub struct Agent {
     pub checkout: Option<AgentCheckout>,
     #[serde(default)]
     pub workspace: Option<String>,
+    /// The selected agent declaration's optional `lifecycle` child; omitted when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<AgentLifecycle>,
     /// Placement handoff phase and the sources still holding its fence.
     #[serde(default)]
     pub handoff: Option<AgentHandoff>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<Value>,
+}
+/// Declared seat lifecycle: standing, owner, or bounded. Absence means undeclared.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentLifecycle {
+    Standing,
+    Owner,
+    Bounded,
+    #[serde(other)]
+    Unknown,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentHandoff {
@@ -1623,7 +1667,11 @@ pub struct Summary {
     #[serde(flatten)]
     pub header: ResourceHeader,
     pub person_id: Option<String>,
+    /// The alert count; an older daemon also counted unread updates.
     pub needs_you: u64,
+    /// Open alerts; absent on daemons that predate alerts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<u64>,
     pub working_agents: u64,
     pub active_missions: u64,
     pub machines: SummaryMachines,
@@ -1791,6 +1839,8 @@ pub struct ConversationChanges {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub next_cursor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1799,6 +1849,8 @@ pub struct TimelinePage {
     pub session_id: String,
     pub items: Vec<TimelineEntry>,
     pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -2222,6 +2274,8 @@ pub struct Fence {
 pub enum ActionType {
     #[serde(rename = "custom.reply")]
     CustomReply,
+    #[serde(rename = "prompt.respond")]
+    PromptRespond,
     #[serde(rename = "arrangement.edit")]
     ArrangementEdit,
     #[serde(rename = "attention.resolve")]
@@ -2749,6 +2803,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::PairingRevoke,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn prompt_respond(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PromptRespondParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::PromptRespond,
             idempotency_key,
             fence,
             &parameters,
@@ -3293,6 +3361,14 @@ pub struct AttentionResolveParameters {
     pub reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    Silent,
+    #[default]
+    Wake,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MessageSendParameters {
     pub to: String,
@@ -3305,6 +3381,9 @@ pub struct MessageSendParameters {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Silent holds unread mail until the next wake; wake is the default.
+    #[serde(default)]
+    pub kind: MessageKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentInput>,
     /// The sending device's signature over the message, as `docs/st3/device-signing.md` lays out.
@@ -3832,6 +3911,15 @@ pub struct AgentRepository {
     pub agent_ids: Vec<String>,
 }
 
+/// A person's answer to a native harness prompt alert.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptRespondParameters {
+    pub target_id: String,
+    pub episode: String,
+    pub answer: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomReplyParameters {
@@ -3851,6 +3939,8 @@ pub struct TimelineBlock {
     pub visibility: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<Value>,
     pub payload: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ConversationContentRef>,
@@ -3875,4 +3965,51 @@ pub struct ConversationContentChunk {
     pub size: u64,
     pub data: String,
     pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationReport {
+    pub report_id: String,
+    pub samples: Vec<ObservationSample>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum ObservationSample {
+    #[serde(rename = "latency")]
+    Latency {
+        target: String,
+        carrier: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        interval_start: String,
+        interval_end: String,
+        count: u64,
+        over_target: u64,
+        max_ms: u64,
+        buckets: Vec<(u64, u64)>,
+    },
+    #[serde(rename = "live-share")]
+    LiveShare {
+        target: String,
+        carrier: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        interval_start: String,
+        interval_end: String,
+        foreground_ms: u64,
+        live_ms: u64,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObservationAccepted {
+    pub accepted: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObservationResponse {
+    pub api_version: String,
+    pub request_id: String,
+    pub value: ObservationAccepted,
 }

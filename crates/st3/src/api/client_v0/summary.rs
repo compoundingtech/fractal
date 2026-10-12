@@ -1,36 +1,18 @@
 //! Tiny current summary on the existing protocol. Native reads are authorized in
 //! one snapshot; the contract stays the same when the shared IVM source takes over.
 use super::*;
-use st3_ui_model::missions::{Display, Word};
+use st3_ui_model::missions::Display;
 
-pub(super) fn home_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "human-gate"
-            | "launch-approval"
-            | "revision-approval"
-            | "person-step"
-            | "agent-request"
-            | "harness-prompt"
-    ) || kind.starts_with("custom.")
-}
 pub(super) fn working(agent: &Value) -> bool {
     agent["state"] == "running"
         && agent["harness_state"] == "working"
         && agent["fault"].is_null()
         && agent["delivery"]["state"] != "stale"
 }
+/// A mission that is really running or about to: stuck, paused and finished runs, and ones that
+/// only wait on a person, are counted elsewhere.
 pub(super) fn active(mission: &st3_ui_model::missions::Mission) -> bool {
-    !mission.system
-        && matches!(
-            mission.word,
-            Word::Working
-                | Word::Queued
-                | Word::Decision
-                | Word::Stalled
-                | Word::Unstaffed
-                | Word::Unclaimed
-        )
+    !mission.system && mission.word.is_active()
 }
 
 pub(super) fn native(
@@ -46,15 +28,8 @@ pub(super) fn native(
         .map_err(|e| anyhow::anyhow!(e.message))?;
     let store = &state.store;
     let attention = store.attention_snapshot(person.as_deref(), now)?;
-    let needs = attention
-        .iter()
-        .filter(|item| home_kind(&item.kind))
-        .count();
-    let gates = attention
-        .iter()
-        .filter(|item| item.kind == "human-gate")
-        .filter_map(|item| item.mission.clone())
-        .collect::<BTreeSet<_>>();
+    // What needs the person is what waits on their answer: an update asks nothing.
+    let alerts = attention.iter().filter(|item| item.is_alert()).count();
     let compute = || {
         let (missions, deadline) = store.client_summary_missions(now)?;
         let semantics = st3_ui_model::missions::adapt(
@@ -79,9 +54,9 @@ pub(super) fn native(
             false,
         ))
     };
-    // Mission active membership cannot depend on which agent owns a ready queue:
-    // unstaffed, queued and unclaimed all count. Native runtime/harness activity
-    // therefore reuses this lean mission input instead of rereading every step.
+    // Mission active membership cannot depend on which agent owns a ready queue: a step that
+    // waits its turn counts. Native runtime/harness activity therefore reuses this lean
+    // mission input instead of rereading every step.
     let missions = if let Some(windows) = windows {
         let mut internal = request.clone();
         internal.collection = "summary-missions".into();
@@ -109,10 +84,7 @@ pub(super) fn native(
         .and_then(|v| v["missions"].as_array())
         .into_iter()
         .flatten()
-        .filter(|m| {
-            m["system"] != true
-                && (m["active"] == true || gates.contains(m["id"].as_str().unwrap_or_default()))
-        })
+        .filter(|m| m["system"] != true && m["active"] == true)
         .count();
     // A daemon's reads never fold the roster: count from its newest publication, and say which.
     let mut agents_as_of = None;
@@ -134,7 +106,7 @@ pub(super) fn native(
     let working = agents.iter().filter(|agent| working(agent)).count();
     let machines = machine_summary_resources(state, snapshot, session)?;
     let machine_counts = machine_counts(&machines, &agents, &client_host_id(&state.node), now);
-    let mut value = json!({"person_id":person,"needs_you":needs,"working_agents":working,"active_missions":active,"machines":machine_counts});
+    let mut value = json!({"person_id":person,"alerts":alerts,"needs_you":alerts,"working_agents":working,"active_missions":active,"machines":machine_counts});
     value["revision"] = json!(smallclaims::hash::canonical_hash(&value)?);
     value["id"] = json!("summary/current");
     value["kind"] = json!("summary");

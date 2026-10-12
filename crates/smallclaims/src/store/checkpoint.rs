@@ -24,8 +24,21 @@ pub const DAY_MS: u128 = 86_400_000;
 
 /// Envelopes and records a sealed-set read takes per page. Each page is a read of its own, so no
 /// read holds a snapshot, and with it the WAL, for the length of the whole set.
-pub(crate) const SEALED_ENVELOPE_PAGE: i64 = 5_000;
-pub(crate) const SEALED_RECORD_PAGE: i64 = 20_000;
+pub(crate) const SEALED_ENVELOPE_PAGE: i64 = 64;
+pub(crate) const SEALED_RECORD_PAGE: i64 = 64;
+
+fn checkpoint_accepted_time(raw: &str, id: &str, column: usize) -> rusqlite::Result<u128> {
+    raw.parse::<u128>().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid accepted time for checkpoint claim {id}: {error}"),
+            )),
+        )
+    })
+}
 
 /// The name of the checkpoint whose cut is `cut_unix_ms`, for example `checkpoint/2026-09-27`.
 pub fn checkpoint_name(cut_unix_ms: u128) -> String {
@@ -154,6 +167,9 @@ pub struct SealedSet {
     /// `envelopes` with no claims, so a trimmed and an untrimmed node seal the same identities.
     pub envelope_tombstones: Vec<EnvelopeTombstone>,
     pub claim_tombstones: Vec<ClaimTombstone>,
+    /// Unit-test ownership probe; released only when the captured set is released.
+    #[cfg(test)]
+    pub(crate) capture_lifetime: std::sync::Arc<()>,
 }
 
 /// What a seal records of a sealed set: its digest, how many envelopes it holds, and the row it
@@ -315,6 +331,13 @@ type ProofSources = BTreeMap<(String, String), Vec<CheckpointItemSource>>;
 // No source/subject IDs are keys, and suppressed failures have no flush, queue or retry.
 static CHECKPOINT_DIAGNOSTICS: std::sync::OnceLock<std::sync::Mutex<super::ProjectionDiagnosticState>> = std::sync::OnceLock::new();
 
+/// The tombstones a sealed set reads: those before the cut, but none of a checkpoint whose trim
+/// is still recording them. A trim records tombstones in chunks, so after a crash part way
+/// through, the plan made again reads only what earlier checkpoints dropped, as it did the first
+/// time, and records the rest.
+const RECORDED_TOMBSTONE_FILTER: &str = "accepted_at_unix_ms < ?3
+    AND checkpoint NOT IN (SELECT id FROM checkpoints WHERE state='recording')";
+
 /// Record the tombstones of a checkpoint's drop. Recording them again changes nothing.
 pub fn record_checkpoint_tombstones_tx(
     transaction: &Transaction<'_>,
@@ -375,6 +398,7 @@ pub fn delete_dropped_rows_tx(
             )?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
+        super::principals::forget_claim_tx(transaction, &claim.id)?;
         transaction.execute("DELETE FROM claims WHERE id=?1", [&claim.id])?;
     }
     for envelope in envelopes {
@@ -530,6 +554,8 @@ fn status_history_diagnostics_bound_items_and_exclude_content() {
     let sealed = SealedSet {
         cut_unix_ms:DAY_MS, envelopes:Vec::new(), claims:Vec::new(), seal_rowid:7,
         envelope_tombstones:Vec::new(), claim_tombstones:Vec::new(),
+        #[cfg(test)]
+        capture_lifetime: std::sync::Arc::default(),
     };
     let plan = DropPlan {
         cut_unix_ms:DAY_MS, rules_digest:"rules".into(), sealed_envelopes:0, sealed_claims:0,
@@ -570,8 +596,9 @@ pub fn answer_mismatches(
 ) -> Vec<String> {
     let mut mismatches = Vec::new();
     for (subject, before) in before {
-        let after = after.get(subject).cloned().unwrap_or(Value::Null);
-        let (Some(before), Some(after)) = (before.as_object(), after.as_object()) else {
+        let (Some(before), Some(after)) =
+            (before.as_object(), after.get(subject).and_then(Value::as_object))
+        else {
             mismatches.push(format!("{subject} all"));
             continue;
         };
@@ -590,18 +617,128 @@ pub fn answer_mismatches(
     mismatches
 }
 
+/// How `copy_store_to` copied the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreCopy {
+    /// A copy-on-write clone: it costs only the pages the proof then rewrites.
+    Clone,
+    /// A full `VACUUM INTO` copy, where the filesystem cannot clone.
+    Full,
+}
+
+/// Clone `source` to a new file at `target`: APFS `clonefile`, or a reflink on Linux. An error
+/// where the filesystem cannot clone, as on ext4.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+    // SAFETY: both paths are NUL-terminated and outlive the call.
+    if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn clone_file(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    let source = fs::File::open(source)?;
+    let file = fs::OpenOptions::new().write(true).create_new(true).open(target)?;
+    // SAFETY: both descriptors are open for the length of the call.
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    drop(file);
+    let _ = fs::remove_file(target);
+    Err(error)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn clone_file(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+fn open_checkpoint_copy(copy: &Path) -> Result<Connection> {
+    let connection = Connection::open(copy)?;
+    projection_digest::register(&connection)?;
+    // This scratch transaction can rewrite most of the store twice. Its rollback journal
+    // belongs on disk, not in an allocation proportional to the database's size. The copy is
+    // discarded after the proof, so its commits need not wait for the disk.
+    connection.execute_batch(&format!(
+        "PRAGMA foreign_keys = ON; PRAGMA journal_mode = DELETE; PRAGMA synchronous = OFF;
+         PRAGMA cache_size = -{}; PRAGMA temp_store = FILE;",
+        crate::sqlite::READ_CACHE_KIB,
+    ))?;
+    Ok(connection)
+}
+
+/// Keep only the sealed set on a proof copy. Blobs go with the claims that reference them.
+/// Admission needs a claim's blobs, so every node that holds the sealed claims holds these, while
+/// the blobs of later claims depend on what has arrived since the cut. A trim deletes no blob.
+fn keep_sealed_claims_in_canonical_order(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
+         DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
+         DELETE FROM replica_records WHERE NOT EXISTS (
+             SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
+               AND s.sequence=replica_records.sequence AND s.envelope_hash=replica_records.envelope_hash);",
+    )?;
+    // Number the claims in canonical order. Every node that holds the sealed set then proves
+    // on the same store, whatever order its claims arrived in, so readers that compare store
+    // indexes answer alike and the digests can match across nodes.
+    connection.execute_batch(&format!(
+        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
+         INSERT INTO temp.canonical_index(old, new)
+             SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
+             FROM claims JOIN batches ON batches.id=claims.batch_id;
+         UPDATE claims SET store_index=-(SELECT new FROM temp.canonical_index
+                                         WHERE old=claims.store_index);
+         UPDATE claims SET store_index=-store_index;"
+    ))?;
+    Ok(())
+}
+
 /// Project a copy of the sealed set with and without the drop, and compare the graph and every
 /// reader answer. `copy` is a store file holding at least the sealed set; it is changed.
+/// The key a proof compares the runtime's global answers under, beside the subjects' answers.
+pub const GLOBAL_ANSWERS: &str = "fleet";
+
 pub fn prove_on_copy(
     runtime: &dyn Runtime,
     copy: &Path,
     sealed: &SealedSet,
     plan: &DropPlan,
 ) -> Result<CheckpointProof> {
+    prove(runtime, copy, sealed, plan, false)
+}
+
+/// `prove_on_copy` for a copy that is deleted afterwards. Keeping the sealed set and numbering
+/// it commit first, statement by statement, so their rollback journal never holds every claim
+/// page at once. Inside one transaction each renumbering pass also kept a statement journal: the
+/// original of every claim page it moved, spilled to a temporary file. Only the replays and the
+/// comparison share a transaction, as before.
+fn prove_on_scratch_copy(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    sealed: &SealedSet,
+    plan: &DropPlan,
+) -> Result<CheckpointProof> {
+    prove(runtime, copy, sealed, plan, true)
+}
+
+fn prove(
+    runtime: &dyn Runtime,
+    copy: &Path,
+    sealed: &SealedSet,
+    plan: &DropPlan,
+    commit_preparation: bool,
+) -> Result<CheckpointProof> {
+    let _completion = super::checkpoint_completion::Completion::work();
     runtime.checkpoint_preflight()?;
-    let mut connection = Connection::open(copy)?;
-    projection_digest::register(&connection)?;
-    connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = MEMORY;")?;
+    let mut connection = open_checkpoint_copy(copy)?;
     let transaction = connection.transaction()?;
     // Keep only the sealed set.
     transaction.execute_batch(
@@ -632,28 +769,14 @@ pub fn prove_on_copy(
         )?;
     }
     runtime.clear_checkpoint_projections(&transaction)?;
-    // Blobs go with the claims that reference them. Admission needs a claim's blobs, so every
-    // node that holds the sealed claims holds these, while the blobs of later claims depend on
-    // what has arrived since the cut. A trim deletes no blob.
-    transaction.execute_batch(
-        "DELETE FROM claims WHERE id NOT IN (SELECT id FROM temp.sealed_claims);
-         DELETE FROM blobs WHERE hash NOT IN (SELECT hash FROM temp.sealed_blobs);
-         DELETE FROM replica_records WHERE NOT EXISTS (
-             SELECT 1 FROM temp.sealed_envelopes s WHERE s.writer=replica_records.writer
-               AND s.sequence=replica_records.sequence AND s.envelope_hash=replica_records.envelope_hash);",
-    )?;
-    // Number the claims in canonical order. Every node that holds the sealed set then proves
-    // on the same store, whatever order its claims arrived in, so readers that compare store
-    // indexes answer alike and the digests can match across nodes.
-    transaction.execute_batch(&format!(
-        "CREATE TEMP TABLE canonical_index(old INTEGER PRIMARY KEY, new INTEGER NOT NULL);
-         INSERT INTO temp.canonical_index(old, new)
-             SELECT claims.store_index, ROW_NUMBER() OVER (ORDER BY {CANONICAL_ORDER})
-             FROM claims JOIN batches ON batches.id=claims.batch_id;
-         UPDATE claims SET store_index=-(SELECT new FROM temp.canonical_index
-                                         WHERE old=claims.store_index);
-         UPDATE claims SET store_index=-store_index;"
-    ))?;
+    let transaction = if commit_preparation {
+        transaction.commit()?;
+        keep_sealed_claims_in_canonical_order(&connection)?;
+        connection.transaction()?
+    } else {
+        keep_sealed_claims_in_canonical_order(&transaction)?;
+        transaction
+    };
     let subjects = plan
         .claims
         .iter()
@@ -662,7 +785,10 @@ pub fn prove_on_copy(
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_before = graph_digest(&transaction)?;
     let digests_before = projection_digest::tables(&transaction)?;
-    let (before, before_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    let (mut before, before_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
+        before.insert(GLOBAL_ANSWERS.into(), answers);
+    }
     // As a trim does: tombstones first, which readers that walk ancestry pass through.
     record_checkpoint_tombstones_tx(
         &transaction,
@@ -673,7 +799,10 @@ pub fn prove_on_copy(
     delete_dropped_rows_tx(&transaction, &plan.envelopes, &plan.claims)?;
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_after = graph_digest(&transaction)?;
-    let (after, after_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    let (mut after, after_sources) = reader_answers_with_sources(runtime, &transaction, &subjects, sealed.cut_unix_ms)?;
+    if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
+        after.insert(GLOBAL_ANSWERS.into(), answers);
+    }
     let mut mismatches = answer_mismatches(&before, &after);
     if graph_digest_before != graph_digest_after {
         mismatches.splice(
@@ -714,20 +843,41 @@ pub fn prove_on_copy(
     Ok(proof)
 }
 
-/// The query for one window of records in the sealed-set read: the claim columns, the record's
-/// identity and state, and the canonical order's components as columns 14 to 20 (so the pages
-/// can be sorted together in Rust as `ORDER BY canonical` sorted them), then the record's
-/// position as column 21. It must be driven from `replica_records` by its rowid range; a plan
-/// that drives from `claims` would read every claim for every window.
+/// Compact identities and canonical sort keys for one sealed-record window. Claim bodies are
+/// read only after the envelope cut and canonical ordering have been resolved. The query must
+/// be driven from `replica_records` by its rowid range; driving from `claims` would read every
+/// claim for every window.
 pub fn sealed_records_page_sql() -> String {
     let order = super::canonical::components("claims").join(", ");
     format!(
-        "SELECT {CLAIM_COLUMNS}, records.writer, records.sequence, records.envelope_hash,
-                records.state, {order}, records.position
-         FROM claims JOIN batches ON batches.id=claims.batch_id
-         JOIN replica_records records ON records.claim_id=claims.id
-         WHERE records.rowid > ?1 AND records.rowid <= ?2 AND records.state<>'repaired'"
+        "SELECT {order}, records.writer, records.sequence, records.envelope_hash,
+                records.state, records.position
+         FROM replica_records records CROSS JOIN claims ON claims.id=records.claim_id
+         JOIN batches ON batches.id=claims.batch_id
+         JOIN replica_envelopes envelopes
+           ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+             AND envelopes.envelope_hash=records.envelope_hash
+         WHERE records.rowid > ?1 AND records.rowid <= ?2 AND records.state<>'repaired'
+           AND envelopes.rowid <= ?4
+           AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
     )
+}
+
+#[derive(Debug)]
+struct CheckpointCaptureChanged;
+
+impl std::fmt::Display for CheckpointCaptureChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("checkpoint capture invalidated by a concurrent store change")
+    }
+}
+
+impl std::error::Error for CheckpointCaptureChanged {}
+
+struct CheckpointCaptureQuery<'a> {
+    table: &'a str,
+    columns: &'a str,
+    filter: &'a str,
 }
 
 impl Store {
@@ -752,13 +902,11 @@ impl Store {
         )
     }
 
-    /// `checkpoint_sealed_set_through`, reading `envelope_page` envelopes and `record_page`
-    /// records per read. Each page is a read of its own, so its snapshot ends with it and the WAL
-    /// can be checkpointed between pages; one transaction over the whole set pinned the WAL for
-    /// the 20 to 40 seconds a large store took. The set stays the same set: the envelopes are
-    /// those up to `seal_rowid`, and a claim is kept only if its envelope is among them, so what
-    /// arrives between pages is read and left out. Only a record changing state (a repair)
-    /// between two pages of one call could differ from a single snapshot.
+    /// Capture metadata and bodies in bounded page snapshots with an epoch guard. The seal
+    /// and cut are registered once, only advancing durable guard bounds when needed. Retries
+    /// keep that seal and reread the epoch: three conflicting captured-history changes fail
+    /// closed. New above-cut admission, identical re-offers and unrelated projection writes
+    /// do not invalidate the captured prefix.
     pub fn checkpoint_sealed_set_paged(
         &self,
         cut_unix_ms: u128,
@@ -767,22 +915,62 @@ impl Store {
         record_page: i64,
     ) -> Result<SealedSet> {
         self.runtime.checkpoint_preflight()?;
+        anyhow::ensure!(envelope_page > 0 && record_page > 0, "checkpoint page sizes must be positive");
+        let envelope_page = envelope_page.min(SEALED_ENVELOPE_PAGE);
+        let record_page = record_page.min(SEALED_RECORD_PAGE);
         // Seal only new batches. A full history scan under the writer stalls live requests
         // every time a checkpoint is reconsidered, even when no new envelope is needed.
         self.seal_local_batches()?;
-        let seal_rowid: i64 = {
-            let connection = self.readers.get();
-            let high: i64 = connection.query_row(
-                "SELECT COALESCE(MAX(rowid), 0) FROM replica_envelopes",
-                [],
-                |row| row.get(0),
+        let cut = i64::try_from(cut_unix_ms)?;
+        let (high, frontier, registered_cut): (i64, i64, i64) = self.read_snapshot(|_| {
+            Ok(self.readers.get().query_row(
+                "SELECT (SELECT COALESCE(MAX(rowid), 0) FROM replica_envelopes),
+                        envelope_frontier, cut_unix_ms
+                 FROM checkpoint_capture_epoch WHERE id=1",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?)
+        })?;
+        let seal_rowid = through_rowid.map_or(high, |through| through.min(high));
+        if frontier < seal_rowid || registered_cut < cut {
+            // One atomic autocommit statement. Already covered bounds take no writer loan;
+            // another capture can cover them before this loan, in which case no row changes.
+            self.connection.write().execute(
+                "UPDATE checkpoint_capture_epoch
+                 SET envelope_frontier=MAX(envelope_frontier, ?1),
+                     cut_unix_ms=MAX(cut_unix_ms, ?2)
+                 WHERE id=1 AND (envelope_frontier<?1 OR cut_unix_ms<?2)",
+                params![seal_rowid, cut],
             )?;
-            through_rowid.map_or(high, |through| through.min(high))
-        };
+        }
+        for _ in 0..3 {
+            let epoch: i64 = self.read_snapshot(|_| {
+                Ok(self.readers.get().query_row(
+                    "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
+                )?)
+            })?;
+            match self.checkpoint_sealed_set_attempt(
+                cut_unix_ms, seal_rowid, epoch, envelope_page, record_page,
+            ) {
+                Err(error) if error.downcast_ref::<CheckpointCaptureChanged>().is_some() => continue,
+                result => return result,
+            }
+        }
+        anyhow::bail!("checkpoint capture invalidated by concurrent store changes after 3 attempts")
+    }
+
+    fn checkpoint_sealed_set_attempt(
+        &self,
+        cut_unix_ms: u128,
+        seal_rowid: i64,
+        epoch: i64,
+        envelope_page: i64,
+        record_page: i64,
+    ) -> Result<SealedSet> {
         let mut envelopes = Vec::new();
         let mut after = 0_i64;
         while after < seal_rowid {
             let upto = after.saturating_add(envelope_page).min(seal_rowid);
+            let page = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
             let page = connection
                 .prepare_cached(
@@ -804,11 +992,15 @@ impl Store {
                         accepted_at_unix_ms: row
                             .get::<_, String>(3)?
                             .parse()
-                            .unwrap_or(u128::MAX),
+                            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+                                3, rusqlite::types::Type::Text, Box::new(error),
+                            ))?,
                         records: row.get(4)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(page)
+            })?;
             envelopes.extend(page);
             after = upto;
         }
@@ -821,79 +1013,61 @@ impl Store {
         // canonical order's components as columns so the pages sort together here exactly as
         // `ORDER BY canonical` sorted them in SQL (binary text, then integers, NULL first).
         let records_sql = sealed_records_page_sql();
-        let (first, last): (i64, i64) = {
+        let last: i64 = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
-            connection.query_row(
-                "SELECT COALESCE(MIN(rowid), 0), COALESCE(MAX(rowid), 0) FROM replica_records",
+            Ok(connection.query_row(
+                "SELECT COALESCE(MAX(rowid), 0) FROM replica_records",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?
-        };
+                |row| row.get(0),
+            )?)
+        })?;
         // The canonical order, then the record's own identity, so a claim held by two records
         // (the same claim admitted from two envelopes) orders the same way every time.
-        type OrderKey = (i64, String, Option<String>, Option<i64>, String, i64, String, String, i64, String, i64);
-        let mut keyed: Vec<(OrderKey, ClaimRecord, EnvelopeKey, bool)> = Vec::new();
-        let mut after = first.saturating_sub(1);
+        type OrderKey = (i64, String, Option<String>, Option<i64>, String, i64, String, String, u64, String, i64);
+        let cut = i64::try_from(cut_unix_ms)?;
+        let mut keyed: Vec<(OrderKey, bool)> = Vec::new();
+        let mut after = 0_i64;
         while after < last {
             let upto = after.saturating_add(record_page).min(last);
+            let page = self.checkpoint_capture_page(epoch, || {
             let connection = self.readers.get();
             let page = connection
                 .prepare_cached(&records_sql)?
-                .query_map([after, upto], |row| {
+                .query_map(params![after, upto, cut, seal_rowid], |row| {
                     Ok((
                         (
-                            row.get(14)?,
-                            row.get(15)?,
-                            row.get(16)?,
-                            row.get(17)?,
-                            row.get(18)?,
-                            row.get(19)?,
-                            row.get(20)?,
-                            row.get(10)?,
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                            row.get(9)?,
                             row.get(11)?,
-                            row.get(12)?,
-                            row.get(21)?,
                         ),
-                        claim_from_row(row)?,
-                        EnvelopeKey {
-                            writer: row.get(10)?,
-                            sequence: row.get(11)?,
-                            envelope_hash: row.get(12)?,
-                        },
-                        row.get::<_, String>(13)? == "valid",
+                        row.get::<_, String>(10)? == "valid",
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(page)
+            })?;
             keyed.extend(page);
             after = upto;
         }
-        keyed.sort_by(|left, right| left.0.cmp(&right.0));
-        let claims: Vec<(ClaimRecord, EnvelopeKey, bool)> = keyed
-            .into_iter()
-            .map(|(_, claim, envelope, valid)| (claim, envelope, valid))
-            .collect();
-        // Read after the record pages, so it is at least as new as the claims: a claim that became
-        // protected while the pages were read is protected here, and the set errs toward keeping.
-        let connection = self.readers.get();
-        let protected = connection
-            .prepare(
-                "SELECT claim_id FROM desired WHERE claim_id IS NOT NULL
-                 UNION SELECT claim_id FROM mission_definitions
-                 UNION SELECT claim_id FROM mission_revisions
-                 UNION SELECT binding_claim_id FROM documents WHERE binding_claim_id IS NOT NULL
-                 UNION SELECT json_extract(body, '$.fields.replacement') FROM claims
-                     WHERE kind='record.repaired'
-                 UNION SELECT replacement_claim_id FROM replica_records
-                     WHERE replacement_claim_id IS NOT NULL",
-            )?
-            .query_map([], |row| row.get::<_, Option<String>>(0))?
-            .filter_map(|row| row.transpose())
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-        let connection = self.readers.get();
+        // Record identity completes the key, so equal keys are the same record. An unstable
+        // sort preserves the canonical order without a second array of sort scratch space.
+        keyed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let mut late = BTreeSet::new();
-        for (claim, envelope, _) in &claims {
-            if claim.accepted_at_unix_ms >= cut_unix_ms {
-                late.insert(envelope.clone());
+        for (key, _) in &keyed {
+            if checkpoint_accepted_time(&key.1, &key.6, 1)? >= cut_unix_ms {
+                late.insert(EnvelopeKey {
+                    writer: key.7.clone(),
+                    sequence: key.8,
+                    envelope_hash: key.9.clone(),
+                });
             }
         }
         envelopes.retain(|envelope| !late.contains(&envelope.key));
@@ -901,38 +1075,80 @@ impl Store {
             .iter()
             .map(|envelope| envelope.key.clone())
             .collect::<BTreeSet<_>>();
-        let claims = claims
-            .into_iter()
-            .filter(|(_, envelope, _)| before.contains(envelope))
-            .map(|(claim, envelope, valid)| SealedClaim {
-                protected: protected.contains(&claim.id),
-                claim,
-                envelope,
-                valid,
-            })
-            .collect();
+        let mut claims = Vec::new();
+        let mut records = keyed.into_iter().peekable();
+        let claim_sql = format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1");
+        while records.peek().is_some() {
+            let page = self.checkpoint_capture_page(epoch, || {
+            let connection = self.readers.get();
+            let mut statement = connection.prepare_cached(&claim_sql)?;
+            let mut page = Vec::new();
+            for _ in 0..record_page {
+                let Some((key, valid)) = records.next() else {
+                    break;
+                };
+                let envelope = EnvelopeKey {
+                    writer: key.7,
+                    sequence: key.8,
+                    envelope_hash: key.9,
+                };
+                if before.contains(&envelope) {
+                    page.push(SealedClaim {
+                        claim: statement.query_row([&key.6], claim_from_row)?,
+                        envelope,
+                        valid,
+                        protected: false,
+                    });
+                }
+            }
+            Ok(page)
+            })?;
+            claims.extend(page);
+        }
+        let mut protected = BTreeSet::new();
+        for (table, columns, filter) in [
+            ("desired", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("mission_definitions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("mission_revisions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("documents", "binding_claim_id", "binding_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ("claims", "json_extract(body, '$.fields.replacement')", "kind='record.repaired' AND ?3 IS NOT NULL"),
+            ("replica_records", "replacement_claim_id", "replacement_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+        ] {
+            let page = self.checkpoint_capture_rows(
+                epoch, CheckpointCaptureQuery { table, columns, filter }, cut, record_page,
+                |row| row.get::<_, Option<String>>(0),
+            )?;
+            protected.extend(page.into_iter().flatten());
+        }
+        for claim in &mut claims {
+            claim.protected = protected.contains(&claim.claim.id);
+        }
         // Envelopes an earlier checkpoint dropped are still part of what this node seals.
-        let envelope_tombstones = connection
-            .prepare(
-                "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms
-                 FROM checkpoint_envelopes WHERE accepted_at_unix_ms < ?1",
-            )?
-            .query_map([i64::try_from(cut_unix_ms)?], |row| {
+        let envelope_tombstones = self.checkpoint_capture_rows(
+            epoch,
+            CheckpointCaptureQuery {
+                table: "checkpoint_envelopes",
+                columns: "writer, sequence, envelope_hash, accepted_at_unix_ms",
+                filter: RECORDED_TOMBSTONE_FILTER,
+            },
+            cut, record_page, |row| {
                 Ok(EnvelopeTombstone {
                     writer: row.get(0)?,
                     sequence: row.get(1)?,
                     envelope_hash: row.get(2)?,
                     accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let claim_tombstones = connection
-            .prepare(
-                "SELECT id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
-                        operation_id, request_digest, accepted_at_unix_ms
-                 FROM checkpoint_claims WHERE accepted_at_unix_ms < ?1",
-            )?
-            .query_map([i64::try_from(cut_unix_ms)?], |row| {
+            },
+        )?;
+        let claim_tombstones = self.checkpoint_capture_rows(
+            epoch,
+            CheckpointCaptureQuery {
+                table: "checkpoint_claims",
+                columns: "id, writer, sequence, envelope_hash, subject, kind, actor, predecessors,
+                          operation_id, request_digest, accepted_at_unix_ms",
+                filter: RECORDED_TOMBSTONE_FILTER,
+            },
+            cut, record_page, |row| {
                 Ok(ClaimTombstone {
                     id: row.get(0)?,
                     writer: row.get(1)?,
@@ -947,8 +1163,8 @@ impl Store {
                     request_digest: row.get(9)?,
                     accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(10)?).unwrap_or(0),
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            },
+        )?;
         for tombstone in &envelope_tombstones {
             let key = EnvelopeKey {
                 writer: tombstone.writer.clone(),
@@ -964,6 +1180,7 @@ impl Store {
             }
         }
         envelopes.sort_by(|left, right| left.key.cmp(&right.key));
+        self.checkpoint_capture_page(epoch, || Ok(()))?;
         Ok(SealedSet {
             cut_unix_ms,
             envelopes,
@@ -971,7 +1188,54 @@ impl Store {
             seal_rowid,
             envelope_tombstones,
             claim_tombstones,
+            #[cfg(test)]
+            capture_lifetime: std::sync::Arc::default(),
         })
+    }
+
+    fn checkpoint_capture_page<T>(&self, epoch: i64, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.read_snapshot(|_| {
+            let current: i64 = self.readers.get().query_row(
+                "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
+            )?;
+            if current != epoch {
+                return Err(CheckpointCaptureChanged.into());
+            }
+            read()
+        })
+    }
+
+    fn checkpoint_capture_rows<T>(
+        &self,
+        epoch: i64,
+        query: CheckpointCaptureQuery<'_>,
+        cut: i64,
+        page_size: i64,
+        mut decode: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>> {
+        let CheckpointCaptureQuery { table, columns, filter } = query;
+        let high: i64 = self.checkpoint_capture_page(epoch, || {
+            Ok(self.readers.get().query_row(
+                &format!("SELECT COALESCE(MAX(rowid), 0) FROM {table}"), [], |row| row.get(0),
+            )?)
+        })?;
+        let sql = format!(
+            "SELECT {columns} FROM {table} WHERE rowid>?1 AND rowid<=?2 AND ({filter})"
+        );
+        let mut rows = Vec::new();
+        let mut after = 0_i64;
+        while after < high {
+            let upto = after.saturating_add(page_size).min(high);
+            let page = self.checkpoint_capture_page(epoch, || {
+                let connection = self.readers.get();
+                Ok(connection.prepare_cached(&sql)?
+                    .query_map(params![after, upto, cut], &mut decode)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })?;
+            rows.extend(page);
+            after = upto;
+        }
+        Ok(rows)
     }
 
     /// The identities `checkpoint_sealed_set_through` would read, without the claims: what a
@@ -1084,8 +1348,12 @@ impl Store {
             .collect()
     }
 
-    /// Copy this store to `copy` from one consistent snapshot, while the writer carries on.
-    pub fn copy_store_to(&self, copy: &Path) -> Result<()> {
+    /// Copy this store to `copy` from one consistent snapshot, while the writer carries on: a
+    /// filesystem clone where the filesystem can make one, otherwise a full `VACUUM INTO` copy.
+    pub fn copy_store_to(&self, copy: &Path) -> Result<StoreCopy> {
+        if !self.shared_memory && self.clone_store_to(copy)? {
+            return Ok(StoreCopy::Clone);
+        }
         // `VACUUM INTO` reads the whole store in one transaction on a connection of its own, which
         // holds the WAL pinned for as long as the copy takes. Register it, so a pinned-WAL
         // report can name it: it was the one pin with no live read to blame.
@@ -1099,7 +1367,39 @@ impl Store {
         let connection = Connection::open_with_flags(&self.path, flags)?;
         connection.execute_batch("PRAGMA busy_timeout = 5000;")?;
         connection.execute("VACUUM INTO ?1", [copy.to_string_lossy()])?;
-        Ok(())
+        Ok(StoreCopy::Full)
+    }
+
+    /// Clone the store file and its WAL to `copy` under one read snapshot, held only while the
+    /// filesystem clones them. While a snapshot is open no checkpoint copies a frame past it into
+    /// the store file, and the frames it reads stay in the WAL, so the two clones open as the
+    /// snapshot or a later commit. The `-shm` index is not copied: opening the copy rebuilds it
+    /// from the WAL. False, with nothing left at `copy`, where the filesystem cannot clone.
+    fn clone_store_to(&self, copy: &Path) -> Result<bool> {
+        let wal = PathBuf::from(format!("{}-wal", self.path.display()));
+        let copy_wal = PathBuf::from(format!("{}-wal", copy.display()));
+        let connection = self.readers.get();
+        let snapshot = connection.unchecked_transaction()?;
+        snapshot.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))?;
+        let store = clone_file(&self.path, copy);
+        let wal = store.as_ref().map(|()| match clone_file(&wal, &copy_wal) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !wal.exists() => Ok(()),
+            result => result,
+        });
+        snapshot.commit()?;
+        drop(connection);
+        match wal {
+            Ok(Ok(())) => {}
+            // A failed clone leaves nothing behind, so only the store clone needs removing.
+            Ok(Err(_)) => {
+                fs::remove_file(copy)?;
+                return Ok(false);
+            }
+            Err(_) => return Ok(false),
+        }
+        // Fold the cloned WAL into the copy, so it is one file, as a `VACUUM INTO` copy is.
+        Connection::open(copy)?.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
+        Ok(true)
     }
 
     /// Plan the drop for `cut_unix_ms` and prove it on a copy of this store in `scratch`, which
@@ -1109,6 +1409,7 @@ impl Store {
         cut_unix_ms: u128,
         scratch: &Path,
     ) -> Result<(DropPlan, CheckpointProof)> {
+        let _completion = super::checkpoint_completion::Completion::outer();
         self.plan_checkpoint_through(cut_unix_ms, None, scratch)
             .map(|(_, plan, proof)| (plan, proof))
     }
@@ -1121,6 +1422,7 @@ impl Store {
         through_rowid: Option<i64>,
         scratch: &Path,
     ) -> Result<(SealedSet, DropPlan, CheckpointProof)> {
+        let _completion = super::checkpoint_completion::Completion::outer();
         self.runtime.checkpoint_preflight()?;
         let sealed = self.checkpoint_sealed_set_through(cut_unix_ms, through_rowid)?;
         let plan = self.runtime.plan_checkpoint_drops(&sealed);
@@ -1136,12 +1438,13 @@ impl Store {
         plan: &DropPlan,
         scratch: &Path,
     ) -> Result<CheckpointProof> {
+        let _completion = super::checkpoint_completion::Completion::work();
         self.runtime.checkpoint_preflight()?;
         fs::create_dir_all(scratch)?;
         let copy = scratch.join(format!("proof-{}.sqlite3", Uuid::now_v7().simple()));
         let result = self
             .copy_store_to(&copy)
-            .and_then(|()| prove_on_copy(&*self.runtime, &copy, sealed, plan));
+            .and_then(|_| prove_on_scratch_copy(&*self.runtime, &copy, sealed, plan));
         for suffix in ["", "-journal", "-wal", "-shm"] {
             let _ = fs::remove_file(format!("{}{suffix}", copy.display()));
         }
@@ -1154,6 +1457,7 @@ impl Store {
         cut_unix_ms: u128,
         scratch: &Path,
     ) -> Result<CheckpointPlanView> {
+        let _completion = super::checkpoint_completion::Completion::outer();
         let (plan, proof) = self.plan_checkpoint(cut_unix_ms, scratch)?;
         Ok(CheckpointPlanView {
             checkpoint: checkpoint_name(cut_unix_ms),
@@ -1169,5 +1473,47 @@ impl Store {
             retained_digest: plan.retained_digest,
             proof,
         })
+    }
+}
+
+/// One-shot completion attempts, glibc calls, and their duration on this thread.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn allocator_reclaim_stats_for_test() -> (u64, u64, std::time::Duration) {
+    super::checkpoint_completion::reclaim_stats()
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_copy_spills_rollback_and_temporary_pages_to_disk() {
+        let scratch = tempfile::tempdir().unwrap();
+        let copy = scratch.path().join("proof.sqlite3");
+        let mut connection = open_checkpoint_copy(&copy).unwrap();
+        assert_eq!(
+            connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)).unwrap(),
+            "delete"
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0)).unwrap(),
+            -(crate::sqlite::READ_CACHE_KIB as i64)
+        );
+        assert_eq!(
+            connection.query_row("PRAGMA temp_store", [], |row| row.get::<_, i64>(0)).unwrap(),
+            1
+        );
+        connection.execute_batch(
+            "CREATE TABLE payload(body BLOB);
+             INSERT INTO payload VALUES (zeroblob(4 * 1024 * 1024));"
+        ).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute("UPDATE payload SET body=randomblob(4 * 1024 * 1024)", []).unwrap();
+        assert!(
+            fs::metadata(scratch.path().join("proof.sqlite3-journal")).unwrap().len() > 4 * 1024 * 1024,
+            "the overwritten copy pages belong in a disk rollback journal"
+        );
+        transaction.rollback().unwrap();
     }
 }
