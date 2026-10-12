@@ -24,6 +24,25 @@ impl Store {
                         &serde_json::to_value(&desired)?,
                         author.as_deref(),
                     )?;
+                    let Some(claim) = self.selected_desired_token(&actor)? else {
+                        return Ok(None);
+                    };
+                    smallclaims::touched::note_read(|| claim.clone());
+                    if self.claim_verdict(&claim)? != smallclaims::principal::Verdict::Verified {
+                        return Ok(None);
+                    }
+                    let Some(signature) = self.claim_signature(&claim)? else {
+                        return Ok(None);
+                    };
+                    // A host vouching on behalf of an asserted actor is not person authority.
+                    // Field-only signatures may leave declaration metadata unsigned.
+                    if signature.signer != *person
+                        || signature.on_behalf.is_some()
+                        || signature.format.is_some()
+                        || !signature.signed_fields.is_empty()
+                    {
+                        return Ok(None);
+                    }
                     return Ok(Some(person.clone()));
                 }
                 let Some(next) = author else {
@@ -40,6 +59,14 @@ impl Store {
 mod tests {
     use super::*;
 
+    fn store() -> Store {
+        let store = Store::open_memory("alder").unwrap();
+        store
+            .set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
+            .unwrap();
+        store
+    }
+
     fn declare(store: &Store, name: &str, child: &str, author: Option<&str>, key: &str) {
         let source = format!("version 2\nagent \"{name}\" {{ {child} command \"true\"; }}");
         let intent = crate::graph::parse_internal_intent(&source, "alder").unwrap();
@@ -53,12 +80,17 @@ mod tests {
                 )
             })
             .collect();
+        if let Some(person) = author.filter(|actor| actor.starts_with("person/")) {
+            store.ensure_principal_key(person).unwrap();
+        }
         store.apply_as(&intent, &expected, key, author).unwrap();
+        store.seal_local_batches().unwrap();
+        store.judge_claims(true).unwrap();
     }
 
     #[test]
     fn trace_principal_follows_only_declaring_seats_to_an_explicit_root() {
-        let store = Store::open_memory("alder").unwrap();
+        let store = store();
         declare(
             &store,
             "example/root",
@@ -121,7 +153,7 @@ mod tests {
 
     #[test]
     fn trace_principal_cycles_missing_roots_retirement_and_person_authors_give_none() {
-        let store = Store::open_memory("alder").unwrap();
+        let store = store();
         declare(&store, "example/a", "", Some("agent/example/b"), "a");
         declare(&store, "example/b", "", Some("agent/example/a"), "b");
         declare(
@@ -253,5 +285,138 @@ mission "example/work" state="ready" {
             Some("person/avery")
         );
         assert_eq!(store.trace_principal(&seat).unwrap(), None);
+    }
+
+    #[test]
+    fn trace_principal_rejects_unsigned_and_node_vouched_person_authorship() {
+        let store = Store::open_memory("alder").unwrap();
+        let source =
+            "version 2\nagent \"example/root\" { accountable \"person/avery\"; command \"true\"; }";
+        let intent = crate::graph::parse_internal_intent(source, "alder").unwrap();
+        let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
+        store
+            .apply_as(&intent, &expected, "unsigned-root", Some("person/avery"))
+            .unwrap();
+        let claim = store
+            .selected_desired_token("agent/example/root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.claim_verdict(&claim).unwrap(),
+            smallclaims::principal::Verdict::Unsigned
+        );
+        assert_eq!(store.trace_principal("agent/example/root").unwrap(), None);
+        store
+            .set_node_key(Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
+            .unwrap();
+        store.seal_local_batches().unwrap();
+        store.judge_claims(true).unwrap();
+        assert_eq!(
+            store.claim_verdict(&claim).unwrap(),
+            smallclaims::principal::Verdict::Verified
+        );
+        let signature = store.claim_signature(&claim).unwrap().unwrap();
+        assert_eq!(signature.signer, "host/alder");
+        assert_eq!(signature.on_behalf.as_deref(), Some("person/avery"));
+        assert_eq!(store.trace_principal("agent/example/root").unwrap(), None);
+    }
+
+    #[test]
+    fn trace_principal_requires_the_exact_person_and_complete_verified_content() {
+        use smallclaims::principal::{
+            ClaimSignature, FIELDS_FORMAT, Verdict, content_digest, fields_signing_bytes,
+        };
+        for case in ["verified", "held", "invalid", "other-person", "fields-only"] {
+            let store = store();
+            let device = crate::fleet::MemberKey::generate().unwrap().0;
+            let signer = if case == "other-person" {
+                "person/robin"
+            } else {
+                "person/avery"
+            };
+            let chain = if case == "held" {
+                vec!["claim/missing-delegation".into()]
+            } else {
+                store
+                    .enroll_device_key(signer, device.public(), "example device")
+                    .unwrap()
+            };
+            let source = "version 2\nagent \"example/root\" { accountable \"person/avery\"; command \"true\"; }";
+            let intent = crate::graph::parse_internal_intent(source, "alder").unwrap();
+            let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
+            store
+                .apply_as(&intent, &expected, "root", Some("person/avery"))
+                .unwrap();
+            let root = store
+                .latest_claim("agent/example/root", Some("intent.desired"))
+                .unwrap()
+                .unwrap();
+            let content =
+                content_digest(&root.subject, &root.kind, root.actor.as_deref(), &root.body);
+            let mut signature = ClaimSignature::sign(
+                &device,
+                &content,
+                signer,
+                None,
+                chain,
+                root.accepted_at_unix_ms as u64,
+            );
+            if case == "invalid" {
+                signature.signature = device.sign(b"different content");
+            }
+            if case == "fields-only" {
+                signature.format = Some(FIELDS_FORMAT.into());
+                signature.signed_fields = vec!["kind".into()];
+                signature.signature = device.sign(&fields_signing_bytes(
+                    &root.subject,
+                    &root.kind,
+                    root.actor.as_deref(),
+                    &root.body["fields"],
+                    &signature.signed_fields,
+                    &signature.signer,
+                    None,
+                    &signature.key,
+                    &signature.chain,
+                    &signature.nonce,
+                    signature.signed_at_unix_ms,
+                ));
+            }
+            store
+                .connection
+                .batched(|tx| {
+                    smallclaims::store::principals::store_claim_signature_tx(
+                        tx, &root.id, &signature,
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            store.seal_local_batches().unwrap();
+            store.judge_claims(true).unwrap();
+            match case {
+                "held" => assert!(matches!(
+                    store.claim_verdict(&root.id).unwrap(),
+                    Verdict::Held(_)
+                )),
+                "invalid" => assert!(matches!(
+                    store.claim_verdict(&root.id).unwrap(),
+                    Verdict::Invalid(_)
+                )),
+                _ => assert_eq!(
+                    store.claim_verdict(&root.id).unwrap(),
+                    Verdict::Verified,
+                    "{case}"
+                ),
+            }
+            let expected = if case == "verified" {
+                Some("person/avery")
+            } else {
+                None
+            };
+            assert_eq!(
+                store.trace_principal(&root.subject).unwrap().as_deref(),
+                expected,
+                "{case}"
+            );
+        }
     }
 }

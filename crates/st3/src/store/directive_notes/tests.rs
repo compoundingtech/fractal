@@ -573,6 +573,7 @@ agent "example/root" {{ {field} harness "claude" {{ account-pool "person/robin";
         )
     };
     declare(&store, &source(""), "person/avery", "without-principal");
+    store.ensure_principal_key("person/avery").unwrap();
     let seat = "agent/example/root";
     let before_notes = store.directive_notes(seat).unwrap();
     assert_eq!(
@@ -644,6 +645,8 @@ agent "example/root" {{ {field} harness "claude" {{ account-pool "person/robin";
         "person/avery",
         "with-principal",
     );
+    store.seal_local_batches().unwrap();
+    store.judge_claims(true).unwrap();
     assert_eq!(
         store.trace_principal(seat).unwrap().as_deref(),
         Some("person/avery")
