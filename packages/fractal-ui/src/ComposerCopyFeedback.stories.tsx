@@ -16,18 +16,20 @@ import { geometryVars as g, interactionVars as interaction, spaceVars as s, surf
 const answer = 'The composer uses a border for frame focus and a ring for focused actions.'
 const source = 'const focus = "border"\n'
 const options = { messages: [], isRunning: false, onNew: async () => {} }
-function ComposerCopyFeedback({ scheme, width, variant }: { scheme: Scheme; width: 440 | 1440; variant: 'C2' | 'C3' }) {
+/** `nested` renders one labelled region inside a shared main so the matrix keeps unique landmarks. */
+function ComposerCopyFeedback({ scheme, width, variant, nested = false }: { scheme: Scheme; width: 440 | 1440; variant: 'C2' | 'C3'; nested?: boolean }) {
   const [revision, setRevision] = React.useState(0)
   const [failure, setFailure] = React.useState(false)
-  return <main data-scheme={scheme} data-revision={revision} {...stylex.props(styles.root, styles.width(width), ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
+  const Root = nested ? 'section' : 'main'
+  return <Root aria-label={nested ? `${scheme} ${width}` : undefined} data-scheme={scheme} data-revision={revision} {...stylex.props(styles.root, styles.width(width), ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
     <div {...stylex.props(styles.toolbar)}><Button onPress={() => setRevision(value => value + 1)}>Rerender snapshot</Button><Button onPress={() => setFailure(value => !value)}>Toggle copy failure</Button></div>
     <EmbraceRuntimeProvider options={options}><EmbraceComposer variant={variant} history={['Review the composer focus treatment.']} /></EmbraceRuntimeProvider>
     <Markdown text={'```typescript\n' + source + '```'} />
-    <section aria-label="Answer action"><p>{answer}</p><CopyAnswerButton text={answer} onCopy={async () => { if (failure) throw new Error('Host copy rejected'); await navigator.clipboard.writeText(answer) }} /></section>
+    <section aria-label={nested ? `Answer action ${scheme} ${width}` : 'Answer action'}><p>{answer}</p><CopyAnswerButton text={answer} onCopy={async () => { if (failure) throw new Error('Host copy rejected'); await navigator.clipboard.writeText(answer) }} /></section>
     <span data-testid="focus-reference" {...stylex.props(styles.reference)} />
     <span data-testid="copy-glyph" hidden><Icon name="copy" size={14} /></span>
     <span data-testid="check-glyph" hidden><Icon name="check" size={14} /></span>
-  </ThemePortal></main>
+  </ThemePortal></Root>
 }
 const styles = stylex.create({
   root: { boxSizing: 'border-box', minHeight: '100vh', maxWidth: '100%', padding: s.lg, display: 'flex', flexDirection: 'column', gap: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
@@ -121,4 +123,4 @@ export const Dark440: Story = { play }
 export const Light440: Story = { args: { scheme: 'light' }, play }
 export const Dark1440: Story = { args: { width: 1440 }, play }
 export const Light1440: Story = { args: { scheme: 'light', width: 1440, variant: 'C2' }, play }
-export const AllStates: Story = { render: () => <>{(['light', 'dark'] as const).flatMap(scheme => ([440, 1440] as const).map(width => <ComposerCopyFeedback key={`${scheme}-${width}`} scheme={scheme} width={width} variant="C3" />))}</> }
+export const AllStates: Story = { render: () => <main>{(['light', 'dark'] as const).flatMap(scheme => ([440, 1440] as const).map(width => <ComposerCopyFeedback key={`${scheme}-${width}`} scheme={scheme} width={width} variant="C3" nested />))}</main> }
