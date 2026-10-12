@@ -55,7 +55,7 @@ function Block({ block, previous, turn, kind, meta }: Pick<ExploreArgs, 'turn' |
   const time = <time data-turn-time dateTime={block.at} title={exact(block.at)} {...stylex.props(styles.time)}>{clock(block.at)}</time>
   const item = replyItems.find(item => item.id === block.id)
   const content = seat && item !== undefined
-    ? <ThreadPrimitive.Unstable_MessageById messageId={item.id} components={{ Message: () => <TranscriptAnswer item={item} /> }} />
+    ? <ThreadPrimitive.Unstable_MessageById messageId={item.id} components={{ Message: () => <TranscriptAnswer item={item} showMeta={false} /> }} />
     : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human' } : { _tag: 'Incoming' }} />
   const header = (!seat || turn === `T${3}`) && (turn !== `T${3}` || previous?.sender !== block.sender)
     ? <header data-turn-header {...stylex.props(styles.header)}><strong>{block.sender}</strong>{kind === 'K1' && !seat ? <span>{block.kind} · {block.verified ? 'Verified' : 'Unverified'}</span> : null}</header> : null
@@ -63,34 +63,17 @@ function Block({ block, previous, turn, kind, meta }: Pick<ExploreArgs, 'turn' |
   return <div ref={root} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && styles.input, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, kind === 'K2' && block.kind === 'Person' && styles.humanRail, kind === 'K2' && block.kind === 'Agent' && styles.agentRail, kind === 'K2' && (block.kind === 'Relay' || block.kind === 'System') && styles.quietRail, collapsedKind && styles.quiet)}>
     {turn === `T${3}` ? <span aria-hidden="true" {...stylex.props(styles.glyph)}>{glyphs[block.kind]}</span> : null}
     {meta === 'M3' && isDivider(block, previous) ? <div data-time-divider {...stylex.props(styles.divider)}>── {time} ──</div> : null}
-    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary)}><span aria-hidden="true">{glyphs[block.kind]} {expanded ? '▾' : '▸'}</span><span {...stylex.props(styles.summaryText)}>{block.sender} · {block.text.split('\n')[0]}</span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{header}{body}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
+    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary)}><span data-input-kind-icon aria-hidden="true">{glyphs[block.kind]} {expanded ? '▾' : '▸'}</span><strong data-input-sender>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}>{block.text.split('\n')[0]}</span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{header}{body}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
     {meta === 'M1' || meta === 'M2' ? <div data-meta-time data-affordance={meta === 'M2' || seat ? 'reveal' : 'always'} {...stylex.props(styles.timeOverlay, meta === 'M2' && styles.gutterTime)}>{time}</div> : null}
     {meta === 'M4' && tail !== null && (!collapsedKind || expanded) ? createPortal(<span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span>, tail) : null}
     <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`Copy ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy)}>{copied ? 'Copied' : 'Copy'}</Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? exact(block.at) : 'Copy message'}</Tooltip></TooltipTrigger>
   </div>
 }
 
-function WorkFold() {
-  const root = React.useRef<HTMLDivElement>(null)
-  React.useLayoutEffect(() => {
-    const element = root.current
-    if (element === null) return
-    const projectStatus = () => {
-      for (const status of element.querySelectorAll<HTMLElement>('[data-tool-status="success"] button > :last-child')) {
-        if (status.textContent?.startsWith('OK · ')) status.textContent = status.textContent.slice(5)
-      }
-    }
-    const observer = new MutationObserver(projectStatus)
-    observer.observe(element, { childList: true, subtree: true })
-    return () => observer.disconnect()
-  }, [])
-  return <div ref={root} data-work-fixture {...stylex.props(styles.work)}><WorkLogV1 turn={workTurn} /></div>
-}
-
 function Lane({ args }: { args: ExploreArgs }) {
   return <section data-lane data-turn-variant={args.turn} data-kind-variant={args.kind} data-meta-variant={args.meta} data-scheme={args.scheme} data-width={args.width} aria-label={`${args.turn} ${args.kind} ${args.meta} · ${args.scheme} · ${args.width}`} {...stylex.props(styles.lane)}>
     <h2 {...stylex.props(styles.laneTitle)}>{args.turn} · {args.kind} · {args.meta} / {args.scheme} / {args.width}</h2>
-    <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root {...stylex.props(styles.thread)}>{turnBlocks.map((block, index) => <React.Fragment key={block.id}><Block block={block} previous={turnBlocks[index - 1]} turn={args.turn} kind={args.kind} meta={args.meta} />{index === 7 ? <WorkFold /> : null}</React.Fragment>)}</ThreadPrimitive.Root></EmbraceRuntimeProvider>
+    <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root {...stylex.props(styles.thread)}>{turnBlocks.map((block, index) => <React.Fragment key={block.id}><Block block={block} previous={turnBlocks[index - 1]} turn={args.turn} kind={args.kind} meta={args.meta} />{index === 7 ? <div data-work-fixture {...stylex.props(styles.work)}><WorkLogV1 turn={workTurn} /></div> : null}</React.Fragment>)}</ThreadPrimitive.Root></EmbraceRuntimeProvider>
   </section>
 }
 function Explorer(args: ExploreArgs) {
@@ -112,13 +95,14 @@ function Explorer(args: ExploreArgs) {
       <div data-control-focus {...stylex.props(styles.block)}><span data-affordance="reveal" {...stylex.props(styles.hoverOnly)}>Hover-only time</span><Button {...stylex.props(styles.control)}>Control copy</Button></div>
       <div data-control-style>Unstyled token probe</div>
       <div data-control-transition data-turn-variant="T1" data-kind-variant="K1" data-meta-variant="M1" data-scheme="dark" data-width="1440" data-lane-count="1"><Button {...stylex.props(styles.control)}>Inert transition control</Button><Button aria-expanded={false} {...stylex.props(styles.control)}>Inert disclosure control</Button></div>
+      <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root data-control-production-meta><ThreadPrimitive.Unstable_MessageById messageId={replyItems[0]!.id} components={{ Message: () => <TranscriptAnswer item={replyItems[0]!} showMeta /> }} /></ThreadPrimitive.Root></EmbraceRuntimeProvider>
+      <div data-control-k3 {...stylex.props(styles.quietInputControl)}><span data-input-title>Quiet summary with no sender or kind cue</span></div>
     </section>
   </main>
 }
 // Scoped variant projections keep the production message / Markdown / work-log renderers.
 // Every geometry value comes from composition tokens (including the locked hierarchy step).
 const projectionCss = `
-[data-turns-explorer] [data-turn-content] [data-testid="answer-meta"] { display: none; }
 [data-turns-explorer] [data-turn-content] article { padding: 0; border: 0; background: transparent; }
 [data-turns-explorer] [data-turn-content] article > header { display: none; }
 [data-turns-explorer] [data-turn-content] article h3 { margin-top: 0; }
@@ -129,13 +113,6 @@ const projectionCss = `
 [data-turns-explorer] [data-turn-block]:hover [data-affordance="reveal"],
 [data-turns-explorer] [data-turn-block]:focus-within [data-affordance="reveal"],
 [data-turns-explorer] [data-turn-block][data-tapped] [data-affordance="reveal"] { opacity: 1; }
-[data-turns-explorer] [data-work-fixture] [data-testid="work-log-divider"] { display: none; }
-[data-turns-explorer] [data-work-fixture] [data-testid="work-log"] > button { border-bottom: 0; gap: ${s.sm}; }
-[data-turns-explorer] [data-work-fixture] [data-testid="work-log"] > button > :first-child { width: ${g.icon}; height: ${g.icon}; }
-[data-turns-explorer] [data-work-fixture] [data-testid="work-log"] > div { margin-left: ${geometry.railInset}; padding-left: calc(${geometry.indent} - ${geometry.railInset} - ${g.hairline}); border-left: ${g.hairline} solid ${border.borderStrong}; }
-[data-turns-explorer] [data-work-fixture] [data-tool-status] button { display: grid; grid-template-columns: ${g.icon} minmax(0, 1fr) ${g.icon} ${g.statusWord}; column-gap: ${s.sm}; padding-inline: 0; }
-[data-turns-explorer] [data-work-fixture] [data-tool-status] button > :first-child { display: none; }
-[data-turns-explorer] [data-work-fixture] [data-tool-status] button > :last-child { text-align: right; font-variant-numeric: tabular-nums; }
 `
 const styles = stylex.create({
   root: { padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, boxSizing: 'border-box' },
@@ -157,7 +134,8 @@ const styles = stylex.create({
   trailing: { display: 'inline-block', width: geometry.trailingWidth, marginInlineEnd: geometry.trailingOverlap, whiteSpace: 'nowrap' },
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   divider: { position: 'absolute', top: geometry.lift, left: 0, right: 0, textAlign: 'center', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  summary: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
+  summary: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
+  quietInputControl: { color: ink.fgMuted, height: g.iconSm, overflow: 'hidden', fontSize: t.metaSize, lineHeight: t.metaLeading },
   work: { marginTop: s.md }, tooltip: { padding: s.md, backgroundColor: surface.raised, color: ink.fg, fontSize: t.metaSize, borderRadius: r.sm },
   negativeControls: { marginTop: s.section, display: 'flex', flexDirection: 'column', gap: s.section }, footerControl: { height: g.toolRow }, wrongOwner: { position: 'absolute', top: '100%', marginTop: s.section, fontSize: t.metaSize }, hoverOnly: { opacity: { default: 0, ':hover': 1 } },
 })
@@ -189,6 +167,22 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   await expect(parseFloat(styled.paddingTop)).toBe(24)
   await expect(parseFloat(styleControl.paddingTop)).not.toBe(24)
   await expect(styled.backgroundColor).not.toBe('rgba(0, 0, 0, 0)')
+  for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
+    await expect(lane.querySelector('[data-turn-content] [data-testid="answer-meta"], [data-turn-content] [data-testid="message-time"], [data-turn-content] footer')).toBeNull()
+    for (const block of lane.querySelectorAll<HTMLElement>('[data-kind-cue="K3"]')) {
+      const trigger = block.querySelector<HTMLElement>('button[aria-expanded="false"]')
+      if (trigger === null) continue
+      await expect(getComputedStyle(trigger.querySelector('[data-input-title]')!).color).toBe(getComputedStyle(block).color)
+      await expect(trigger.querySelector('[data-input-sender]')!.textContent?.trim().length).toBeGreaterThan(0)
+      await expect(trigger.querySelector('[data-input-kind-icon]')!.textContent?.trim().length).toBeGreaterThan(0)
+      await expect(trigger.getBoundingClientRect().height).toBeGreaterThanOrEqual(24)
+    }
+  }
+  await waitFor(() => expect(canvasElement.querySelector('[data-control-production-meta] [data-testid="answer-meta"]')).not.toBeNull())
+  const quietControl = canvasElement.querySelector<HTMLElement>('[data-control-k3]')!
+  await expect(getComputedStyle(quietControl.querySelector('[data-input-title]')!).color).not.toBe(styled.color)
+  await expect(quietControl.querySelector('[data-input-sender], [data-input-kind-icon]')).toBeNull()
+  await expect(quietControl.getBoundingClientRect().height).toBeLessThan(24)
   for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
     const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
     for (const [index, block] of blocks.entries()) {

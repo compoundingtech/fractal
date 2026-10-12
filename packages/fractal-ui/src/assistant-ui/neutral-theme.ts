@@ -63,7 +63,7 @@ const typeVarsTheme = stylex.createTheme(typeVars, {
   uiSize: '14px', uiLeading: '20px',
   metaSize: '12px', metaLeading: '16px',
   denseSize: '11px',
-  codeSize: '13px',
+  codeSize: '13px', codeLeading: '18px',
   bodySize: '14px', bodyLeading: '22.75px',
   weightMedium: '500',
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
@@ -80,7 +80,6 @@ const radiusVarsTheme = stylex.createTheme(radiusVars, {
 const spaceVarsTheme = stylex.createTheme(spaceVars, {
   xs2: '2px', xs: '4px', sm: '6px', md: '8px', lg: '12px', xl: '16px', xxl: '20px',
   zero: '0', hairline: '1px', xxxs: '1px', row: '10px', section: '24px', control: '28px', panel: '32px',
-  proseGap: '10px',
 })
 
 const geometryVarsTheme = stylex.createTheme(geometryVars, {
