@@ -4,7 +4,7 @@ import { terminalRoute, TerminalRouteMemory, fabricRouteLabel, daemonRouteLabel 
 const route = { terminal_id: 'terminal/agent/demo/worker', runtime_incarnation: 'runtime:one', owner_host_id: 'host/owner-a', fabric: { node: 'a'.repeat(64), service: 'st3/client/demo-fleet' } };
 test('route fences subject/incarnation and admits only the client service', () => {
   assert.equal(terminalRoute(route, route.terminal_id, 'runtime:one'), route);
-  for (const change of [{ terminal_id: 'terminal/other' }, { runtime_incarnation: '' }, { owner_host_id: '' }, { fabric: { ...route.fabric, service: 'st3/pty/demo-fleet' } }, { fabric: { ...route.fabric, node: 'arbitrary' } }]) assert.throws(() => terminalRoute({ ...route, ...change }, route.terminal_id));
+  for (const change of [{ terminal_id: 'terminal/other' }, { terminal_id: undefined }, { runtime_incarnation: true }, { owner_host_id: 42 }, { fabric: { ...route.fabric, node: ['a'.repeat(64)] } }, { fabric: { ...route.fabric, service: 42 } }, { runtime_incarnation: '' }, { owner_host_id: '' }, { fabric: { ...route.fabric, service: 'st3/pty/demo-fleet' } }, { fabric: { ...route.fabric, node: 'arbitrary' } }]) assert.throws(() => terminalRoute({ ...route, ...change }, route.terminal_id));
   assert.throws(() => terminalRoute({ ...route, runtime_incarnation: 'runtime:two' }, route.terminal_id, 'runtime:one'), /restarted/);
   assert.equal(fabricRouteLabel(route), 'Fabric to owner-a');
   assert.equal(daemonRouteLabel('owner away', true), 'via the daemon (Fabric: owner away, not tried again yet)');

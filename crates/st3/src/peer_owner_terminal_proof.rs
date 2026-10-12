@@ -1,6 +1,5 @@
 //! Optional Linux proof with two private API daemons, a real PTY and the phone's TS/native code.
 use super::*;
-use anyhow::Context as _;
 use crate::model::ClaimInput;
 use smallclaims::sync::{FleetContext, peer_router};
 use std::os::unix::fs::PermissionsExt;
@@ -242,7 +241,7 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
         )?,
     )?;
     fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o600))?;
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut child = tokio::process::Command::new("node")
         .current_dir(&repo)
         .args([

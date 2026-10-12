@@ -33,7 +33,7 @@ export class RoutedTerminalFollow {
   private current?: TerminalClient;
   private snapshot = '';
   private direct = false;
-  private attached?: TerminalClient;
+  private attached?: { client: TerminalClient; id: string };
   private descriptor?: TerminalRoute;
   private starting = false;
   private timer?: ReturnType<typeof setTimeout>;
@@ -81,8 +81,8 @@ export class RoutedTerminalFollow {
           this.check(screen.value);
           this.snapshot = screen.snapshot.id;
           const attachment = await this.obtain(target.client);
-          if (!valid() || controller.signal.aborted) { this.detach(target.cleanup); return; }
-          this.attached = target.cleanup;
+          if (!valid() || controller.signal.aborted) { void this.detach(target.cleanup, attachment.id); return; }
+          this.attached = { client: target.cleanup, id: attachment.id };
           const first = new Promise<void>((resolve, reject) => { this.first = { resolve, reject }; });
           void first.catch(() => {}); // A close/error can precede the socket-open promise.
           const socket = await target.client.collectionStream({
@@ -112,7 +112,7 @@ export class RoutedTerminalFollow {
           });
           if (!valid() || controller.signal.aborted) { socket.close(); return; }
           this.socket = socket;
-          socket.subscribeTerminal('terminal', this.id, this.pin, attachment);
+          socket.subscribeTerminal('terminal', this.id, this.pin, attachment.capability);
           await first;
           if (valid()) this.routing.memory.succeeded(route);
         })(),
@@ -142,15 +142,15 @@ export class RoutedTerminalFollow {
     if (screen.terminal_id && screen.terminal_id.replace(/^terminal\//, '') !== this.id.replace(/^terminal\//, '')) throw new Error('The owner returned another terminal');
   }
 
-  private async obtain(client: TerminalClient): Promise<string> {
+  private async obtain(client: TerminalClient): Promise<{ id: string; capability: string }> {
     const result = await withFreshTerminalFence(client, this.id, this.pin, fence => {
       const id = this.actionId();
       return client.terminalAttach({ id, idempotency_key: id, fence, parameters: { target_id: this.id } });
     });
     const attachment = result.value.terminal_attachment;
-    if (!attachment?.stream_capability) throw new Error('The terminal issuer returned no stream capability');
+    if (!attachment?.stream_capability || !attachment.attachment_id) throw new Error('The terminal issuer returned no attachment or stream capability');
     if (attachment.runtime_incarnation && attachment.runtime_incarnation !== this.pin) throw new Error(TERMINAL_RESTARTED);
-    return attachment.stream_capability;
+    return { id: attachment.attachment_id, capability: attachment.stream_capability };
   }
 
   private async attachGateway(valid: () => boolean): Promise<void> {
@@ -162,10 +162,10 @@ export class RoutedTerminalFollow {
       this.snapshot = screen.snapshot.id;
       this.current = this.gateway;
       this.handlers.onScreen(screen.value);
-      const capability = await this.obtain(this.gateway);
-      if (!valid()) { this.detach(this.gateway); return; }
-      this.attached = this.gateway;
-      this.gatewaySocket()?.subscribeTerminal('terminal', this.id, this.pin, capability);
+      const attachment = await this.obtain(this.gateway);
+      if (!valid()) { void this.detach(this.gateway, attachment.id); return; }
+      this.attached = { client: this.gateway, id: attachment.id };
+      this.gatewaySocket()?.subscribeTerminal('terminal', this.id, this.pin, attachment.capability);
       this.handlers.onIssue('');
     } catch (error) {
       if (!valid()) return;
@@ -236,10 +236,10 @@ export class RoutedTerminalFollow {
     this.timer = setTimeout(() => { void this.attach(); }, this.retries[Math.min(this.failures++, this.retries.length - 1)]);
   }
 
-  private detach(client: TerminalClient): Promise<void> {
+  private detach(client: TerminalClient, attachmentId: string): Promise<void> {
     return withFreshTerminalFence(client, this.id, this.pin, fence => {
       const id = this.actionId();
-      return client.terminalDetach({ id, idempotency_key: id, fence, parameters: { target_id: this.id } });
+      return client.terminalDetach({ id, idempotency_key: id, fence, parameters: { target_id: attachmentId } });
     }).then(() => {}, () => {});
   }
 
@@ -252,8 +252,8 @@ export class RoutedTerminalFollow {
     const issuer = this.attached, target = this.target;
     this.attached = undefined; this.target = undefined; this.current = undefined; this.snapshot = ''; this.direct = false;
     // Release even if detach is refused or the network closes; the native target is bounded.
-    if (target) void target.release(issuer ? this.detach(issuer) : undefined).catch(() => {});
-    else if (issuer) void this.detach(issuer);
+    if (target) void target.release(issuer ? this.detach(issuer.client, issuer.id) : undefined).catch(() => {});
+    else if (issuer) void this.detach(issuer.client, issuer.id);
   }
 
   private stop(issue: string): void {

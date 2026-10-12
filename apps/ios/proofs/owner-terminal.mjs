@@ -21,14 +21,18 @@ const rpc = (op, args = {}) => new Promise((resolve, reject) => {
   const id = ++sequence; calls.set(id, { resolve, reject }); native.stdin.write(JSON.stringify({ id, op, ...args }) + '\n');
 });
 let action = 0;
-const actionId = () => `action/proof-${++action}`;
+const actionId = () => `action/owner-terminal-proof-${++action}`;
 const socketFactory = (url, protocols, headers) => new WebSocket(url, protocols, { headers });
 function client(url, mark) {
   const value = new St3Client({ baseUrl: url, credential: () => fixture.credential, client: 'isolated-owner-proof' });
-  const stream = value.collectionStream.bind(value), attach = value.terminalAttach.bind(value);
+  const stream = value.collectionStream.bind(value), attach = value.terminalAttach.bind(value), detach = value.terminalDetach.bind(value);
   value.collectionStream = options => stream({ ...options, socket: socketFactory,
     onFrame: frame => { if (frame.kind === 'screen') mark?.('screen', frame); options.onFrame(frame); } });
   value.terminalAttach = async parameters => { const result = await attach(parameters); mark?.('open', result); return result; };
+  value.terminalDetach = parameters => {
+    assert(parameters.parameters.target_id.startsWith('terminal-attachment/'));
+    return detach(parameters).then(result => { mark?.('detach', result); return result; }, error => { mark?.('detach-error', error); throw error; });
+  };
   return value;
 }
 const gateway = client(fixture.gateway);
@@ -44,9 +48,12 @@ try {
   for (const mode of ['direct-cold', 'direct-warm', 'gateway-cold', 'gateway-warm']) {
     const started = performance.now();
     let opened, first, follow, gatewayStream, ownerTarget, label;
-    let doneResolve, doneReject;
+    let doneResolve, doneReject, detachResolve, detachReject;
+    const detached = new Promise((resolve, reject) => { detachResolve = resolve; detachReject = reject; });
     const done = new Promise((resolve, reject) => { doneResolve = resolve; doneReject = reject; });
     const mark = (event, frame) => {
+      if (event === 'detach') detachResolve();
+      if (event === 'detach-error') detachReject(frame);
       if (event === 'open') opened ??= performance.now() - started;
       if (event === 'screen') {
         assert.equal(frame.value.runtime_incarnation, fixture.incarnation);
@@ -87,6 +94,7 @@ try {
       paths: stats ? [...new Set(stats.attempts.map(item => item.selectedPath))] : ['gateway peer relay'] });
     follow.close(); gatewayStream.close();
     await releaseDone;
+    await detached;
     if (mode === 'direct-warm') {
       const owner = client(retainedTarget.url);
       const caps = (await owner.capabilities()).value;

@@ -14,7 +14,7 @@ function harness({ refused, openError, built = true, fallback = true, first = tr
     const calls = { reads: 0, attaches: [], detaches: [], inputs: [], resizes: [], incarnation: 'runtime:one' };
     const screen = () => ({ kind: 'terminal-screen', terminal_id: id, runtime_incarnation: calls.incarnation, lines: [], next_sequence: calls.reads });
     client.terminalScreen = async () => ({ snapshot: { id: `snapshot/${host}/${++calls.reads}` }, value: screen() });
-    client.terminalAttach = async input => { calls.attaches.push(input); if (host === 'owner' && refused) throw refused; return { value: { terminal_attachment: { runtime_incarnation: calls.incarnation, stream_capability: `cap/${host}` } } }; };
+    client.terminalAttach = async input => { calls.attaches.push(input); if (host === 'owner' && refused) throw refused; return { value: { terminal_attachment: { attachment_id: `terminal-attachment/${host}/${input.id}`, runtime_incarnation: calls.incarnation, stream_capability: `cap/${host}` } } }; };
     client.terminalDetach = async input => { calls.detaches.push(input); return { value: {} }; };
     client.terminalInput = async input => { calls.inputs.push(input); return { value: {} }; };
     client.terminalResize = async input => { calls.resizes.push(input); return { value: {} }; };
@@ -47,7 +47,7 @@ test('owner capability, snapshot and socket stay local; gateway windows stay con
   const control = h.feed.terminalControl(id, 'runtime:one'); assert.equal(control.client, h.owner.client); assert.equal(control.snapshot, 'snapshot/owner/frame');
   assert.throws(() => h.feed.terminalControl(id, 'runtime:two'), /restarted/);
   h.gateway.sockets[0].drop(new Error('gateway changed')); await settle(); assert.equal(h.state.releases, 0); assert.equal(h.owner.calls.attaches.length, 1); assert.equal(h.ready.at(-1), true);
-  h.feed.close(); await settle(); assert.equal(h.owner.calls.detaches.length, 1); assert.equal(h.gateway.calls.detaches.length, 0); assert.equal(h.state.releases, 1);
+  h.feed.close(); await settle(); assert.equal(h.owner.calls.detaches.length, 1); assert.equal(h.owner.calls.detaches[0].parameters.target_id, `terminal-attachment/owner/${h.owner.calls.attaches[0].id}`); assert.equal(h.gateway.calls.detaches.length, 0); assert.equal(h.state.releases, 1);
   assert.throws(() => h.feed.terminalControl(id, 'runtime:one'), /not ready/);
 });
 test('refusal falls back visibly with fresh gateway capability and unchanged pin', async () => {

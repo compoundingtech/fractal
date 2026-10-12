@@ -4,11 +4,14 @@ const subject = (id: string) => id.replace(/^terminal\//, '');
 
 /** Only a current gateway-authenticated route can receive the paired credential. */
 export function terminalRoute(value: TerminalRoute, id: string, pin?: string): TerminalRoute {
-  if (!value || subject(value.terminal_id) !== subject(id) || !value.runtime_incarnation || !value.owner_host_id) {
+  if (!value || typeof value.terminal_id !== 'string' || subject(value.terminal_id) !== subject(id)
+    || typeof value.runtime_incarnation !== 'string' || !value.runtime_incarnation
+    || typeof value.owner_host_id !== 'string' || !value.owner_host_id) {
     throw new Error('The gateway returned an invalid terminal route');
   }
   if (pin && value.runtime_incarnation !== pin) throw new Error('Terminal restarted; reopen it before sending input.');
-  if (value.fabric && (!/^[a-f0-9]{64}$/.test(value.fabric.node)
+  if (value.fabric && (typeof value.fabric.node !== 'string' || typeof value.fabric.service !== 'string'
+    || !/^[a-f0-9]{64}$/.test(value.fabric.node)
     || !/^st3\/client\/[^\s]+$/.test(value.fabric.service) || value.fabric.service.length > 255)) {
     throw new Error('The gateway returned an invalid owner Fabric target');
   }
