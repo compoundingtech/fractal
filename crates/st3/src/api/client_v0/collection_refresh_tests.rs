@@ -738,6 +738,27 @@ async fn clients_inventory_follows_connect_disconnect_and_reconnect() {
 }
 
 #[tokio::test]
+async fn usage_inventory_open_period_uses_wall_time_on_an_empty_graph() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "usage-empty-fixture");
+    let before = client_now_ms() as u64;
+    let since = before.saturating_sub(86_400_000);
+    assert!(client_snapshot_time(&new_client_snapshot(&state)) < since as u128);
+    let request = json!({"kind":"subscribe","id":"usage","collection":"usage","since_ms":since});
+    let mut fixture = Fixture::open(state.clone(), true, None, &[]).await;
+    fixture.send(request.clone()).await;
+    let snapshot = fixture.frame().await;
+    assert_eq!(snapshot["kind"], "snapshot", "{snapshot}");
+    inventory_schema(&snapshot);
+    let value = &snapshot["items"][0]["value"];
+    assert_eq!(value["since_ms"], since);
+    assert!(value["until_ms"].as_u64().unwrap() >= before);
+    assert!(value["until_ms"].as_u64().unwrap() <= client_now_ms() as u64);
+    assert_eq!(value["rows"], json!([]));
+    inventory_reconnect(state, ClientSession::local(None).unwrap(), request, &snapshot["order"]).await;
+}
+
+#[tokio::test]
 async fn usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::test_state_named(root.path(), "usage-inventory-fixture");
