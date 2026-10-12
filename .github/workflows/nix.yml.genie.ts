@@ -42,10 +42,7 @@ export default githubWorkflow({
       "steps": [
         {
           "uses": "actions/checkout@v4",
-          "with": {
-            "persist-credentials": false,
-            "ref": "${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}"
-          }
+          "with": { "persist-credentials": false }
         },
         {
           "name": "Verify the persistent Nix runner",
@@ -54,6 +51,15 @@ export default githubWorkflow({
         {
           "name": "Test persistent-store release verification",
           "run": "python3 scripts/ci-nix-release-test"
+        },
+        {
+          "name": "Select the existing release tag",
+          "if": "github.event_name == 'workflow_dispatch' && inputs.tag != ''",
+          "uses": "actions/checkout@v4",
+          "with": {
+            "persist-credentials": false,
+            "ref": "${{ format('refs/tags/{0}', inputs.tag) }}"
+          }
         },
         {
           "name": "Build the package and every native check",

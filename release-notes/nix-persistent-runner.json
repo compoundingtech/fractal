@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "summary": "Verify Nix packages and native checks on a dedicated persistent runner",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, protocol or harness contract change. Telemetry test daemons use the existing non-installed fixture executable; CLI export assertions still run production st3."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No installed daemon restart or service interruption is required."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "CI operators must provide the dedicated smalltalk-nix-persistent Linux runner with preinstalled Nix, a persistent store and CI_LOCAL_CARGO_HOME for GC roots. Dispatch can select an existing release tag without changing that tag or release. Installed users need no additional steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  },
+  "commits": [
+    "2774bbe197c7004ec23538c9540297e4b10e2bfe"
+  ]
+}

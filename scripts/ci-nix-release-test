@@ -16,12 +16,15 @@ def output(*args, cwd=None):
 
 
 system = output('nix', 'eval', '--impure', '--raw', '--expr', 'builtins.currentSystem')
-# Only the fixture's nixpkgs input is needed. Archiving the whole graph also downloads
-# unused historical inputs, even when their package outputs already exist in the store.
-nixpkgs = output('nix', 'eval', '--impure', '--raw', '--expr',
-                 f'(builtins.getFlake {json.dumps(str(repo))}).inputs.nixpkgs.outPath')
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
+    # Root the selected source in the same Nix invocation that resolves it. A bare
+    # eval leaves it collectible between commands, including the fixture's lock.
+    # Only nixpkgs is needed; archiving the graph also fetches historical inputs.
+    nixpkgs_root = root / 'nixpkgs'
+    output('nix', 'build', '--impure', '--out-link', str(nixpkgs_root), '--expr',
+           f'(builtins.getFlake {json.dumps(str(repo))}).inputs.nixpkgs.outPath')
+    nixpkgs = str(nixpkgs_root.resolve(strict=True))
     fixture = root / 'example'
     fixture.mkdir()
     cache = root / 'persistent-cache'

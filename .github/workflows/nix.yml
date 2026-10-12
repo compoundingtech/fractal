@@ -40,13 +40,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.sha }}
       - name: Verify the persistent Nix runner
         run: |
           nix --version
           test -d "$CI_LOCAL_CARGO_HOME"
       - name: Test persistent-store release verification
         run: python3 scripts/ci-nix-release-test
+      - name: Select the existing release tag
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ format('refs/tags/{0}', inputs.tag) }}
       - name: Build the package and every native check
         run: scripts/ci-nix-release build
       - name: Prove the warm cache without downloads or builds
