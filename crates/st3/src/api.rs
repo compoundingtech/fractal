@@ -15038,7 +15038,7 @@ async fn agent_trace_principal(
     if reduced.is_some() {
         return Ok(Json(reduced));
     }
-    // interim: delete at cutover to TODO(upstream issue: accountable human per seat/fleet root).
+    // interim: delete at cutover to compoundingtech/smalltalk#2440.
     // Config::person is command authority, not this reviewed provenance declaration.
     let declared = match std::env::var("ST_AGENT_TRACE_FALLBACK_PRINCIPAL") {
         Ok(value) => Some(value),
