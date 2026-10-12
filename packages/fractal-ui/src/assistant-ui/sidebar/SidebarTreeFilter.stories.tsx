@@ -19,13 +19,13 @@ const fixture: readonly Agent[] = Array.from({ length: 78 }, (_, index) => ({
 const emptyExpanded = new Set<Key>()
 const onExpandedChange = (_keys: Set<Key>) => {}
 const onRowContextMenu = (_item: Agent, event: React.MouseEvent) => event.preventDefault()
-/** Samples per input per phase; p90 is the 18th of 20, so two load spikes cannot set it alone. */
-const sampleCount = 20
+/** Samples per input per phase; p90 is the 27th of 30, so three load spikes cannot set it alone. */
+const sampleCount = 30
 /** Asynchronous settling on a contended CI host; the samples themselves carry the measurements. */
 const settled = { timeout: 10_000 }
 /** Filter keystroke-to-next-frame p90 may be at most this multiple of the reference keystroke p90. */
 const ratioBudget = 3
-/** The synchronous regression control: a busy wait of this many reference p90s per keystroke. */
+/** The synchronous regression control: each filter keystroke busy-waits this multiple of its paired reference keystroke. */
 const controlRatio = 4
 /** Renders are attributed to a keystroke through this many frames after its first post-commit frame. */
 const settleFrames = 2
@@ -140,7 +140,7 @@ const meta = {
   component: SidebarTree,
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke; a busy-wait control of 4x a fresh reference p90 must reject. This kit-only probe does not measure application agent-search latency.' } },
+    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke; a busy-wait control making each filter keystroke wait 4x its paired reference keystroke must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
 } satisfies Meta<typeof SidebarTree>
 export default meta
@@ -153,7 +153,10 @@ type Inputs = { readonly reference: HTMLInputElement; readonly filter: HTMLInput
 
 // One keystroke per sample, each waiting until the previous sample has settled. Reference
 // and filter keystrokes alternate so both distributions see the same host-load windows.
-async function collect(root: HTMLElement, inputs: Inputs) {
+// With `busyControl`, each filter keystroke busy-waits `controlRatio` times the reference
+// keystroke just before it, so every filter sample is at least that multiple of its pair
+// and the filter p90 is at least `controlRatio` times the reference p90, whatever the load.
+async function collect(root: HTMLElement, inputs: Inputs, busyControl = false) {
   const before = { reference: read(root, 'referenceSamples').length, filter: read(root, 'filterSamples').length }
   await expect(inputs.reference.value).toBe('')
   await expect(inputs.filter.value).toBe('')
@@ -161,6 +164,7 @@ async function collect(root: HTMLElement, inputs: Inputs) {
     const toggle = index % 2 === 0
     await userEvent.type(inputs.reference, toggle ? 'r' : '{Backspace}')
     await waitFor(() => expect(read(root, 'referenceSamples')[before.reference + index]?.renders).toBeDefined(), settled)
+    if (busyControl) root.dataset.synchronousCostMs = String(controlRatio * read(root, 'referenceSamples')[before.reference + index]!.durationMs)
     await userEvent.type(inputs.filter, toggle ? 'x' : '{Backspace}')
     await waitFor(() => expect(read(root, 'filterSamples')[before.filter + index]?.renders).toBeDefined(), settled)
   }
@@ -202,8 +206,8 @@ export const FilterKeystrokeToPaint: Story = {
     for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-testid^="filter-probe-"]')) {
       const inputs: Inputs = { filter: within(root).getByRole('searchbox') as HTMLInputElement, reference: within(root).getByRole('textbox') as HTMLInputElement }
       await expect(root.dataset.visibleCount).toBe('78')
-      const phase = async (name: string) => {
-        const sampled = await collect(root, inputs)
+      const phase = async (name: string, busyControl = false) => {
+        const sampled = await collect(root, inputs, busyControl)
         root.dataset[`${name}Ratio`] = String(p90(sampled.samples) / p90(sampled.reference))
         return sampled
       }
@@ -218,10 +222,7 @@ export const FilterKeystrokeToPaint: Story = {
         root.dataset.rebuildControl = 'false'
       }
       try {
-        // Size the busy wait from a fresh unloaded phase's reference p90, then measure it.
-        const calibration = await phase('calibration')
-        root.dataset.synchronousCostMs = String(controlRatio * p90(calibration.reference))
-        const busy = await phase('busy')
+        const busy = await phase('busy', true)
         await expect(assertRatio(busy.samples, busy.reference)).rejects.toThrow()
       } finally {
         root.dataset.synchronousCostMs = '0'
