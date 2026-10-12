@@ -163,7 +163,8 @@ export const NarrowValueColumns:Story={
         const button=row.querySelector<HTMLButtonElement>(':scope > button'),title=row.querySelector('[data-row-column="title-text"]')?.textContent?.trim(),location=row.querySelector('[data-row-field="host"]')?.textContent?.trim();requireContract(button&&title&&location,'Missing production row name fields')
         // The row button is named by exactly its visible title (label-in-name); the painted location and every other fact live in its description.
         const assertRowName=()=>requireContract(within(row).queryByRole('button',{name:title,description:description=>description.includes(location)})===button,'Subagent row name differs from its visible title or its description omits the location')
-        const assertOneTitle=()=>requireContract(row.innerText.split(title).length===2,'Subagent current work repeats its painted title')
+        // Current work paints beside the button; the hidden description legitimately repeats facts, so only painted fields count.
+        const assertOneTitle=()=>requireContract(button.innerText.split(title).length===2&&!row.querySelector('[data-row-field="current-work"]')?.textContent?.includes(title),'Subagent current work repeats its painted title')
         assertRowName();assertOneTitle()
         button.setAttribute('aria-label',`${title}, 0 unread`)
         try{await rejectsControl('Subagent row name differs from its visible title or its description omits the location',assertRowName)}finally{button.removeAttribute('aria-label')}
