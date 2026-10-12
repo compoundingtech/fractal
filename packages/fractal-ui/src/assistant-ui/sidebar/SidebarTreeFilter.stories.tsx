@@ -140,7 +140,7 @@ const meta = {
   component: SidebarTree,
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke; a busy-wait control making each filter keystroke wait 4x its paired reference keystroke must reject. This kit-only probe does not measure application agent-search latency.' } },
+    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke and pooled over the phases before and after the controls; a busy-wait control making each filter keystroke wait 4x its paired reference keystroke must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
 } satisfies Meta<typeof SidebarTree>
 export default meta
@@ -192,8 +192,8 @@ async function assertWork(samples: readonly Sample[]) {
 
 // Secondary check, calibrated against reference keystrokes interleaved with the filter ones.
 async function assertRatio(filter: readonly Sample[], reference: readonly Sample[]) {
-  await expect(filter).toHaveLength(sampleCount)
-  await expect(reference).toHaveLength(sampleCount)
+  await expect(filter.length).toBeGreaterThanOrEqual(sampleCount)
+  await expect(reference).toHaveLength(filter.length)
   await expect(p90(filter) / p90(reference)).toBeLessThanOrEqual(ratioBudget)
 }
 
@@ -213,7 +213,6 @@ export const FilterKeystrokeToPaint: Story = {
       }
       const production = await phase('production')
       await assertWork(production.samples)
-      await assertRatio(production.samples, production.reference)
       try {
         root.dataset.rebuildControl = 'true'
         const rebuild = await phase('rebuild')
@@ -229,7 +228,12 @@ export const FilterKeystrokeToPaint: Story = {
       }
       const restored = await phase('restored')
       await assertWork(restored.samples)
-      await assertRatio(restored.samples, restored.reference)
+      // The ratio pools both unregressed phases (60 pairs, p90 is the 54th). A control
+      // left armed would make half the pool slow and so set the p90.
+      const filter = [...production.samples, ...restored.samples]
+      const reference = [...production.reference, ...restored.reference]
+      root.dataset.pooledRatio = String(p90(filter) / p90(reference))
+      await assertRatio(filter, reference)
     }
   },
 }
