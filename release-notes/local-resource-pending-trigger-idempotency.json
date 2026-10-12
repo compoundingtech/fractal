@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "A failed opening transaction rolls back trigger replacement and marker together. The old-SQL record INSERT before-control returned success on the first hosted run, so the reported conflict cause remains unknown. Exact-ID recovery of the two reported internal invalid records needs a separately reviewed bounded envelope retry path; this change provides no repair command or automatic retry."
+    "detail": "A failed opening transaction rolls back trigger replacement and marker together. In a controlled old-trigger fixture, the first replica-record INSERT and resource-claim INSERT/DELETE succeeded, while re-upserting the same replica record with its subject pending raised the pending-subject UNIQUE error. The NOT EXISTS trigger writes avoid that reproduced conflict. The original invalid records' cause and onset remain unknown. Exact-ID recovery of those records needs a separately reviewed bounded envelope retry path; this change provides no repair command or automatic retry."
   }
 }
