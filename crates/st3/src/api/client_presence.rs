@@ -162,27 +162,29 @@ impl StreamGuard {
     pub(super) fn follow(&self, id: &str, what: String) {
         if let Ok(mut presence) = presence().lock()
             && let Some(stream) = presence.streams.get_mut(&self.0)
+            && stream.follows.get(id) != Some(&what)
         {
-            if stream.follows.get(id) != Some(&what) {
-                stream.follows.insert(id.to_owned(), what);
-                changed(&stream.key.member);
-            }
+            stream.follows.insert(id.to_owned(), what);
+            changed(&stream.key.member);
         }
     }
 
     pub(super) fn unfollow(&self, id: &str) {
         if let Ok(mut presence) = presence().lock()
             && let Some(stream) = presence.streams.get_mut(&self.0)
+            && stream.follows.remove(id).is_some()
         {
-            if stream.follows.remove(id).is_some() { changed(&stream.key.member); }
+            changed(&stream.key.member);
         }
     }
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        if let Ok(mut presence) = presence().lock() {
-            if let Some(stream) = presence.streams.remove(&self.0) { changed(&stream.key.member); }
+        if let Ok(mut presence) = presence().lock()
+            && let Some(stream) = presence.streams.remove(&self.0)
+        {
+            changed(&stream.key.member);
         }
     }
 }

@@ -530,7 +530,7 @@ export type ClientConnection = {
 
 export type ClientConnections = {
   items: Array<ClientConnection>;
-  kind: "connected-clients";
+  kind: "client-connections";
   member: string;
 };
 

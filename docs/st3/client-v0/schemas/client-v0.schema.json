@@ -681,7 +681,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["kind", "member", "items"],
       "properties": {
-        "kind": { "const": "connected-clients" },
+        "kind": { "const": "client-connections" },
         "member": { "type": "string" },
         "items": { "type": "array", "items": { "$ref": "#/$defs/ClientConnection" } }
       }

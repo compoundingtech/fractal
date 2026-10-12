@@ -1194,7 +1194,7 @@ export type ClientConnectionEncoded = typeof ClientConnection.Encoded
 
 export const ClientConnections = /*#__PURE__*/ (() => Schema.Struct({
   "items": Schema.Array(ClientConnection),
-  "kind": Schema.Literal("connected-clients"),
+  "kind": Schema.Literal("client-connections"),
   "member": Schema.String
 }).annotate({ identifier: "ClientConnections" }))()
 export type ClientConnections = typeof ClientConnections.Type
