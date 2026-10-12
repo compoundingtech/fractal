@@ -295,11 +295,18 @@ impl Store {
     pub fn advance_publication_evidence(&self) -> Result<bool> {
         let mut connection = self.connection.write_background();
         let transaction = connection.transaction()?;
-        backfill(&transaction)?;
-        flush(&transaction)?;
-        let complete = ready(&transaction)?;
+        let pending: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_publication_pending)",
+            [],
+            |row| row.get(0),
+        )?;
+        // A loan does one bounded task. Exact deltas drain in runtime maintenance at commit;
+        // otherwise this page touches only derived tables and creates no pending source delta.
+        if !pending {
+            backfill(&transaction)?;
+        }
         transaction.commit()?;
-        Ok(complete)
+        ready(&connection)
     }
 }
 
