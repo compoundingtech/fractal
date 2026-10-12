@@ -86,12 +86,21 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   const empty = canvasElement.querySelector('[data-tool-status="success"]:last-child')!
   await expect(empty.querySelector('button')).toHaveAttribute('aria-expanded', 'false')
   await expect(empty.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
-  await expect(empty).toHaveTextContent('No output')
+  await expectNoOutputWithControl(empty as HTMLElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Open read tool detail' }))
   await expect(canvas.getByRole('region', { name: 'Opened tool detail' }).querySelector('pre')?.textContent).toBe(source)
 } }
 export const ExpandedLight: Story = { ...Expanded, args: { state: 'expanded', scheme: 'light' } }
 const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+async function expectNoOutputWithControl(element: HTMLElement) {
+  const assertAbsent = async () => { await expect(element).not.toHaveTextContent('No output') }
+  await assertAbsent()
+  const placeholder = document.createElement('span')
+  placeholder.textContent = ' · No output'
+  element.append(placeholder)
+  try { await expect(assertAbsent()).rejects.toThrow() } finally { placeholder.remove() }
+  await assertAbsent()
+}
 const longCommand = 'pnpm --filter ./packages/rows exec vitest run src/rows.test.ts --reporter=verbose --coverage --coverage.include=src/rows.ts --testNamePattern "selection survives the projection change across visible and hidden rows"'
 const commandRowItems = ([['short', 'pnpm test rows'], ['long', longCommand]] as const).map(([key, command]): ConversationItem => ({ _tag: 'ToolCall', id: `rows/${key}`, callId: `rows/${key}`, name: 'run', input: { command }, status: 'success', result: { content: '✓ selection retained', mediaType: 'text/x-shellscript', isError: false, at: '2026-01-15T12:00:04Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' }))
 const commandRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'rows', items: commandRowItems, work: workLogTurnFromItems(commandRowItems, { kindFor: () => 'run', running: false, failed: false, interrupted: false, durationMs: 4000, startedAt: at, completeHistory: true }) }] }
@@ -102,20 +111,37 @@ export const LongCommandRow: Story = { render: args => <main {...stylex.props(st
   const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
   await expect(rows).toHaveLength(2)
   const heights = () => rows.map(row => row.getBoundingClientRect().height)
+  const tokenProbe = document.createElement('span')
+  tokenProbe.style.height = g.toolRow
+  tokenProbe.style.display = 'block'
+  canvasElement.append(tokenProbe)
+  const toolRow = parseFloat(getComputedStyle(tokenProbe).height)
+  tokenProbe.remove()
+  await expect(toolRow).toBeGreaterThan(0)
+  const assertTokenHeights = async () => {
+    for (const height of heights()) await expect(height).toBe(toolRow)
+  }
   const label = rows[1]!.querySelector<HTMLElement>('span[title]')!
   await expect(label).toHaveAttribute('title', `run ${longCommand}`)
   await waitFor(() => expect(label.querySelector('[data-syntax-token]')).not.toBeNull())
   await nextFrame()
-  await expect(heights()[1]).toBe(heights()[0])
+  await assertTokenHeights()
   await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
   await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
-  // Control: the same height check must fail once the label is allowed to wrap.
+  // A wrapped label must fail the token-height check, not merely differ from its sibling.
   label.style.whiteSpace = 'normal'
   await nextFrame()
-  await expect(heights()[1]).toBeGreaterThan(heights()[0]!)
-  label.style.whiteSpace = ''
+  try { await expect(assertTokenHeights()).rejects.toThrow() } finally { label.style.whiteSpace = '' }
   await nextFrame()
-  await expect(heights()[1]).toBe(heights()[0])
+  await assertTokenHeights()
+  // Control: equally oversized rows must also fail.
+  for (const row of rows) row.style.minHeight = `calc(${g.toolRow} * 2)`
+  await nextFrame()
+  try { await expect(assertTokenHeights()).rejects.toThrow() } finally {
+    for (const row of rows) row.style.minHeight = ''
+  }
+  await nextFrame()
+  await assertTokenHeights()
 } }
 export const LongCommandRowLight: Story = { ...LongCommandRow, args: { scheme: 'light' } }
 const rawMarker = 'raw-input-sentinel'
@@ -193,7 +219,10 @@ export const RawInputWithoutOutput: Story = { render: args => <main {...stylex.p
   const notice = await canvas.findByRole('alert')
   const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
   await expect(rows).toHaveLength(3)
-  for (const row of rows) await expect(row).toHaveAttribute('aria-expanded', 'false')
+  for (const row of rows) {
+    await expect(row).toHaveAttribute('aria-expanded', 'false')
+    await expectNoOutputWithControl(row)
+  }
   await expect(canvas.queryAllByTestId('tool-detail-preview')).toHaveLength(0)
   await expect(canvasElement.textContent).not.toContain(rawMarker)
   for (const [index, id] of ['silent/read', 'silent/run', 'live/run'].entries()) {
@@ -240,7 +269,7 @@ export const NativeToolOutput: Story = { render: args => <main {...stylex.props(
   await expect(canvas.getAllByTestId('work-call-output')).toHaveLength(2)
   await expect(canvas.getAllByTestId('work-call-output')[0]).toHaveTextContent('String result retained.')
   await expect(canvas.queryByRole('button', { name: /empty output|non-text output/ })).toBeNull()
-  await expect(canvas.getAllByText(/No output/)).toHaveLength(2)
+  await expectNoOutputWithControl(canvasElement)
 } }
 export const NativeToolOutputLight: Story = { ...NativeToolOutput, args: { scheme: 'light' } }
 export const Streaming: Story = { args: { state: 'streaming' }, play: async ({ canvasElement }) => {
@@ -631,7 +660,7 @@ export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(sty
       await expect(raw).toHaveAttribute('aria-expanded', 'false')
       await userEvent.click(raw)
       await expect(raw).toHaveAttribute('aria-expanded', 'true')
-    } else await expect(row).toHaveTextContent('No output')
+    } else await expectNoOutputWithControl(row)
   }
   await expect(within(work).getByRole('button', { name: 'Thinking' })).toBeVisible()
   await expect(work).toHaveTextContent('export const last = visibleRows.at(-1)')
