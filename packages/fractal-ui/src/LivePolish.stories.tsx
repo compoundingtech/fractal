@@ -21,27 +21,50 @@ const styles = stylex.create({
   narrow: { width: g.polishNarrow },
   workbench: { height: g.transcriptFrameHeight },
   transcript: { height: g.transcriptFrameHeight },
+  contrastFailure: { opacity: 0.3 },
 })
 const meta = {
   title: 'Fractal UI/Live polish', component: LiveActivity,
   parameters: { layout: 'fullscreen' },
-  args: { scheme: 'dark' as Scheme, narrow: false, failingControl: false, now: clock, startedAt },
-  argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failingControl: { control: 'boolean', description: 'Remove the run start fact: the elapsed-label assertion must fail.' } },
-  render: function Render({ scheme, narrow, failingControl, now }) {
+  args: { scheme: 'dark' as Scheme, narrow: false, failingControl: false, contrastFailure: false, state: { _tag: 'Working' as const }, now: clock, startedAt },
+  argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failingControl: { control: 'boolean', description: 'Remove the run start fact: the elapsed-label assertion must fail.' }, contrastFailure: { control: 'boolean', description: 'Reduce live-region opacity: the measured contrast assertion must fail.' } },
+  render: function Render({ scheme, narrow, failingControl, contrastFailure, state, now }) {
     const fixture = useWorkbenchFixture('idle')
     return <main {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
-      <section aria-label="Live activity example"><LiveActivity startedAt={failingControl ? undefined : startedAt} now={now} /></section>
+      <section aria-label="Live activity example" {...stylex.props(contrastFailure && styles.contrastFailure)}><LiveActivity state={state} startedAt={failingControl ? undefined : startedAt} now={now} /></section>
       <section aria-label="Long prompt example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [prompt], onNew: async () => {} }}><Transcript title="Long operator message" turns={[{ id: 'polish', prompt, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }]} sync={{ _tag: 'Live', since: clock }} now={clock} observedAt={clock} /></EmbraceRuntimeProvider></section>
       <section aria-label="History action example"><EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><EmbraceComposer variant="C3" history={['Review the selected resource.']} /></EmbraceRuntimeProvider></section>
       <section aria-label="Composer dock example" {...stylex.props(styles.workbench)}><Workbench layout={onePaneLayout} resources={fixture.resources} appearance={decidedAppearance} scheme={scheme} workspaceId={`live-polish-${scheme}-${narrow}`} /></section>
     </main>
   },
-} satisfies Meta<React.ComponentProps<typeof LiveActivity> & { scheme: Scheme; narrow: boolean; failingControl: boolean }>
+} satisfies Meta<React.ComponentProps<typeof LiveActivity> & { scheme: Scheme; narrow: boolean; failingControl: boolean; contrastFailure: boolean }>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Dark1440: Story = { play: async ({ mount, args }) => {
   const canvas = await mount()
-  await expect(within(canvas.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent('Working for 12s')
+  const liveCanvas = within(canvas.getByRole('region', { name: 'Live activity example' }))
+  await expect(liveCanvas.getByTestId('live-work')).toHaveTextContent(args.state._tag === 'Working' ? 'Working for 12s' : 'Waiting for your answer · 4h 27m')
+  const label = liveCanvas.getByTestId('live-activity-label')
+  // The label has no animation, so its trough is its permanent alpha/opacity.
+  await expect(label.getAnimations()).toHaveLength(0)
+  const foreground = getComputedStyle(label).color.match(/[\d.]+/g)!.map(Number)
+  let opacity = 1
+  let background: number[] | undefined
+  for (let element: HTMLElement | null = label; element !== null; element = element.parentElement) {
+    const css = getComputedStyle(element)
+    opacity *= Number(css.opacity)
+    const color = css.backgroundColor.match(/[\d.]+/g)!.map(Number)
+    if (background === undefined && (color[3] ?? 1) === 1) background = color
+  }
+  if (background === undefined) throw new Error('Live contrast requires the real opaque canvas')
+  const alpha = (foreground[3] ?? 1) * opacity
+  const painted = foreground.slice(0, 3).map((channel, index) => channel * alpha + background![index]! * (1 - alpha))
+  const luminance = (channels: readonly number[]) => channels.slice(0, 3).reduce((sum, channel, index) => {
+    const srgb = channel / 255
+    return sum + [0.2126, 0.7152, 0.0722][index]! * (srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4)
+  }, 0)
+  const fgLuminance = luminance(painted), bgLuminance = luminance(background)
+  await expect((Math.max(fgLuminance, bgLuminance) + 0.05) / (Math.min(fgLuminance, bgLuminance) + 0.05)).toBeGreaterThanOrEqual(4.5)
   const longPromptCanvas = within(canvas.getByRole('region', { name: 'Long prompt example' }))
   const expand = await longPromptCanvas.findByRole('button', { name: 'Show full message' })
   const message = longPromptCanvas.getByTestId('user-message')
@@ -74,8 +97,8 @@ export const Dark1440: Story = { play: async ({ mount, args }) => {
   await expect(getComputedStyle(send).opacity).toBe('1')
   await expect(send.getBoundingClientRect().width).toBe(32)
   if (args.scheme === 'light') await expect(getComputedStyle(dock).backgroundColor).toBe('rgb(252, 252, 252)')
-  const advanced = await mount(<meta.render {...args} now={clock + 1000} />)
-  await expect(within(advanced.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent('Working for 13s')
+  const advanced = await mount(<meta.render {...args} now={args.now + 1000} />)
+  await expect(within(advanced.getByRole('region', { name: 'Live activity example' })).getByTestId('live-work')).toHaveTextContent(args.state._tag === 'Working' ? 'Working for 13s' : 'Waiting for your answer · 4h 27m')
   const restoredDock = within(advanced.getByRole('region', { name: 'Composer dock example' })).getByTestId('workbench-composer-dock')
   await waitFor(() => {
     expect(within(restoredDock).getByTestId('composer-input')).toHaveValue('Keep the selected resource visible.')
@@ -86,3 +109,7 @@ export const Light1440: Story = { ...Dark1440, args: { scheme: 'light' } }
 export const Dark440: Story = { ...Dark1440, args: { narrow: true } }
 export const Light440: Story = { ...Dark1440, args: { narrow: true, scheme: 'light' } }
 export const AllStates: Story = { ...Dark1440 }
+export const WaitingDark1440: Story = { ...Dark1440, args: { state: { _tag: 'WaitingForAnswer' }, now: Date.parse(startedAt) + 16027000 } }
+export const WaitingLight1440: Story = { ...WaitingDark1440, args: { ...WaitingDark1440.args, scheme: 'light' } }
+export const WaitingDark440: Story = { ...WaitingDark1440, args: { ...WaitingDark1440.args, narrow: true } }
+export const WaitingLight440: Story = { ...WaitingDark1440, args: { ...WaitingDark1440.args, narrow: true, scheme: 'light' } }
