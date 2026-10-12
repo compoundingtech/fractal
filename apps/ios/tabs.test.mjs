@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { parseDevLink, tabLabel, tabNamed, tabOrder, TABS } from './tabs.ts';
 assert.deepEqual(TABS, ['Now', 'Resources', 'Fleet', 'Spaces']);
 assert.equal(tabNamed('resources'), 'Resources');
+// Initial navigation ignores a retired name and a saved order from an older build.
+assert.equal(tabNamed('Home') ?? tabOrder(['Agents', 'Missions', 'Fleet', 'Home'])[0], 'Now');
 assert.equal(tabNamed(' Now '), 'Now');
 for (const retired of ['Home', 'Agents', 'Missions', 'Chat', 'Control', 'Usage', 'Glasses']) assert.equal(tabNamed(retired), null);
 assert.deepEqual(tabOrder(['Fleet', 'Resources', 'Now', 'Spaces']), ['Fleet', 'Resources', 'Now', 'Spaces']);

@@ -56,6 +56,7 @@ pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
 mod checkpoint_completion;
+pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 pub mod heal;
@@ -70,7 +71,7 @@ pub use checkpoint::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
     CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView,
     CheckpointProof, ClaimTombstone, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone,
-    SealedSet, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
+    SealedSet, StoreCopy, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
     verify_checkpoint_manifest,
 };
 pub use checkpoint_agreement::write_time;
@@ -709,6 +710,10 @@ CREATE INDEX IF NOT EXISTS checkpoint_claims_envelope
 ON checkpoint_claims(writer, sequence, envelope_hash);
 CREATE INDEX IF NOT EXISTS checkpoint_claims_operation
 ON checkpoint_claims(operation_id) WHERE operation_id IS NOT NULL;
+-- Cover typed checkpoint metadata for one operation without fetching checkpoint table rows.
+CREATE INDEX IF NOT EXISTS checkpoint_claims_operation_digest
+ON checkpoint_claims(operation_id, request_digest, id)
+WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL;
 "#;
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
@@ -6388,6 +6393,15 @@ impl Store {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
     }
 
+    /// An opaque process/Store-lifetime observation token plus its deferred flag, sampled
+    /// together. A changed token can invalidate cached consumers even if they missed the
+    /// pending interval. This is not a persisted cut or a certificate for replay/heal,
+    /// physical removal, OLD images or every projection path. Its existing generation wraps.
+    pub fn replication_projection_observation(&self) -> (u64, bool) {
+        let state = self.replication_projection_state.load(Ordering::Acquire);
+        (state, state & 1 != 0)
+    }
+
     pub fn projection_contention_generation(&self) -> u64 {
         self.projection_contention_generation.load(Ordering::Acquire)
     }
@@ -7939,7 +7953,19 @@ const CHECKPOINT_OPERATION_METADATA_QUERY: &str =
          AND json_type(body,'$._operation.request_digest')='text'
          AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))";
 
-/// What `expected_operations` holds for one operation, read through the operation index.
+// The reducer and typed decoding are unchanged; only the affected-key covering access changes.
+const CHECKPOINT_OPERATION_KEYED_QUERY: &str =
+    "SELECT request_digest,id FROM checkpoint_claims INDEXED BY checkpoint_claims_operation_digest
+     WHERE operation_id=?1 AND operation_id IS NOT NULL AND request_digest IS NOT NULL
+       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
+       AND NOT EXISTS(SELECT 1 FROM claims WHERE id=checkpoint_claims.id
+         AND json_type(body,'$._operation.id')='text'
+         AND json_type(body,'$._operation.request_digest')='text'
+         AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))";
+
+/// What `expected_operations` holds for one operation, read through the operation indexes.
+/// Requires the current schema installed by Store::open/open_memory before readers are exposed.
+/// Read-only/immutable copies must retain that schema; an older raw connection fails closed.
 pub fn expected_operation(
     connection: &Connection,
     operation_id: &str,
@@ -7958,15 +7984,7 @@ pub fn expected_operation(
         let (claim_id, request_digest) = row?;
         operation.include(request_digest, claim_id, true);
     }
-    let mut statement = connection.prepare_cached(
-        "SELECT request_digest,id FROM checkpoint_claims
-         WHERE operation_id=?1 AND request_digest IS NOT NULL
-           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
-           AND NOT EXISTS(SELECT 1 FROM claims WHERE id=checkpoint_claims.id
-             AND json_type(body,'$._operation.id')='text'
-             AND json_type(body,'$._operation.request_digest')='text'
-             AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))",
-    )?;
+    let mut statement = connection.prepare_cached(CHECKPOINT_OPERATION_KEYED_QUERY)?;
     for row in statement.query_map([operation_id], |row| Ok((row.get(0)?, row.get(1)?)))? {
         let (request_digest, claim_id) = row?;
         operation.include(request_digest, claim_id, false);

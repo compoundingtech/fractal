@@ -19,7 +19,7 @@ The chrome is native and keeps the system look and fonts. The content is React a
 | Tab bar with SF Symbol icons and the Now badge | `UITabBarController` | `@react-navigation/bottom-tabs/unstable` `createNativeBottomTabNavigator`, on react-native-screens' tabs |
 | Each tab's stack, navigation bar, back button, swipe-back | `UINavigationController` | `@react-navigation/native-stack` on react-native-screens |
 | Bar buttons: Terminal and New mission (+) | `UIBarButtonItem` and `UIMenu` | native-stack `unstable_headerRightItems` / `unstable_headerLeftItems` |
-| Resources filter | `UITextField` | React Native `TextInput` |
+| Resources filter and searchable agent/mission lists | `UITextField` | React Native `TextInput` and native-stack `headerSearchBarOptions` |
 | Planner choice | `UISegmentedControl` | `@react-native-segmented-control/segmented-control` |
 | Long-press menus on Now rows | `UIContextMenuInteraction` / `UIMenu` | `@react-native-menu/menu` |
 | Pull to refresh | `UIRefreshControl` | React Native `RefreshControl` |
@@ -29,11 +29,10 @@ The chrome is native and keeps the system look and fonts. The content is React a
 Each tab holds its own native stack, and every detail (a conversation, terminal, mission, attention item, launch, past sessions) can be pushed in any tab, so the back button returns where the person came from. A conversation and a terminal hide the tab bar while they are on top, as Messages does.
 
 - **Now** lists what stui's Home lists: every unresolved request, review, approval, native harness prompt and provider sign-in for the paired person, plus the updates they asked for, grouped by tier (somebody is stopped on you, today, when there is time) with stui's glyphs and a legend. The first thing it prints is the alert count: nothing at zero, `1 alert`, `N alerts` otherwise; the tab's badge shows the same number. An alert is whatever blocks or waits on the person (an update asks nothing and is not one). The app reads `alert` on each attention row, and a daemon that predates alerts is read as everything but an update or an unread message. The wire names (`attention`, `/attention`) are unchanged, so older and newer builds keep working. An item opens its detail, with resolve when st offers it; a long press offers the agent's conversation and the mission.
-- **Resources** opens on the person's own folders, then Everything else grouped into Agents, Missions, Terminals and Machines. The filter stays on top. Agent and mission status glyphs and needs-you dots remain visible, including sessions found running. A row opens its conversation, mission or terminal; long-press offers Move to. New folder, folder rename and confirmed deletion use `arrangement.edit`; each folder's + finds a resource not already in it. Drag handles move resources or reorder rows and folders; tapping a handle changes nothing. The stream supplies the winning registers after edits. Collapse choices and unavailable resource names stay on this phone.
-- **Spaces** lists the person's workspaces and their tabs; spaces made in stui appear here live.
-- **Fleet** shows machines, sessions found running on the gateway machine, agent work, this connection, paired devices, and the tab order.
-- **Alerts in a conversation.** Each alert shows above the conversation of the agent it belongs to (`conversation_id`; a provider sign-in shared by several seats shows in each, once, naming the others), a line that opens to its question and its answers, and starts open when it is the only one. Requests are answered there as they are on Home. A Claude permission prompt (`prompt.respond`) shows the pending tool call in full, from the conversation where Claude records it before asking, beside Allow and Deny. The prompt names no call, so Allow is offered only when exactly one call is unanswered and shown; with several, all are listed and only Deny is offered, with a pointer to the terminal. Deny is always offered, and an answer in the terminal still wins. A prompt of another harness, or a question prompt, says to answer it in the terminal. A seat whose harness is compacting its conversation reads `compacting` in the agent strip and the Agents list: a status, never an alert.
-- **Spaces** (st keeps them as `glass` resources) have a fifth tab, on unless turned off under Fleet › tabs. It holds the person's spaces from stui, followed live from st when the gateway grants `glasses`. The tab shows one thing at a time: a picker when there is more than one space, then the chosen space's tabs, Home first, with `◆` where something needs the person. A tab with one pane opens it (a conversation, a mission, or Fleet for a machine); a split tab lists its panes, and each opens the same way. A pane whose subject st no longer lists says it is gone. The phone reads spaces and never changes them.
+- **Resources** keeps the Agents and Missions lists one tap away, with their search, list/tree controls, conversation results and mission cards. It opens on the person's own folders, then Everything else grouped into Agents, Missions, Terminals and Machines. The filter stays on top. Agent and mission status glyphs and needs-you dots remain visible, including sessions found running. A row opens its conversation, mission or terminal; long-press offers Move to. New folder, folder rename and confirmed deletion use `arrangement.edit`; each folder's + finds a resource not already in it. Drag handles move resources or reorder rows and folders; tapping a handle changes nothing. The stream supplies the winning registers after edits. Collapse choices and unavailable resource names stay on this phone.
+- **Fleet** shows machines, sessions found running on the gateway machine, this connection, paired devices, and the tab order.
+- **Alerts in a conversation.** Each alert shows above the conversation of the agent it belongs to (`conversation_id`; a provider sign-in shared by several seats shows in each, once, naming the others), a line that opens to its question and its answers, and starts open when it is the only one. Requests are answered there as they are on Now. A Claude permission prompt (`prompt.respond`) shows the pending tool call in full, from the conversation where Claude records it before asking, beside Allow and Deny. The prompt names no call, so Allow is offered only when exactly one call is unanswered and shown; with several, all are listed and only Deny is offered, with a pointer to the terminal. Deny is always offered, and an answer in the terminal still wins. A prompt of another harness, or a question prompt, says to answer it in the terminal. A seat whose harness is compacting its conversation reads `compacting` in the agent strip and the Agents list: a status, never an alert.
+- **Spaces** is always one of the four tabs. It lists the person's spaces by name, followed live when the gateway grants `glasses`; selecting a space shows its tabs grouped by pane in the computer's order. A pane opens its conversation, mission, resource, terminal or Fleet for a machine. An unavailable subject stays marked. The phone reads spaces and never changes them. Saved spaces and sidebar folders remain available offline, with the age of the cached data shown.
 
 New agent offers a repository from the selected machine’s agents, or an absolute path you type. Selecting a repository creates a Git worktree using the agent’s safe simple name as its default branch, with `origin/main` as the editable base. An empty repository uses a plain workspace. Workspace is optional in either case; st chooses a new directory when it is empty. The conversation header shows the requested worktree and branch, and any checkout failure remains visible as the agent’s fault.
 
@@ -72,7 +71,7 @@ The Debug-only fabric proof (`fabric-proof` links, the separate offline Debug ap
 ## Resource sidebar
 
 Resources opens shared folders followed by Everything else, grouped by Agents, Missions,
-Terminals and Machines. The filter row stays above the person's folders. This view follows
+Terminals and Machines. Agents and Missions open their full searchable lists in one tap. The filter row stays above the person's folders. This view follows
 the optional arrangements stream; older pairings retain the grouped resource browser.
 Tap a resource to open it and a heading to collapse it. Long-press a resource for Move to;
 long-press a folder for rename or confirmed deletion. Each folder's + finds a resource to
@@ -85,3 +84,14 @@ created only on the first edit.
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored
 tab orders are intentionally retired. A fresh workspace names its host and points to
 Now → New → New terminal; New mission is available there too.
+
+Pull requests, repositories and other observed graph resources are available through the
+existing optional `resources.list` route. Resources refreshes three bounded 200-item windows
+when it opens or is pulled to refresh; there is no catalog polling or additional collection
+subscription. Truncation or an unsupported read is visible while the ordinary browser stays
+usable. Resource details show the observed kind and facts with an explicit Open link button,
+and resource tabs open from Spaces. The folder's + finder can also file an explicitly typed
+graph subject. Session and PTY IDs only navigate; placements require stable graph subjects.
+
+Opening a resource detail also reads its exact subject with the existing prefix filter,
+including subjects beyond the catalog windows.

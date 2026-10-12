@@ -1164,7 +1164,8 @@ export const Capabilities = /*#__PURE__*/ (() => Schema.Struct({
   "capabilities": Schema.Array(Capability),
   "event_cursor": Cursor,
   "kind": Schema.Literal("capabilities"),
-  "limits": Schema.Struct({ "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_page_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1024)), "max_wait_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
+  "limits": Schema.Struct({ "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), /** The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096. */
+"max_message_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))).annotate({ description: "The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096." }), "max_page_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1024)), "max_wait_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
   /** Compile-time build identity of the responding daemon; absent on older servers. */
   "machine_version": optionalKey(Schema.String).annotate({ description: "Compile-time build identity of the responding daemon; absent on older servers." }),
   "oldest_event_cursor": Cursor,
@@ -1581,6 +1582,10 @@ export type MachineEncoded = typeof Machine.Encoded
 
 export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment)),
+  /** The length in UTF-8 bytes of the whole text, with body_ref. */
+  "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "The length in UTF-8 bytes of the whole text, with body_ref." }),
+  /** Present when content is only the start of a longer message; read the whole text with message-body.get. */
+  "body_ref": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u")))).annotate({ description: "Present when content is only the start of a longer message; read the whole text with message-body.get." }),
   "content": Schema.String,
   "from": Id,
   "id": Id,
@@ -1883,7 +1888,7 @@ export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
-  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read"]),
+  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read","dismissed"]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])
 }).annotate({ identifier: "PersonAnswer" }))()
@@ -1937,6 +1942,8 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "revision": Revision,
   "state": WorkState,
+  /** Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match. */
+  "submitted_incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match." }),
   "timeout_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1))), NULL_NONE),
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "updated_at": Timestamp,
@@ -2547,6 +2554,7 @@ export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment)),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
+  "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "from": optionalKey(ParticipantRef),
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
@@ -2691,6 +2699,25 @@ export const ConversationSearch = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ConversationSearch" }))()
 export type ConversationSearch = typeof ConversationSearch.Type
 export type ConversationSearchEncoded = typeof ConversationSearch.Encoded
+
+/** A person's current advisory note. It never assigns work, grants authority or satisfies a gate. */
+export const DirectiveNote = /*#__PURE__*/ (() => Schema.Struct({
+  "author": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
+  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
+  "revision": Schema.String,
+  /** At most 4096 UTF-8 bytes; whitespace-only text is refused. */
+  "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(4096)).annotate({ description: "At most 4096 UTF-8 bytes; whitespace-only text is refused." }),
+  "time": Timestamp
+}).annotate({ identifier: "DirectiveNote", description: "A person's current advisory note. It never assigns work, grants authority or satisfies a gate." }))()
+export type DirectiveNote = typeof DirectiveNote.Type
+export type DirectiveNoteEncoded = typeof DirectiveNote.Encoded
+
+export const DirectiveNotes = /*#__PURE__*/ (() => Schema.Struct({
+  "notes": Schema.Array(DirectiveNote)
+}).annotate({ identifier: "DirectiveNotes" }))()
+export type DirectiveNotes = typeof DirectiveNotes.Type
+export type DirectiveNotesEncoded = typeof DirectiveNotes.Encoded
 
 export const DocumentContent = /*#__PURE__*/ (() => Schema.Struct({
   "bytes": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255))),
@@ -2941,13 +2968,13 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
 /** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. */
-export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
+export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
@@ -2987,6 +3014,16 @@ export const HostRepositories = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "HostRepositories" }))()
 export type HostRepositories = typeof HostRepositories.Type
 export type HostRepositoriesEncoded = typeof HostRepositories.Encoded
+
+export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
+  "bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent. */
+  "complete": optionalKey(Schema.Boolean).annotate({ description: "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }),
+  "message": Schema.String,
+  "text": Schema.String
+}).annotate({ identifier: "MessageBody" }))()
+export type MessageBody = typeof MessageBody.Type
+export type MessageBodyEncoded = typeof MessageBody.Encoded
 
 export const ObservationAccepted = /*#__PURE__*/ (() => Schema.Struct({
   "accepted": Schema.Literal(true)

@@ -496,6 +496,7 @@ export type Capabilities = {
   max_glass_depth?: number;
   max_glass_nodes?: number;
   max_glasses?: number;
+  max_message_bytes?: number;
   max_page_items: number;
   max_response_bytes: number;
   max_wait_ms: number;
@@ -737,6 +738,19 @@ export type Diagnostic = {
   severity: "info" | "warning" | "error";
 };
 
+export type DirectiveNote = {
+  author: string;
+  expires_at?: (Timestamp | null);
+  person: string;
+  revision: string;
+  text: string;
+  time: Timestamp;
+};
+
+export type DirectiveNotes = {
+  notes: Array<DirectiveNote>;
+};
+
 export type DocumentContent = {
   bytes: Array<number>;
   reference: string;
@@ -746,10 +760,10 @@ export type Envelope = {
   api_version: "st3.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
+  value: (DirectiveNotes | Capabilities | DocumentContent | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | PairingChallenge | PairedSession | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog);
 };
 
-export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "internal" | string);
+export type ErrorCode = ("attention-migrated" | "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired" | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle" | "arrangement-body-too-large" | "arrangement-owner-forbidden" | "invalid-arrangement-subject" | "invalid-arrangement-action" | "invalid-arrangement-operations" | "invalid-arrangement-folder" | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference" | "not-found" | "forbidden" | "unsupported-capability" | "validation-failed" | "idempotency-conflict" | "issuer-required" | "stale-fence" | "cursor-gap" | "page-cursor-expired" | "rate-limited" | "runtime-not-local" | "runtime-authority-indeterminate" | "remote-unavailable" | "terminal-unavailable" | "terminal-ended" | "timeline-history-incomplete" | "projection-detail-too-large" | "projection-detail-invalid-source" | "conversation-content-invalidated" | "transcript-unavailable" | "blob-too-large" | "unsupported-media-type" | "blob-content-mismatch" | "blob-quota-exceeded" | "blob-not-found" | "blob-expired" | "message-too-large" | "message-store-full" | "long-message-signature-unsupported" | "internal" | string);
 
 export type ErrorEnvelope = {
   api_version: "st3.client.v0";
@@ -1043,6 +1057,8 @@ export type MailBacklog = {
 
 export type Message = ResourceHeader & {
   attachments?: Array<Attachment>;
+  body_bytes?: number;
+  body_ref?: string;
   content: string;
   from: Id;
   in_reply_to?: (Id | null);
@@ -1053,6 +1069,13 @@ export type Message = ResourceHeader & {
   tags?: Array<string>;
   title?: string | null;
   to: Id;
+};
+
+export type MessageBody = {
+  bytes: number;
+  complete?: boolean;
+  message: string;
+  text: string;
 };
 
 export type MessageProvenance = {
@@ -1334,7 +1357,7 @@ export type ParticipantRef = string;
 export type PersonAnswer = {
   id?: string;
   label?: string;
-  outcome: "accept" | "decline" | "request_changes" | "selected" | "custom" | "feedback" | "read";
+  outcome: "accept" | "decline" | "request_changes" | "selected" | "custom" | "feedback" | "read" | "dismissed";
   text?: string;
   type: "decision" | "choice" | "feedback" | "update";
 };
@@ -1845,6 +1868,7 @@ export type TimelineErrorBody = {
 export type TimelineMessageBody = {
   attachments?: Array<Attachment>;
   blocks?: Array<TimelineBlock>;
+  body_bytes?: number;
   from?: ParticipantRef;
   message_id: string;
   provenance?: MessageProvenance;
@@ -2384,6 +2408,7 @@ export type Work = ResourceHeader & {
   progress_at?: (Timestamp | null);
   readiness_epoch: number;
   state: WorkState;
+  submitted_incarnation?: string | null;
   timeout_ms?: number | null;
   title?: string | null;
   usage?: (UsageSummary | null);

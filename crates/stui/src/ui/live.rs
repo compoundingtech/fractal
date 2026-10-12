@@ -208,6 +208,7 @@ enum Fetched {
     /// The Fleet tab's machines and paired devices.
     Machines(Collection),
     Terminals(Vec<super::resource_sidebar::ResourceRow>, bool),
+    Observations { generation: u64, outcome: Result<(Vec<st3_client::ResourceObservation>, bool), String> },
     /// Token spend over a period of this many hours, or why st could not say.
     Usage(u64, Result<st3_client::UsagePeriod, String>),
     /// The clients connected to this member, or why they could not be read.
@@ -330,6 +331,8 @@ pub fn run(context: Context) -> Result<()> {
     let mut pending: Vec<Pending> = Vec::new();
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
+    ui.drafts_path = super::drafts_store::path();
+    ui.load_drafts();
     if glass.is_some() { ui.resource_sidebar.load(&person); }
     ui.resource_sidebar.observe(&ui.world);
     ui.build = true;
@@ -391,6 +394,11 @@ pub fn run(context: Context) -> Result<()> {
     let mut cursor_style: Option<crossterm::cursor::SetCursorStyle> = None;
     // The tab shown on the last pass: opening a tab loads what only it needs.
     let mut shown_tab = usize::MAX;
+    let mut resources_shown = false;
+    let mut resource_pane = None;
+    let mut resources_stale = true;
+    let mut resources_reading = false;
+    let mut resources_generation = 0_u64;
     // Whether the feed was last told to follow the missions window, and until when the last time
     // one was on screen keeps it followed.
     let mut missions_sent = false;
@@ -443,6 +451,7 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::GlassesVersion(version) => super::set_glasses_version(version),
                 feed::Update::Connected(member) => {
                     client = member;
+                    resources_generation += 1; resources_stale = true;
                     machines_stale = true;
                     extras.live = false;
                     attached = None;
@@ -514,12 +523,18 @@ pub fn run(context: Context) -> Result<()> {
                         sync: None,
                     };
                     match window {
-                        Window::Attention => model.now = collection,
+                        Window::Attention => {
+                            model.now = collection;
+                            extras.attention_live = true;
+                        }
                         Window::Missions => {
                             model.missions = collection;
                             extras.missions_followed = true;
                         }
-                        Window::Agents => model.agents = collection,
+                        Window::Agents => {
+                            model.agents = collection;
+                            extras.agents_live = true;
+                        }
                         Window::Glasses | Window::Summary | Window::Arrangements => {}
                     }
                     extras.live = true;
@@ -715,7 +730,7 @@ pub fn run(context: Context) -> Result<()> {
                         Ok(session) => model.add_opened_session(*session),
                         Err(message) => {
                             ui.flash(format!("Could not open {id}: {message}"));
-                            failed.insert(id, message);
+                            failed.insert(id, format!("{message} · open it again to retry"));
                         }
                     }
                 }
@@ -732,6 +747,12 @@ pub fn run(context: Context) -> Result<()> {
                     machines_reading = false;
                     ui.flash(format!("Could not load machines: {why}"));
                 }
+                Fetched::Observations { generation, outcome } => {
+                    resources_reading = false;
+                    if generation == resources_generation { match outcome {
+                    Ok((rows, has_more)) => { ui.resource_sidebar.observations = rows; ui.resource_sidebar.observations_has_more = has_more; ui.resource_sidebar.observations_issue = None; }
+                    Err(error) => ui.resource_sidebar.observations_issue = Some(error),
+                }}},
                 Fetched::Terminals(rows, has_more) => {
                     ui.resource_sidebar.terminals = rows;
                     ui.resource_sidebar.terminals_has_more = has_more;
@@ -854,6 +875,19 @@ pub fn run(context: Context) -> Result<()> {
         let (tab, selected) = ui.focus();
         // What a tab needs when it opens: harness sessions st did not start (Agents), and the
         // machines and devices (Fleet). They are read then, never on a timer.
+        let showing_resources = ui.glasses.as_ref().is_some_and(|g| g.sidebar.shown);
+        let focused_resource = match ui.focused_pane() { Some(super::pane::Pane::Resource(id)) => Some(id), _ => None };
+        if tab != shown_tab || showing_resources && !resources_shown || focused_resource.is_some() && focused_resource != resource_pane { resources_stale = true; }
+        resource_pane = focused_resource.clone();
+        if ui.glasses.is_some() && extras.live && resources_stale && !resources_reading {
+            resources_stale = false; resources_reading = true;
+            let reader = client.clone(); let tx = fetched_tx.clone(); let generation = resources_generation;
+            runtime.spawn(async move {
+                let outcome = super::observed_resources::read(&reader, focused_resource.as_deref()).await.map_err(|error| format!("Not available on this connection: {}", error.plain()));
+                let _ = tx.send(Fetched::Observations { generation, outcome });
+            });
+        }
+        resources_shown = showing_resources;
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
             // pauses it, and coming back shows the current screen first.
@@ -1028,11 +1062,14 @@ pub fn run(context: Context) -> Result<()> {
         if let Some(trace) = &mut open_timing {
             trace.intend(&wanted);
         }
+        retry_failed_opens(&mut sessions_requested, &failed, &wanted);
         for id in &wanted {
             if id.starts_with("session/")
                 && !model.opened_sessions.contains_key(id)
                 && sessions_requested.insert(id.clone())
             {
+                // Opened again after a failure: loading, not the old error, until st answers.
+                failed.remove(id);
                 let client = client.clone();
                 let tx = fetched_tx.clone();
                 let id = id.clone();
@@ -1219,6 +1256,7 @@ pub fn run(context: Context) -> Result<()> {
                         let client = client.clone();
                         let tx = fetched_tx.clone();
                         let agent = agent.clone();
+                        let fallback = ui.terminal_fallback;
                         runtime.spawn(async move {
                             let attached = attach_known_then_direct(
                                 &client,
@@ -1226,6 +1264,7 @@ pub fn run(context: Context) -> Result<()> {
                                 known,
                                 &runtime_ids,
                                 owner.as_deref(),
+                                fallback,
                             )
                             .await;
                             let _ = tx.send(match attached {
@@ -1480,6 +1519,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_terminal_hold();
         ui.step_default_view();
         ui.step_terminal_tabs();
+        ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
         terminal.draw(|frame| {
@@ -1574,6 +1614,7 @@ pub fn run(context: Context) -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
             let owner = terminal_owners.get(&agent).cloned();
+            let fallback = ui.terminal_fallback;
             runtime.spawn(async move {
                 let outcome = attach_direct(
                     &client,
@@ -1581,6 +1622,7 @@ pub fn run(context: Context) -> Result<()> {
                     &runtime_ids,
                     Some(&expected),
                     owner.as_deref(),
+                    fallback,
                 )
                 .await;
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
@@ -1629,6 +1671,7 @@ pub fn run(context: Context) -> Result<()> {
         ));
     }
     save_cache(cache_path.as_deref(), &person, &model);
+    ui.flush_drafts();
     Ok(())
 }
 
@@ -1715,6 +1758,16 @@ fn conversations(
         out.insert(target.to_owned(), load);
     }
     out
+}
+
+/// A session that could not be opened is asked for again once the person has left it and opens
+/// it again; while it stays on screen, the error stays, so a refusal is not asked in a loop.
+fn retry_failed_opens(
+    requested: &mut HashSet<String>,
+    failed: &BTreeMap<String, String>,
+    wanted: &[String],
+) {
+    requested.retain(|id| !failed.contains_key(id) || wanted.contains(id));
 }
 
 /// Entries per page read back: st's largest, so a long session takes few requests.
@@ -3362,6 +3415,37 @@ mod tests {
     }
 
     #[test]
+    fn a_session_that_failed_to_open_says_why_and_is_asked_again_when_reopened() {
+        let session = "session/example-child".to_owned();
+        let failed = BTreeMap::from([(
+            session.clone(),
+            "not found · open it again to retry".to_owned(),
+        )]);
+        let shown = conversations(
+            &Model::default(),
+            "person/avery",
+            &BTreeMap::new(),
+            &failed,
+            &[session.clone()],
+        );
+        match &shown[&session] {
+            Load::Failed(reason) => assert!(
+                reason.contains("not found") && reason.contains("retry"),
+                "{reason}"
+            ),
+            other => panic!("a failed open is an error, not loading: {other:?}"),
+        }
+        let mut requested = HashSet::from([session.clone(), "session/example-open".to_owned()]);
+        // On screen, the failure stays and is not asked again in a loop.
+        retry_failed_opens(&mut requested, &failed, std::slice::from_ref(&session));
+        assert!(requested.contains(&session));
+        // Left, it is forgotten, so opening it again asks st once more; a good open is kept.
+        retry_failed_opens(&mut requested, &failed, &[]);
+        assert!(!requested.contains(&session));
+        assert!(requested.contains("session/example-open"));
+    }
+
+    #[test]
     fn a_conversation_says_above_its_oldest_entry_how_far_back_it_goes() {
         let items: Vec<st3_client::TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"c","sequence":2,"revision":1,"timestamp":"2026-10-01T10:00:00Z","role":"assistant","type":"content","final":true,
@@ -3432,7 +3516,7 @@ mod tests {
         let conversing = [target.clone()];
         assert_eq!(
             moved_sessions(&conversing, &model, &timelines, &mut asked),
-            [target.clone()]
+            std::slice::from_ref(&target)
         );
         // Asked once for that session, not on every pass.
         assert!(moved_sessions(&conversing, &model, &timelines, &mut asked).is_empty());
@@ -3543,15 +3627,18 @@ async fn attach_known_then_direct(
     known: Option<(String, String, String)>,
     runtime_ids: &[String],
     owner: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
     if let Some((name, terminal, incarnation)) = known
         && !agent.starts_with("terminal/")
-        && let Ok(direct) =
-            attach_terminal(client, agent, name, &terminal, incarnation, owner, None).await
     {
-        return Ok(direct);
+        // Once selected, keep this incarnation through every route failure. Rediscovery after
+        // an error could silently attach a process that restarted in the meantime.
+        return attach_terminal(
+            client, agent, (name, incarnation), &terminal, owner, None, fallback,
+        ).await;
     }
-    attach_direct(client, agent, runtime_ids, None, owner).await
+    attach_direct(client, agent, runtime_ids, None, owner, fallback).await
 }
 
 async fn attach_direct(
@@ -3560,6 +3647,7 @@ async fn attach_direct(
     runtime_ids: &[String],
     expected: Option<&str>,
     owner: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
     let mut found = Vec::new();
     if subject.starts_with("terminal/") {
@@ -3611,11 +3699,11 @@ async fn attach_direct(
         match attach_terminal(
             client,
             subject,
-            name,
+            (name, incarnation),
             &terminal,
-            incarnation,
             owner.as_deref(),
             expected,
+            fallback,
         )
         .await
         {
@@ -3632,12 +3720,13 @@ async fn attach_direct(
 async fn attach_terminal(
     client: &Client,
     subject: &str,
-    name: String,
+    identity: (String, String),
     terminal: &str,
-    incarnation: String,
     owner: Option<&str>,
     expected: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
+    let (name, incarnation) = identity;
     let opened = direct::open(
         client,
         &direct::Terminal {
@@ -3646,6 +3735,7 @@ async fn attach_terminal(
             incarnation: &incarnation,
             owner,
             expected,
+            fallback,
         },
     )
     .await?;
@@ -3668,11 +3758,11 @@ async fn attach_terminal(
     let attachment = client
         .raw_terminal_attachment(terminal, &incarnation, st3_client::RawTerminalMode::Attach)
         .await
-        .map_err(|error| error.plain())?;
+        .map_err(|error| format!("{route}: {}", error.plain()))?;
     let stream = client
         .raw_terminal_stream(&attachment)
         .await
-        .map_err(|error| error.plain())?;
+        .map_err(|error| format!("{route}: {}", error.plain()))?;
     stream
         .into_std()
         .map(|stream| Direct {

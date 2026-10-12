@@ -2,10 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { plainError, type ClientConnections } from '../../../clients/typescript/st3-client';
 import { ActionSheetIOS, Alert, ScrollView, View } from 'react-native';
-import { agentName } from '../agentsView';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
-import { agentHealth, ago, clientDetail, clientTitle, deviceDetail, deviceTitle, olderThanMember, queuedWorkSummary } from '../presentation';
+import { clientDetail, clientTitle, deviceDetail, deviceTitle, olderThanMember } from '../presentation';
 import { isUnmanaged, isUnresolved } from '@smalltalk/st3-views';
 import { useStore } from '../store';
 import { TABS } from '../tabs';
@@ -56,8 +55,6 @@ export function FleetScreen() {
   const { clients, issue: clientsIssue } = useClients();
   const now = Date.now();
   const undeclared = data.sessions.filter(session => session.state === 'running' && isUnmanaged(session));
-  const unhealthy = data.agents.filter(agent => !agentHealth(agent).healthy);
-  const busy = data.agents.filter(agent => (agent.active_work_count ?? 0) > 0 || (agent.queued_work_count ?? 0) > 0);
   const gatewayListed = data.machines.some(machine => machine.id === gatewayMachineId);
   const found = <>
     {undeclared.map(session => <T key={session.id} dim style={{ paddingLeft: 34 }}>? {isUnresolved(session) ? 'unresolved process' : 'native session'} · {session.driver ?? 'harness'}{session.process ? ` · pid ${session.process.pid}` : ''}</T>)}
@@ -81,10 +78,7 @@ export function FleetScreen() {
       </View>)}
       {!gatewayListed && gatewayHost ? <View><ListRow glyph="●" glyphColor={theme.idle} title={`${gatewayHost} · this gateway`} />{found}</View> : null}
       {truncated.machines || truncated.devices ? <Note tone="warning">This view is partial; the CLI lists every machine and device.</Note> : null}
-      <SectionHeader title="agent work" count={busy.length + unhealthy.length} />
-      {unhealthy.map(agent => <ListRow key={`unhealthy-${agent.id}`} glyph="✕" glyphColor={theme.fault} title={agentName(agent)} second={`${agentHealth(agent).label} · observed ${ago(agent.updated_at, now)} ago`} />)}
-      {busy.map(agent => <ListRow key={agent.id} glyph="⠿" glyphColor={theme.working} title={agentName(agent)} right={<T dim>{agent.active_work_count ?? 0} active</T>} second={queuedWorkSummary(agent, now) ?? undefined} />)}
-      <SectionHeader title="tabs" />
+      <SectionHeader title="conversations" />
       <ListRow
         glyph={simpleOn ? '●' : '○'}
         glyphColor={simpleOn ? theme.green : theme.overlay1}
@@ -95,7 +89,7 @@ export function FleetScreen() {
       <SectionHeader title="this connection" />
       <View style={{ paddingHorizontal: 12, gap: 2 }}>
         <T>{caps ? `${caps.session_actor} · ${caps.transport}` : 'reconnecting'}</T>
-        <T dim selectable>{url}</T>
+        <T dim selectable>{carrierInfo.route.kind === 'fabric' ? `saved gateway, if fabric cannot connect · ${url}` : url}</T>
         {gatewayTransport(url) === 'lan' ? <T color={theme.waiting}>{LAN_HTTP_WARNING}</T> : null}
         <T>route · {carrierInfo.routeText}</T>
         {carrierInfo.route.fellBack && carrierInfo.route.why ? <T color={theme.waiting}>{carrierInfo.route.why}</T> : null}

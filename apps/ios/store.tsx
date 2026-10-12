@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, outcomeUnknown, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
+import { API_VERSION, ClientError, St3Client, isTransient, notApplied, outcomeUnknown, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
@@ -25,6 +25,7 @@ import { gatewayFetch } from './gatewayFetch';
 import { normalizeGatewayUrl } from './gatewayUrl';
 import { tabOrder, type Tab } from './tabs';
 import type { SidebarResource } from './sidebarView';
+import { readSidebarResources } from './sidebarResources';
 import { sidebarArrangement, uuid7 } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
@@ -120,16 +121,15 @@ function useAppStore(proof?: FabricProfile) {
   const [missionsLoaded, setMissionsLoaded] = useState(false);
   const [error, setError] = useState(''), [pairingIssue, setPairingIssue] = useState(''), [busy, setBusy] = useState(false);
   const [historicalSessions, setHistoricalSessions] = useState<SessionView[]>([]);
-  // The Agents tab shows a list or a tree, as stui's `t` toggles. Debug links can set it, and ask
-  // the visible screen to scroll for screenshots.
+  // The Agents list shows a list or a tree, as stui's `t` toggles.
   const [treeView, setTreeView] = useState(false);
-  // Spaces is one of the four phone tabs.
-  const glassesOn = true;
   const [simpleOn, setSimpleOn] = useState(true);
   const [arrangements, setArrangements] = useState<Arrangement[]>([]), [arrangementsIssue, setArrangementsIssue] = useState('');
   const [sidebarTerminals, setSidebarTerminals] = useState<Runtime[]>([]), [sidebarTerminalsIssue, setSidebarTerminalsIssue] = useState('');
   const [glasses, setGlasses] = useState<Glass[]>([]), [glassesIssue, setGlassesIssue] = useState('');
   const [scrollRequest, setScrollRequest] = useState<{ y: number; at: number } | null>(null);
+  const [sidebarResources, setSidebarResources] = useState<ResourceObservation[]>([]), [sidebarResourcesIssue, setSidebarResourcesIssue] = useState('');
+  const sidebarResourcesRead = useRef<{ focused?: string; promise: Promise<void> } | null>(null);
   const sidebarCreation = useRef<{ subject: string; created: boolean } | null>(null);
   const sidebarWriting = useRef(false);
   const sidebarSeen = useRef(new Map<string, SidebarResource>());
@@ -250,7 +250,12 @@ function useAppStore(proof?: FabricProfile) {
     if (bearer) {
       if (gateway && p.status === 'fulfilled') {
         const cache = hydrateProjectionForPairedDevice(p.value, gateway, true);
-        if (cache) { setData(cache.data); setTruncated(Object.fromEntries(cache.truncated.map(key => [key, true]))); setHasSynced(true); setStatus('connecting'); cachedActor.current = cache.actor; cacheSavedAt.current = cache.savedAt; setCachedHostId(cache.hostId); }
+        if (cache) {
+          setData(cache.data); setGlasses(cache.workspace.glasses); setArrangements(cache.workspace.arrangements);
+          setMissionsLoaded(cache.data.missions.length > 0); setTruncated(Object.fromEntries(cache.truncated.map(key => [key, true])));
+          setHasSynced(true); setStatus('connecting'); setCachedHostId(cache.hostId);
+          cachedActor.current = cache.actor; cacheSavedAt.current = cache.savedAt;
+        }
       }
       setCredential(bearer);
     }
@@ -267,7 +272,7 @@ function useAppStore(proof?: FabricProfile) {
     sidebarSeen.current.clear(); sidebarCreation.current = null;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
-    setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]);
+    setGlasses([]); setGlassesIssue(''); setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]); setSidebarResources([]); setSidebarResourcesIssue(''); sidebarResourcesRead.current = null;
     setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null);
   }
   async function clearCachedProjection() { cacheGeneration.current++; clearCaches(); if (!proof) await AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
@@ -332,8 +337,8 @@ function useAppStore(proof?: FabricProfile) {
         else if (state === 'reconnecting' && routeRef.current.kind === 'fabric' && ++feedMisses.current >= 2) void carrier.feedFailed();
       },
       onWindowError: (name, message) => { if (current()) setLoadErrors(previous => ({ ...previous, [name]: message })); },
-      // The missions window is followed only while a missions screen shows: what it held is out of date.
-      onWindowStopped: name => { if (current() && name === 'missions') { setData(previous => ({ ...previous, missions: [] })); setMissionsLoaded(false); } },
+      // Releasing a subscription keeps its last rows for navigation and offline use.
+      // The next focused mission screen follows again and replaces them with a snapshot.
       onConversationFrame: (rows, replace) => { if (current()) proofRef.current?.record('conversation', { rows, replace }); },
       onTiming: (target, ms) => { if (current() && !proofRef.current) observations.observe(target, ms); },
     }, foreground.current, actionId, undefined, undefined, false);
@@ -362,7 +367,7 @@ function useAppStore(proof?: FabricProfile) {
   const arrangementPerson = caps?.session_actor.match(/^person\/[^/]+/)?.[0];
   const arrangementsGranted = caps?.capabilities.some(capability => capability.id === 'arrangements' && capability.version >= 1 && capability.state === 'granted') ?? false;
   useEffect(() => {
-    if (!feed || !arrangementsGranted || !arrangementPerson) { setArrangements([]); setArrangementsIssue(''); return; }
+    if (!feed || !arrangementsGranted || !arrangementPerson) return;
     const follow = feed.followArrangements(arrangementPerson, { onArrangements: setArrangements, onIssue: setArrangementsIssue });
     return () => follow.close();
   }, [feed, arrangementPerson, arrangementsGranted]);
@@ -376,24 +381,39 @@ function useAppStore(proof?: FabricProfile) {
       setSidebarTerminalsIssue(result.truncated ? 'More terminals exist beyond this window.' : '');
     } catch (error) { if (generation === cacheGeneration.current) setSidebarTerminalsIssue(errorText(error)); }
   }, [client]);
+  const loadSidebarResources = useCallback((focused?: string): Promise<void> => {
+    if (!client || status !== 'online') return Promise.resolve();
+    const generation = cacheGeneration.current;
+    if (sidebarResourcesRead.current) {
+      if (!focused || focused === sidebarResourcesRead.current.focused) return sidebarResourcesRead.current.promise;
+      return sidebarResourcesRead.current.promise.then(() => { if (generation === cacheGeneration.current) return loadSidebarResources(focused); });
+    }
+    const pending = readSidebarResources((filters, options) => client.resourcesList(filters, options), focused).then(result => {
+      if (generation !== cacheGeneration.current) return;
+      setSidebarResources(result.rows); setSidebarResourcesIssue(result.truncated ? 'More graph resources exist beyond this window.' : '');
+    }).catch(error => { if (generation === cacheGeneration.current) setSidebarResourcesIssue(`Resources not available on this connection: ${errorText(error)}`); })
+      .finally(() => { if (sidebarResourcesRead.current?.promise === pending) sidebarResourcesRead.current = null; });
+    sidebarResourcesRead.current = { focused, promise: pending };
+    return pending;
+  }, [client, status]);
   // Version 1 glasses are splits of tab groups; an earlier member's glasses are a shape this app no longer reads.
   const glassesGranted = caps?.capabilities.some(capability => capability.id === 'glasses' && capability.version >= 1 && capability.state === 'granted') ?? false;
   useEffect(() => {
-    if (!feed || !glassesOn || !glassesGranted) { setGlasses([]); return; }
+    if (!feed || !glassesGranted) return;
     const follow = feed.followGlasses({ onGlasses: setGlasses, onIssue: setGlassesIssue });
     return () => follow.close();
-  }, [feed, glassesOn, glassesGranted]);
+  }, [feed, glassesGranted]);
   // Keep the last data for an offline start, saved at most every 10 s while it changes.
   useEffect(() => {
     if (proof || !hasSynced || !snapshot || !caps) return;
     const timer = setTimeout(() => {
       cacheSavedAt.current = Date.now();
       const truncatedKeys = (Object.keys(truncated) as Array<keyof Data>).filter(key => truncated[key]);
-      const encoded = encodeProjectionCache(url, caps.session_actor, snapshot.host_id, snapshot.store_index, { ...data, attention: data.attention.filter(item => !item.closedElsewhere) }, cacheSavedAt.current, truncatedKeys);
+      const encoded = encodeProjectionCache(url, caps.session_actor, snapshot.host_id, snapshot.store_index, { ...data, attention: data.attention.filter(item => !item.closedElsewhere) }, cacheSavedAt.current, truncatedKeys, { glasses, arrangements });
       if (encoded) void AsyncStorage.setItem(PROJECTION_CACHE_KEY, encoded).catch(() => { cacheSavedAt.current = 0; });
     }, Math.max(0, cacheSavedAt.current + 10_000 - Date.now()));
     return () => clearTimeout(timer);
-  }, [caps, data, hasSynced, snapshot, truncated, url]);
+  }, [caps, data, glasses, arrangements, hasSynced, snapshot, truncated, url]);
 
   // Launches, machines, devices, and sessions have no window: a screen loads them when it opens,
   // and again after an action there. A list that fails is named; the others still show.
@@ -781,13 +801,13 @@ function useAppStore(proof?: FabricProfile) {
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
 
   return {
-    order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
+    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, client,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, actions,
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
-    glassesOn, glassesGranted, glasses, glassesIssue, simpleOn,
+    glassesGranted, glasses, glassesIssue, simpleOn,
     carrierInfo: { choice: carrierChoice, built: fabricBuilt, target: fabricTarget, fallback: fallbackOn, route: selected.route, routeText: routeLabel(selected.route), pending: selected.pending, issue: selected.issue, fabric: fabricSnapshot, node: fabricNode, path: fabricPath },
-    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals,
+    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
   };
 }
 
