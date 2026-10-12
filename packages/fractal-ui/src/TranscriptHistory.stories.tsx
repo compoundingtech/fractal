@@ -487,7 +487,12 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   const focusedBeforePrepend = within(row(1300)!).getByRole('button', { name: /Worked/ })
   focusedBeforePrepend.focus({ preventScroll: true })
   await deliver(200)
-  await waitFor(() => expect(row(1300)!.getBoundingClientRect().top - lane.getBoundingClientRect().top - readingTop).toBe(0))
+  await waitFor(() => {
+    const current = row(1300)
+    expect(current !== null, 'History tour: prepended checkpoint remains render-ready').toBe(true)
+    expect(current!.getBoundingClientRect().top - lane.getBoundingClientRect().top - readingTop, 'History tour: prepend anchor').toBe(0)
+    expect(document.activeElement, 'History tour: prepend keeps focused element identity').toBe(focusedBeforePrepend)
+  }, { timeout: 5000 })
   await expect(document.activeElement).toBe(focusedBeforePrepend)
   await mountedBound()
 
