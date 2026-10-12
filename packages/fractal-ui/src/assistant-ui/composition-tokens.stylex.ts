@@ -131,6 +131,7 @@ export const geometryNumbers = {
   sidebarDefault: 256,
   panelDefault: 540,
   panelMin: 360,
+  detailsColumnsMin: 360,
   drawerDefault: 220,
   footer: 40,
   drawerMin: 120, drawerMax: 600,
@@ -140,8 +141,6 @@ export const geometryNumbers = {
   threadViewportMin: 96,
 } as const
 
-/** Panel-local responsive geometry: label, readable value, gap and section insets. */
-export const detailsNarrowQuery = '@container details-pane (width < 360px)'
 
 export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',

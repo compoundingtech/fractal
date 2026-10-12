@@ -11,7 +11,7 @@ import type { SyncStatus } from '../st3-views/sync-status'
 import { canRetrySyncFailure, syncFailureRecovery } from '../st3-views/sync-line'
 import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
-import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, detailsNarrowQuery } from '../composition-tokens.stylex'
+import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, geometryNumbers as geometry } from '../composition-tokens.stylex'
 import { MissingDetailsValue } from './DetailsUnavailable'
 
 export interface DetailsVariants {
@@ -62,6 +62,23 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
   const openerRef=React.useRef<HTMLElement|null>(null)
   const closeButtonRef=React.useRef<HTMLButtonElement>(null)
   const regionRef=React.useRef<HTMLElement|null>(null)
+  React.useLayoutEffect(()=>{
+    const pane=paneRef.current
+    if(!pane)return
+    let wasStacked:boolean|undefined
+    const measure=()=>{
+      const stacked=pane.getBoundingClientRect().width<geometry.detailsColumnsMin
+      if(stacked===wasStacked)return
+      wasStacked=stacked
+      pane.dataset.detailsStacked=String(stacked)
+      if(stacked){pane.style.setProperty('--details-overview-columns','minmax(0, 1fr)');pane.style.setProperty('--details-spend-columns','minmax(0, 1fr)');pane.style.setProperty('--details-value-align','left')}
+      else{pane.style.removeProperty('--details-overview-columns');pane.style.removeProperty('--details-spend-columns');pane.style.removeProperty('--details-value-align')}
+    }
+    measure()
+    const observer=new ResizeObserver(measure)
+    observer.observe(pane)
+    return ()=>observer.disconnect()
+  },[])
   React.useLayoutEffect(()=>{
     const pane=paneRef.current,active=pane?.ownerDocument.activeElement
     if(onClose&&opening?._tag!=='Restored'&&active instanceof HTMLElement&&active!==pane?.ownerDocument.body&&active!==pane?.ownerDocument.documentElement&&!pane?.contains(active))openerRef.current=active
@@ -195,7 +212,7 @@ const styles=stylex.create({
   checkBox:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:g.icon,height:g.icon,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},
   overview:{display:'flex',flexDirection:'column',gap:s.xs,paddingBlock:s.sm,minWidth:0},
   line:{display:'flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,minWidth:0,whiteSpace:'nowrap',overflow:'hidden'},
-  grid:{display:'grid',gridTemplateColumns:{default:`minmax(90px, 1fr) minmax(${g.detailsValueMin}, 1fr)`,[detailsNarrowQuery]:'minmax(0, 1fr)'},gap:s.xs,margin:s.zero},
+  grid:{display:'grid',gridTemplateColumns:`var(--details-overview-columns, minmax(90px, 1fr) minmax(${g.detailsValueMin}, 1fr))`,gap:s.xs,margin:s.zero},
   muted:{color:tx.fgMuted,overflowWrap:'normal'},
   value:{display:'flex',margin:s.zero,minWidth:0,overflow:'hidden',whiteSpace:'normal',overflowWrap:'normal'},
   orientation:{margin:s.zero,paddingInline:s.zero,paddingBlock:s.sm,color:tx.fgSoft,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
