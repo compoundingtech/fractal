@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Separate fault snapshot and delivery work in reconciler profile spans.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, message, or checkpoint replay changes. Fault snapshot selection and message delivery retain their existing order and idempotency key."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, trigger, migration, or persistent view changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Fault ownership, current-state checks, refusal and recovery guards, and throttle timing are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "When profiling is enabled, two fixed child spans distinguish the complete fault.snapshot read from fault.delivery owner filtering and message work. Existing stage/faults totals remain inclusive; the child phases are disjoint, and no client or wire field changes. Span wall, CPU, and SQL counters are diagnostic, not a claim of per-family SQL attribution or writer cost."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart or migration beyond ordinary deployment is needed. The added profiling overhead and production CPU effect are unmeasured."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No new setup is required; existing opt-in profiling controls whether the spans are recorded."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persisted recovery state changes. Disabling profiling or reverting the spans restores the earlier accounting without changing fault messages."
+  }
+}
