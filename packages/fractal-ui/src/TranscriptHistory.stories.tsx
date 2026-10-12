@@ -471,8 +471,12 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
     await expect(document.activeElement).toBe(heldReader)
     await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
   } finally {
-    heldReader.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, button: 0, buttons: 0, isPrimary: true }))
+    // Release off the disclosure: the hold is a reading gesture, not a press.
+    // Releasing on the button would legitimately toggle it whenever its node
+    // survived the append, leaving the later fold step in an arbitrary state.
+    document.body.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, button: 0, buttons: 0, isPrimary: true }))
   }
+  await expect(within(row(1300)!).getByRole('button', { name: /Worked/ }), 'History tour: held reader did not press its disclosure').toHaveAttribute('aria-expanded', 'false')
 
   // Remeasure wrapping and theme without moving the current reading anchor.
   for (const name of ['Resize reading lane', 'Switch reading theme', 'Resize reading lane', 'Switch reading theme']) {
