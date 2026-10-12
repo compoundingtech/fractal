@@ -229,13 +229,7 @@ pub fn run(program: &'static str) -> ! {
         .ok()
         .and_then(|executable| fs::metadata(executable).ok());
     let real = real_program(program, path.as_deref(), own.as_ref());
-    let delegated = match delegated_path(path.as_deref(), own.as_ref()) {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("st recorder: cannot prepare the real program's PATH: {error}");
-            std::process::exit(126);
-        }
-    };
+    let delegated = delegated_path(path.as_deref(), own.as_ref());
     let capture = marker.as_ref().is_some_and(|marker| marker.receipts.is_some())
         && program == "gh"
         && arguments.get(1).is_some_and(|argument| argument == "create")
@@ -311,7 +305,7 @@ fn real_program(
 
 /// Git hooks and aliases must find real tools instead of reentering the recorder. A wrapper
 /// that explicitly executes a recorder still meets the depth guard before it can spawn again.
-fn delegated_path(path: Option<&OsStr>, own: Option<&fs::Metadata>) -> Result<OsString> {
+fn delegated_path(path: Option<&OsStr>, own: Option<&fs::Metadata>) -> OsString {
     let entries = std::env::split_paths(path.unwrap_or(OsStr::new(DEFAULT_PATH)))
         .filter(|entry| {
             let directory = search_entry(entry);
@@ -322,7 +316,16 @@ fn delegated_path(path: Option<&OsStr>, own: Option<&fs::Metadata>) -> Result<Os
                     })
                 }))
         });
-    std::env::join_paths(entries).context("remove recorders from delegated PATH")
+    // On Unix, split_paths entries contain no colon. Reassemble them directly so preparing
+    // the delegated PATH is infallible, including empty entries for the working directory.
+    let mut path = OsString::new();
+    for (index, entry) in entries.enumerate() {
+        if index != 0 {
+            path.push(":");
+        }
+        path.push(entry);
+    }
+    path
 }
 
 /// An empty PATH entry means the working directory. The result always contains a slash, so
@@ -1065,7 +1068,7 @@ mod tests {
         );
         let only_recorders = std::env::join_paths([&recorder, &unmarked, &symlinked]).unwrap();
         assert_eq!(real_program("git", Some(&only_recorders), Some(&own)), None);
-        assert_eq!(delegated_path(Some(&path), Some(&own)).unwrap(), real.as_os_str());
+        assert_eq!(delegated_path(Some(&path), Some(&own)), real.as_os_str());
     }
 
     #[test]

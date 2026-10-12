@@ -26,7 +26,7 @@ fn isolated(test: &str) -> bool {
     for path in [&tools, &home, &state, &config, &tmp] {
         std::fs::create_dir(path).unwrap();
     }
-    for program in ["git", "ssh-keygen", "python3", "which"] {
+    for program in ["git", "ssh-keygen", "python3"] {
         let real = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .filter(|directory| !directory.join("st3-recorder.json").exists())
             .filter_map(|directory| std::fs::canonicalize(directory.join(program)).ok())
@@ -43,13 +43,17 @@ fn isolated(test: &str) -> bool {
             .unwrap_or_else(|| {
                 panic!("a real {program} must be available outside recorder directories")
             });
-        std::os::unix::fs::symlink(real, tools.join(program)).unwrap();
+        std::os::unix::fs::symlink(&real, tools.join(program)).unwrap();
     }
     let output = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", test, "--nocapture"])
         .env_clear()
         .env(CHILD, test)
         .env("PATH", &tools)
+        .env(
+            "ST3_GIT_EVIDENCE_REAL_GIT",
+            std::fs::canonicalize(tools.join("git")).unwrap(),
+        )
         .env("HOME", &home)
         .env("XDG_STATE_HOME", &state)
         .env("XDG_CONFIG_HOME", &config)
@@ -525,10 +529,8 @@ sys.stdout.buffer.write((pathlib.Path(os.environ['FIXTURE_API']) / files[suffix]
     )
     .unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
-        .unwrap()
-        .trim()
-        .to_owned();
+    let real_git = std::env::var_os("ST3_GIT_EVIDENCE_REAL_GIT")
+        .expect("the isolated harness supplies the genuine Git executable");
     let installed_git = tools.join("git");
     std::fs::write(
         &installed_git,

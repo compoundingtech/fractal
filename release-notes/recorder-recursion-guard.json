@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Recorder wrapper reentry for the same program fails immediately with exit 126 instead of starting another child. Delegated tools receive a PATH without recorders so ordinary nested Git calls continue to use real tools. Git and GitHub depth flags are independent. Executable-identity checks exclude recorder symlinks and hard links."
+    "detail": "Recorder wrapper reentry for the same program fails immediately with exit 126 instead of starting another child. Delegated tools receive a PATH without recorders so ordinary nested Git calls continue to use real tools. Git and GitHub depth flags are independent. Executable-identity checks exclude recorder symlinks and hard links. Nested git/gh calls from hooks, aliases, and extensions are not recorded; a nested gh pr create or gh issue create produces no recorder receipt. The rejected second recorder invocation creates no additional record or child."
   },
   "downtime": {
     "status": "none",
