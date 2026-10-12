@@ -32,7 +32,7 @@ export function HarnessWeightComparison({ scheme = 'dark' }: { readonly scheme?:
         <div data-component-name="NeedsYouBar" data-weight-class="shell"><NeedsYouBar requests={[questionRequest]} expanded={false} onToggle={fn()} /></div>
         <div data-component-name="NeedsYouInbox" data-weight-class="shell"><NeedsYouInbox requests={[questionRequest]} onShowInThread={fn()} onOpenTerminal={fn()} /></div>
       </section>
-      <section aria-label="Messages specimens" {...stylex.props(styles.list)}>
+      <section aria-label={`Messages specimens · ${variant.name}`} {...stylex.props(styles.list)}>
         <div data-component-name="AgentMessage" data-weight-class="card"><AgentMessage {...agentMessage} /></div>
         <div data-component-name="OutgoingMessageRow" data-weight-class="row"><OutgoingMessageRow {...broadcastMessage} /></div>
       </section>

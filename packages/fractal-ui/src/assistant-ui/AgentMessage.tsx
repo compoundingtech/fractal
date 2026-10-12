@@ -99,10 +99,10 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
     {body._tag === 'Full' && body.markdown.length > 4000 ? <Disclosure defaultExpanded={loaded}>
       {({ isExpanded }) => <>
         <Button slot="trigger" {...stylex.props(styles.button)}>{isExpanded ? 'Hide full message' : 'Show full message'}</Button>
-        {!isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Message excerpt"><MessageBody text={preview} foreground={variant._tag !== 'Outgoing'} /></div> : null}
+        {!isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="group" aria-label="Message excerpt"><MessageBody text={preview} foreground={variant._tag !== 'Outgoing'} /></div> : null}
         <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Full message"><MessageBody text={body.markdown} foreground={variant._tag !== 'Outgoing'} /></div> : null}</DisclosurePanel>
       </>}
-    </Disclosure> : <div {...stylex.props(styles.messageBody)} tabIndex={body.markdown.length > 4000 ? 0 : undefined} role="region" aria-label={body._tag === 'Full' ? 'Message body' : 'Message excerpt'}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} foreground={variant._tag !== 'Outgoing'} /></div>}
+    </Disclosure> : <div {...stylex.props(styles.messageBody)} tabIndex={body.markdown.length > 4000 ? 0 : undefined} role={body.markdown.length > 4000 ? 'region' : 'group'} aria-label={body._tag === 'Full' ? 'Message body' : 'Message excerpt'}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} foreground={variant._tag !== 'Outgoing'} /></div>}
     {body._tag !== 'Full' || loaded ? <div {...stylex.props(styles.controls)}>
       {!loaded ? <span {...stylex.props(styles.meta)}>Message preview</span> : null}
       <Button {...stylex.props(styles.button)} isPending={body._tag === 'Loading'} isDisabled={!loaded && onLoadFull === undefined} aria-disabled={loaded || undefined} aria-describedby={reasonId} onPress={loaded ? undefined : () => { setLoadRequested(true); onLoadFull?.() }}>{loaded ? 'Full message loaded' : body._tag === 'Loading' ? 'Loading full message…' : body._tag === 'Failed' ? 'Retry full message' : 'Show full message'}</Button>
