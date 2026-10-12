@@ -939,23 +939,28 @@ def prove_claim_socket_denied(node, seats, evidence):
     subject = seat_subject("a")
     def diagnostic():
         rows = trace(node, subject)
-        return next((row for row in rows if row["kind"] == "harness.diagnostic"
+        exhausted = next((row for row in rows if row["kind"] == "harness.diagnostic"
                      and row["body"].get("fields", {}).get("code") == "work-wake-exhausted"), None)
-    fault = until(diagnostic, 90, "the observed socket denial did not raise a readiness fault")
+        fault = next((row for row in rows if row["kind"] == "operational.failure"
+                      and row["body"].get("fields", {}).get("condition") == "work-wake-exhausted"), None)
+        return (exhausted, fault) if exhausted and fault else None
+    exhausted, fault = until(diagnostic, 90, "the observed socket denial did not raise a readiness fault")
     agent, work = seats.view("a")
     assert work["state"] == "ready"
-    fields = fault["body"]["fields"]
+    fields = exhausted["body"]["fields"]
     assert "Operation not permitted" in fields["reason"] and str(node.endpoint) in fields["reason"]
+    assert fault["body"]["fields"]["title"] == "Ready work cannot claim: daemon socket access failed"
+    assert "Operation not permitted" in fault["body"]["fields"]["reason"]
     observed = [row for row in trace(node, subject) if row["kind"] == "harness.diagnostic"
                 and row["body"].get("fields", {}).get("code") == "work-claim-socket-failed"]
     assert len(observed) == 1 and json.loads(observed[0]["body"]["fields"]["matched_line"])["os_error"] == 1
-    assert observed[0]["id"] in fault["body"]["evidence"]
+    assert observed[0]["id"] in exhausted["body"]["evidence"]
     claims = [row for row in receipts(node, "a") if row["event"] == "claim"]
     assert len(claims) == 1 and claims[0]["exit"] == 5 and claims[0]["seconds"] < 5
     assert "st-work-claim-socket-failure:" in claims[0]["stderr"]
     (evidence / "socket-denial.json").write_text(json.dumps({
         "denial": "real Linux seccomp connect(2) EPERM", "provider": "native Codex protocol stand-in",
-        "claim": claims[0], "diagnostic": observed[0], "fault": fault,
+        "claim": claims[0], "diagnostic": observed[0], "exhausted": exhausted, "fault": fault,
         "ready_before_recovery": True, "daemon_wait_seconds": 30,
     }, indent=2) + "\n")
     (node.root / "ws/claim-socket-denied").unlink()
