@@ -48,13 +48,15 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
     }
     return () => { cancelAnimationFrame(frame); if (probeFrame !== undefined) cancelAnimationFrame(probeFrame) }
   }, [cold, noSettle])
-  return <section data-example={sticky ? 'sticky' : 'control'} ref={root} {...stylex.props(styles.example, light && lightTheme, width === 240 ? styles.narrow : width === 1440 ? styles.wide : styles.small)}>
+  return <section data-example={sticky && !noSettle ? 'sticky' : 'control'} ref={root} {...stylex.props(styles.example, light && lightTheme, width === 240 ? styles.narrow : width === 1440 ? styles.wide : styles.small)}>
     <div {...stylex.props(styles.toolbar)}><button onClick={() => handle.current?.reveal(deepKey)}>Reveal review</button><button onClick={() => handle.current?.reveal('south.a.a.a.a.a.a.35')}>Reveal unvisited branch</button><button onClick={() => handle.current?.reveal('north.a.a.a.a.a.a.69')}>Reveal boundary</button><button onClick={() => setFiltered(value => !value)}>Filter reviews</button><button onClick={() => setKeys(new Set())}>Collapse all</button><button onClick={() => setReverse(value => !value)}>Reorder</button></div>
     <div {...stylex.props(styles.viewport)}><SidebarTree ref={handle} aria-label="Project reviews" items={items} expandedKeys={keys} onExpandedChange={setKeys} stickyAncestors={sticky} renderRow={item => <div {...stylex.props(styles.label, resized && styles.resized)}>{item.textValue}</div>} /></div>
   </section>
 }
-function Pair({ cold = false, width = 440, light = false }: { readonly cold?: boolean; readonly width?: number; readonly light?: boolean }) { return <main {...stylex.props(styles.matrix)}><Example cold={cold} width={width} light={light} /><Example sticky={false} noSettle={cold} cold={cold} width={width} light={light} /></main> }
-const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta
+// The cold control keeps stickiness and disables measured settling instead: with 24px estimates a
+// non-sticky single scroll already lands clear, so only the sticky band can expose an unsettled reveal.
+function Pair({ cold = false, width = 440, light = false }: { readonly cold?: boolean; readonly width?: number; readonly light?: boolean }) { return <main {...stylex.props(styles.matrix)}><Example cold={cold} width={width} light={light} /><Example sticky={cold} noSettle={cold} cold={cold} width={width} light={light} /></main> }
+const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled, or for the cold reveal with measured settling disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta
 export default meta
 type Story = StoryObj
 const frames = async () => { await document.fonts.ready; for (let i = 0; i < 6; i++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
@@ -171,6 +173,9 @@ export const ColdRevealBeforeMeasurement: Story = { render: () => <Pair cold />,
   await expect(clear(yes, real(yes, deepKey)!)).toBe(true)
   await frames()
   await expect(clear(yes, real(yes, deepKey)!)).toBe(true)
+  // The unsettled control is compared once its ancestors are measured and pinned.
+  await waitFor(() => expect(no.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0), settled)
+  await frames()
   const control = real(no, deepKey)
   await expect(control === null || !clear(no, control)).toBe(true)
 } }
