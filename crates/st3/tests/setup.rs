@@ -381,12 +381,14 @@ fn plain_st_first_run_asks_names_starts_daemon_and_opens_home() {
     assert_eq!(table["node"].as_str(), Some("studio"));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn onboarding_publication_is_graph_decided_and_preserves_stopped_expert() {
-    if st3::test_support::supervise_test() {
-        return;
-    }
-    let fixture = Fixture::new();
+/// A daemon API on the fixture's socket whose provider list is simulated: only codex.
+async fn onboarding_api(
+    fixture: &Fixture,
+) -> (
+    std::sync::Arc<st3::store::Store>,
+    st3::client::Client,
+    tokio::task::JoinHandle<()>,
+) {
     let state_dir = fixture.path("home/.local/state/st3");
     fs::create_dir_all(&state_dir).unwrap();
     fs::write(
@@ -426,7 +428,9 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_expert() 
     ));
     let socket = fixture.path("run/st3.sock");
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { st3::api::serve_unix(&server_socket, router).await });
+    let server = tokio::spawn(async move {
+        let _ = st3::api::serve_unix(&server_socket, router).await;
+    });
     let client = st3::client::Client::unix(&socket);
     for _ in 0..100 {
         if client.get::<serde_json::Value>("/v1/health").await.is_ok() {
@@ -434,6 +438,16 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_expert() 
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    (store, client, server)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onboarding_publication_is_graph_decided_and_preserves_stopped_expert() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let (store, client, server) = onboarding_api(&fixture).await;
     let setup = || {
         let mut command = fixture.cli();
         command.args([
@@ -547,5 +561,62 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_expert() 
         store.selected_desired_token("agent/st/expert").unwrap(),
         stopped
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_expert_asks_first_and_an_existing_setup_never_starts_it_on_its_own() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let (store, _client, server) = onboarding_api(&fixture).await;
+    let setup = |extra: &[&str]| {
+        let mut command = fixture.cli();
+        command.args([
+            "setup",
+            "--person",
+            "ada",
+            "--node",
+            "studio",
+            "--yes",
+            "--install",
+            "false",
+            "--service",
+            "false",
+            "--start",
+            "false",
+        ]);
+        command.args(extra);
+        command
+    };
+    let run = |mut command: Command| async move {
+        tokio::task::spawn_blocking(move || command.output().unwrap())
+            .await
+            .unwrap()
+    };
+    // The first run asks, naming the account it uses; declining publishes nothing.
+    let declined = success(&run(setup(&["--expert", "false"])).await);
+    assert!(
+        declined.contains("agent that runs on your own codex account, so it uses your codex usage and quota"),
+        "{declined}"
+    );
+    assert!(declined.contains("Not started. Run st setup --onboarding"), "{declined}");
+    assert!(store.mission_run("st/onboarding").unwrap().is_none());
+    assert!(store.selected_desired_token("agent/st/expert").unwrap().is_none());
+    // The configuration exists now: ordinary setup, with the daemon answering and no history,
+    // still does not start it.
+    let existing = success(&run(setup(&[])).await);
+    assert!(existing.contains("not started on its own"), "{existing}");
+    assert!(store.mission_run("st/onboarding").unwrap().is_none());
+    assert!(store.selected_desired_token("agent/st/expert").unwrap().is_none());
+    // Asking for it by name starts it and says what was created and how to stop it.
+    let explicit = success(&run(setup(&["--onboarding"])).await);
+    assert!(explicit.contains("Created: the agent agent/st/expert (codex"), "{explicit}");
+    assert!(
+        explicit.contains("Stop it with: st agents stop agent/st/expert --as person/ada"),
+        "{explicit}"
+    );
+    assert!(store.mission_run("st/onboarding").unwrap().is_some());
     server.abort();
 }

@@ -44,7 +44,13 @@ async fn has_run_on(client: &Client) -> Result<bool> {
             .as_u64()
             .context("onboarding history has no run count")?
             > 0),
+        // The named mission has no overview yet: nothing has run.
         Err(error) if crate::client::is_not_found(&error) => Ok(false),
+        // An older daemon without the overview route cannot say, and guessing "never" would
+        // start a second onboarding on an install that already finished one.
+        Err(error) if crate::client::is_missing_route(&error) => Err(error.context(
+            "the running daemon is older than this st and cannot say whether onboarding already ran; restart it, or run st setup --onboarding to begin explicitly",
+        )),
         Err(error) => Err(error),
     }
 }
@@ -235,7 +241,7 @@ async fn expert_status(client: &Client) -> Result<Option<crate::model::SubjectSt
         .find(|subject| subject.subject == EXPERT_SUBJECT))
 }
 
-fn workspace() -> Result<PathBuf> {
+pub(crate) fn workspace() -> Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())

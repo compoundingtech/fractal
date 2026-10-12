@@ -46,6 +46,9 @@ pub struct SetupArgs {
     /// Start onboarding again, including a stopped built-in expert.
     #[arg(long)]
     pub onboarding: bool,
+    /// Start the built-in expert after setup (default: ask, with --yes: yes).
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub expert: Option<bool>,
 }
 
 pub struct PreparedSetup {
@@ -100,14 +103,8 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
                 )
                 .await?;
             }
-            if daemon_ready(&config).await && !crate::onboarding::has_run(&config).await? {
-                let harness =
-                    prepare_harness(&config, &std::env::current_exe()?, &SetupArgs::default())
-                        .await?;
-                if let Some(harness) = harness {
-                    return crate::onboarding::start(&config, &harness, false).await;
-                }
-            }
+            // An existing configuration never starts onboarding on its own, whatever its
+            // graph holds; `st setup --onboarding` is the explicit way.
             Ok(None)
         })
 }
@@ -206,8 +203,21 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     }
     let harness = prepare_harness(&config, &executable, &args).await?;
     let initial_subject = if let Some(harness) = &harness {
-        if daemon_ready(&config).await {
-            crate::onboarding::start(&config, harness, args.onboarding).await?
+        if !first_run && !args.onboarding {
+            println!(
+                "This setup already existed, so the built-in expert is not started on its own. Run st setup --onboarding to begin."
+            );
+            None
+        } else if daemon_ready(&config).await {
+            if confirm_expert(&config, harness, &args)? {
+                let started = crate::onboarding::start(&config, harness, args.onboarding).await?;
+                if started.is_some() {
+                    print_expert_summary(&config, harness)?;
+                }
+                started
+            } else {
+                None
+            }
         } else {
             anyhow::ensure!(
                 !args.onboarding,
@@ -364,6 +374,39 @@ fn fallback_harness(found: &[String]) -> Option<String> {
         println!("No usable harness remains; no onboarding seat was created.");
     }
     next
+}
+
+/// Ask before the built-in expert starts: it is an agent running on the person's own
+/// provider account. An explicit `--onboarding` already names the request.
+fn confirm_expert(config: &Config, harness: &str, args: &SetupArgs) -> Result<bool> {
+    if args.onboarding {
+        return Ok(true);
+    }
+    println!(
+        "The built-in expert is an agent that runs on your own {harness} account, so it uses your {harness} usage and quota. It runs in {} access mode.",
+        config.active_access_mode().as_str()
+    );
+    let start = ask_bool(
+        "Start the built-in expert now?",
+        "--expert",
+        args.expert,
+        args.yes,
+        true,
+    )?;
+    if !start {
+        println!("Not started. Run st setup --onboarding when you want it.");
+    }
+    Ok(start)
+}
+
+/// Name what starting the expert created and how to stop it.
+fn print_expert_summary(config: &Config, harness: &str) -> Result<()> {
+    let person = config.person.as_deref().unwrap_or("person/you");
+    println!(
+        "Created: the agent agent/st/expert ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/expert --as {person}",
+        crate::onboarding::workspace()?.display()
+    );
+    Ok(())
 }
 
 /// Say what the install's access mode does, as it will apply to agents the daemon starts.
