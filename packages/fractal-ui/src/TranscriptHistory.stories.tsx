@@ -296,12 +296,18 @@ async function exerciseTouchRearm({ canvasElement }: { canvasElement: HTMLElemen
   await expect(root).toHaveAttribute('data-page', 'Ready')
   await expect(Number(root.getAttribute('data-requests'))).toBe(requests)
   await expect(lane.scrollTop).toBeLessThan(lane.clientHeight * 1.5)
+  await expect(lane.scrollTop).toBeGreaterThan(0)
+  const touchGeometry = { scrollHeight: lane.scrollHeight, clientHeight: lane.clientHeight }
 
   // Touch begins without leaving the fetch boundary. Its upward scroll must
   // re-arm the empty-page gate; a permanent touch latch fails this assertion.
   lane.dispatchEvent(new Event('touchstart', { bubbles: true }))
   lane.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', pointerId: 2, isPrimary: true, buttons: 1 }))
+  // Browser takeover may cancel the pointer before touch scrolling begins.
+  lane.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerType: 'touch', pointerId: 2, isPrimary: true }))
   lane.scrollTop = 0
+  await expect(lane.scrollHeight).toBe(touchGeometry.scrollHeight)
+  await expect(lane.clientHeight).toBe(touchGeometry.clientHeight)
   lane.dispatchEvent(new Event('scroll'))
   try {
     await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
