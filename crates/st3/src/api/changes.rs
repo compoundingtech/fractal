@@ -155,7 +155,7 @@ pub(super) async fn sync(
     Extension(session): Extension<client_v0::ClientSession>,
     Json(request): Json<SyncRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    client_v0::require_scope(&session, "read.projections")?;
+    client_v0::require_scope(&session, "control.work")?;
     let entry = entry(&state, &request.repository)?;
     let admission = entry
         .sync(state.store.clone())
@@ -309,5 +309,34 @@ mod tests {
         assert_eq!(next["items"].as_array().unwrap().len(), 1);
         assert_ne!(next["items"][0]["change_id"], page["items"][0]["change_id"]);
         assert!(next["next_cursor"].is_null());
+    }
+    #[tokio::test]
+    async fn explicit_sync_requires_control_scope_and_reports_named_unavailable_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests::state(root.path());
+        configured(&state);
+        let denied = sync(
+            State(state.clone()),
+            session(&["read.projections"]),
+            Json(SyncRequest {
+                repository: "fixture/garden".into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+        let value = sync(
+            State(state),
+            session(&["control.work"]),
+            Json(SyncRequest {
+                repository: "fixture/garden".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(value["sync"]["status"], "unavailable");
+        assert_eq!(value["sync"]["reader_node"], "fixture-other");
+        assert_eq!(value["fallback"], "pull_request");
     }
 }

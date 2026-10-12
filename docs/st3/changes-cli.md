@@ -57,7 +57,20 @@ current object says `sync_needed`; a missing previously indexed change says
 cooperative scheduling data and does not prove a real landing or a live work lease.
 Evidence freshness is unknown until separately indexed and verified.
 
-Routes use the existing `read.projections` scope and client envelope. This read
+List/show use the existing `read.projections` scope and client envelope. Explicit
+sync requires `control.work` because it exercises configured Git credentials and
+writes the local derived index. An unavailable or non-owner sync is a typed
+`unavailable` result naming its reader node and the PR fallback. Imports bind each
+current ref's canonical ID to the ID of every loaded or already indexed record;
+a mismatch is skipped and reported in a bounded issue list, and cannot set another
+change's latest history pointer. A canceled client between fetch completion and
+import start can leave fetched objects waiting until another explicit sync.
+
+This importer has a finite 10,000-object job bound, with full unknown lineage
+validation before publication. It has no minute-scale wall budget or durable
+checkpoint for an unfinished lineage. Very deep cold histories require a separate
+resumable importer or the PR path; repeatedly running sync is not promised to
+complete a lineage beyond the bound. This read
 slice does not add claim/state/source mutation commands, a landing observer,
 production pruning, a new claim kind or a binding-contract field. Pilot creation
 and stage actions remain off until their separately reviewed authority and bound

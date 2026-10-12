@@ -5,6 +5,7 @@ use super::discovery::{Observation, Owner, SyncAdmission, Transport};
 use super::transport::{Advertisement, Authentication, Repository};
 use crate::store::Store;
 use anyhow::{Context, Result, ensure};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -76,6 +77,42 @@ struct Pin {
     id: String,
     observed: Observation,
     created: Instant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SyncOutcome {
+    Completed { import: ImportReport },
+    InFlight,
+    Deferred { retry_after_ms: u64 },
+    Unavailable { reader_node: String, reason: String },
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ImportReport {
+    pub indexed_objects: usize,
+    pub skipped_refs: usize,
+    pub issues: Vec<ImportIssue>,
+    pub omitted_issues: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ImportIssue {
+    pub ref_change_id: Option<String>,
+    pub record_change_id: Option<String>,
+    pub object_id: String,
+    pub reason: &'static str,
+}
+
+impl ImportReport {
+    fn skip(&mut self, issue: ImportIssue) {
+        self.skipped_refs += 1;
+        if self.issues.len() < 50 {
+            self.issues.push(issue);
+        } else {
+            self.omitted_issues += 1;
+        }
+    }
 }
 
 pub struct Registry {
@@ -215,28 +252,37 @@ impl Entry {
 
     /// Explicit, budgeted namespace fetch followed by finite local object validation.
     /// No SQLite read snapshot or writer is held during Git work.
-    pub async fn sync(&self, store: Arc<Store>) -> Result<SyncAdmission> {
-        let owner = self
-            .owner
-            .as_ref()
-            .context("Git reader unavailable; use the PR path")?;
-        let admission = owner.sync().await?;
-        if admission != SyncAdmission::Completed {
-            return Ok(admission);
+    pub async fn sync(&self, store: Arc<Store>) -> Result<SyncOutcome> {
+        let Some(owner) = &self.owner else {
+            return Ok(SyncOutcome::Unavailable {
+                reader_node: self.configuration.reader_node.clone(),
+                reason: self
+                    .unavailable
+                    .clone()
+                    .unwrap_or_else(|| "Git reader unavailable; use the PR path".into()),
+            });
+        };
+        match owner.sync().await? {
+            SyncAdmission::InFlight => return Ok(SyncOutcome::InFlight),
+            SyncAdmission::Deferred { retry_after_ms } => {
+                return Ok(SyncOutcome::Deferred { retry_after_ms });
+            }
+            SyncAdmission::Completed => {}
         }
         let repository = self
             .repository
             .clone()
             .context("Git repository unavailable")?;
         let configured = self.configuration.clone();
-        self.run_import(move || import_tracking(&store, &repository, &configured))
+        let import = self
+            .run_import(move || import_tracking(&store, &repository, &configured))
             .await?;
-        Ok(SyncAdmission::Completed)
+        Ok(SyncOutcome::Completed { import })
     }
-    async fn run_import(
+    async fn run_import<T: Send + 'static>(
         &self,
-        operation: impl FnOnce() -> Result<()> + Send + 'static,
-    ) -> Result<()> {
+        operation: impl FnOnce() -> Result<T> + Send + 'static,
+    ) -> Result<T> {
         let indexing = self.indexing.clone().lock_owned().await;
         tokio::task::spawn_blocking(move || {
             // Cancellation drops the join handle, but the blocking importer keeps
@@ -253,65 +299,96 @@ fn import_tracking(
     store: &Store,
     repository: &Repository,
     configuration: &RepositoryConfig,
-) -> Result<()> {
+) -> Result<ImportReport> {
     let namespace = format!(
         "refs/st/tracking/{}/",
         hex::encode(Sha256::digest(configuration.remote_url.as_bytes()))
     );
-    let output = Command::new("git")
-        .arg("--no-replace-objects")
-        .arg("-C")
-        .arg(&configuration.transport_directory)
-        .args([
-            "for-each-ref",
-            "--format=%(refname) %(objectname)",
-            &namespace,
-        ])
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_NAMESPACE")
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "cannot enumerate fetched change objects"
-    );
-    let inventory = String::from_utf8(output.stdout)?;
+    let inventory = repository.tracking_inventory(&configuration.remote_url)?;
     ensure!(
         inventory.len() <= 1024 * 1024,
         "tracking inventory exceeds import budget"
     );
+    let mut report = ImportReport::default();
     let mut pending = Vec::new();
     for line in inventory.lines() {
         let (name, object) = line.split_once(' ').context("malformed tracking ref")?;
         if name.ends_with("/current") {
             super::oid(object)?;
-            pending.push(object.to_owned());
+            let suffix = name
+                .strip_prefix(&namespace)
+                .context("tracking ref outside isolated namespace")?;
+            let (id, marker) = suffix
+                .split_once('/')
+                .context("malformed tracking current ref")?;
+            if marker != "current" || super::change_id(id).is_err() {
+                report.skip(ImportIssue {
+                    ref_change_id: None,
+                    record_change_id: None,
+                    object_id: object.into(),
+                    reason: "malformed_current_ref",
+                });
+                continue;
+            }
+            pending.push((id.to_owned(), object.to_owned()));
         }
     }
     ensure!(
         pending.len() <= 5000,
         "tracking inventory exceeds change budget"
     );
-    let mut seen = BTreeSet::new();
-    while let Some(current) = pending.pop() {
+    let mut visited = 0usize;
+    let mut mismatched_objects = BTreeMap::<String, String>::new();
+    'currents: while let Some((expected_id, current)) = pending.pop() {
         let mut chain = Vec::new();
+        let mut seen = BTreeSet::new();
         let mut cursor = Some(current);
         while let Some(object) = cursor {
-            if store
-                .indexed_git_changes(&configuration.name, std::slice::from_ref(&object))?
-                .contains_key(&object)
-            {
+            if let Some(actual_id) = mismatched_objects.get(&object) {
+                if actual_id != &expected_id {
+                    report.skip(ImportIssue {
+                        ref_change_id: Some(expected_id),
+                        record_change_id: Some(actual_id.clone()),
+                        object_id: object,
+                        reason: "change_id_mismatch",
+                    });
+                    continue 'currents;
+                }
+            }
+            let known =
+                store.indexed_git_changes(&configuration.name, std::slice::from_ref(&object))?;
+            if let Some(known) = known.get(&object) {
+                if known.revision.record.change_id != expected_id {
+                    report.skip(ImportIssue {
+                        ref_change_id: Some(expected_id),
+                        record_change_id: Some(known.revision.record.change_id.clone()),
+                        object_id: object,
+                        reason: "change_id_mismatch",
+                    });
+                    continue 'currents;
+                }
                 break;
             }
             ensure!(
                 seen.insert(object.clone()),
                 "metadata history cycle or repeated unindexed object"
             );
+            visited += 1;
             ensure!(
-                seen.len() <= 10000,
+                visited <= 10000,
                 "metadata history exceeds import job budget; use the PR path"
             );
             let revision = repository.load(&object)?;
+            if revision.record.change_id != expected_id {
+                mismatched_objects.insert(object.clone(), revision.record.change_id.clone());
+                report.skip(ImportIssue {
+                    ref_change_id: Some(expected_id),
+                    record_change_id: Some(revision.record.change_id),
+                    object_id: object,
+                    reason: "change_id_mismatch",
+                });
+                continue 'currents;
+            }
             cursor = revision.record.previous_record.clone();
             chain.push(revision);
         }
@@ -319,9 +396,10 @@ fn import_tracking(
         // Each receipt remains a separate short transaction, without a Git-held writer.
         for revision in chain.into_iter().rev() {
             store.index_git_change(&configuration.name, &revision)?;
+            report.indexed_objects += 1;
         }
     }
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -349,6 +427,10 @@ mod tests {
             let registry = Registry::new(&configured(), node).unwrap();
             let entry = registry.entry("fixture/garden").unwrap();
             assert!(entry.owner.is_none());
+            let store = Arc::new(Store::open_memory("fixture-owner").unwrap());
+            assert!(
+                matches!(entry.sync(store).await.unwrap(), SyncOutcome::Unavailable { reader_node, reason } if reader_node == "fixture-owner" && reason.contains("PR path"))
+            );
             let observed = entry.observation(false).await.unwrap();
             assert!(observed.advertisement().is_none());
             assert!(observed.error.as_deref().unwrap().contains("PR path"));
@@ -377,7 +459,7 @@ mod tests {
         assert!(entry.snapshot(false, Some("missing")).await.is_err());
     }
     #[tokio::test]
-    async fn explicit_fetch_validates_real_git_objects_and_indexes_exact_current() {
+    async fn explicit_fetch_indexes_exact_current_and_rejects_mismatched_ref_identity() {
         use crate::changes::{Record, State, TrailerStatus, new_change_id};
         use std::path::Path;
         fn git(path: &Path, args: &[&str]) -> String {
@@ -454,6 +536,61 @@ mod tests {
                 mirror: None,
             })
             .unwrap();
+        // A valid object for B cannot enter B's history through a ref labelled A.
+        let wrong_id = format!("I{}", "f".repeat(40));
+        assert_ne!(wrong_id, id);
+        let prefix = format!(
+            "refs/st/tracking/{}/",
+            hex::encode(Sha256::digest(destination.as_bytes()))
+        );
+        git(
+            &source,
+            &[
+                "update-ref",
+                &format!("{prefix}{wrong_id}/current"),
+                &revision.oid,
+            ],
+        );
+        let mut local_configuration = configured().repositories.remove(0);
+        local_configuration.transport_directory = source.clone();
+        local_configuration.remote_url = destination.into();
+        let isolated = Store::open_memory("fixture-owner").unwrap();
+        let refused = import_tracking(&isolated, &repository, &local_configuration).unwrap();
+        assert_eq!(refused.indexed_objects, 0);
+        assert_eq!(refused.skipped_refs, 1);
+        assert_eq!(refused.issues[0].reason, "change_id_mismatch");
+        assert!(
+            isolated
+                .latest_indexed_git_change("fixture/garden", &id)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            isolated
+                .latest_indexed_git_change("fixture/garden", &wrong_id)
+                .unwrap()
+                .is_none()
+        );
+        // Both refs coexist: rejecting the first alias must not suppress valid B.
+        git(
+            &source,
+            &[
+                "update-ref",
+                &format!("{prefix}{id}/current"),
+                &revision.oid,
+            ],
+        );
+        let mixed = import_tracking(&isolated, &repository, &local_configuration).unwrap();
+        assert_eq!(mixed.indexed_objects, 1);
+        assert_eq!(mixed.skipped_refs, 1);
+        assert_eq!(
+            isolated
+                .latest_indexed_git_change("fixture/garden", &id)
+                .unwrap()
+                .unwrap()
+                .revision,
+            revision
+        );
         repository.publish("origin", None, &revision).unwrap();
         let mut configuration = configured();
         configuration.repositories[0].transport_directory = reader;
@@ -461,9 +598,8 @@ mod tests {
         let registry = Registry::new(&configuration, "fixture-owner").unwrap();
         let entry = registry.entry("fixture/garden").unwrap();
         let store = Arc::new(Store::open_memory("fixture-owner").unwrap());
-        assert_eq!(
-            entry.sync(store.clone()).await.unwrap(),
-            SyncAdmission::Completed
+        assert!(
+            matches!(entry.sync(store.clone()).await.unwrap(), SyncOutcome::Completed { import } if import.indexed_objects == 1 && import.skipped_refs == 0)
         );
         let indexed = store
             .indexed_git_changes("fixture/garden", std::slice::from_ref(&revision.oid))
