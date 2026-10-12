@@ -32,7 +32,7 @@ function AccountRow({ row, args, onSelect }: { row: UsageMeterRow; args: Args; o
   const extraCount = row.omitted + (!full && row.comparison ? 1 : 0)
   const reset = row.reset === 'Unreported' ? '—' : row.reset.replace(/\s/g, '')
   return <div role="row" data-priority-row={row.id} data-stale={row.stale || undefined} data-visible-count={full ? 5 : 3} {...stylex.props(styles.row)}>
-    <div role="cell" data-priority="1" {...stylex.props(styles.cell, styles.accountCell)}><Button aria-label={`Account ${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} title={row.identity} onPress={() => onSelect(row.id)} {...stylex.props(styles.account)}><span data-line-run>{row.identity}</span></Button></div>
+    <div role="cell" data-priority="1" {...stylex.props(styles.cell, styles.accountCell)}><Button aria-label={`Account ${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} onPress={() => onSelect(row.id)} {...stylex.props(styles.account)}><span data-line-run title={row.identity}>{row.identity}</span></Button></div>
     <div role="cell" data-priority="2" data-reading aria-label={`Primary ${row.governing.label} · ${row.governing.text}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} {...stylex.props(styles.cell)}><UsageMeterReading meter={governing} stale={row.stale} compact /></div>
     <div role="cell" data-priority="3" data-reset aria-label={row.reset === 'Unreported' ? 'Reset unreported' : `Primary reset: ${row.reset}`} title={row.reset === 'Unreported' ? 'Reset unreported' : `Primary reset: ${row.reset}`} {...stylex.props(styles.cell, styles.reset)}><span data-line-run>{reset}</span></div>
     {full && <div role="cell" data-priority="4" data-reading={args.W === 320 ? '' : undefined} aria-label={`Secondary ${row.comparison?.label} · ${row.comparison?.text}`} {...stylex.props(styles.cell)}>{comparison && <UsageMeterReading meter={comparison} stale={row.stale} compact />}</div>}
@@ -73,14 +73,14 @@ function ProbeExplorer(initial: Args) {
   return <Explorer {...args} onChange={patch => setArgs(current => ({ ...current, ...patch }))} />
 }
 const meta = {
-  title: 'Fractal UI/Explore/QuotaPriority', component: Explorer,
+  title: 'Fractal UI/Explore/QuotaPriority',
   render: function Render() {
     const [args, updateArgs] = useArgs<Args>()
     return args.probe ? <ProbeExplorer {...args} /> : <Explorer {...args} onChange={updateArgs} />
   },
   parameters: { layout: 'fullscreen' },
   args: { D: 'D3', T: 'T1', G: 'G1', W: 240, B: 'B1', scheme: 'dark', compare: false, viewport: 1440, probe: false },
-  argTypes: { D: { control: 'select', options: drops.map(choice => choice.id) }, T: { control: 'select', options: tables.map(choice => choice.id) }, G: { control: 'select', options: gaps.map(choice => choice.id) }, W: { control: 'select', options: widths.map(choice => choice.id) }, B: { control: 'select', options: bars.map(choice => choice.id) }, scheme: { control: 'select', options: ['light', 'dark'] }, compare: { control: 'boolean' }, viewport: { control: 'select', options: [1440, 900] }, probe: { table: { disable: true } }, onChange: { table: { disable: true } } },
+  argTypes: { D: { control: 'select', options: drops.map(choice => choice.id) }, T: { control: 'select', options: tables.map(choice => choice.id) }, G: { control: 'select', options: gaps.map(choice => choice.id) }, W: { control: 'select', options: widths.map(choice => choice.id) }, B: { control: 'select', options: bars.map(choice => choice.id) }, scheme: { control: 'select', options: ['light', 'dark'] }, compare: { control: 'boolean' }, viewport: { control: 'select', options: [1440, 900] }, probe: { table: { disable: true } } },
 } satisfies Meta<Args>
 export default meta
 type Story = StoryObj<typeof meta>
