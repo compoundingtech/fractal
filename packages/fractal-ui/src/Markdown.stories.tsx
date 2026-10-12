@@ -184,7 +184,7 @@ export const StreamingControlsPersistence: Story = {
       flushSync(() => copy.click())
       await settle()
       if (fence.dataset.copyState !== 'copied' || copied[0] !== fence.querySelector('code')?.textContent) throw new Error('Copy did not write the raw rendered code')
-      if (copy.textContent !== 'Copied' || copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copied feedback did not match the accessible control name')
+      if (String(copy.textContent) !== 'Copied' || copy.getAttribute('aria-label') !== 'Copied code') throw new Error('Copied feedback did not match the accessible control name')
       for (let stage = 1; stage < streamChunks.length; stage++) {
         flushSync(() => append.click())
         await settle()
