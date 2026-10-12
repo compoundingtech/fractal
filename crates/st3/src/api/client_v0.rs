@@ -8407,6 +8407,7 @@ fn terminal_route_at(state: &AppState, id: &str) -> Result<Value, ApiError> {
                 .filter(|endpoint| endpoint["transport"] == "fabric")
                 .filter_map(|endpoint| endpoint["node"].as_str())
                 .filter(|node| node.len() == 64 && node.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .map(str::to_ascii_lowercase)
                 .collect();
             if let Some(node) = nodes.iter().next().filter(|_| nodes.len() == 1) {
                 value["fabric"] = json!({"node": node.to_ascii_lowercase(),
@@ -11690,6 +11691,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = terminal_route_fixture(root.path());
         assert!(terminal_route_at(&state, "agent/demo/worker").unwrap().get("fabric").is_none());
+        state.store.publish_fleet_endpoints("listening", &[
+            json!({"transport":"fabric", "node":"a".repeat(64)}),
+            json!({"transport":"fabric", "node":"A".repeat(64)}),
+        ], "test").unwrap();
+        assert_eq!(terminal_route_at(&state, "agent/demo/worker").unwrap()["fabric"]["node"], "a".repeat(64));
         state.store.publish_fleet_endpoints("listening", &[
             json!({"transport":"fabric", "node":"a".repeat(64)}),
             json!({"transport":"fabric", "node":"b".repeat(64)}),
