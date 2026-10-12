@@ -151,6 +151,58 @@ impl Fixture {
         }
     }
 
+    /// Under a paused clock: lets reads on the blocking pool finish for `wall` without parking
+    /// the runtime, which would move the paused clock past their read deadlines, and returns the
+    /// next frame already sent, if any.
+    async fn paused_settle(&mut self, wall: Duration) -> Option<Value> {
+        let until = std::time::Instant::now() + wall;
+        while std::time::Instant::now() < until {
+            if let Some(message) = futures_util::FutureExt::now_or_never(self.socket.next()) {
+                // Protocol pings carry no frame.
+                if let Message::Text(text) = message.unwrap().unwrap() {
+                    return Some(serde_json::from_str(&text).unwrap());
+                }
+                continue;
+            }
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
+    }
+
+    /// [`Self::frame`] under a paused clock, whose timeout would fire as soon as a read waits
+    /// on the blocking pool. The clock moves in short steps meanwhile, as it would, so a paced
+    /// reread comes due; three seconds cover the reread interval twice.
+    async fn paused_frame(&mut self) -> Value {
+        for _ in 0..30 {
+            if let Some(frame) = self.paused_settle(Duration::from_millis(200)).await {
+                return frame;
+            }
+            tokio::time::advance(Duration::from_millis(100)).await;
+        }
+        panic!("a collection frame");
+    }
+
+    /// [`Self::quiet`] under a paused clock: no frame while reads finish, across the reread
+    /// interval, and while what it started finishes.
+    async fn paused_quiet(&mut self) {
+        if let Some(frame) = self.paused_settle(Duration::from_millis(500)).await {
+            panic!("unexpected frame: {frame}");
+        }
+        self.paused_advance(COLLECTION_REREAD_INTERVAL + Duration::from_millis(500)).await;
+        if let Some(frame) = self.paused_settle(Duration::from_millis(500)).await {
+            panic!("unexpected frame: {frame}");
+        }
+    }
+
+    /// Moves the paused clock once reads in flight have finished, so none passes its deadline.
+    async fn paused_advance(&mut self, by: Duration) {
+        if let Some(frame) = self.paused_settle(Duration::from_millis(500)).await {
+            panic!("unexpected frame: {frame}");
+        }
+        tokio::time::advance(by).await;
+    }
+
     fn counts(&self) -> BTreeMap<String, usize> {
         self.reads.lock().unwrap().clone()
     }
@@ -636,45 +688,45 @@ async fn a_held_view_that_is_not_ready_resyncs_once_and_waits_for_its_next_chang
         let gate = Arc::new(std::sync::atomic::AtomicU8::new(NOT_READY));
         let mut fixture =
             Fixture::open_with(state.clone(), session.clone(), false, None, Some(gate.clone()), &["work"]).await;
-        let first = fixture.frame().await;
+        let first = fixture.paused_frame().await;
         assert_eq!((first["kind"].as_str(), first["retryable"].as_bool()), (Some("resync"), Some(true)), "{first}");
         // Neither a commit nor the reread interval reads it again meanwhile. A paired session's
         // clock does, to recheck its grant, and sends nothing.
         // A commit the work collection reads, not one it ignores.
         fixture.claim("agent/fixture-seat", "runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
-        tokio::time::advance(ATTENTION_CLOCK_INTERVAL + COLLECTION_REREAD_INTERVAL).await;
-        fixture.quiet().await;
+        fixture.paused_advance(ATTENTION_CLOCK_INTERVAL + COLLECTION_REREAD_INTERVAL).await;
+        fixture.paused_quiet().await;
         let clock_reads = usize::from(paired);
         assert_eq!(fixture.counts(), counts(&[("work", 1 + clock_reads)]), "{}", session.transport);
         // The view's next change reads it, and the window gets its rows.
         gate.store(READY, SeqCst);
         state.store.publish_collection_view("work");
-        assert_eq!(fixture.frame().await["kind"], "snapshot");
+        assert_eq!(fixture.paused_frame().await["kind"], "snapshot");
         let reads = fixture.counts()["work"];
         // Withdrawn again: one resync, then quiet until the view changes once more.
         gate.store(NOT_READY, SeqCst);
         state.store.hold_collection_view("work");
-        assert_eq!(fixture.frame().await["kind"], "resync");
+        assert_eq!(fixture.paused_frame().await["kind"], "resync");
         // A commit the work collection reads, not one it ignores.
         fixture.claim("agent/fixture-seat", "runtime.observed", json!({"status":"running", "incarnation_id":"two"}));
-        tokio::time::advance(ATTENTION_CLOCK_INTERVAL + COLLECTION_REREAD_INTERVAL).await;
-        fixture.quiet().await;
+        fixture.paused_advance(ATTENTION_CLOCK_INTERVAL + COLLECTION_REREAD_INTERVAL).await;
+        fixture.paused_quiet().await;
         assert_eq!(fixture.counts()["work"], reads + 1 + clock_reads, "{}", session.transport);
         if paired {
             // A grant revoked while the window waits ends it at the clock's next recheck, and it
             // gets no rows after.
             gate.store(REVOKED, SeqCst);
-            tokio::time::advance(ATTENTION_CLOCK_INTERVAL).await;
-            let revoked = fixture.frame().await;
+            fixture.paused_advance(ATTENTION_CLOCK_INTERVAL).await;
+            let revoked = fixture.paused_frame().await;
             assert_eq!((revoked["kind"].as_str(), revoked["retryable"].as_bool()), (Some("error"), Some(false)), "{revoked}");
             gate.store(READY, SeqCst);
             state.store.publish_collection_view("work");
-            fixture.quiet().await;
+            fixture.paused_quiet().await;
         } else {
             gate.store(READY, SeqCst);
             state.store.publish_collection_view("work");
             // Its rows changed meanwhile: the read count is in them.
-            assert_eq!(fixture.frame().await["kind"], "changes");
+            assert_eq!(fixture.paused_frame().await["kind"], "changes");
         }
     }
 }
@@ -792,11 +844,11 @@ async fn a_revoked_grant_ends_a_waiting_work_window_through_the_real_read() {
     state.store.published_work_list().start();
     let direct = state.store.direct_work_reads();
     let mut fixture = Fixture::open_as(state.clone(), session, true, None, &["work"]).await;
-    let first = fixture.frame().await;
+    let first = fixture.paused_frame().await;
     assert_eq!((first["kind"].as_str(), first["retryable"].as_bool()), (Some("resync"), Some(true)), "{first}");
     // The clock rechecks the grant through the real read, which says nothing new.
-    tokio::time::advance(ATTENTION_CLOCK_INTERVAL).await;
-    fixture.quiet().await;
+    fixture.paused_advance(ATTENTION_CLOCK_INTERVAL).await;
+    fixture.paused_quiet().await;
     assert_eq!(fixture.counts(), counts(&[("work", 2)]));
     // Revoked while it waits: the next recheck ends the window before the work list is read.
     state.store.append_claim(&ClaimInput {
@@ -804,12 +856,12 @@ async fn a_revoked_grant_ends_a_waiting_work_window_through_the_real_read() {
         actor: Some("person/avery".into()), fields: BTreeMap::new(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
-    tokio::time::advance(ATTENTION_CLOCK_INTERVAL).await;
-    let revoked = fixture.frame().await;
+    fixture.paused_advance(ATTENTION_CLOCK_INTERVAL).await;
+    let revoked = fixture.paused_frame().await;
     assert_eq!((revoked["kind"].as_str(), revoked["retryable"].as_bool()), (Some("error"), Some(false)), "{revoked}");
     // Gone: a later publication neither reads it nor sends it anything.
     super::super::published_lists::refresh_work_once(&state.store);
-    fixture.quiet().await;
+    fixture.paused_quiet().await;
     assert_eq!(fixture.counts(), counts(&[("work", 3)]));
     assert_eq!(state.store.direct_work_reads(), direct);
 }

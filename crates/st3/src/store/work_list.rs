@@ -924,7 +924,7 @@ mod tests {
         // Slots built again: the next read of it is kept.
         orders.get_or_build("agent/late", || vec![9]);
         assert_eq!(orders.kept(), (ACTOR_ORDERS, 0, 0));
-        assert_eq!(orders.get_or_build("agent/late", || panic!("kept, so not built again")).1, false);
+        assert!(!orders.get_or_build("agent/late", || panic!("kept, so not built again")).1);
     }
 
     #[test]
@@ -960,7 +960,7 @@ mod tests {
             assert_eq!(waiting.join().unwrap(), (std::sync::Arc::new(vec![2]), true));
         });
         assert_eq!(orders.kept(), (2, 0, 0), "a and b kept, built, nothing orphaned");
-        assert_eq!(orders.get_or_build("agent/b", || panic!("kept, so not built again")).1, false);
+        assert!(!orders.get_or_build("agent/b", || panic!("kept, so not built again")).1);
     }
 
     /// Two reads of `actor`'s one cell, both of whose builds panic: the first blocks until the

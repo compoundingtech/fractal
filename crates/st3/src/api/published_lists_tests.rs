@@ -1018,13 +1018,17 @@ fn a_work_page_clones_only_its_rows_along_each_growing_inventory() {
     }
     let off_page = grows(&store, "ash off-page", &unrelated);
     assert_eq!(off_page.rows, unrelated.rows + 8);
-    // Finished work: never held, so nothing a page or build reads grows.
+    // Finished work: never held, so nothing a page or build reads grows. Ash's queue already
+    // holds its off-page runs, so each finished run is moved first, as a seat's operator would.
     for n in 0..8 {
         let run = start(&store, "garden/ash-more", &format!("done-{n}"));
         let (plant, ash) = step(&run, "plant");
         store.set_step_state(&plant, "ready", None).unwrap();
+        move_run(&store, &ash, &run.id, "top", None, &format!("done-{n}-first"));
         act(&store, &plant, &ash, "claim", &format!("claim-done-{n}"));
         act(&store, &plant, &ash, "complete", &format!("complete-done-{n}"));
+        // Submitted work is verifying, still current; its verification finishes it.
+        store.set_step_state(&plant, "completed", None).unwrap();
     }
     let history = grows(&store, "history", &off_page);
     assert_eq!(history.rows, off_page.rows, "finished work is not held");
@@ -1139,7 +1143,8 @@ async fn an_edited_or_foreign_published_work_cursor_expires() {
     assert_eq!(other.store.published_work_list().generation(), store.published_work_list().generation());
     expired(continue_with(&other, cursor.clone(), None).await, "another store's list");
     // Each other issued filter edited.
-    let fields: [(&str, &dyn Fn(&mut ClientPageCursor)); 3] = [
+    type Edit<'a> = (&'a str, &'a dyn Fn(&mut ClientPageCursor));
+    let fields: [Edit<'_>; 3] = [
         ("person", &|cursor| cursor.person = Some("person/someone-else".into())),
         ("status", &|cursor| cursor.status = Some("ready".into())),
         ("native_only", &|cursor| cursor.native_only = !cursor.native_only),
