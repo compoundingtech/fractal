@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { build, type Plugin } from 'vite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { extensionBuild } from '../../scripts/extensions-build.mjs'
+import { changelogSources } from '../../.changelog/mod.ts'
 
 // Real Vite/Rolldown graphs through the production plugin: the changelog modules are replaced by
 // compiled literals, and the public gate rejects injected private text or modules.
@@ -59,7 +60,10 @@ describe('public changelog build gate', () => {
   it('replaces the changelog modules with the compiled public manifest for the exact build identity', async () => {
     const text = await buildPublic('', { public: publicRegistry, private: privateRegistry() })
     expect(text).toContain(machineVersion)
-    expect(text).toContain('2026-10-11-sidebar-tree-indentation')
+    for (const { file, source } of changelogSources) {
+      expect(text).toContain(file.replace(/\.ts$/, ''))
+      expect(text).toContain(source.title)
+    }
     expect(text).not.toContain(synthetic.title)
     expect(text).not.toContain('2000-01-01-synthetic-private-control')
   })
