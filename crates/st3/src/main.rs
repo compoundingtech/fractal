@@ -7775,6 +7775,9 @@ async fn follow_mission_run_to(
     let client = &client;
     let mut prior = String::new();
     loop {
+        if cli_output::closed() {
+            return Ok(());
+        }
         let page = if json_output {
             None
         } else {
@@ -7821,6 +7824,9 @@ async fn follow_mission_run_to(
                 anyhow::bail!("mission run {} is {}", run.subject, run.status)
             }
             _ => {}
+        }
+        if cli_output::closed() {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
         run = client
@@ -8728,6 +8734,9 @@ async fn run_trace_to(
     let claims = trace_claims(client, &args).await?;
     let mut cursor = args.after_index.unwrap_or_default();
     for claim in claims {
+        if cli_output::closed() {
+            return Ok(());
+        }
         cursor = cursor.max(claim.store_index);
         if json_output {
             writeln!(output, "{}", serde_json::to_string(&claim)?)?;
@@ -8735,7 +8744,7 @@ async fn run_trace_to(
             write_trace_claim(output, &claim)?;
         }
     }
-    if !args.follow {
+    if !args.follow || cli_output::closed() {
         return Ok(());
     }
     if args.after_index.is_none() {
@@ -8752,6 +8761,9 @@ async fn run_trace_to(
         ..Default::default()
     };
     loop {
+        if cli_output::closed() {
+            return Ok(());
+        }
         let mut event_query = vec![
             format!("after={cursor}"),
             "wait=true".into(),
@@ -8766,6 +8778,9 @@ async fn run_trace_to(
         let page = event_feed.read(client, &event_query.join("&")).await?;
         let scanned = page.next_after;
         for event in page.items {
+            if cli_output::closed() {
+                return Ok(());
+            }
             if json_output {
                 writeln!(output, "{}", serde_json::to_string(&event)?)?;
             } else {
@@ -9059,7 +9074,7 @@ async fn run_activity(endpoint: &Endpoint, args: ActivityArgs, json_output: bool
             .await?;
         cursor = Some(response.value.resume_cursor.clone());
         print_activity_page(&response, json_output, args.all)?;
-        if !args.follow {
+        if !args.follow || cli_output::closed() {
             return Ok(());
         }
     }
@@ -9401,6 +9416,9 @@ async fn run_collection_watch(
     let client = generated_client(endpoint, person)?;
     let mut rows = BTreeMap::<String, Value>::new();
     loop {
+        if cli_output::closed() {
+            return Ok(());
+        }
         let mut stream = match client.collection_stream().await {
             Ok(stream) => stream,
             Err(GeneratedClientError::Transport(_) | GeneratedClientError::Unreachable(_)) => {
@@ -9460,6 +9478,9 @@ async fn run_collection_watch(
                 .collect::<Vec<_>>();
             if json_output {
                 print_value(&frame, true)?;
+                if cli_output::closed() {
+                    return Ok(());
+                }
                 continue;
             }
             let items = order
@@ -9493,6 +9514,9 @@ async fn run_collection_watch(
                 print_product_page(title, &page, false, &format!("st {collection} ls --watch"))?;
             }
             cli_output::stdout().flush()?;
+            if cli_output::closed() {
+                return Ok(());
+            }
         }
         // The socket ended (including daemon restart). Reopen and subscribe for
         // a fresh snapshot rather than attempting to resume a stale projection.
@@ -10520,6 +10544,9 @@ async fn follow_conversation(
     let mut seen = BTreeMap::new();
     let mut stalled: Option<String> = None;
     loop {
+        if cli_output::closed() {
+            return Ok(());
+        }
         match stream.next_event().await? {
             None => anyhow::bail!("st closed the conversation stream"),
             Some(st3_client::CollectionEvent::Conversation {
@@ -20992,6 +21019,9 @@ async fn run_pi_channel(
     let mut checked_todo_minute = None;
     let mut todo_end_seen = None;
     loop {
+        if cli_output::closed() {
+            return Ok(());
+        }
         tokio::select! {
             wake = async { match todo_observations.as_mut() {
                 Some(observations) => observations.recv().await,

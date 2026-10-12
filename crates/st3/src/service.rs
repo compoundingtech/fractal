@@ -1,5 +1,7 @@
 //! Install the st daemon as a native user service.
 
+use crate::{cli_print as print, cli_println as println};
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};

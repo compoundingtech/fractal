@@ -1,11 +1,22 @@
-//! CLI stdout writes share one exit policy: a reader closing its pipe is success.
+//! CLI stdout writes stop when the reader closes its pipe; commands still finish their effects.
 //! Apply this only to output errors, never to daemon or filesystem errors.
+//! Formatting macros are explicitly imported by main, directive_note, evidence::cli,
+//! sekrets::cli, gate_kinds, service, and service::install; the library root never shadows
+//! std's macros in daemon code or tests.
 
 use std::fmt;
 use std::io::{self, Write as _};
 use std::pin::Pin;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
+
+static CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Streaming readers stop after a failed stdout write. Commands with effects keep running.
+pub fn closed() -> bool {
+    CLOSED.load(Ordering::Relaxed)
+}
 
 #[macro_export]
 macro_rules! cli_print {
@@ -18,34 +29,31 @@ macro_rules! cli_println {
     ($($arg:tt)*) => { $crate::cli_print!("{}\n", format_args!($($arg)*)) };
 }
 
-// Keep the ordinary formatting syntax for every CLI command and its child modules.
-macro_rules! print {
-    ($($arg:tt)*) => { $crate::cli_print!($($arg)*) };
-}
-
-macro_rules! println {
-    ($($arg:tt)*) => { $crate::cli_println!($($arg)*) };
-}
-
 pub fn print(arguments: fmt::Arguments<'_>) {
-    if let Err(error) = io::stdout().lock().write_fmt(arguments) {
-        let error = write_error(error);
+    if closed() {
+        return;
+    }
+    if let Err(error) = output_result(io::stdout().lock().write_fmt(arguments), ()) {
         let _ = writeln!(io::stderr().lock(), "st: write stdout: {error}");
         std::process::exit(1);
     }
 }
 
-/// Streaming and raw byte output use the same policy as formatted output. Exit at the
-/// failed write, so a follow command stops immediately and no later mutation is attempted.
-fn write_error(error: io::Error) -> io::Error {
-    if error.kind() == io::ErrorKind::BrokenPipe {
-        std::process::exit(0);
+fn output_result<T>(result: io::Result<T>, discarded: T) -> io::Result<T> {
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+            CLOSED.store(true, Ordering::Relaxed);
+            Ok(discarded)
+        }
+        other => other,
     }
-    error
 }
 
 /// Include a final unterminated line in the policy; std's shutdown flush ignores errors.
 pub fn finish(code: ExitCode) -> ExitCode {
+    if closed() {
+        return code;
+    }
     match io::stdout().flush() {
         Ok(()) => code,
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => code,
@@ -76,11 +84,17 @@ impl Output<io::Stdout> {
 
 impl<W: io::Write> io::Write for Output<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write(bytes).map_err(write_error)
+        if closed() {
+            return Ok(bytes.len());
+        }
+        output_result(self.0.write(bytes), bytes.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush().map_err(write_error)
+        if closed() {
+            return Ok(());
+        }
+        output_result(self.0.flush(), ())
     }
 }
 
@@ -90,20 +104,29 @@ impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Output<W> {
         context: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if closed() {
+            return Poll::Ready(Ok(bytes.len()));
+        }
         Pin::new(&mut self.0)
             .poll_write(context, bytes)
-            .map_err(write_error)
+            .map(|result| output_result(result, bytes.len()))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if closed() {
+            return Poll::Ready(Ok(()));
+        }
         Pin::new(&mut self.0)
             .poll_flush(context)
-            .map_err(write_error)
+            .map(|result| output_result(result, ()))
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if closed() {
+            return Poll::Ready(Ok(()));
+        }
         Pin::new(&mut self.0)
             .poll_shutdown(context)
-            .map_err(write_error)
+            .map(|result| output_result(result, ()))
     }
 }
