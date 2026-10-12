@@ -78,7 +78,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
     return () => observer.disconnect()
   }, [expanded, meta, block.id, block.sender, turn, kind])
   const time = <time data-turn-time dateTime={block.at} title={exact(block.at)} {...stylex.props(styles.time)}>{clock(block.at)}</time>
-  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy)}>{copied ? 'Copied' : <Icon name="copy" scale="status" />}</Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? exact(block.at) : 'Copy message'}</Tooltip></TooltipTrigger>
+  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? `${copied ? 'Copied · ' : ''}${exact(block.at)}` : copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
   const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time>{time}</span></> : null}</span>
   const content = seat
     ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
