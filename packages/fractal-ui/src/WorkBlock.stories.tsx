@@ -120,8 +120,10 @@ const phaseButton = (block: HTMLElement, index: number) => block.querySelector<H
 const stepRow = (block: HTMLElement, step: number) => block.querySelector<HTMLElement>(`[data-work-row="step"][data-call-id="work/step-${step}"]`)
 const cell = (row: HTMLElement, name: string) => row.querySelector<HTMLElement>(`:scope > [data-cell="${name}"]`)!
 const press = async (element: HTMLElement, expanded: 'true' | 'false') => { await userEvent.click(element); await waitFor(() => expect(element).toHaveAttribute('aria-expanded', expanded)) }
-const box = (element: Element) => element.getBoundingClientRect()
+const box = (target: Element | Range) => target.getBoundingClientRect()
 const same = async (values: readonly number[], what: string) => { for (const value of values) await expect(Math.abs(value - values[0]!), what).toBeLessThan(0.5) }
+/** Plays leave no focus ring behind, so the settled frame shows the resting table. */
+const restFocus = (canvasElement: HTMLElement) => { const active = canvasElement.ownerDocument.activeElement; if (active instanceof HTMLElement) active.blur() }
 
 /** Collapsed default: a settled block is one summary row, and the failure it holds is a count in danger ink. */
 async function assertCollapsed(block: HTMLElement) {
@@ -160,11 +162,14 @@ async function assertColumns(block: HTMLElement, narrow: boolean) {
   }
   const details = rows.flatMap(row => row.querySelector<HTMLElement>(':scope > [data-cell="detail"]') ?? [])
   await expect(details.length).toBeGreaterThan(0)
+  const phaseCounts = rowsOf(block, 'phase').map(row => row.querySelector<HTMLElement>('[data-work-counts]')!)
   if (narrow) {
-    // Below the lane minimum the detail folds into the opened body; the name column takes its width.
+    // Below the lane minimum the detail folds into the opened body and phase titles keep the room their counts took.
     for (const detail of details) await expect(getComputedStyle(detail).display).toBe('none')
+    for (const counts of phaseCounts) await expect(getComputedStyle(counts).display).toBe('none')
   } else {
     await same([...details.map(detail => box(detail).left), table.left + 256 + 8], 'detail left edge')
+    for (const counts of phaseCounts) await expect(box(counts).width).toBeGreaterThan(0)
   }
   for (const row of rows) {
     const cells = Array.from(row.querySelectorAll<HTMLElement>(':scope > [data-cell]')).filter(element => getComputedStyle(element).display !== 'none')
@@ -216,6 +221,7 @@ const play = (narrow: boolean): Story['play'] => async ({ canvasElement }) => {
   // Control: opening the earlier failure must break "only the turn-ending failure opens"; closing it restores the rule.
   const earlier = stepRow(block, 4)!.querySelector<HTMLElement>('button')!
   await withControl(() => assertAutoOpen(block, undefined), () => press(earlier, 'true'), () => press(earlier, 'false'))
+  restFocus(canvasElement)
 }
 
 export const SettledDark1440: Story = { play: play(false) }
@@ -247,6 +253,7 @@ const partialPlay: Story['play'] = async ({ canvasElement }) => {
   const dead = (event: Event) => { event.stopPropagation(); event.preventDefault() }
   const pressEvents = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'keydown', 'keyup'] as const
   await withControl(foldWorks, () => { for (const type of pressEvents) summaryButton(block).addEventListener(type, dead, true) }, () => { for (const type of pressEvents) summaryButton(block).removeEventListener(type, dead, true) })
+  restFocus(canvasElement)
 }
 export const PartialHistoryDark1440: Story = { args: { state: 'partial' }, play: partialPlay }
 export const PartialHistoryLight1440: Story = { args: { state: 'partial', scheme: 'light' }, play: partialPlay }
@@ -275,12 +282,19 @@ const failurePlay = (narrow: boolean): Story['play'] => async ({ canvasElement }
   await expect(Math.abs(box(frame).right - box(block.querySelector('[role="table"]')!).right)).toBeLessThan(0.5)
   await userEvent.click(within(body).getByRole('button', { name: 'Full output' }))
   await waitFor(() => expect(within(body).getByTestId('work-step-output')).toHaveTextContent(/^resolving recipients/))
+  await expect(body.querySelector('[data-tail-hidden]')).toBeNull()
+  await userEvent.click(within(body).getByRole('button', { name: 'Last lines' }))
+  await waitFor(() => expect(within(body).getByTestId('work-step-output')).toHaveTextContent(/^sent reviewer/))
+  await expect(body.querySelector('[data-tail-hidden]')).toHaveTextContent(/^… 3 earlier lines$/)
 
   await press(phaseButton(block, 0), 'true')
   const earlier = stepRow(block, 4)!.querySelector<HTMLElement>('button')!
   await withControl(() => assertAutoOpen(block, 20), () => press(earlier, 'true'), () => press(earlier, 'false'))
   const flexRow = stepRow(block, 20)!
   await withControl(() => assertColumns(block, narrow), () => { flexRow.style.display = 'flex' }, () => { flexRow.style.removeProperty('display') })
+  // Leave the default frame: only the turn-ending failure's phase open.
+  await press(phaseButton(block, 0), 'false')
+  restFocus(canvasElement)
 }
 export const TurnEndingFailureDark1440: Story = { args: { state: 'failed' }, play: failurePlay(false) }
 export const TurnEndingFailureLight1440: Story = { args: { state: 'failed', scheme: 'light' }, play: failurePlay(false) }
@@ -306,6 +320,7 @@ const runningPlay = (narrow: boolean): Story['play'] => async ({ canvasElement }
   await expect(block.querySelector('[data-work-row="body"]')).toBeNull()
   const flexRow = stepRow(block, 18)!
   await withControl(() => assertColumns(block, narrow), () => { flexRow.style.display = 'flex' }, () => { flexRow.style.removeProperty('display') })
+  restFocus(canvasElement)
 }
 export const RunningDark1440: Story = { args: { state: 'running' }, play: runningPlay(false) }
 export const RunningLight1440: Story = { args: { state: 'running', scheme: 'light' }, play: runningPlay(false) }

@@ -113,7 +113,7 @@ function GroupRow({ rowKey, kind, depth, open, glyph, title, titleTone, counts, 
       <Button aria-expanded={open} aria-labelledby={[`${id}-title`, `${id}-counts`, tag === undefined ? '' : `${id}-tag`, word === undefined ? '' : `${id}-word`].filter(Boolean).join(' ')} onPress={() => toggle(rowKey, open)} {...stylex.props(styles.hit)} />
       <span aria-hidden="true" {...stylex.props(grammar.slot, glyph === 'running' && styles.runningInk)}>{glyph === 'running' ? <Icon name="spinner" spinning size={14} /> : <span {...stylex.props(grammar.chevron, open && grammar.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span>
       <span id={`${id}-title`} data-work-title {...stylex.props(styles.text, titleTone === 'subject' ? styles.subject : styles.verb)}>{title}</span>
-      <span id={`${id}-counts`} data-work-counts {...stylex.props(styles.counts)}>{counts}</span>
+      <span id={`${id}-counts`} data-work-counts {...stylex.props(styles.counts, kind === 'phase' && styles.phaseCounts)}>{counts}</span>
       {tag !== undefined && <span id={`${id}-tag`} data-work-tag {...stylex.props(styles.tag)}>{tag}</span>}
     </div>
     <div role="cell" data-cell="status" {...stylex.props(styles.wordCell, tones[tone])}><span id={`${id}-word`}>{word}</span></div>
@@ -191,6 +191,7 @@ function TerminalTail({ text }: { readonly text: string }) {
   return <div data-terminal-tail>
     <div {...stylex.props(styles.tailMeta)}>
       {hidden > 0 && <><span data-tail-hidden>… {counted(hidden, 'earlier line')}</span><span aria-hidden="true">·</span><Button onPress={() => setFull(true)} {...stylex.props(styles.tailAction)}>Full output</Button><span aria-hidden="true">·</span></>}
+      {full && lines.length > TAIL_LINES && <><Button onPress={() => setFull(false)} {...stylex.props(styles.tailAction)}>Last lines</Button><span aria-hidden="true">·</span></>}
       <Button onPress={copy} data-copied={copied || undefined} {...stylex.props(styles.tailAction)}>{copied ? 'Copied' : 'Copy'}</Button>
     </div>
     <pre data-testid="work-step-output" {...stylex.props(styles.tailLines)}><code>{lines.slice(hidden).join('\n')}</code></pre>
@@ -215,6 +216,8 @@ const styles = stylex.create({
   subject: { flexShrink: 1, color: ink.fgSoft, fontWeight: t.weightMedium },
   verb: { flexShrink: 1, color: ink.fgMuted, fontWeight: t.weightRegular },
   counts: { flexShrink: 100, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
+  // In a narrow lane the phase title keeps the room; its kind counts stay in the accessible name.
+  phaseCounts: { display: { default: 'none', '@container (min-width: 40rem)': 'inline' } },
   tag: { flexShrink: 0, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, color: ink.fgMuted, whiteSpace: 'nowrap' },
   detailCell: { gridColumn: 'detail', display: { default: 'none', '@container (min-width: 40rem)': 'block' }, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   code: { fontFamily: t.fontMono },
