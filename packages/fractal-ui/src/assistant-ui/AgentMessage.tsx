@@ -76,7 +76,7 @@ const MessageFrame = ({ variant, header, subject, children, label, outgoing = fa
   readonly frameStyles?: ReadonlyArray<stylex.StyleXStyles>
 }) => <article {...stylex.props(styles.message, variant._tag === 'Incoming' ? styles.card : variant._tag === 'Outgoing' ? styles.outgoing : variant.frame?._tag === 'Card' ? styles.card : styles.human, ...(frameStyles ?? []))} aria-label={label} data-fractal-card={variant._tag === 'Incoming' || (variant._tag === 'Human' && variant.frame?._tag === 'Card') ? '' : undefined} data-harness-weight={variant._tag === 'Incoming' || (variant._tag === 'Human' && variant.frame?._tag === 'Card') ? 'card' : 'row'} data-agent-message-direction={variant._tag === 'Incoming' ? 'incoming' : variant._tag === 'Outgoing' ? 'outgoing' : 'human'} data-message-variant={variant._tag.toLowerCase()} data-work-kind={outgoing ? 'messages-sent' : undefined}>
   <header data-message-header {...stylex.props(styles.header)}>{header}</header>
-  {subject !== undefined ? <h3 data-message-subject {...stylex.props(styles.subject)}>{subject}</h3> : null}
+  {subject !== undefined ? <h2 data-message-subject {...stylex.props(styles.subject)}>{subject}</h2> : null}
   {children !== undefined && children !== null ? <div data-message-content {...stylex.props(styles.content, subject === undefined && styles.contentWithoutSubject)}>{children}</div> : null}
 </article>
 
@@ -155,7 +155,7 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
       </header>
       {isExpanded ? <DisclosurePanel>
         <div data-opened-body {...stylex.props(styles.openedBody)}>
-          {normalizedSubject !== undefined ? <h3 data-message-subject {...stylex.props(styles.openedSubject)}>{normalizedSubject}</h3> : null}
+          {normalizedSubject !== undefined ? <h2 data-message-subject {...stylex.props(styles.openedSubject)}>{normalizedSubject}</h2> : null}
           <div data-message-content {...stylex.props(styles.messageBody)} tabIndex={message.length > 4000 ? 0 : undefined} role="region" aria-label="Outgoing message body"><MessageBody text={message} /></div>
           <div {...stylex.props(styles.controls)}>{recipients.map(recipient => <span key={recipient.id} role={recipient.receipt?._tag === 'Failed' ? 'note' : undefined} tabIndex={recipient.receipt?._tag === 'Failed' ? 0 : undefined} aria-label={recipient.receipt?._tag === 'Failed' ? `${recipient.id} · failed · ${recipient.receipt.reason}` : undefined} {...stylex.props(styles.receipt, recipient.receipt?._tag === 'Failed' && styles.danger)} title={recipient.receipt?._tag === 'Failed' ? recipient.receipt.reason : recipient.id}>
             <AgentIdHierarchy id={recipient.id} />{recipient.receipt !== undefined ? ` · ${recipient.receipt._tag.toLowerCase()}` : ''}

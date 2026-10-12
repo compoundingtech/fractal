@@ -162,6 +162,14 @@ export const AllStates: Story = { render: () => <>
   await expect(canvasElement.querySelectorAll('[data-harness-weight="row"]')).toHaveLength(3)
   await expect(canvas.queryByText('End of the full release review.')).toBeNull()
   await expect(canvas.getByRole('alert')).toHaveTextContent('the preview is kept')
+  const subject = canvasElement.querySelector<HTMLElement>('[data-message-subject]')!
+  const assertHeading = async () => { await expect(canvas.getByRole('heading', { name: 'Release review', level: 2 })).toBeVisible() }
+  await assertHeading()
+  const skippedHeading = document.createElement('h3')
+  skippedHeading.textContent = subject.textContent
+  subject.replaceWith(skippedHeading)
+  try { await expect(assertHeading()).rejects.toThrow() } finally { skippedHeading.replaceWith(subject) }
+  await assertHeading()
 } }
 export const OutgoingSingle: Story = { render: () => <OutgoingMessageRow {...outgoingMessage} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
