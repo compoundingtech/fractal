@@ -424,7 +424,9 @@ export const LargeSingleLineOutgoing: Story = { render: () => <OutgoingMessageRo
   const canvas = within(canvasElement)
   const trigger = canvas.getByRole('button', { name: /Review.*Single line report/ })
   await expect(trigger.textContent!.length).toBeLessThan(240)
-  await expect(trigger.querySelector('[title]')?.getAttribute('title')?.length).toBeLessThanOrEqual(200)
+  // The excerpt is bounded in the name itself (no native title carries it): 'To Review · ' plus at most 200 characters.
+  await expect(trigger.querySelectorAll('[title]')).toHaveLength(0)
+  await expect(trigger.getAttribute('aria-label')!.length).toBeLessThanOrEqual('To Review · '.length + 200)
   await expect(canvasElement.querySelector('[data-message-window]')).toBeNull()
   await userEvent.click(trigger)
   await expect(trigger).toHaveFocus()
