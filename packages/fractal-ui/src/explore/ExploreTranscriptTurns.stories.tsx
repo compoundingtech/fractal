@@ -363,9 +363,13 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await expect(identity).toHaveAccessibleName(/^Workspace\s*\.\s*Review$/)
     await expect(identity.textContent).toBe('Workspace.Review')
     // Earlier steps leave keyboard modality; React Aria opens hover tooltips only under pointer modality.
-    await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
-    await userEvent.hover(identity)
-    await waitFor(() => expect(tooltips(), 'identity tooltip on hover').toHaveLength(1))
+    // Under a loaded runner the 350ms delay can outlast one poll window, so the hover is re-entered until it opens.
+    await waitFor(async () => {
+      await userEvent.unhover(identity)
+      await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
+      await userEvent.hover(identity)
+      await waitFor(() => expect(tooltips(), 'identity tooltip on hover').toHaveLength(1), { timeout: 1500 })
+    }, { timeout: 6000 })
     await userEvent.unhover(identity)
     await waitFor(() => expect(tooltips()).toHaveLength(0))
     await userEvent.keyboard('{Escape}')
@@ -373,7 +377,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     await waitFor(() => {
       expect(tooltips(), 'identity tooltip on keyboard focus').toHaveLength(1)
       expect(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]').length, 'one tooltip on keyboard focus').toBe(1)
-    })
+    }, { timeout: 3000 })
     identity.blur()
     await waitFor(() => expect(tooltips()).toHaveLength(0))
   }
