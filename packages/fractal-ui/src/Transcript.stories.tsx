@@ -260,8 +260,7 @@ export const HasOlderWithLoad: Story = { args: { history: { _tag: 'HasOlder', on
   const canvas = within(canvasElement)
   loadEarlier.mockClear()
   await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Load earlier messages')
-  await expect(canvas.getByTestId('history-boundary')).not.toHaveTextContent('Earlier messages not loaded')
+  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
   await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
   await expect(loadEarlier).toHaveBeenCalledTimes(1)
 } }

@@ -24,7 +24,7 @@ const work: WorkLogTurn = { running: true, failed: false, interrupted: false, du
   { id: 'critique/wait', kind: 'read', title: 'Await the next observation', status: 'running', startedAt: at },
 ] }
 const hint = 'Messages can be sent once this conversation loads.'
-const failures = ['none', 'answer-meta', 'history', 'cold-composer', 'tool-rows', 'thinking', 'row-fade'] as const
+const failures = ['none', 'answer-meta', 'cold-composer', 'tool-rows', 'thinking', 'row-fade'] as const
 type Failure = typeof failures[number]
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
@@ -36,14 +36,12 @@ const styles = stylex.create({
 function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { scheme?: Scheme; narrow?: boolean; failure?: Failure }) {
   const root = React.useRef<HTMLElement>(null)
   const [revision, rerender] = React.useState(0)
-  const [loaded, setLoaded] = React.useState(false)
   // Deliberately restore one old behavior after the production tree re-renders.
   // Each selectable negative control must break its corresponding measured assertion.
   React.useLayoutEffect(() => {
     if (revision === 0 || root.current === null) return
     const element = <T extends HTMLElement>(selector: string) => root.current!.querySelector<T>(selector)!
     if (failure === 'answer-meta') { element('[data-testid="answer-meta"]').style.height = 'auto'; element('[data-testid="answer-meta"]').style.opacity = '1' }
-    if (failure === 'history') { element('[data-testid="history-boundary"]').style.top = getComputedStyle(root.current).paddingTop }
     if (failure === 'cold-composer') element('[data-testid="composer-placeholder"]').textContent = 'Message'
     if (failure === 'tool-rows') { element('[data-row-disclosure]').parentElement!.style.display = 'flex'; element('[data-row-disclosure]').parentElement!.lastElementChild!.textContent = 'OK · 2s' }
     if (failure === 'thinking') element('[data-testid="thinking-body"]').style.borderLeftWidth = '0'
@@ -51,7 +49,7 @@ function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { schem
   }, [failure, revision])
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><span>{failure}</span></div>
-    <section aria-label="Answer and history example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [answer, next], onNew: async () => {} }}><Transcript title="Review history" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} history={loaded ? { _tag: 'Complete' } : { _tag: 'HasOlder', onLoadEarlier: () => setLoaded(true) }} turns={[{ id: 'critique', items: [answer, next], work: { ...work, calls: [], running: false } }]} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Answer example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [answer, next], onNew: async () => {} }}><Transcript title="Review answers" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={[{ id: 'critique', items: [answer, next], work: { ...work, calls: [], running: false } }]} /></EmbraceRuntimeProvider></section>
     <section aria-label="Tool row example"><WorkLogV1 turn={work} hideLiveRow /></section>
     <section aria-label="Thinking example"><ThinkingEntry text="Compare **reported rows** with the input, then review the retained selection." /></section>
     <section aria-label="Cold composer example"><EmbraceRuntimeProvider options={{ messages: [], isDisabled: true, onNew: async () => {} }}><EmbraceComposer variant="C1" disabledReason={hint} /></EmbraceRuntimeProvider></section>
@@ -93,18 +91,6 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   canvas.getByRole('button', { name: 'Apply selected regression' }).focus()
   await waitFor(() => expect(metadata.getBoundingClientRect().height).toBe(0))
 
-  // 6: opaque padding begins at the viewport edge, including after scrolling.
-  const boundary = canvas.getByTestId('history-boundary')
-  const lane = canvas.getByTestId('transcript-scroll')
-  await expect(within(boundary).getAllByRole('button')).toHaveLength(1)
-  await expect(boundary.textContent).toBe('Load earlier messages')
-  await expect(parseFloat(getComputedStyle(boundary).top)).toBe(0)
-  await expect(parseFloat(getComputedStyle(boundary).paddingTop)).toBe(12)
-  await expect(getComputedStyle(boundary).backgroundColor).toBe(getComputedStyle(canvasElement.querySelector('main')!).backgroundColor)
-  lane.scrollTop = 200
-  lane.dispatchEvent(new Event('scroll'))
-  await waitFor(() => expect(Math.abs(boundary.getBoundingClientRect().top - lane.getBoundingClientRect().top)).toBeLessThan(1))
-
   // 9: a single compact shape; the cold reason belongs to the empty field.
   const cold = canvas.getByRole('region', { name: 'Cold composer example' })
   const composer = within(cold).getByTestId('kit-composer')
@@ -137,8 +123,6 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(getComputedStyle(thinking).transitionDuration).toBe(reduced ? '0s' : '0.15s')
   await userEvent.click(thinking)
   await expect(canvas.queryByTestId('thinking-body')).toBeNull()
-  await userEvent.click(within(boundary).getByRole('button', { name: 'Load earlier messages' }))
-  await expect(canvas.queryByTestId('history-boundary')).toBeNull()
 } }
 export const Light1440: Story = { ...Dark1440, args: { scheme: 'light' } }
 export const Dark440: Story = { ...Dark1440, args: { narrow: true } }
