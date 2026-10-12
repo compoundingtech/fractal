@@ -48,6 +48,7 @@ The [source eval migration review](./MIGRATION-REVIEW.md) classifies all 58 acti
 | Native session import | Not supported | `st3/native-session-import` |
 | Graceful messaging | Not supported | `st3/graceful-messaging` |
 | Messaging faults | Not supported | `st3/messaging-faults` |
+| Codex minimal access | Not supported | `st3/codex-minimal-access` |
 
 The License MIT, Restart continuity, and Claude Skill Inheritance pairs use Claude Sonnet in both runtimes.
 

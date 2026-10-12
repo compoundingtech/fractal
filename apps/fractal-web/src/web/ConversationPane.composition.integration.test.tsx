@@ -572,9 +572,12 @@ describe('ConversationPane composition activation', () => {
     if (open !== null) await act(async () => { open.click() })
     const preview = container.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
     expect(preview.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe(reason)
+    expect(preview.querySelector('[data-testid="tool-raw-input"]')).toBeNull()
+    expect(preview.querySelector('[data-testid="tool-command"]')).toBeNull()
     const raw = [...preview.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
     await act(async () => { raw.click() })
     expect(preview.querySelector('[data-testid="tool-command"] code')?.textContent).toBe(command)
+    expect(preview.querySelector('[data-testid="tool-raw-input"] code')?.textContent).toBe(JSON.stringify(input, null, 2))
   })
 
   it('keeps optimistic send state visible on its prompt', async () => {

@@ -94,6 +94,11 @@ in
       type = types.str;
       description = "The person identity used by st3 commands, for example person/ada.";
     };
+    accessMode = mkOption {
+      type = types.nullOr (types.enum [ "auto" "bypass" ]);
+      default = null;
+      description = "Managed harness access mode. Null preserves legacy bypass; select auto for new installations.";
+    };
     node = mkOption { type = types.nullOr types.str; default = null; description = "Daemon node name; null uses the daemon default."; };
     stateDir = mkOption {
       type = types.str;
@@ -173,6 +178,7 @@ in
       '');
     xdg.configFile."st3/config.toml".text =
       "person = ${builtins.toJSON cfg.person}\n"
+      + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
       + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
       + "state_dir = ${builtins.toJSON cfg.stateDir}\n"
       + lib.optionalString (cfg.ptyRoot != null) "pty_root = ${builtins.toJSON cfg.ptyRoot}\n"

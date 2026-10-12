@@ -23,6 +23,16 @@ cargo-nextest, and mold on Linux. Cargo uses mold for Linux links and the system
 linker on macOS; dev and test builds keep line tables for workspace crates and
 omit dependency debug info. On both platforms the shell sets `RUSTC_WRAPPER` to
 sccache. Run tests with `cargo nextest run --workspace --locked`.
+The default and perf shells can opt into an owner-provisioned read-only WebDAV
+cache with `ST_SCCACHE_READ_ENDPOINT` and `ST_SCCACHE_READ_SERVER_PORT`. Leave
+both unset for the existing cache behavior. The port must be separate from the
+current sccache server; the owner must qualify it as unused before the first build.
+This does not change a running server's configuration or grant network access.
+Provide an actual read-only service credential through sccache's authentication
+environment variables. The shell sets `SCCACHE_WEBDAV_RW_MODE=READ_ONLY`, but the
+service must independently reject writes. Never reuse a trusted CI writer identity
+in a builder or an untrusted job. Existing explicit cache configurations cannot be
+combined with this opt-in. See [compiler-cache measurement](ci.md#compiler-cache-measurement).
 Outside the Nix shell, install mold on Linux and cargo-nextest separately; the
 repository's `.cargo/config.toml` still selects mold for Linux builds.
 

@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Tooltip, TooltipTrigger } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, Tooltip, TooltipTrigger } from 'react-aria-components'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { Icon } from '../composition/Icons'
 import { ErrorOverlay } from '../composition/ErrorOverlay'
@@ -49,15 +49,31 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   const renderDetail = React.useContext(CallDetailRenderer)
   const { preview, interactive } = React.useContext(CallPresentation)
   const hasOutput = call.detail !== undefined && call.detail.length > 0
-  const displayed = hasOutput && (!interactive || open || preview && call.status !== 'error')
-  const result = call.detail ?? (call.status === 'running' ? 'Running…' : 'No output')
+  // Input-only rows still open an intent summary and the explicit raw disclosure.
+  const expandable = hasOutput || call.rawInput !== undefined
+  const displayed = interactive ? expandable && (open || hasOutput && preview && call.status !== 'error') : hasOutput
+  const result = call.detail ?? ''
   const label = call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // A non-success outcome stays visible as a word beside the pinned disclosure; running rows say so in the duration column until they end.
   const word = call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : undefined
-  const row = <><span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : call.kind === 'read' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} spinning={call.status === 'running'} size={14} /></span><span data-call-title {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-word {...stylex.props(styles.callWord)}>{word}</span><span aria-hidden="true" data-row-disclosure={hasOutput && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{hasOutput && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span></>
-  return <div data-tool-status={call.status}>{hasOutput && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <pre data-testid="work-call-output" {...stylex.props(styles.output)}><code><HighlightedSource code={result} language={workLogOutputLanguage(call)} /></code></pre> : renderDetail(call))}</div>
+  const row = <><span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : call.kind === 'read' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} spinning={call.status === 'running'} size={14} /></span><span data-call-title title={label} {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-word {...stylex.props(styles.callWord)}>{word}</span><span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span></>
+  return <div data-tool-status={call.status}>{expandable && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call))}</div>
+}
+function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
+  const [rawOpen, setRawOpen] = React.useState(false)
+  return <>
+    <p>{call.summary ?? call.title} · {call.status}</p>
+    {call.status === 'error' && call.detail !== undefined && <p>{errorReason(call.detail)}</p>}
+    <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
+      <Button slot="trigger" {...stylex.props(styles.call, styles.rawTrigger)}>Show raw input/output</Button>
+      <DisclosurePanel>{rawOpen && <>
+        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" {...stylex.props(styles.output)}><code>{call.rawInput}</code></pre>}
+        {call.detail !== undefined && call.detail !== '' && <pre data-testid="work-call-output" {...stylex.props(styles.output)}><code><HighlightedSource code={call.detail} language={workLogOutputLanguage(call)} /></code></pre>}
+      </>}</DisclosurePanel>
+    </Disclosure>
+  </>
 }
 const styles = stylex.create({
   summary: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.toolRow, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.uiSize, padding: 0, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
@@ -75,6 +91,7 @@ const styles = stylex.create({
   duration: { overflow: 'hidden', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
   disclosure: { opacity: { default: 0.5, [stylex.when.ancestor(':hover')]: 1, [stylex.when.ancestor(':focus-visible')]: 1 }, transitionProperty: 'opacity', transitionDuration: m.fast, transitionTimingFunction: m.ease, '@media (prefers-reduced-motion: reduce)': { transitionDuration: '0s' } },
   expanded: { backgroundColor: surface.rowActive, color: ink.fg }, staticCall: { cursor: 'default' },
+  rawTrigger: { display: 'flex', paddingInline: s.xs },
   mono: { fontFamily: t.fontMono, fontSize: t.metaSize },
   output: { marginBlockStart: s.xs2, marginBlockEnd: 0, marginInlineStart: g.textColumn, paddingInline: s.lg, paddingBlock: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, color: ink.fgMuted, fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   time: { flexShrink: 0, color: ink.fgMuted, fontSize: t.metaSize, marginLeft: 'auto' },

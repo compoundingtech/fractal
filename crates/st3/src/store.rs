@@ -1,5 +1,6 @@
 pub mod custom;
 pub mod declarations;
+pub mod directive_notes;
 pub(crate) mod observer_subscription_detail;
 mod glass_heads;
 mod arrangements;
@@ -148,6 +149,7 @@ mod idle_mail;
 pub use idle_holds::WORK_NUDGED_KIND;
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
 pub use limits::{AccountLimit, LIMITS_ACTOR, LIMITS_CATCH_UP_PAGE, LimitsOutcome, LimitsPolicy};
+pub(crate) use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
@@ -546,9 +548,22 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
-CREATE INDEX IF NOT EXISTS claims_actor_progress_index
-ON claims(actor, store_index)
+-- Last activity is the greatest numeric acceptance time, independent of local arrival.
+CREATE INDEX IF NOT EXISTS claims_actor_activity_time_index
+ON claims(actor, length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
 WHERE kind IN ('work.progress', 'work.submitted');
+-- The acceptance-time index replaces the only reader of the arrival-ordered one.
+DROP INDEX IF EXISTS claims_actor_progress_index;
+CREATE INDEX IF NOT EXISTS claims_message_from_activity_time_index
+ON claims(json_extract(body, '$.fields.from'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='message.sent';
+CREATE INDEX IF NOT EXISTS claims_message_to_activity_time_index
+ON claims(json_extract(body, '$.fields.to'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='message.sent';
+CREATE INDEX IF NOT EXISTS claims_timeline_activity_time_index
+ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result');
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
@@ -640,6 +655,19 @@ ON claims(
 )
 WHERE json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
     THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END) IS NOT NULL;
+
+-- Harness folds must not walk the same incarnation's accumulated legacy timeline rows.
+CREATE INDEX IF NOT EXISTS claims_harness_incarnation_accepted_index
+ON claims(
+    subject,
+    json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
+        THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END),
+    length(accepted_at_unix_ms),
+    accepted_at_unix_ms
+)
+WHERE kind='harness.observed'
+    AND json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
+        THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END) IS NOT NULL;
 
 -- A legacy observation without a text incarnation remains eligible for the current
 -- runtime's optional-field fold. Keep those rare rows separate: checking their JSON
@@ -1148,6 +1176,14 @@ const ACTUAL_STATE_CLAIM: &str = "(claims.kind<'harness.' OR claims.kind>='harne
      AND claims.kind NOT IN ('intent.desired', 'runtime.readiness-deadline-reached',
                              'reconcile.fault')";
 
+// Repaired originals are not live actual-state sources, even if a node retains their
+// claim rows or has trimmed the admission receipt. The digest's repaired-ID set survives
+// receipt cleanup and is maintained transactionally by repair claims. Keep this separate
+// from ACTUAL_STATE_CLAIM, which is also a SQLite partial-index predicate.
+const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
+    SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id
+)";
+
 // Both discovery and index installation share the actual fold's open-ended kind predicate.
 // Custom actual-state kinds can also supply a runtime id; a fixed kind allowlist is incomplete.
 const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
@@ -1442,7 +1478,8 @@ fn runtime_only_authority(
 ) -> Result<Option<(Value, String)>> {
     let mut sources = connection.prepare_cached(&format!(
         "SELECT DISTINCT claims.kind, claims.origin FROM claims INDEXED BY claims_subject_kind_index
-         WHERE claims.subject=?1 AND claims.store_index<=?2 AND {ACTUAL_STATE_CLAIM} LIMIT 2"
+         WHERE claims.subject=?1 AND claims.store_index<=?2 AND {ACTUAL_STATE_CLAIM}
+           AND {UNREPAIRED_CLAIM} LIMIT 2"
     ))?;
     let mut rows = sources.query(params![subject, through])?;
     let Some(row) = rows.next()? else { return Ok(None); };
@@ -1462,6 +1499,7 @@ fn runtime_only_authority(
         "SELECT claims.body FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='runtime.observed' AND claims.store_index<=?4
+           AND {UNREPAIRED_CLAIM}
            AND json_type(claims.body, CASE WHEN json_type(claims.body, '$.fields') IS NULL
                          THEN ?2 ELSE ?3 END) IS NOT NULL
          ORDER BY {CANONICAL_ORDER_DESC} LIMIT 1"
@@ -1532,6 +1570,10 @@ fn subject_status_at_with_mode(
         }, None)));
     }
     let desired = desired_row_at(connection, subject, at_index)?;
+    #[cfg(test)]
+    if let Some(after_read) = STATUS_AFTER_DESIRED_READ.with(|slot| slot.borrow_mut().take()) {
+        after_read();
+    }
     let member = desired
         .as_ref()
         .and_then(|row| row.member.as_deref())
@@ -4172,6 +4214,7 @@ impl Store {
         rebuild_planning_tx(&transaction)?;
         resources::rebuild(&transaction)?;
         glass_heads::rebuild(&transaction)?;
+        directive_notes::rebuild(&transaction)?;
         arrangements::rebuild(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -6502,17 +6545,19 @@ impl Store {
     }
 
     /// Change who a running run reports to, or clear it, as `missions start --report-to` would
-    /// have set it: the mission's own `stalled-after` and `report-completed` apply unless the
-    /// request names a limit. Only a person or the agent that requested the run may. It is a
-    /// claim of its own on the run, so the creation claim keeps what the run started with and a
+    /// have set it: the mission's own `stalled-after`, `report-stalls` and `report-completed`
+    /// apply unless the request names a limit or stall policy. Only a person or the agent that
+    /// requested the run may. It is a claim of its own on the run, so the creation claim keeps what the run started with and a
     /// repeated declaration of the run still compares with it. A request that changes nothing
     /// writes nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_mission_run_report(
         &self,
         run: &str,
         actor: &str,
         report_to: Option<&str>,
         stalled_after_ms: Option<u64>,
+        report_stalls: Option<bool>,
         report_completed: bool,
         idempotency_key: &str,
     ) -> Result<MissionRunReportView, St3Error> {
@@ -6523,10 +6568,10 @@ impl Store {
             return Ok(response);
         }
         match report_to {
-            None if stalled_after_ms.is_some() || report_completed => {
+            None if stalled_after_ms.is_some() || report_stalls.is_some() || report_completed => {
                 return Err(St3Error::new(
                     "report-without-recipient",
-                    "a stall limit or completion report needs a `report-to` agent",
+                    "a stall policy, limit or completion report needs a `report-to` agent",
                 ));
             }
             None => {}
@@ -6592,15 +6637,21 @@ impl Store {
                         .unwrap_or(crate::mission::DEFAULT_STALLED_AFTER_MS),
                     report_completed
                         || mission.as_ref().is_some_and(|mission| mission.report_completed),
+                    report_stalls.unwrap_or_else(|| {
+                        mission.as_ref().is_none_or(|mission| mission.report_stalls)
+                    }),
                 ))
             }
         };
         let changed = desired != current_run_report_tx(&transaction, &current.subject)?;
         if changed {
             let mut fields = serde_json::Map::new();
-            if let Some((report_to, stalled_after_ms, completed)) = &desired {
+            if let Some((report_to, stalled_after_ms, completed, stalls)) = &desired {
                 fields.insert("report_to".into(), json!(report_to));
                 fields.insert("stalled_after_ms".into(), json!(stalled_after_ms));
+                if !*stalls {
+                    fields.insert("report_stalls".into(), json!(false));
+                }
                 if *completed {
                     fields.insert("report_completed".into(), json!(true));
                 }
@@ -6618,16 +6669,17 @@ impl Store {
             )
             .map_err(internal)?;
         }
-        let (report_to, stalled_after_ms, report_completed) = match desired {
-            Some((report_to, stalled_after_ms, completed)) => {
-                (Some(report_to), Some(stalled_after_ms), completed)
+        let (report_to, stalled_after_ms, report_completed, report_stalls) = match desired {
+            Some((report_to, stalled_after_ms, completed, stalls)) => {
+                (Some(report_to), Some(stalled_after_ms), completed, stalls)
             }
-            None => (None, None, false),
+            None => (None, None, false, true),
         };
         let view = MissionRunReportView {
             run: current.subject,
             report_to,
             stalled_after_ms,
+            report_stalls,
             report_completed,
             changed,
         };
@@ -9024,6 +9076,9 @@ impl Store {
                     "claim_expires_at_unix_ms": claim_expiry,
                     "readiness_epoch": readiness_epoch
                 }, "evidence": request.evidence});
+                if action == "complete" {
+                    body["fields"]["submitted_incarnation"] = json!(actor_incarnation);
+                }
                 if let Some(extend_ms) = extend_ms {
                     body["fields"]["extend_ms"] = json!(extend_ms);
                 }
@@ -9637,7 +9692,15 @@ impl Store {
                 old_revision: current.as_ref().map(|row| row.revision.clone()),
                 new_revision: revision,
             });
-            if desired.kind == "stop" {
+            if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
+                Ok(current.as_ref().and_then(|row| row.member.as_deref())
+                    .map(serde_json::from_str::<crate::model::MemberSpec>)
+                    .transpose()?)
+            })
+                .map_err(internal)?
+            {
+                actions.push(action);
+            } else if desired.kind == "stop" {
                 actions.push(PlannedAction {
                     subject: subject.clone(),
                     action: "stop".into(),
@@ -12227,6 +12290,27 @@ impl Store {
         include_history: bool,
         selected_names: Option<BTreeSet<String>>,
     ) -> Result<StatusResponse> {
+        // A request reader loan alone can see a commit between statements. Keep the
+        // selected declaration, runtime observation and conflict leaves in one snapshot.
+        self.read_snapshot(|_| {
+            self.status_at_view_for_names_in_snapshot(
+                selected,
+                selected_owner_run,
+                at_index,
+                include_history,
+                selected_names,
+            )
+        })
+    }
+
+    fn status_at_view_for_names_in_snapshot(
+        &self,
+        selected: Option<&str>,
+        selected_owner_run: Option<&str>,
+        at_index: Option<u64>,
+        include_history: bool,
+        selected_names: Option<BTreeSet<String>>,
+    ) -> Result<StatusResponse> {
         let connection = self.readers.get();
         let current = current_index(&connection)?;
         let store_index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
@@ -14599,9 +14683,10 @@ impl Store {
     /// only for what only a person can give.
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
         let mut items = self.subscription_fault_items(as_of)?;
-        items.extend(self.operational_attention_items(None, as_of)?);
+        let (operational, failures) = self.operational_attention_items_with_failures(None, as_of)?;
+        items.extend(operational);
         items.extend(
-            self.broken_gate_items(None, as_of)?
+            self.broken_gate_items_from_failures(None, as_of, failures)?
                 .into_iter()
                 .filter(|item| !item.person.starts_with("person/")),
         );
@@ -14752,16 +14837,24 @@ impl Store {
     }
 
     /// The selected desired revision of `subject`, then each predecessor that differs from it
-    /// only in presentation. The last entry is the revision that still defines the launch, so
-    /// launch records, restart budgets, and crash-loop parking follow a rename.
+    /// only in presentation. Launch records, restart budgets and crash-loop parking follow
+    /// labels; environment edits still get a fresh launch token and restart budget.
     pub fn launch_lineage(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         launch_lineage_tx(&connection, subject)
     }
 
-    /// Presentation-only lineage of a recorded launch, even when it is no longer desired.
-    pub(crate) fn launch_lineage_from(&self, token: &str) -> Result<Vec<String>> {
-        launch_lineage_from_tx(&self.readers.get(), token.to_owned())
+    /// Suspension follows all non-launch edits, independently of process retry budgets.
+    pub(crate) fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
+        let connection = self.readers.get();
+        let Some(row) = current_desired_row(&connection, subject)? else {
+            return Ok(Vec::new());
+        };
+        desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
+    }
+
+    pub(crate) fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
+        desired_lineage_from_tx(&self.readers.get(), token.to_owned(), same_declared_launch)
     }
 
     /// Only seats whose durable resume requests name this host need transfer reconciliation.
@@ -14879,14 +14972,14 @@ impl Store {
         }
         connection
             .query_row(
-                &canonical_sql(
+                &canonical_sql(&format!(
                     "SELECT origin FROM claims
                  WHERE subject=?1 AND kind!='intent.desired'
                    AND kind NOT LIKE 'harness.%'
                    AND kind!='runtime.readiness-deadline-reached'
-                   AND kind!='reconcile.fault'
+                   AND kind!='reconcile.fault' AND {UNREPAIRED_CLAIM}
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-                ),
+                )),
                 [subject],
                 |row| row.get(0),
             )
@@ -16960,19 +17053,22 @@ impl Store {
                 times.push(time.max(0) as u128);
             }
             let replicated: Option<String> = connection.prepare_cached(
-                "SELECT accepted_at_unix_ms FROM claims
+                "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_timeline_activity_time_index
                  WHERE subject=?1 AND kind='harness.timeline'
                    AND json_extract(body, '$.fields.incarnation_id')=?2
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
-                   AND store_index<=?3 ORDER BY store_index DESC LIMIT 1")?.query_row(
+                   AND store_index<=?3
+                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1")?.query_row(
                 params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             times.extend(replicated.and_then(|time| time.parse::<u128>().ok()));
         }
+        // Only the timestamp is returned, so equal acceptance times need no identity tie
+        // break. Length then decimal text preserves the full unsigned numeric range.
         for query in [
-            "SELECT accepted_at_unix_ms FROM claims WHERE actor=?1 AND kind IN ('work.progress','work.submitted') AND store_index<=?2 ORDER BY store_index DESC LIMIT 1",
-            "SELECT accepted_at_unix_ms FROM claims WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=?1 AND store_index<=?2 ORDER BY store_index DESC LIMIT 1",
-            "SELECT accepted_at_unix_ms FROM claims WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1 AND store_index<=?2 ORDER BY store_index DESC LIMIT 1",
+            "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_actor_activity_time_index WHERE actor=?1 AND kind IN ('work.progress','work.submitted') AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+            "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_from_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+            "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_to_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
         ] {
             let time: Option<String> = connection
                 .prepare_cached(query)?
@@ -17988,6 +18084,7 @@ impl Store {
                 | "work.claimed"
                 | "work.renewed"
                 | "work.progress"
+                | "work.nudged"
                 | "work.submitted"
                 | "work.failed"
                 | "work.released"
@@ -18689,7 +18786,7 @@ fn awaited_mission_run_tx(connection: &Connection, run: &str) -> Result<Option<S
 fn requested_run_report(
     connection: &Connection,
     creation: &crate::model::MissionRunCreation,
-) -> Result<Option<(String, bool)>, St3Error> {
+) -> Result<Option<(String, bool, bool)>, St3Error> {
     let mission = mission_revision_spec_tx(connection, &creation.mission, &creation.revision)?;
     Ok(mission.and_then(|mission| {
         resolved_run_report(
@@ -18705,17 +18802,24 @@ fn requested_run_report(
 fn mission_run_report_tx(
     connection: &Connection,
     run_id: &str,
-) -> Result<Option<(String, bool)>, St3Error> {
+) -> Result<Option<(String, bool, bool)>, St3Error> {
     connection
         .query_row(
             "SELECT json_extract(body, '$.fields.report_to'),
-                    COALESCE(json_extract(body, '$.fields.report_completed'), 0)
+                    COALESCE(json_extract(body, '$.fields.report_completed'), 0),
+                    COALESCE(json_extract(body, '$.fields.report_stalls'), 1)
              FROM claims WHERE subject=?1 AND kind='mission-run.created' LIMIT 1",
             [format!("mission-run/{run_id}")],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
         )
         .optional()
-        .map(|row| row.and_then(|(report_to, completed)| Some((report_to?, completed))))
+        .map(|row| row.and_then(|(report_to, completed, stalls)| Some((report_to?, completed, stalls))))
         .map_err(internal)
 }
 
@@ -18725,7 +18829,7 @@ pub(crate) const RUN_REPORT_KIND: &str = "mission-run.report-to";
 
 /// The agent, stall limit and completion report that a report claim or a creation claim
 /// records, or `None` when it names no agent.
-pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool)> {
+pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool, bool)> {
     let fields = body.get("fields").unwrap_or(body);
     Some((
         fields.get("report_to")?.as_str()?.to_owned(),
@@ -18737,6 +18841,10 @@ pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool)> {
             .get("report_completed")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        fields
+            .get("report_stalls")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
     ))
 }
 
@@ -18744,7 +18852,7 @@ pub(crate) fn run_report_fields(body: &Value) -> Option<(String, u64, bool)> {
 fn current_run_report_tx(
     transaction: &Transaction<'_>,
     run: &str,
-) -> Result<Option<(String, u64, bool)>, St3Error> {
+) -> Result<Option<(String, u64, bool, bool)>, St3Error> {
     let claim = match latest_claim_of_kind_tx(transaction, run, RUN_REPORT_KIND)? {
         Some(claim) => Some(claim),
         None => latest_claim_of_kind_tx(transaction, run, "mission-run.created")?,
@@ -21384,7 +21492,15 @@ fn launch_lineage_tx(connection: &Connection, subject: &str) -> Result<Vec<Strin
     launch_lineage_from_tx(connection, row.claim_id)
 }
 
-fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Result<Vec<String>> {
+fn launch_lineage_from_tx(connection: &Connection, current: String) -> Result<Vec<String>> {
+    desired_lineage_from_tx(connection, current, presentation_only_change)
+}
+
+fn desired_lineage_from_tx(
+    connection: &Connection,
+    mut current: String,
+    equivalent: fn(&Value, &Value) -> bool,
+) -> Result<Vec<String>> {
     let mut lineage = vec![current.clone()];
     while let Some(claim) = claim_by_id_tx(connection, &current)? {
         // A claim that merges concurrent revisions has one predecessor per fork; follow the
@@ -21397,7 +21513,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
             if let Some(previous) = claim_by_id_tx(connection, predecessor)?
                 && previous.kind == "intent.desired"
                 && previous.subject == claim.subject
-                && presentation_only_change(&previous.body, &claim.body)
+                && equivalent(&previous.body, &claim.body)
             {
                 next = Some(previous.id);
                 break;
@@ -21412,7 +21528,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
     Ok(lineage)
 }
 
-/// Two agent declarations that differ only in their human label share one launch.
+/// Preserve the existing launch-token boundary for restart budgets and crash-loop recovery.
 fn presentation_only_change(previous: &Value, next: &Value) -> bool {
     let parse = |body: &Value| {
         let mut desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
@@ -21421,6 +21537,18 @@ fn presentation_only_change(previous: &Value, next: &Value) -> bool {
         Some(desired)
     };
     matches!((parse(previous), parse(next)), (Some(previous), Some(next)) if previous == next)
+}
+
+/// Keep suspension under exactly the launch comparator used by preview and reconcile.
+/// Desired kind and subject are fences, even when their member launch happens to match.
+fn same_declared_launch(previous: &Value, next: &Value) -> bool {
+    let parse = |body: &Value| {
+        let desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
+        (desired.kind == "agent").then_some(())?;
+        Some((desired.subject, desired.member?))
+    };
+    matches!((parse(previous), parse(next)), (Some((previous_subject, previous)), Some((next_subject, next)))
+        if previous_subject == next_subject && next.launch_changes(&previous).is_empty())
 }
 
 /// The version of the rules that derive `operations` from claims. Every write and projection
@@ -21925,6 +22053,7 @@ pub(crate) fn append_claim_tx(
         .map_err(anyhow::Error::new)?;
     st3_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     st3_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
+    st3_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
@@ -21943,6 +22072,9 @@ pub(crate) fn append_claim_tx(
     let claim_spec = st3_schema::registry()
         .validate_claim(subject, kind, &fields)
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    if kind == st3_schema::directive_notes::KIND {
+        directive_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
+    }
     validate_claim_cardinality(
         transaction,
         subject,
@@ -21969,6 +22101,9 @@ pub(crate) fn append_claim_tx(
     }
     if matches!(kind, "glass.upserted" | "glass.deleted") {
         glass_heads::flush(transaction)?;
+    }
+    if kind == st3_schema::directive_notes::KIND {
+        directive_notes::flush(transaction)?;
     }
     if kind == "message.sent" {
         agent_messages::flush(transaction)?;
@@ -22397,6 +22532,9 @@ fn message_view_tx(
             .unwrap_or_else(|| "requester".into()),
     );
     let to = normalize_message_party(&field("to").or_else(|| child("to")).unwrap_or_default());
+    // A replicated claim is another member's word: keep only references a file name can be
+    // built from, so a hostile hash never reaches a path or a URL.
+    let (attachments, body) = crate::message_body::split_attachments(actual.get("attachments"));
     Ok(MessageView {
         subject: subject.into(),
         from,
@@ -22430,23 +22568,10 @@ fn message_view_tx(
                     })
                     .unwrap_or_default()
             }),
-        // A replicated claim is another member's word: keep only references a file name can be
-        // built from, so a hostile hash never reaches a path or a URL.
-        attachments: actual
-            .get("attachments")
-            .cloned()
-            .and_then(|value| {
-                serde_json::from_value::<Vec<crate::model::MessageAttachment>>(value).ok()
-            })
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|attachment| {
-                crate::blobs::is_sha256(&attachment.sha256)
-                    && attachment.origin.starts_with("host/")
-                    && crate::blobs::MEDIA_TYPES.contains(&attachment.media_type.as_str())
-            })
-            .take(crate::blobs::MAX_ATTACHMENTS)
-            .collect(),
+        attachments,
+        body_ref: body.as_ref().map(|body| crate::message_body::reference(&body.sha256)),
+        body_bytes: body.as_ref().map(|body| body.size),
+        body_origin: body.map(|body| body.origin),
         created_index,
     })
 }
@@ -22474,6 +22599,7 @@ fn selected_actual_source_at(
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2
+           AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
     let rows = statement
@@ -22637,7 +22763,7 @@ fn latest_actual_at(
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
            AND claims.kind NOT LIKE 'harness.%'
-           AND claims.store_index<=?2
+           AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
          ORDER BY {CANONICAL_ORDER}"
     ))?;
     let rows = statement
@@ -22711,7 +22837,7 @@ fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result
 fn harness_observations_of_incarnation_query() -> String {
     format!(
         "SELECT claims.id, claims.body, claims.accepted_at_unix_ms
-         FROM claims INDEXED BY claims_incarnation_accepted_index
+         FROM claims INDEXED BY claims_harness_incarnation_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {INCARNATION_OF_CLAIM}=?3
            AND claims.kind='harness.observed' AND +claims.store_index<=?2
@@ -22736,11 +22862,19 @@ fn harness_observations_without_incarnation_query() -> String {
 }
 
 fn newest_claims_of_kind_query(columns: &str, kind: &str) -> String {
+    // Runtime observations supply live authority and its epoch. Harness observations keep
+    // their existing canonical-history contract, including retained repaired originals.
+    let membership = if kind == "runtime.observed" {
+        UNREPAIRED_CLAIM
+    } else {
+        "1"
+    };
     format!(
         "SELECT {columns}
          FROM claims INDEXED BY claims_subject_kind_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND claims.kind='{kind}' AND +claims.store_index<=?2
+           AND {membership}
          ORDER BY {CANONICAL_ORDER_DESC}"
     )
 }
@@ -24301,20 +24435,56 @@ fn pending_attention_requests_tx(
 
 fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
     let mut keys = BTreeMap::new();
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
-        "SELECT id FROM claims WHERE subject=?1 AND kind IN ('message.sent','intent.desired') ORDER BY CANONICAL_ASC(claims) LIMIT 1"
-    ));
-    let mut statement = connection.prepare_cached(&QUERY)?;
     for message in messages.iter() {
-        let id: String = statement.query_row([&message.subject], |row| row.get(0))?;
         keys.insert(
             message.subject.clone(),
-            canonical::claim_key(connection, &id)?,
+            message_canonical_key_tx(connection, &message.subject)?,
         );
     }
     messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
     Ok(())
 }
+
+fn message_canonical_key_query() -> &'static str {
+    // Requires the named index: create_schema installs it before reader-pool creation.
+    // A dropped or renamed index makes preparation fail, rather than using a slower fallback.
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
+        &format!(
+            "SELECT chosen.accepted_at_unix_ms, batches.origin, batches.replica_sequence,
+                    chosen.batch_id, {}, chosen.id
+             FROM claims AS chosen JOIN batches ON batches.id=chosen.batch_id
+             WHERE chosen.id=(
+                 SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=?1
+                   AND kind IN ('message.sent','intent.desired')
+                 ORDER BY CANONICAL_ASC(claims) LIMIT 1
+             )",
+            canonical::position_sql("chosen"),
+        )
+    ));
+    &QUERY
+}
+
+fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Result<canonical::ClaimKey> {
+    // Select the earliest ID without a batch join. An absent batch for that ID is an error,
+    // not permission to select a younger claim. Decode exactly the shared key's columns.
+    let (time, writer, sequence, batch, position, id) = connection
+        .prepare_cached(message_canonical_key_query())?
+        .query_row([subject], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+    Ok((time.parse()?, writer, sequence, batch, position, id))
+}
+
+#[cfg(test)]
+#[path = "store/message_canonical_sort_tests.rs"]
+mod message_canonical_sort_tests;
 
 fn selected_actionable_messages(
     connection: &Connection,
@@ -25717,11 +25887,12 @@ fn resolved_run_report(
     mission: &MissionSpec,
     report_to: Option<&str>,
     report_completed: bool,
-) -> Option<(String, bool)> {
+) -> Option<(String, bool, bool)> {
     let report_to = report_to.or(mission.report_to.as_deref())?;
     Some((
         report_to.to_owned(),
         report_completed || mission.report_completed,
+        mission.report_stalls,
     ))
 }
 
@@ -25733,7 +25904,8 @@ fn add_run_report_fields(
     report_to: Option<&str>,
     report_completed: bool,
 ) {
-    let Some((report_to, completed)) = resolved_run_report(mission, report_to, report_completed)
+    let Some((report_to, completed, stalls)) =
+        resolved_run_report(mission, report_to, report_completed)
     else {
         return;
     };
@@ -25744,6 +25916,9 @@ fn add_run_report_fields(
             .stalled_after_ms
             .unwrap_or(crate::mission::DEFAULT_STALLED_AFTER_MS)
     );
+    if !stalls {
+        fields["report_stalls"] = json!(false);
+    }
     if completed {
         fields["report_completed"] = json!(true);
     }
@@ -26388,6 +26563,214 @@ mod fleet_admission_tests {
             upgraded.replication_peer_sync(&["current".into()])["current"]
                 .graph_compared_at_unix_ms
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn submitted_incarnation_waits_on_older_members_and_legacy_submissions_replay() {
+        let anchor_key = key();
+        let older_key = key();
+        let current = node("current", Some(&anchor_key), Some(&anchor_key));
+        admit(&current, "current", &anchor_key, "anchor", None);
+        admit(&current, "older", &older_key, "invite", None);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("older.sqlite3");
+        let older = Store::open(&path, "older").unwrap();
+        older.bind_fleet(FLEET).unwrap();
+        older.pin_fleet_anchor(anchor_key.public()).unwrap();
+        older.set_member_key(Some(older_key.clone())).unwrap();
+        let mut registry = st3_schema::registry().clone();
+        registry
+            .claims
+            .get_mut("work.submitted")
+            .unwrap()
+            .fields
+            .remove("submitted_incarnation")
+            .unwrap();
+        older.set_claim_registry(registry.clone());
+        sync(&current, &older);
+        let intent = crate::graph::parse_test_intent(
+            r#"version 2
+agent "garden/worker" { workspace "/tmp"; command "true" }
+mission "garden" state="ready" {
+  goal "Record and verify garden work submissions."
+  step "new" { assigned-to "agent/garden/worker" }
+  step "legacy" { assigned-to "agent/garden/worker" }
+}
+"#,
+            "current",
+        )
+        .unwrap();
+        current.apply_internal(&intent, "garden").unwrap();
+        let run = current
+            .create_mission_run(&MissionRunRequest {
+                mission: "garden".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/ada".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "garden-run".into(),
+            })
+            .unwrap();
+        let actor = "agent/garden/worker";
+        let incarnation = "garden:one";
+        let step = &run
+            .steps
+            .iter()
+            .find(|step| step.step == "new")
+            .unwrap()
+            .subject;
+        let legacy_step = &run
+            .steps
+            .iter()
+            .find(|step| step.step == "legacy")
+            .unwrap()
+            .subject;
+        let claim_step = |subject: &str| {
+            current.set_step_state(subject, "ready", None).unwrap();
+            current
+                .work_action(
+                    subject,
+                    "claim",
+                    &WorkRequest {
+                        actor: Some(actor.into()),
+                        incarnation: Some(incarnation.into()),
+                        summary: None,
+                        reason: None,
+                        evidence: vec![],
+                        idempotency_key: format!("claim-{subject}"),
+                    },
+                )
+                .unwrap();
+        };
+        claim_step(step);
+        current
+            .work_action(
+                step,
+                "complete",
+                &WorkRequest {
+                    actor: Some(actor.into()),
+                    incarnation: Some(incarnation.into()),
+                    summary: None,
+                    reason: None,
+                    evidence: vec![],
+                    idempotency_key: "garden-submit".into(),
+                },
+            )
+            .unwrap();
+        let submitted = current
+            .latest_claim(step, Some("work.submitted"))
+            .unwrap()
+            .unwrap();
+        claim_step(legacy_step);
+        let legacy = current
+            .append_claim(&ClaimInput {
+                subject: legacy_step.clone(),
+                kind: "work.submitted".into(),
+                actor: Some(actor.into()),
+                fields: BTreeMap::from([
+                    ("attempt".into(), json!(1)),
+                    ("status".into(), json!("verifying")),
+                    ("worker_reported".into(), json!(true)),
+                    ("claimant".into(), Value::Null),
+                    ("claim_incarnation".into(), Value::Null),
+                    ("claim_expires_at_unix_ms".into(), Value::Null),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some("legacy-submit".into()),
+            })
+            .unwrap();
+        assert!(!crate::model::work_submission_matches(
+            &legacy,
+            legacy_step,
+            1,
+            actor,
+            Some(incarnation),
+            &[]
+        ));
+        assert!(!crate::model::work_submission_matches(
+            &legacy,
+            legacy_step,
+            1,
+            actor,
+            None,
+            &[]
+        ));
+        current.replay_replication_graph().unwrap();
+        let legacy_view = current.step_run(legacy_step).unwrap().unwrap();
+        assert_eq!(legacy_view.status, "verifying");
+        assert!(legacy_view.submitted_incarnation.is_none());
+        let fields = schema_fields_for_body(&submitted.kind, &submitted.body).unwrap();
+        assert_eq!(
+            registry
+                .validate_claim(step, "work.submitted", &fields)
+                .unwrap_err()
+                .code,
+            "unknown-claim-field"
+        );
+        assert!(matches!(
+            classify_replicated_claim_with_registry(&submitted, &registry).unwrap(),
+            ReplicatedClaimAdmission::UnknownField
+        ));
+        let later = note(&current, "A known claim after the submission");
+        let admission = sync(&current, &older);
+        assert_eq!(admission.unknown, 1);
+        assert_eq!(admission.invalid, 0);
+        assert!(!admitted(&older, &submitted));
+        assert!(admitted(&older, &legacy));
+        assert!(admitted(&older, &later));
+        assert!(
+            older
+                .step_run(step)
+                .unwrap()
+                .unwrap()
+                .submitted_incarnation
+                .is_none()
+        );
+        assert_eq!(
+            older.step_run(legacy_step).unwrap().unwrap().status,
+            "verifying"
+        );
+        let local = note(&older, "The older member can still write known claims");
+        sync(&older, &current);
+        assert!(admitted(&current, &local));
+        let before = older.replication_status(true, Some(FLEET), &[]).unwrap();
+        let source = current.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(before.waiting_claims, 1);
+        assert_eq!(before.invalid_records, 0);
+        assert_eq!(before.unhealthy_projections, 0);
+        assert_eq!(before.authority_digest, source.authority_digest);
+        let waiting = older.replica_records(true).unwrap();
+        assert_eq!(
+            waiting[0].error_code.as_deref(),
+            Some("unknown-claim-field")
+        );
+        drop(older);
+        let upgraded = Store::open(&path, "older").unwrap();
+        upgraded.set_member_key(Some(older_key)).unwrap();
+        upgraded.validate_replication_backlog().unwrap();
+        upgraded.apply_replication_repairs().unwrap();
+        upgraded.project_replication_backlog().unwrap();
+        let after = upgraded.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(after.waiting_claims, 0);
+        assert_eq!(after.authority_digest, before.authority_digest);
+        assert_eq!(after.graph_digest, source.graph_digest);
+        assert_eq!(after.projection_digests, source.projection_digests);
+        let learned = upgraded.claim_by_id(&submitted.id).unwrap().unwrap();
+        assert_eq!(learned.body, submitted.body);
+        let view = upgraded.step_run(step).unwrap().unwrap();
+        assert_eq!(view.submitted_incarnation.as_deref(), Some(incarnation));
+        assert!(view.claimant.is_none());
+        assert!(view.claim_incarnation.is_none());
+        assert!(
+            upgraded
+                .step_run(legacy_step)
+                .unwrap()
+                .unwrap()
+                .submitted_incarnation
+                .is_none()
         );
     }
 
@@ -27203,6 +27586,7 @@ mod fleet_admission_tests {
 #[cfg(test)]
 thread_local! {
     pub(crate) static SUBJECT_REDUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STATUS_AFTER_DESIRED_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Steps whose queue, timing and wake a read enriched, so a test can see a read's work.
     pub(crate) static STEPS_ENRICHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -27986,6 +28370,8 @@ fn classify_replicated_claim_with_registry(
     st3_schema::glasses::validate_owner(&claim.subject, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
     st3_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
+        .map_err(|e| St3Error::new(e.code, e.message))?;
+    st3_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
         && (!fields.contains_key("base_revision") || !fields.contains_key("replaced_revision"))
@@ -29320,6 +29706,8 @@ fn replay_graph_from_nothing_with_progress_tx(
     resources::rebuild(transaction).map_err(internal)?;
     stage("full-replay/glass-heads");
     glass_heads::rebuild(transaction).map_err(internal)?;
+    stage("full-replay/directive-notes");
+    directive_notes::rebuild(transaction).map_err(internal)?;
     stage("full-replay/custom");
     custom::rebuild(transaction).map_err(internal)?;
     stage("full-replay/arrangements");
@@ -29910,6 +30298,11 @@ fn project_mission_run_update(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
 ) -> Result<(), St3Error> {
+    // Nudges are retained events, never work-state transitions. This also matches
+    // full replay for historical bodies that bypassed today's field admission.
+    if claim.kind == WORK_NUDGED_KIND {
+        return Ok(());
+    }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     if person_work::project(transaction, claim)? {
         return Ok(());
@@ -31813,6 +32206,7 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
         worker_reported: row.get::<_, bool>(11)?,
         claimant: row.get(12)?,
         claim_incarnation: row.get(13)?,
+        submitted_incarnation: None,
         claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
         carried_claimant: None,
         execution_started_at_unix_ms: None,
@@ -31945,6 +32339,7 @@ fn enrich_step_summaries_at(
     view.progress_summary = None;
     view.progress_at_unix_ms = None;
     view.completion_summary = None;
+    view.submitted_incarnation = None;
     for (kind, body, accepted) in events {
         let accepted = accepted.parse::<u128>().unwrap_or(0);
         if accepted > snapshot_unix_ms {
@@ -31957,6 +32352,14 @@ fn enrich_step_summaries_at(
         }
         if fields.get("handoff_acknowledged").is_some() {
             continue;
+        }
+        if kind == "work.submitted" {
+            // Bind only this attempt's submission, including reports without a summary.
+            // Legacy claims carry no submitting incarnation; the cleared lease is no proof.
+            view.submitted_incarnation = fields
+                .get("submitted_incarnation")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
         }
         let Some(summary) = fields
             .get("summary")
@@ -33988,6 +34391,11 @@ mod tests {
 
     const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 
+    mod stopped_seat_declaration_controls {
+        use super::*;
+        include!("store/stopped_seat_declaration_controls.rs");
+    }
+
     #[test]
     fn an_agent_card_build_does_not_hold_other_read_snapshots_at_the_cache_lock() {
         let directory = tempfile::tempdir().unwrap();
@@ -34358,6 +34766,21 @@ mod tests {
         include!("store/canonical_audit.rs");
     }
 
+    mod actual_purity_tests {
+        use super::*;
+        include!("store/actual_purity_tests.rs");
+    }
+
+    mod activity_purity_tests {
+        use super::*;
+        include!("store/activity_purity_tests.rs");
+    }
+
+    mod fault_history_tests {
+        use super::*;
+        include!("store/fault_history_tests.rs");
+    }
+
     #[test]
     fn seat_rename_persists_across_a_real_store_reopen() {
         let directory = tempfile::tempdir().unwrap();
@@ -34387,6 +34810,49 @@ agent "test/worker" { workspace "."; command "true"; name "Initial" }
         let cleared = store.desired_subject_with_writer("agent/test/worker").unwrap().unwrap().0;
         assert_eq!(crate::model::effective_agent_name("agent/test/worker", Some(&cleared.desired)), "test/worker");
         assert_eq!(cleared.member.unwrap().display_name, None);
+    }
+
+    #[test]
+    fn declared_launch_lineage_fences_subject_kind_and_launch_changes() {
+        let original = parse_intent(
+            r#"version 2
+    agent "garden/orchard" { command "true" }
+    "#,
+            "amber",
+        )
+        .unwrap()
+        .subjects
+        .remove("agent/garden/orchard")
+        .unwrap();
+        let previous = serde_json::to_value(&original).unwrap();
+        for edit in [r#"env { COLOR "blue"; }"#, r#"name "New label";"#] {
+            let next = parse_intent(
+                &format!("version 2\nagent \"garden/orchard\" {{ command \"true\"; {edit} }}"),
+                "amber",
+            )
+            .unwrap();
+            assert!(same_declared_launch(
+                &previous,
+                &serde_json::to_value(&next.subjects["agent/garden/orchard"]).unwrap()
+            ));
+        }
+        for field in ["subject", "kind", "launch"] {
+            let mut next = original.clone();
+            match field {
+                "subject" => next.subject = "agent/garden/meadow".into(),
+                "kind" => next.kind = "stop".into(),
+                "launch" => {
+                    next.member.as_mut().unwrap().launch =
+                        crate::model::LaunchSpec::Shell("false".into())
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !same_declared_launch(&previous, &serde_json::to_value(&next).unwrap()),
+                "{field}"
+            );
+        }
+        assert!(!same_declared_launch(&previous, &json!({"kind":"agent"})));
     }
 
     #[test]
@@ -36554,6 +37020,7 @@ agent "test/empty" { command "true" }
         assert!(Store::simple_replication_kind("work.renewed"));
         assert!(Store::simple_replication_kind("work.claimed"));
         assert!(Store::simple_replication_kind("work.progress"));
+        assert!(Store::simple_replication_kind(WORK_NUDGED_KIND));
         assert!(!Store::simple_replication_kind("work.unknown"));
         assert!(!Store::simple_replication_kind("mission.published"));
         let store = Store::open_memory("node").unwrap();
@@ -41154,6 +41621,245 @@ version 2
     }
 
     #[test]
+    fn work_nudged_operations_are_incremental_in_opposite_arrival_and_batch_orders() {
+        fn nudge(store: &Store, step: &str, key: &str) -> ClaimRecord {
+            store.append_claim(&ClaimInput {
+                subject: step.into(),
+                kind: WORK_NUDGED_KIND.into(),
+                actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([
+                    ("attempt".into(), Value::from(1)),
+                    ("agent".into(), Value::String("agent/worker.one".into())),
+                    ("message".into(), Value::String("message/invented-nudge".into())),
+                    ("idle_since_unix_ms".into(), Value::String("1".into())),
+                    ("reason".into(), Value::String(key.into())),
+                    ("waits".into(), json!([])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            }).unwrap()
+        }
+        fn stored_step(store: &Store, step: &str) -> String {
+            store.readers.get().query_row(
+                "SELECT json_array(status,attempt,worker_reported,lease_owner,
+                 lease_incarnation,lease_expires_at_unix_ms,blocked_reason,updated_at_unix_ms)
+                 FROM step_runs WHERE subject=?1",
+                [step], |row| row.get(0),
+            ).unwrap()
+        }
+        for split_worker_batches in [false, true] {
+            let (controller, worker, step) = replicated_step_pair();
+            worker_work(&worker, &step, "claim", None, "nudge-claim");
+            assert!(!projection_replayed(&controller, "worker", &worker));
+            assert!(worker.project_replication_backlog().unwrap());
+            // These private nodes sign the new nudge claims through the normal sealer.
+            for source in [&controller, &worker] {
+                source.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+            }
+            let left = Store::open_memory("left").unwrap();
+            let right = Store::open_memory("right").unwrap();
+            for follower in [&left, &right] {
+                receive_and_project(follower, "controller",
+                    &exchange_from(&controller, &ReplicationInventory::default()));
+            }
+            for store in [&controller, &worker, &left, &right] {
+                assert!(!store.replication_projection_needs_recovery().unwrap(),
+                    "initialize healthy projections before the nudge exchange");
+            }
+            let before = stored_step(&controller, &step);
+            let before_index = left.index().unwrap();
+            let local = nudge(&controller, &step, "nudge-controller");
+            let foreign_first = nudge(&worker, &step, "nudge-worker-first");
+            // Seal a first worker batch before admitting a second. One follower may
+            // project the first batch separately; the other receives both together.
+            let first_exchange = exchange_from(&worker, &left.replication_inventory().unwrap());
+            if split_worker_batches {
+                FULL_REPLAYS.with(|count| count.set(0));
+                receive_and_project(&left, "worker", &first_exchange);
+                assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+            }
+            let foreign_second = nudge(&worker, &step, "nudge-worker-second");
+            for source in [&controller, &worker] {
+                FULL_REPLAYS.with(|count| count.set(0));
+                assert!(source.project_replication_backlog().unwrap());
+                assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "local nudge");
+            }
+            // The right follower sees worker batches before the controller's
+            // nudge, the left sees the controller before the remaining worker data.
+            assert!(!projection_replayed(&right, "worker", &worker));
+            assert!(!projection_replayed(&right, "controller", &controller));
+            assert!(!projection_replayed(&left, "controller", &controller));
+            assert!(!projection_replayed(&left, "worker", &worker));
+            assert!(!left.claims_since_only_quiet_notifications(before_index).unwrap(),
+                "a nudge must retain the existing receive wake classification");
+            let nudges = [&local, &foreign_first, &foreign_second];
+            let latest = nudges.iter().map(|claim| claim.accepted_at_unix_ms).max().unwrap();
+            // Both arrival orders must use identical canonical authority.
+            let left_connection = left.readers.get();
+            let right_connection = right.readers.get();
+            for claim in &nudges {
+                assert_eq!(canonical::claim_key(&left_connection, &claim.id).unwrap(),
+                    canonical::claim_key(&right_connection, &claim.id).unwrap());
+            }
+            drop(left_connection);
+            drop(right_connection);
+            let mut digests = Vec::new();
+            for follower in [&left, &right] {
+                assert_eq!(stored_step(follower, &step), before, "nudge is not a state transition");
+                let connection = follower.readers.get();
+                let mut view = follower.step_run(&step).unwrap().unwrap();
+                enrich_step_nudge_at(&connection, &mut view, latest).unwrap();
+                assert_eq!(view.nudged_at_unix_ms, Some(latest));
+                assert_eq!(follower.latest_nudge(&step).unwrap().unwrap().accepted_at_unix_ms, latest);
+                let rows = nudges.iter().map(|claim| {
+                    let (operation, _) = operation_parts(&claim.body).expect("durable operation");
+                    let signed: bool = connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM claim_signatures WHERE claim_id=?1)",
+                        [&claim.id], |row| row.get(0),
+                    ).unwrap();
+                    assert!(signed, "replicated nudge carries its stored signature");
+                    let row = operation_tx(&connection, operation).unwrap().unwrap();
+                    assert_eq!(row.2, "active");
+                    row
+                }).collect::<Vec<_>>();
+                drop(connection);
+                assert!(follower.operation_projection_drift().unwrap().is_empty());
+                let digest = graph_digest_of(follower);
+                follower.replay_replication_graph().unwrap();
+                assert_eq!(graph_digest_of(follower), digest, "full replay oracle");
+                assert_eq!(stored_step(follower, &step), before);
+                let connection = follower.readers.get();
+                let mut replayed_view = follower.step_run(&step).unwrap().unwrap();
+                enrich_step_nudge_at(&connection, &mut replayed_view, latest).unwrap();
+                assert_eq!(replayed_view.nudged_at_unix_ms, Some(latest));
+                for (claim, expected) in nudges.iter().zip(rows) {
+                    let (operation, _) = operation_parts(&claim.body).unwrap();
+                    assert_eq!(operation_tx(&connection, operation).unwrap().unwrap(), expected);
+                }
+                digests.push(digest);
+            }
+            assert_eq!(digests[0], digests[1]);
+        }
+    }
+
+    #[test]
+    fn work_nudged_incremental_guards_and_rollback_preserve_the_committed_frontier() {
+        for refusal in ["none", "malformed-operation", "operation-conflict", "unhealthy-projection"] {
+            let store = Store::open_memory("node").unwrap();
+            assert!(store.project_replication_backlog().unwrap());
+            let before = store.index().unwrap();
+            let digest = graph_digest_of(&store);
+            let mut connection = store.connection.lock().unwrap();
+            let transaction = connection.transaction().unwrap();
+            let frontier: u64 = transaction.query_row(
+                "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                [], |row| row.get(0),
+            ).unwrap();
+            let mut body = json!({"fields": {
+                "attempt": 1, "agent": "agent/worker.one", "message": "message/invented-nudge",
+                "idle_since_unix_ms": "1", "reason": "invented control", "waits": []
+            }, "_operation": {"id": "op/nudge-guard", "request_digest": "digest-a"}});
+            if refusal == "malformed-operation" {
+                body["_operation"] = json!({"id": "op/nudge-guard"});
+            }
+            let claim = append_claim_record_tx(&transaction, "node", "step-run/invented",
+                WORK_NUDGED_KIND, Some("daemon/runtime"), &body, &[], None).unwrap();
+            if refusal == "operation-conflict" {
+                transaction.execute(
+                    "INSERT INTO operations(id,request_digest,canonical_claim_id,state)
+                     VALUES ('op/nudge-guard','digest-b',?1,'active')", [&claim.id],
+                ).unwrap();
+            }
+            if refusal == "unhealthy-projection" {
+                transaction.execute("UPDATE projection_health SET status='stale' WHERE aggregate='graph'", []).unwrap();
+            }
+            let result = try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index).unwrap();
+            match result {
+                IncrementalProjection::Projected => {
+                    assert_eq!(refusal, "none");
+                    assert_eq!(operation_tx(&transaction, "op/nudge-guard").unwrap().unwrap().2, "active");
+                }
+                IncrementalProjection::Replay(reason)
+                | IncrementalProjection::ReplayWithContext { reason, .. } => assert_eq!(reason, refusal),
+            }
+            // A projection attempt never advertises the uncommitted index as good.
+            assert_eq!(transaction.query_row(
+                "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+                [], |row| row.get::<_, u64>(0),
+            ).unwrap(), frontier);
+            transaction.rollback().unwrap();
+            assert_eq!(operation_tx(&connection, "op/nudge-guard").unwrap(), None);
+            drop(connection);
+            assert_eq!(store.index().unwrap(), before);
+            assert_eq!(graph_digest_of(&store), digest);
+            assert!(!store.replication_projection_needs_recovery().unwrap());
+        }
+    }
+
+    #[test]
+    fn work_nudged_historical_status_is_ignored_by_incremental_tree_and_full_replay() {
+        let (store, _worker, step) = replicated_step_pair();
+        assert!(!store.replication_projection_needs_recovery().unwrap());
+        let rejected = store.append_claim(&ClaimInput {
+            subject: step.clone(), kind: WORK_NUDGED_KIND.into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("attempt".into(), json!(1)), ("agent".into(), json!("agent/worker.one")),
+                ("message".into(), json!("message/historical-nudge")),
+                ("idle_since_unix_ms".into(), json!("1")),
+                ("reason".into(), json!("historical control")), ("waits".into(), json!([])),
+                ("status".into(), json!("failed")),
+            ]),
+            evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some("historical-nudge-admission-refusal".into()),
+        }).unwrap_err();
+        assert_eq!(rejected.code, "unknown-claim-field");
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let stored_step = |connection: &rusqlite::Connection| -> String {
+            connection.query_row(
+                "SELECT json_array(status,attempt,worker_reported,lease_owner,
+                 lease_incarnation,lease_expires_at_unix_ms,blocked_reason,updated_at_unix_ms)
+                 FROM step_runs WHERE subject=?1",
+                [&step], |row| row.get(0),
+            ).unwrap()
+        };
+        let before = stored_step(&transaction);
+        // A retained-history fixture deliberately bypasses current admission,
+        // which rejects status and lease fields on work.nudged.
+        let body = json!({"fields": {
+            "attempt": 1, "agent": "agent/worker.one", "message": "message/historical-nudge",
+            "idle_since_unix_ms": "1", "reason": "historical control", "waits": [],
+            "status": "failed", "lease_owner": "agent/historical", "worker_reported": true
+        }, "_operation": {"id": "op/historical-nudge", "request_digest": "historical-digest"}});
+        let claim = append_claim_record_tx(&transaction, "historical", &step,
+            WORK_NUDGED_KIND, Some("daemon/runtime"), &body, &[], None).unwrap();
+        project_mission_run_update(&transaction, &claim).unwrap();
+        assert_eq!(stored_step(&transaction), before, "direct incremental state update ignores nudge");
+        FULL_REPLAYS.with(|count| count.set(0));
+        assert!(matches!(
+            try_project_simple_replication_tx(&transaction, &store.origin, claim.store_index).unwrap(),
+            IncrementalProjection::Projected
+        ));
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        assert_eq!(stored_step(&transaction), before);
+        let incremental_digest = graph_digest(&transaction).unwrap();
+        let operation = operation_tx(&transaction, "op/historical-nudge").unwrap().unwrap();
+        assert_eq!(operation.2, "active");
+        let root = run_tree_of_tx(&transaction, &step).unwrap().unwrap();
+        rebuild_run_tree_tx(&transaction, &root).unwrap();
+        assert_eq!(stored_step(&transaction), before, "affected-tree replay ignores nudge state");
+        assert_eq!(graph_digest(&transaction).unwrap(), incremental_digest);
+        replay_graph_from_nothing_tx(&transaction).unwrap();
+        assert_eq!(stored_step(&transaction), before, "full replay ignores nudge state");
+        assert_eq!(graph_digest(&transaction).unwrap(), incremental_digest);
+        assert_eq!(operation_tx(&transaction, "op/historical-nudge").unwrap().unwrap(), operation);
+        assert_eq!(claim_by_id_tx(&transaction, &claim.id).unwrap().unwrap().body, body);
+        transaction.rollback().unwrap();
+    }
+
+    #[test]
     fn supported_work_operations_do_not_require_a_cache_prefix() {
         for operation in ["op/invented-work", "cache/invented-work"] {
             let (controller, worker, step) = replicated_step_pair();
@@ -42407,6 +43113,7 @@ version 2
                 "agent/ops/stranger",
                 Some("agent/ops/watcher"),
                 None,
+                None,
                 false,
                 "stranger",
             )),
@@ -42417,6 +43124,7 @@ version 2
                 run,
                 "person/operator",
                 Some("person/operator"),
+                None,
                 None,
                 false,
                 "person-reporter",
@@ -42429,6 +43137,7 @@ version 2
                 "person/operator",
                 None,
                 Some(60_000),
+                None,
                 false,
                 "limit-alone",
             )),
@@ -42442,6 +43151,7 @@ version 2
                 run,
                 "agent/ops/owner",
                 Some("agent/ops/watcher"),
+                None,
                 None,
                 false,
                 "owner-sets",
@@ -42458,6 +43168,7 @@ version 2
                 "person/operator",
                 Some("agent/ops/watcher"),
                 None,
+                None,
                 false,
                 "person-repeats",
             )
@@ -42470,6 +43181,7 @@ version 2
                 "person/operator",
                 Some("agent/ops/watcher"),
                 Some(60 * 60_000),
+                None,
                 true,
                 "person-limits",
             )
@@ -42483,12 +43195,12 @@ version 2
         assert_eq!(latest.actor.as_deref(), Some("person/operator"));
         assert_eq!(
             run_report_fields(&latest.body),
-            Some(("agent/ops/watcher".into(), 60 * 60_000, true))
+            Some(("agent/ops/watcher".into(), 60 * 60_000, true, true))
         );
 
         // Clearing reports to nobody, even though the mission names a reporter.
         let cleared = store
-            .set_mission_run_report(run, "agent/ops/owner", None, None, false, "owner-clears")
+            .set_mission_run_report(run, "agent/ops/owner", None, None, None, false, "owner-clears")
             .unwrap();
         assert!(cleared.changed);
         assert_eq!(cleared.report_to, None);
@@ -42508,6 +43220,136 @@ version 2
         assert_eq!((still.id, still.body), (created.id, created.body));
         let (_, redeclared) = declare();
         assert!(redeclared.blockers.is_empty(), "{:?}", redeclared.blockers);
+    }
+
+    #[test]
+    fn report_stalls_policy_survives_replication_replay_and_legacy_records() {
+        let store = Store::open_memory("source").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mission = publish_mission(
+            &store,
+            r#"version 2
+mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#false {
+  concurrent-runs
+  goal "Wait until retirement."
+  step "retire" { agentless; gate "retired" { field "state" "mission/parent" is "retired" } }
+}"#,
+            "muted-mission",
+        );
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: mission.id.clone(),
+                revision: Some(mission.revision.clone()),
+                workspace: workspace.path().to_string_lossy().into_owned(),
+                requester: Some("person/operator".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "muted-parent".into(),
+            })
+            .unwrap();
+        let created = store
+            .latest_claim(&run.subject, Some("mission-run.created"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(created.body["fields"]["report_stalls"], false);
+        assert_eq!(
+            run_report_fields(&created.body),
+            Some(("agent/ops/watcher".into(), 1_800_000, false, false))
+        );
+        // Omission inherits the pinned mission revision; it is not an implicit re-enable.
+        let inherited = store
+            .set_mission_run_report(
+                &run.subject,
+                "person/operator",
+                Some("agent/ops/watcher"),
+                None,
+                None,
+                false,
+                "inherits-muted",
+            )
+            .unwrap();
+        assert!(!inherited.changed);
+        assert!(!inherited.report_stalls);
+        for policy in [Some(false), Some(true)] {
+            assert_eq!(
+                store
+                    .set_mission_run_report(
+                        &run.subject,
+                        "person/operator",
+                        None,
+                        None,
+                        policy,
+                        false,
+                        &format!("no-recipient-{policy:?}")
+                    )
+                    .unwrap_err()
+                    .code,
+                "report-without-recipient"
+            );
+        }
+        let replica = Store::open_memory("replica").unwrap();
+        replica
+            .import_replication("source", &store.export_replication(0).unwrap())
+            .unwrap();
+        replica.rebuild_claim_projections().unwrap();
+        assert!(
+            !replica
+                .mission_spec("parent", Some(&mission.revision))
+                .unwrap()
+                .unwrap()
+                .report_stalls
+        );
+        let replayed = replica
+            .latest_claim(&run.subject, Some("mission-run.created"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run_report_fields(&replayed.body),
+            run_report_fields(&created.body)
+        );
+        let enabled = store
+            .set_mission_run_report(
+                &run.subject,
+                "person/operator",
+                Some("agent/ops/watcher"),
+                None,
+                Some(true),
+                false,
+                "explicit-enable",
+            )
+            .unwrap();
+        assert!(enabled.report_stalls);
+        replica
+            .import_replication("source", &store.export_replication(0).unwrap())
+            .unwrap();
+        replica.rebuild_claim_projections().unwrap();
+        let latest = replica
+            .latest_claim(&run.subject, Some(RUN_REPORT_KIND))
+            .unwrap()
+            .unwrap();
+        assert!(latest.body["fields"].get("report_stalls").is_none());
+        assert_eq!(
+            run_report_fields(&latest.body),
+            Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+        );
+        // Old client responses, requests and creation/change claims still mean stalls=true.
+        let old_view = serde_json::json!({"run": run.subject, "report_to": "agent/ops/watcher",
+            "stalled_after_ms": 1_800_000, "changed": false});
+        let view: MissionRunReportView = serde_json::from_value(old_view).unwrap();
+        assert!(view.report_stalls);
+        let old_request = serde_json::json!({"actor": "person/operator",
+            "report_to": "agent/ops/watcher", "idempotency_key": "old-client"});
+        let request: crate::model::MissionRunReportRequest =
+            serde_json::from_value(old_request.clone()).unwrap();
+        assert_eq!(request.report_stalls, None);
+        let mut invalid = old_request;
+        invalid["report_stalls"] = json!("false");
+        assert!(serde_json::from_value::<crate::model::MissionRunReportRequest>(invalid).is_err());
+        let old_claim = json!({"fields": {"report_to": "agent/ops/watcher"}});
+        assert_eq!(
+            run_report_fields(&old_claim),
+            Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+        );
     }
 
     #[test]
@@ -44216,8 +45058,8 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
                 })
                 .unwrap()
         };
-        let original = observation("original", "original");
         let replacement = observation("replacement", "replacement");
+        let original = observation("original", "original");
         receive_and_project(
             &target,
             "alder",
@@ -44290,6 +45132,22 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
         );
         assert!(source.claim_by_id(&original.id).unwrap().is_some());
         assert!(target.claim_by_id(&original.id).unwrap().is_none());
+        assert_eq!(
+            source.latest_actual_value("daemon/alder").unwrap(),
+            target.latest_actual_value("daemon/alder").unwrap(),
+            "retaining a repaired original must not change actual state"
+        );
+        for store in [&source, &target] {
+            let index = store.index().unwrap();
+            let connection = store.readers.get();
+            assert_eq!(
+                selected_actual_source_at(&connection, "daemon/alder", Some(index), None)
+                    .unwrap().0,
+                Some(replacement.id.clone()),
+                "actual provenance must select the replacement's surviving claim"
+            );
+        }
+        let expected_actual = target.latest_actual_value("daemon/alder").unwrap();
         // Receipt cleanup must not make a repaired original a source again.
         source
             .connection
@@ -44308,6 +45166,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             projection_digest::oracle(&source.readers.get()).unwrap(),
             expected
         );
+        assert_eq!(source.latest_actual_value("daemon/alder").unwrap(), expected_actual);
         // Registry rebuilds and restart retain the repair meaning after receipts were trimmed.
         source
             .connection
@@ -44320,6 +45179,7 @@ mission "proposal-replay" state="ready" revisions="human-only" revision-reviewer
             .unwrap();
         drop(source);
         let source = Store::open(&path, "alder").unwrap();
+        assert_eq!(source.latest_actual_value("daemon/alder").unwrap(), expected_actual);
         assert_eq!(
             projection_digest::tables(&source.readers.get()).unwrap(),
             expected
@@ -57261,6 +58121,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
         .map_err(|e| St3Error::new(e.code, e.message))?;
     st3_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
+    st3_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| St3Error::new(e.code, e.message))?;
     claim_operation(input)?;
     Ok(())
 }
@@ -57410,6 +58272,7 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
+    ("person_directive_notes", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),

@@ -34,7 +34,7 @@ async fn main() {
     ));
     commands.send(Command::Converse { targets: vec!["agent/demo".into()] }).unwrap();
     // Drain `received.try_recv()` from the application's update loop.
-    if let Ok(Update::Window { window, snapshot, items, has_more }) = received.try_recv() {
+    if let Ok(Update::Window { window, snapshot, items, has_more, .. }) = received.try_recv() {
         // Replace this window's items and snapshot; preserve st's order and truncation marker.
         let _ = (window, snapshot, items, has_more);
     }

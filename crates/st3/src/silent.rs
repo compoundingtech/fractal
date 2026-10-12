@@ -168,6 +168,9 @@ mod tests {
             in_reply_to: None,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             attachments: Vec::new(),
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 0,
         }
     }
