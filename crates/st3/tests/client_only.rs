@@ -642,7 +642,7 @@ async fn inventory_screens_send_no_request_after_their_first_frames_for_more_tha
             .arg(repo.join("scripts/stui-test-client"))
             .args([
                 "--binary",
-                test_env!("CARGO_BIN_EXE_stui"),
+                test_env!("CARGO_BIN_EXE_st3"),
                 "--classic",
                 "--seconds",
                 "72",
@@ -806,7 +806,7 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
         .arg(repo.join("scripts/stui-test-client"))
         .args([
             "--binary",
-            test_env!("CARGO_BIN_EXE_stui"),
+            test_env!("CARGO_BIN_EXE_st3"),
             "--classic",
             "--seconds",
             "4",
