@@ -266,7 +266,7 @@ export const CopyFailure: Story = {
 }
 
 /** C27/E04–E12: the input boundary forwards foreground ink, while default seat Prose stays soft. */
-function InputInkCanvas({ scheme, narrow = false }: { scheme: 'dark' | 'light'; narrow?: boolean }) {
+function InputInkCanvas({ scheme = 'dark', narrow = false }: { scheme?: 'dark' | 'light'; narrow?: boolean }) {
   const [foreground, setForeground] = React.useState(true)
   const [revision, rerender] = React.useState(0)
   return <main data-revision={revision} {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}>
