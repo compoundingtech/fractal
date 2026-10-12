@@ -142,6 +142,9 @@ mod tests {
         for name in REQUEST_FIELDS {
             let value = fields.remove(name).unwrap();
             assert!(registry.validate_claim("gate-operation/tester","gate.requested",&fields).is_err());
+            assert!(!registry.claim("gate.requested").unwrap().fields[name].nullable);
+            fields.insert(name.into(), Value::Null);
+            assert!(registry.validate_claim("gate-operation/tester","gate.requested",&fields).is_err());
             fields.insert(name.into(),value);
         }
         fields.insert("mode".into(),json!("review-at-head"));

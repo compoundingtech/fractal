@@ -1,5 +1,6 @@
 pub mod custom;
 pub mod declarations;
+pub mod directive_notes;
 pub(crate) mod observer_subscription_detail;
 mod glass_heads;
 mod arrangements;
@@ -12,6 +13,7 @@ mod schedule_active_run_tests;
 mod glasses;
 pub(crate) mod mailbox_wakes;
 mod mailbox_changes;
+pub(crate) mod reconcile_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
@@ -547,9 +549,22 @@ WHERE kind='message.sent' AND json_type(body, '$.fields') IS NULL;
 CREATE INDEX IF NOT EXISTS claims_resume_host_index
 ON claims(json_extract(body, '$.fields.host'), subject)
 WHERE kind='runtime.action.requested' AND json_extract(body,'$.fields.action')='resume';
-CREATE INDEX IF NOT EXISTS claims_actor_progress_index
-ON claims(actor, store_index)
+-- Last activity is the greatest numeric acceptance time, independent of local arrival.
+CREATE INDEX IF NOT EXISTS claims_actor_activity_time_index
+ON claims(actor, length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
 WHERE kind IN ('work.progress', 'work.submitted');
+-- The acceptance-time index replaces the only reader of the arrival-ordered one.
+DROP INDEX IF EXISTS claims_actor_progress_index;
+CREATE INDEX IF NOT EXISTS claims_message_from_activity_time_index
+ON claims(json_extract(body, '$.fields.from'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='message.sent';
+CREATE INDEX IF NOT EXISTS claims_message_to_activity_time_index
+ON claims(json_extract(body, '$.fields.to'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='message.sent';
+CREATE INDEX IF NOT EXISTS claims_timeline_activity_time_index
+ON claims(subject, json_extract(body, '$.fields.incarnation_id'), length(accepted_at_unix_ms), accepted_at_unix_ms, store_index)
+WHERE kind='harness.timeline'
+  AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result');
 CREATE INDEX IF NOT EXISTS claims_actor_work_activity_index
 ON claims(actor, json_extract(body, '$.fields.claim_incarnation'), store_index)
 WHERE kind IN ('work.claimed', 'work.progress');
@@ -641,6 +656,19 @@ ON claims(
 )
 WHERE json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
     THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END) IS NOT NULL;
+
+-- Harness folds must not walk the same incarnation's accumulated legacy timeline rows.
+CREATE INDEX IF NOT EXISTS claims_harness_incarnation_accepted_index
+ON claims(
+    subject,
+    json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
+        THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END),
+    length(accepted_at_unix_ms),
+    accepted_at_unix_ms
+)
+WHERE kind='harness.observed'
+    AND json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
+        THEN '$.incarnation_id' ELSE '$.fields.incarnation_id' END) IS NOT NULL;
 
 -- A legacy observation without a text incarnation remains eligible for the current
 -- runtime's optional-field fold. Keep those rare rows separate: checking their JSON
@@ -4173,6 +4201,7 @@ impl Store {
         rebuild_planning_tx(&transaction)?;
         resources::rebuild(&transaction)?;
         glass_heads::rebuild(&transaction)?;
+        directive_notes::rebuild(&transaction)?;
         arrangements::rebuild(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -16974,19 +17003,22 @@ impl Store {
                 times.push(time.max(0) as u128);
             }
             let replicated: Option<String> = connection.prepare_cached(
-                "SELECT accepted_at_unix_ms FROM claims
+                "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_timeline_activity_time_index
                  WHERE subject=?1 AND kind='harness.timeline'
                    AND json_extract(body, '$.fields.incarnation_id')=?2
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
-                   AND store_index<=?3 ORDER BY store_index DESC LIMIT 1")?.query_row(
+                   AND store_index<=?3
+                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1")?.query_row(
                 params![agent, incarnation, snapshot_index], |row| row.get(0),
             ).optional()?;
             times.extend(replicated.and_then(|time| time.parse::<u128>().ok()));
         }
+        // Only the timestamp is returned, so equal acceptance times need no identity tie
+        // break. Length then decimal text preserves the full unsigned numeric range.
         for query in [
-            "SELECT accepted_at_unix_ms FROM claims WHERE actor=?1 AND kind IN ('work.progress','work.submitted') AND store_index<=?2 ORDER BY store_index DESC LIMIT 1",
-            "SELECT accepted_at_unix_ms FROM claims WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=?1 AND store_index<=?2 ORDER BY store_index DESC LIMIT 1",
-            "SELECT accepted_at_unix_ms FROM claims WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1 AND store_index<=?2 ORDER BY store_index DESC LIMIT 1",
+            "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_actor_activity_time_index WHERE actor=?1 AND kind IN ('work.progress','work.submitted') AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+            "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_from_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+            "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_to_activity_time_index WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=?1 AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
         ] {
             let time: Option<String> = connection
                 .prepare_cached(query)?
@@ -21951,6 +21983,7 @@ pub(crate) fn append_claim_tx(
         .map_err(anyhow::Error::new)?;
     st3_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     st3_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
+    st3_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
@@ -21969,6 +22002,9 @@ pub(crate) fn append_claim_tx(
     let claim_spec = st3_schema::registry()
         .validate_claim(subject, kind, &fields)
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    if kind == st3_schema::directive_notes::KIND {
+        directive_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
+    }
     validate_claim_cardinality(
         transaction,
         subject,
@@ -21995,6 +22031,9 @@ pub(crate) fn append_claim_tx(
     }
     if matches!(kind, "glass.upserted" | "glass.deleted") {
         glass_heads::flush(transaction)?;
+    }
+    if kind == st3_schema::directive_notes::KIND {
+        directive_notes::flush(transaction)?;
     }
     if kind == "message.sent" {
         agent_messages::flush(transaction)?;
@@ -22737,7 +22776,7 @@ fn fold_latest_values(rows: impl IntoIterator<Item = (String, Value)>) -> Result
 fn harness_observations_of_incarnation_query() -> String {
     format!(
         "SELECT claims.id, claims.body, claims.accepted_at_unix_ms
-         FROM claims INDEXED BY claims_incarnation_accepted_index
+         FROM claims INDEXED BY claims_harness_incarnation_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {INCARNATION_OF_CLAIM}=?3
            AND claims.kind='harness.observed' AND +claims.store_index<=?2
@@ -28262,6 +28301,8 @@ fn classify_replicated_claim_with_registry(
         .map_err(|e| St3Error::new(e.code, e.message))?;
     st3_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
+    st3_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| St3Error::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
         && (!fields.contains_key("base_revision") || !fields.contains_key("replaced_revision"))
     {
@@ -29595,6 +29636,8 @@ fn replay_graph_from_nothing_with_progress_tx(
     resources::rebuild(transaction).map_err(internal)?;
     stage("full-replay/glass-heads");
     glass_heads::rebuild(transaction).map_err(internal)?;
+    stage("full-replay/directive-notes");
+    directive_notes::rebuild(transaction).map_err(internal)?;
     stage("full-replay/custom");
     custom::rebuild(transaction).map_err(internal)?;
     stage("full-replay/arrangements");
@@ -34646,6 +34689,11 @@ mod tests {
     mod canonical_audit {
         use super::*;
         include!("store/canonical_audit.rs");
+    }
+
+    mod activity_purity_tests {
+        use super::*;
+        include!("store/activity_purity_tests.rs");
     }
 
     mod fault_history_tests {
@@ -58009,6 +58057,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
         .map_err(|e| St3Error::new(e.code, e.message))?;
     st3_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
+    st3_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| St3Error::new(e.code, e.message))?;
     claim_operation(input)?;
     Ok(())
 }
@@ -58158,6 +58208,7 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
+    ("person_directive_notes", &[]),
     ("custom_registrations", &[]),
     ("custom_sources", &[]),
     ("custom_dependencies", &[]),

@@ -23,6 +23,8 @@ pub(crate) mod disk;
 pub mod delivery_hold;
 pub mod driver_hook;
 pub mod environment;
+/// Offline signed gate observations in immutable git notes refs.
+pub mod evidence;
 pub(crate) mod external_sessions;
 pub(crate) mod native_views;
 pub(crate) mod conversation_header;
