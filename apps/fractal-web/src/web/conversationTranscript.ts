@@ -35,11 +35,15 @@ export const transcriptSendFailureReason = (reason: string): KitSendFailureReaso
   return classified ?? sendFailureReasons.failed
 }
 
-/** Narrows each app item to the kit shape; a nested-property ternary cannot narrow `sendState`. */
+type AppTextItem = Extract<ConversationItem, { _tag: 'Text' }>
+const sendNotFailed = (item: AppTextItem): item is AppTextItem & { readonly sendState?: Exclude<SendState, { _tag: 'Failed' }> } =>
+  item.sendState?._tag !== 'Failed'
+
+/** Narrows each app item to the kit shape; only failed sends are rebuilt, everything else keeps its identity. */
 const toKitItem = (item: ConversationItem): KitConversationItem => {
   if (item._tag === 'UnknownEvent') return { _tag: 'Notice', id: item.id, kind: 'event', text: 'An event this view cannot show yet.',
     ...(item.at === undefined ? {} : { at: item.at }) }
-  if (item._tag !== 'Text') return item
+  if (item._tag !== 'Text' || sendNotFailed(item)) return item
   const sendState = item.sendState
   if (sendState?._tag !== 'Failed') return { ...item, sendState }
   return { ...item, sendState: { ...sendState, reason: transcriptSendFailureReason(sendState.reason), detail: sendFailureDetail(sendState.reason) } }
