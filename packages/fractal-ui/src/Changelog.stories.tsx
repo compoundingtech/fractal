@@ -229,7 +229,7 @@ const ChangelogStateCard = ({ mode, dark }: { readonly mode: Scenario; readonly 
   return <article {...stylex.props(styles.card, dark ? assistantDarkTheme : assistantLightTheme)}><h1>{dark ? 'Dark' : 'Light'} · {mode}</h1><ChangelogView state={state} baseline={current.baseline} onRetry={() => setState({ _tag: 'Ready', manifest: fixture })} buildRevision={fixtureRevision} /></article>
 }
 export const AllStates: Story = {
-  render: () => <div {...stylex.props(styles.matrix)}>{([true, false] as const).flatMap((dark) => (['unseen', 'seen', 'first', 'loading', 'empty', 'failure'] as const).map((mode) => <ChangelogStateCard key={`${dark}-${mode}`} mode={mode} dark={dark} />))}</div>,
+  render: () => <main {...stylex.props(styles.matrix)}>{([true, false] as const).flatMap((dark) => (['unseen', 'seen', 'first', 'loading', 'empty', 'failure'] as const).map((mode) => <ChangelogStateCard key={`${dark}-${mode}`} mode={mode} dark={dark} />))}</main>,
   play: async ({ canvasElement }) => {
     expect(canvasElement.querySelectorAll('article')).toHaveLength(12)
     expect(canvasElement.querySelector('[title]')).toBeNull()

@@ -99,5 +99,5 @@ const styles = stylex.create({
   title: { fontSize: type.uiSize, fontWeight: type.weightSemibold, lineHeight: type.uiLeading, marginBlock: space.sm, marginInline: 0 }, summary: { fontSize: type.uiSize, color: ink.fgSoft, lineHeight: type.bodyLeading, marginTop: space.xs, marginInline: 0, marginBottom: 0 },
   build: { fontSize: type.metaSize, color: ink.fgMuted, marginTop: space.xs, marginInline: 0, marginBottom: 0, overflowWrap: 'anywhere' },
   notice: { paddingBlock: space.xxl, paddingInline: 0, fontSize: type.uiSize, lineHeight: type.bodyLeading }, button: { border: `${geometry.hairline} solid ${border.borderStrong}`, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: radius.sm, fontSize: type.metaSize, paddingBlock: space.xs, paddingInline: space.md, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `${geometry.focusRing} solid ${accent.primary}` }, outlineOffset: geometry.focusRing },
-  link: { display: 'inline-block', marginTop: space.md, color: accent.primary, fontSize: type.metaSize },
+  link: { display: 'inline-block', marginTop: space.md, color: ink.fg, fontSize: type.metaSize, textDecoration: 'underline' },
 })
