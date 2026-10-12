@@ -31,6 +31,7 @@ mod lastrun;
 pub(crate) mod open_timing;
 pub mod layout;
 pub mod live;
+pub(crate) mod slo;
 pub mod pane;
 mod drafts_store;
 mod prefs;
@@ -380,6 +381,7 @@ pub struct Ui {
     quit: bool,
     /// Live: actions become `effects` for the live loop instead of demo edits.
     live: bool,
+    quality: slo::Draw,
     effects: Vec<Effect>,
     /// Updates marked read from here, so each is sent once.
     updates_read: HashSet<String>,
@@ -393,6 +395,8 @@ pub struct Ui {
     older_wanted: RefCell<BTreeSet<String>>,
     /// This device opens an agent's tab on its terminal, not its conversation (a setting).
     terminal_first: bool,
+    /// This device permits the daemon after a failed direct terminal route.
+    pub(crate) terminal_fallback: bool,
     /// The agent whose tab just took the focus, and when: its terminal attaches once the tab has
     /// stayed in front for a moment, so passing through tabs attaches nothing.
     attach_when: Option<(String, Instant)>,
@@ -577,6 +581,44 @@ impl Ui {
         })
     }
 
+    fn quality_visible(&self) -> u8 {
+        let frame = self.frame.borrow();
+        let mut visible =
+            if self.glasses.is_none() && frame.area.width >= 20 && frame.area.height >= 6 {
+                1
+            } else {
+                0
+            };
+        for pane in &frame.panes {
+            if !pane.entry_visible(pane.top, pane.total, &frame.covers) {
+                continue;
+            }
+            if pane.key == "list:home" || pane.key.starts_with("home:") {
+                visible |= 1;
+            }
+            if pane.key == "list:agents"
+                || pane.key == "agent-header"
+                || pane.key.starts_with("agent:")
+                || pane.key.starts_with("details:agent/")
+            {
+                visible |= 2;
+            }
+        }
+        visible
+    }
+
+    fn terminal_ready_visible(&self, target: &str) -> bool {
+        let ready = self
+            .terminal_view(target)
+            .and_then(|view| view.native.as_ref())
+            .is_some_and(|native| native.presented());
+        ready
+            && self.frame.borrow().panes.iter().any(|pane| {
+                pane.key.strip_prefix("terminal:") == Some(target)
+                    && pane.entry_visible(pane.top, pane.total, &self.frame.borrow().covers)
+            })
+    }
+
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
         if self.help
@@ -675,12 +717,14 @@ impl Ui {
             demo: None,
             quit: false,
             live: false,
+            quality: slo::Draw::new(Instant::now()),
             effects: Vec::new(),
             updates_read: HashSet::new(),
             acted: HashSet::new(),
             closed: HashSet::new(),
             older_wanted: RefCell::default(),
             terminal_first: false,
+            terminal_fallback: true,
             attach_when: None,
             popover: None,
             chat: None,
@@ -856,6 +900,7 @@ impl Ui {
             let loaded = prefs::load(&path);
             self.simple = simplified(&loaded);
             self.terminal_first = loaded.terminal_first == Some(true);
+            self.terminal_fallback = loaded.terminal_fallback != Some(false);
         }
     }
 
@@ -941,9 +986,21 @@ impl Ui {
                 &prefs::Prefs {
                     simple: Some(self.simple),
                     terminal_first: Some(self.terminal_first),
+                    terminal_fallback: Some(self.terminal_fallback),
                 },
             );
         }
+    }
+
+    /// Change the next terminal attachment's route policy on this device.
+    pub(crate) fn toggle_terminal_fallback(&mut self) {
+        self.terminal_fallback = !self.terminal_fallback;
+        self.save_prefs();
+        self.flash(if self.terminal_fallback {
+            "Terminal routes: fall back through the daemon on failure"
+        } else {
+            "Terminal routes: fabric only, no fallback"
+        });
     }
 
     /// Open an agent's tab on its terminal, or on its conversation (the default): this device's
@@ -3825,6 +3882,16 @@ impl Ui {
 
     /// Dispatch the outer terminal's decoded input, shared by the live and demo loops.
     fn input_event(&mut self, event: Event) -> bool {
+        if self.live
+            && matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release)
+            && (self.editing
+                || self.chat.as_ref().is_some_and(|chat| chat.editing)
+                || self.new_mission.is_some()
+                || self.find.is_some()
+                || self.palette_open())
+        {
+            self.quality.key();
+        }
         if let Event::Mouse(mouse) = event
             && mouse.kind == MouseEventKind::Moved
         {
