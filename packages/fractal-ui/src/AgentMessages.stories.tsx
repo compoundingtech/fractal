@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import axe from 'axe-core'
-import { AgentMessage, OutgoingMessageRow } from './assistant-ui/AgentMessage'
+import { AgentMessage, OutgoingMessageRow, type AgentMessageProps } from './assistant-ui/AgentMessage'
 import { EmbraceToolItem } from './assistant-ui/EmbraceToolCall'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { Transcript } from './assistant-ui/composition/Transcript'
@@ -77,7 +77,7 @@ const rejectOldMessageRhythm = async (message: HTMLElement) => {
   await assertMessageRhythm(message)
 }
 
-const meta = { title: 'Fractal UI/Agent Messages', component: AgentMessage, parameters: { layout: 'fullscreen' }, args: { ...agentMessage, onCopyId: fn(), onLoadFull: fn(), onOpenReply: fn() }, decorators: [(Story, context) => <main data-scheme={context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, context.parameters.scheme === 'light' && lightTheme, context.parameters.width === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<typeof AgentMessage>
+const meta = { title: 'Fractal UI/Agent Messages', component: AgentMessage, parameters: { layout: 'fullscreen' }, args: { ...agentMessage, onCopyId: fn(), onLoadFull: fn(), onOpenReply: fn() }, argTypes: { scheme: { control: 'select', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } }, decorators: [(Story, context) => <main data-scheme={context.args.scheme ?? context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, (context.args.scheme ?? context.parameters.scheme) === 'light' && lightTheme, (context.args.width ?? context.parameters.width) === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<AgentMessageProps & { readonly scheme?: 'dark' | 'light'; readonly width?: 440 | 1440 }>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Short: Story = { play: async ({ canvasElement, args }) => {
@@ -126,7 +126,9 @@ export const Reply: Story = { args: { replyTo: 'Parent.Question', subject: 'Rele
 export const FromParent: Story = { args: { from: 'Parent', to: 'Parent.Child', via: { _tag: 'FromParent' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByText('from parent')).toBeVisible()
-  await expect(canvasElement.querySelector('[data-agent-id="Parent.Child"]')).toHaveTextContent('Parent › Child')
+  const hierarchy = canvasElement.querySelector('[data-agent-id="Parent.Child"]')!
+  await expect(hierarchy.textContent).toContain('ParentChild')
+  await expect(hierarchy.querySelector('svg[data-icon="chevron-right"]')).not.toBeNull()
   await expect(canvas.queryByText('teammate')).toBeNull()
 } }
 export const BroadcastCopy: Story = { args: { delivery: { _tag: 'BroadcastCopy', recipients: 3 } }, play: async ({ canvasElement }) => {
@@ -177,7 +179,18 @@ export const OutgoingSingle: Story = { render: () => <OutgoingMessageRow {...out
 } }
 export const OutgoingBroadcast: Story = { render: () => <OutgoingMessageRow {...broadcastMessage} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await expect(canvas.getByRole('button', { name: /3 seats/ })).toHaveAttribute('aria-expanded', 'false')
+  const trigger = canvas.getByRole('button', { name: /3 seats/ })
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  const assertFolded = async () => {
+    await expect(canvas.getByText('3 receipts')).toBeVisible()
+    await expect(canvas.queryByText(/injected|queued|revived/)).toBeNull()
+  }
+  await assertFolded()
+  const control = document.createElement('span')
+  control.textContent = 'injected'
+  canvasElement.append(control)
+  try { await expect(assertFolded()).rejects.toThrow() } finally { control.remove() }
+  await userEvent.click(trigger)
   await expect(canvas.getByText(/injected/)).toBeVisible()
   await expect(canvas.getByText(/queued/)).toBeVisible()
   await expect(canvas.getByText(/revived/)).toBeVisible()
@@ -185,12 +198,12 @@ export const OutgoingBroadcast: Story = { render: () => <OutgoingMessageRow {...
 } }
 export const OutgoingFailed: Story = { render: () => <OutgoingMessageRow {...outgoingMessage} recipients={[{ id: 'Review', receipt: { _tag: 'Failed', reason: 'Recipient retired before delivery' } }]} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  const receipt = canvasElement.querySelector<HTMLElement>('[aria-label=\"Review · failed · Recipient retired before delivery\"]')!
+  await expect(canvas.queryByText('Review: Recipient retired before delivery')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: /Please review the release report/ }))
+  const receipt = canvasElement.querySelector<HTMLElement>('[aria-label="Review · failed · Recipient retired before delivery"]')!
   receipt.focus()
   await expect(receipt).toHaveFocus()
   await expect(receipt).toHaveAttribute('title', 'Recipient retired before delivery')
-  await expect(canvas.queryByText('Review: Recipient retired before delivery')).toBeNull()
-  await userEvent.click(canvas.getByRole('button', { name: /Please review the release report/ }))
   await expect(canvas.getByText('Review: Recipient retired before delivery')).toBeVisible()
   await expect(canvas.queryByText(/injected/)).toBeNull()
 } }
@@ -476,10 +489,13 @@ export const HierarchyIncoming: Story = {
     const message = canvasElement.querySelector<HTMLElement>('[data-message-variant]')!
     await rejectOldMessageRhythm(message)
     const header = message.querySelector<HTMLElement>('[data-message-header]')!
-    const avatar = header.querySelector<HTMLElement>('[aria-hidden="true"]')!
-    const assertAvatarContained = async () => {
-      const bounds = avatar.getBoundingClientRect()
+    const glyph = header.querySelector<HTMLElement>('[data-message-glyph]')!
+    const assertGlyphContained = async () => {
+      const bounds = glyph.getBoundingClientRect()
       const line = header.getBoundingClientRect()
+      await expect(header.querySelectorAll('[data-message-glyph]')).toHaveLength(1)
+      await expect(glyph.querySelector('svg[data-icon]')).not.toBeNull()
+      await expect(glyph.textContent).toBe('')
       await expect(bounds.width).toBe(16)
       await expect(bounds.height).toBe(16)
       await expect(bounds.left).toBeGreaterThanOrEqual(line.left)
@@ -487,15 +503,44 @@ export const HierarchyIncoming: Story = {
       await expect(bounds.top).toBeGreaterThanOrEqual(line.top)
       await expect(bounds.bottom).toBeLessThanOrEqual(line.bottom)
     }
-    await assertAvatarContained()
-    avatar.style.width = '1.5rem'
-    avatar.style.height = '1.5rem'
-    try { await expect(assertAvatarContained()).rejects.toThrow() } finally { avatar.style.width = ''; avatar.style.height = '' }
-    await assertAvatarContained()
+    await assertGlyphContained()
+    glyph.style.width = '1.5rem'
+    glyph.style.height = '1.5rem'
+    try { await expect(assertGlyphContained()).rejects.toThrow() } finally { glyph.style.width = ''; glyph.style.height = '' }
+    const glyphSvg = glyph.querySelector('svg')!
+    glyphSvg.remove()
+    glyph.textContent = 'R'
+    try { await expect(assertGlyphContained()).rejects.toThrow() } finally { glyph.textContent = ''; glyph.append(glyphSvg) }
+    await assertGlyphContained()
     const copy = within(header).getByRole('button', { name: 'Copy message' })
     await expect(message.querySelectorAll('button')).toHaveLength(1)
     await expect(message.querySelector('ul ul')).not.toBeNull()
-    if (args.variant?._tag === 'Incoming') {
+    const markdown = message.querySelector<HTMLElement>('[data-testid="markdown"]')!
+    const outerList = markdown.querySelector<HTMLElement>('ul')!
+    const nestedList = markdown.querySelector<HTMLElement>('ul ul')!
+    const firstBlock = markdown.firstElementChild as HTMLElement
+    const lastBlock = markdown.lastElementChild as HTMLElement
+    const assertMarkdown = async () => {
+      await expect(parseFloat(getComputedStyle(markdown).gap)).toBe(8)
+      await expect(parseFloat(getComputedStyle(firstBlock).marginTop)).toBe(0)
+      await expect(parseFloat(getComputedStyle(lastBlock).marginBottom)).toBe(0)
+      await expect(parseFloat(getComputedStyle(outerList).paddingInlineStart)).toBe(22)
+      await expect(parseFloat(getComputedStyle(nestedList).paddingInlineStart)).toBe(20)
+      await expect(parseFloat(getComputedStyle(nestedList).borderInlineStartWidth)).toBe(1)
+      await expect(getComputedStyle(nestedList).listStyleType).toBe('circle')
+      await expect(getComputedStyle(firstBlock).color).toBe(getComputedStyle(message).color)
+    }
+    await assertMarkdown()
+    markdown.style.gap = '0.625rem'
+    try { await expect(assertMarkdown()).rejects.toThrow() } finally { markdown.style.gap = '' }
+    lastBlock.style.marginBottom = '0.625rem'
+    try { await expect(assertMarkdown()).rejects.toThrow() } finally { lastBlock.style.marginBottom = '' }
+    nestedList.style.borderInlineStartWidth = '0'
+    try { await expect(assertMarkdown()).rejects.toThrow() } finally { nestedList.style.borderInlineStartWidth = '' }
+    firstBlock.style.color = 'rgb(120, 120, 120)'
+    try { await expect(assertMarkdown()).rejects.toThrow() } finally { firstBlock.style.color = '' }
+    await assertMarkdown()
+    if (args.variant?._tag === 'Incoming' || (args.variant?._tag === 'Human' && args.variant.frame?._tag === 'Card')) {
       const assertPadding = async () => {
         const computed = getComputedStyle(message)
         await expect(parseFloat(computed.paddingTop)).toBe(8)
@@ -526,7 +571,12 @@ export const HierarchyIncoming: Story = {
     await userEvent.keyboard('{Enter}')
     await expect(args.onCopy).toHaveBeenCalledTimes(1)
     message.removeAttribute('tabindex')
-    await expect(message.querySelector('[tabindex="0"]')).toBeNull()
+    const assertTabStops = async () => expect([...message.querySelectorAll('[tabindex="0"]')].filter(element => element !== copy)).toHaveLength(0)
+    await assertTabStops()
+    const additionalStop = document.createElement('span')
+    additionalStop.tabIndex = 0
+    message.append(additionalStop)
+    try { await expect(assertTabStops()).rejects.toThrow() } finally { additionalStop.remove() }
     await assertMessageRhythm(message)
   },
 }
@@ -542,26 +592,24 @@ export const HierarchyOutgoing: Story = {
   render: args => <OutgoingMessageRow {...outgoingMessage} subject="Release report ready" defaultExpanded onCopy={args.onCopy} />,
   play: async ({ canvasElement, args }) => {
     const message = canvasElement.querySelector<HTMLElement>('[data-message-variant="outgoing"]')!
-    await rejectOldMessageRhythm(message)
-    const assertQuietRail = async () => {
-      const computed = getComputedStyle(message)
-      await expect(parseFloat(computed.borderLeftWidth)).toBe(2)
-      await expect(computed.borderLeftStyle).toBe('solid')
-      await expect(parseContrastColor(computed.borderLeftColor)[3]).toBeCloseTo(0.12)
-      await expect(parseContrastColor(computed.backgroundColor)[3]).toBe(0)
-      await expect(parseFloat(computed.paddingTop)).toBe(2)
-      await expect(parseFloat(computed.paddingBottom)).toBe(2)
-      await expect(parseFloat(computed.paddingLeft)).toBe(12)
-      await expect(parseFloat(computed.paddingRight)).toBe(0)
-    }
-    await assertQuietRail()
-    message.style.borderLeftWidth = 'thin'
-    try { await expect(assertQuietRail()).rejects.toThrow() } finally { message.style.borderLeftWidth = '' }
-    const previousBackground = message.style.backgroundColor
-    message.style.backgroundColor = getComputedStyle(message.closest('main')!).backgroundColor
-    try { await expect(assertQuietRail()).rejects.toThrow() } finally { message.style.backgroundColor = previousBackground }
-    await assertQuietRail()
     const header = message.querySelector<HTMLElement>('[data-message-header]')!
+    const assertWorkRow = async () => {
+      await expect(header.getBoundingClientRect().height).toBe(24)
+      await expect(parseFloat(getComputedStyle(message).borderLeftWidth)).toBe(0)
+      await expect(header.querySelector('time')).toBeNull()
+      await expect(header.querySelector('[data-message-glyph] svg')).not.toBeNull()
+      await expect(message.querySelector('[data-fractal-card]')).toBeNull()
+      const opened = message.querySelector<HTMLElement>('[data-opened-body]')!
+      await expect(opened.getBoundingClientRect().top - header.getBoundingClientRect().bottom).toBe(2)
+      await expect(parseFloat(getComputedStyle(opened).paddingTop)).toBe(8)
+      await expect(parseFloat(getComputedStyle(opened).paddingLeft)).toBe(12)
+      await expect(parseFloat(getComputedStyle(opened).borderLeftWidth)).toBe(1)
+    }
+    await assertWorkRow()
+    message.style.borderLeft = '0.125rem solid currentColor'
+    try { await expect(assertWorkRow()).rejects.toThrow() } finally { message.style.borderLeft = '' }
+    header.style.height = '1rem'
+    try { await expect(assertWorkRow()).rejects.toThrow() } finally { header.style.height = '' }
     const trigger = within(header).getByRole('button', { name: /To Review/ })
     const copy = within(header).getByRole('button', { name: 'Copy message' })
     trigger.focus()
@@ -577,8 +625,7 @@ export const HierarchyOutgoing: Story = {
     await expect(message.querySelector('footer')).toBeNull()
     await expect(trigger).toHaveFocus()
     await userEvent.keyboard('{Enter}')
-    await assertMessageRhythm(message)
-    await assertQuietRail()
+    await assertWorkRow()
   },
 }
 export const HierarchyOutgoingLight440: Story = { ...HierarchyOutgoing, parameters: { scheme: 'light', width: 440 } }
@@ -596,13 +643,13 @@ export const HierarchyWithoutSubject: Story = {
     await expect(messages).toHaveLength(3)
     for (const message of messages) {
       const header = message.querySelector<HTMLElement>('[data-message-header]')!
-      const body = message.querySelector<HTMLElement>('[data-message-content]')!
+      const body = message.querySelector<HTMLElement>('[data-opened-body]') ?? message.querySelector<HTMLElement>('[data-message-content]')!
       const assertGap = async () => {
         await expect(message.querySelector('[data-message-subject], footer')).toBeNull()
-        await expect(body.getBoundingClientRect().top - header.getBoundingClientRect().bottom).toBe(4)
+        await expect(body.getBoundingClientRect().top - header.getBoundingClientRect().bottom).toBe(2)
       }
       await assertGap()
-      body.style.marginTop = '0.125rem'
+      body.style.marginTop = '0.25rem'
       try { await expect(assertGap()).rejects.toThrow() } finally { body.style.marginTop = '' }
       await assertGap()
     }
@@ -611,3 +658,36 @@ export const HierarchyWithoutSubject: Story = {
 export const HierarchyWithoutSubjectLight440: Story = { ...HierarchyWithoutSubject, parameters: { scheme: 'light', width: 440 } }
 export const HierarchyWithoutSubjectDark1440: Story = { ...HierarchyWithoutSubject, parameters: { scheme: 'dark', width: 1440 } }
 export const HierarchyWithoutSubjectLight1440: Story = { ...HierarchyWithoutSubject, parameters: { scheme: 'light', width: 1440 } }
+
+export const HierarchyHumanCard: Story = { ...HierarchyHuman, args: { ...HierarchyHuman.args, variant: { _tag: 'Human', frame: { _tag: 'Card' } } } }
+export const HierarchyHumanCardLight440: Story = { ...HierarchyHumanCard, parameters: { scheme: 'light', width: 440 } }
+export const HierarchyHumanCardDark1440: Story = { ...HierarchyHumanCard, parameters: { scheme: 'dark', width: 1440 } }
+export const HierarchyHumanCardLight1440: Story = { ...HierarchyHumanCard, parameters: { scheme: 'light', width: 1440 } }
+
+export const CompositionFrames: Story = {
+  render: () => <>
+    <AgentMessage {...agentMessage} />
+    <AgentMessage {...agentMessage} variant={{ _tag: 'Human' }} from="Reviewer" />
+    <AgentMessage {...agentMessage} variant={{ _tag: 'Human', frame: { _tag: 'Card' } }} from="Reviewer" />
+    <OutgoingMessageRow {...broadcastMessage} subject="Re: Re: Release review" defaultExpanded />
+  </>,
+  play: async ({ canvasElement }) => {
+    const assertFrames = async () => {
+      await expect(canvasElement.querySelector('[data-fractal-card] [data-fractal-card]')).toBeNull()
+      await expect(canvasElement.querySelectorAll('[data-fractal-card]')).toHaveLength(2)
+      for (const header of canvasElement.querySelectorAll('[data-message-header]')) {
+        await expect(header.querySelectorAll('[data-message-glyph] svg')).toHaveLength(1)
+      }
+      await expect(within(canvasElement).getByText('Re: Release review')).toBeVisible()
+    }
+    await assertFrames()
+    const card = canvasElement.querySelector<HTMLElement>('[data-fractal-card]')!
+    const nested = card.cloneNode(false)
+    card.append(nested)
+    try { await expect(assertFrames()).rejects.toThrow() } finally { nested.remove() }
+    await assertFrames()
+  },
+}
+export const CompositionFramesLight440: Story = { ...CompositionFrames, parameters: { scheme: 'light', width: 440 } }
+export const CompositionFramesDark1440: Story = { ...CompositionFrames, parameters: { scheme: 'dark', width: 1440 } }
+export const CompositionFramesLight1440: Story = { ...CompositionFrames, parameters: { scheme: 'light', width: 1440 } }
