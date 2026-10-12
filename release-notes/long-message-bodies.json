@@ -22,11 +22,11 @@
     "detail": "No restart ordering is required. A long message is read in full by members on this build; others show its preview."
   },
   "manual": {
-    "status": "none",
-    "detail": "None. Backups made by this build include the long bodies the member owns; restore reports how many it returned. The owner's store is limited to 256 MiB per sender and 1 GiB per machine (ST3_MESSAGE_BODIES_ACTOR_MAX_MB, ST3_MESSAGE_BODIES_MAX_MB)."
+    "status": "changed",
+    "detail": "Long message bodies expire from the owner's machine after 30 days by default (ST3_MESSAGE_BODIES_RETENTION_DAYS; 0 keeps them). After that only the preview remains and a reader is told the body expired; the claim and its signature stay valid. The owner's store is limited to 256 MiB per sender and 1 GiB per machine (ST3_MESSAGE_BODIES_ACTOR_MAX_MB, ST3_MESSAGE_BODIES_MAX_MB). Backups made by this build include the long bodies the member owns."
   },
   "recovery": {
     "status": "none",
-    "detail": "Rolling back leaves long messages in the log with their previews; the files stay on the owner and are ignored by older builds."
+    "detail": "Rolling back leaves long messages in the log with their previews; the files and expiry markers stay on the owner and are ignored by older builds. A body that expired cannot be recovered except from a backup taken before it."
   }
 }

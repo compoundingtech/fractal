@@ -91,10 +91,13 @@ with the claim. The measured rows are 4 KiB and the two file-backed sizes.
 - The owner removes, at startup and hourly, a temporary file older than an hour and a body whose
   message the store says does not exist, such as one a checkpoint dropped. A read that fails
   deletes nothing. A file younger than an hour is left alone.
-- The owner keeps the file as long as it keeps its state directory, unless it sets
-  `ST3_MESSAGE_BODIES_RETENTION_DAYS`: the hourly reconcile then removes a body older than that.
-  Unset, nothing sweeps by age, unlike an attachment's seven days. A message whose body has aged out
-  reads as its preview with a note that the rest is no longer on the owner's machine.
+- **Expiry.** The owner keeps a body for 30 days (`ST3_MESSAGE_BODIES_RETENTION_DAYS`, `0` keeps
+  bodies for as long as the owner keeps its state). The hourly reconcile then removes the text and
+  leaves an empty `<id>.expired` marker. The claim and its signature stay valid; the message reads
+  as its preview with the typed state `expired`: the client route answers `blob-expired` ("the full
+  text of this message expired and was removed from HOST after its retention; only the preview
+  remains") and the daemon's own readers are handed the preview and a note. A marker whose message
+  no longer exists is removed. The text is never written to the graph database, expired or not.
 - `st backup create` writes each body the member owns, with its message, sender and hash, after the
   claims, and declares archive version 2 (an archive with no bodies stays version 1, which a build
   without bodies restores; one with bodies it refuses cleanly); a body no claim names with that hash
@@ -104,6 +107,28 @@ with the claim. The measured rows are 4 KiB and the two file-backed sizes.
   `message_bodies_restored`, `message_bodies_unmatched` and `message_bodies_referenced` (the long
   messages the claims name, including those another member owns). An archive made before this still
   restores, with no bodies. A graph backup of a member that does not own a body cannot return it.
+
+## Retention
+
+Bodies expire after 30 days by default (see Expiry above); only the preview, the claim and the
+owner's name remain. Set `ST3_MESSAGE_BODIES_RETENTION_DAYS` to another number of days, or `0` to
+keep bodies. Keeping bodies forever somewhere other than the owner's state directory is the seam
+below, not part of this change.
+
+### Where a body is read and written (for a storage plugin)
+
+A later change can let a plugin hold bodies, for as long as its owner chooses. The seam is two
+small places:
+
+- **Write:** `message_body::Bodies::stage` and `Staged::commit`, called from the accept path in
+  `api.rs` after validation and before the claim (committed after it), take the sender, the
+  message subject and the bytes.
+- **Read:** `whole_text` in `api/message_bodies.rs` (this member's file, or the owner's peer route)
+  and the owner-side chunk branch in `api/client_blobs.rs`. The claim's `text/plain`
+  `attachments` entry (hash, size, origin) is the locator, and the hash is checked on every read.
+
+Expiry is the one branch of `Bodies::reconcile` that calls `expire`; a plugin that keeps bodies
+would replace that branch and the two reads above. The text never enters the graph database.
 
 ## Not covered
 

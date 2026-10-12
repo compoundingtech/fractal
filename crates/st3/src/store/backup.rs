@@ -89,7 +89,10 @@ impl Store {
         // say whether the archive carries any, and written again below inside the snapshot.
         let mut owned: Vec<(String, String, String)> = Vec::new();
         if let Some(bodies) = bodies {
-            for file in bodies.files().into_iter().filter(|file| !file.temporary) {
+            for file in bodies
+                .files()
+                .into_iter()
+                .filter(|file| !file.temporary && !file.expired) {
                 let subject = format!("message/{}", file.id);
                 let Some(message) = self.message(&subject)? else {
                     continue;

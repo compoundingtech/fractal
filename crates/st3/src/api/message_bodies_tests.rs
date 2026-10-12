@@ -476,7 +476,7 @@ fn what_one_sender_and_one_machine_keep_is_bounded_and_orphans_are_reconciled() 
     let fresh = temporary(".going.1.1.part");
     std::fs::OpenOptions::new().write(true).open(&stale).unwrap().set_modified(old).unwrap();
     assert!(bodies.files().iter().any(|file| file.temporary && file.id == ".gone.1.0.part"));
-    let removed = bodies.reconcile(|file| file.id == "kept");
+    let removed = bodies.reconcile(None, |file| file.id == "kept");
     assert_eq!(removed, 2);
     assert!(!stale.exists() && fresh.exists());
     assert!(!bodies.exists("person/blair", "message/orphan"));
@@ -633,6 +633,7 @@ async fn a_body_is_named_while_its_message_exists_and_only_then() {
         bytes: 1,
         modified: std::time::SystemTime::now(),
         temporary: false,
+        expired: false,
     };
     assert!(message_body::body_is_named(&state.store, &file(subject.trim_start_matches("message/"))));
     assert!(!message_body::body_is_named(&state.store, &file("no-such-message")));
@@ -700,4 +701,76 @@ fn the_judge_and_the_reader_take_the_same_body_entry() {
         store.claim_verdict(&record.id).unwrap().reason(),
         Some("the signature does not match the claim")
     );
+}
+
+#[test]
+fn bodies_expire_after_thirty_days_unless_the_owner_chose_otherwise() {
+    let days = |value: Option<&str>| message_body::retention_from(value).map(|keep| keep.as_secs() / 86400);
+    assert_eq!(days(None), Some(30));
+    assert_eq!(days(Some("")), Some(30));
+    assert_eq!(days(Some("not a number")), Some(30));
+    assert_eq!(days(Some("7")), Some(7));
+    assert_eq!(days(Some("3650")), Some(3650));
+    // Zero keeps bodies for as long as the owner keeps its state.
+    assert_eq!(days(Some("0")), None);
+}
+
+#[tokio::test]
+async fn an_expired_body_reads_as_expired_and_keeps_the_message_valid() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    let body = text(50 * 1024);
+    let subject = send(&state, "to-expire", &body).unwrap().message.subject;
+    let bodies = message_body::bodies(&state.state_dir);
+    let ago = |days: u64| std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86400);
+    let age = |days: u64| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(bodies_path(&state.state_dir, "person/alex", &subject))
+            .unwrap()
+            .set_modified(ago(days))
+            .unwrap();
+    };
+    let named = |file: &message_body::BodyFile| message_body::body_is_named(&state.store, file);
+    // Inside its retention the body stays; past it, the text goes and a marker stays.
+    age(10);
+    assert_eq!(bodies.reconcile(message_body::retention_from(None), named), 0);
+    assert!(bodies.exists("person/alex", &subject));
+    age(31);
+    assert_eq!(bodies.reconcile(message_body::retention_from(None), named), 1);
+    assert!(!bodies.exists("person/alex", &subject));
+    assert!(bodies.is_expired("person/alex", &subject));
+    // The claim, preview and reference are untouched.
+    let message = state.store.message(&subject).unwrap().unwrap();
+    assert!(message.body_ref.is_some());
+    assert!(message.content.ends_with('…'));
+    // The internal route says it expired, with the preview; the client route answers the typed
+    // `blob-expired` code, not a generic error.
+    let value = read_body(&state, &subject).await;
+    assert_eq!(value["complete"], false);
+    assert_eq!(value["expired"], true);
+    assert!(value["text"].as_str().unwrap().contains("expired"));
+    let session = ClientSession::for_tests_scoped("person/alex", "person/alex", &["read.projections"]);
+    let error = message_bodies::client_body(
+        State(state.clone()),
+        Extension(session),
+        AxumPath(subject.clone()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "blob-expired");
+    assert!(error.message.contains("expired"), "{}", error.message);
+    // A marker is not a body: a backup does not carry it, and no quota is spent on it.
+    let mut archive = Vec::new();
+    state.store.write_backup_with_bodies(&mut archive, Some(&bodies)).unwrap();
+    assert!(!String::from_utf8_lossy(&archive).contains("\"record\":\"message-body\""));
+    // A repeat of the same send puts the text back, and it reads as live again.
+    send(&state, "to-expire", &body).unwrap();
+    assert!(bodies.exists("person/alex", &subject));
+    assert!(!bodies.is_expired("person/alex", &subject));
+    assert_eq!(full_text(&state, &subject).await, body);
+    // Keeping bodies (`0`) never expires them.
+    age(4000);
+    assert_eq!(bodies.reconcile(message_body::retention_from(Some("0")), named), 0);
+    assert!(bodies.exists("person/alex", &subject));
 }

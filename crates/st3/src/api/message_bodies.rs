@@ -19,15 +19,22 @@ async fn whole_text(
     };
     let gone = |text: String| blob_error(St3Error::new("blob-not-found", text));
     let bytes = if body.origin == client_host_id(&state.node) {
-        message_body::bodies(&state.state_dir)
+        let bodies = message_body::bodies(&state.state_dir);
+        match bodies
             .read(&message.from, &message.subject)
             .map_err(ApiError::internal)?
-            .ok_or_else(|| {
-                gone(format!(
+        {
+            Some(bytes) => bytes,
+            None if bodies.is_expired(&message.from, &message.subject) => {
+                return Err(expired_error(&body.origin));
+            }
+            None => {
+                return Err(gone(format!(
                     "the full text of this message is no longer on {}",
                     body.origin
-                ))
-            })?
+                )));
+            }
+        }
     } else {
         let relay = state
             .client_relay
@@ -86,6 +93,17 @@ async fn whole_text(
     String::from_utf8(bytes).map_err(|_| gone("the full text of this message is not UTF-8".into()))
 }
 
+/// The typed refusal for a body that aged out: `blob-expired`, which clients already read as
+/// "removed after its retention window; the message text remains".
+pub(super) fn expired_error(origin: &str) -> ApiError {
+    blob_error(St3Error::new(
+        "blob-expired",
+        format!(
+            "the full text of this message expired and was removed from {origin} after its retention; only the preview remains"
+        ),
+    ))
+}
+
 fn body_value(message: &MessageView, text: String, complete: bool) -> Value {
     json!({ "message": message.subject, "bytes": text.len(), "text": text, "complete": complete })
 }
@@ -141,11 +159,22 @@ pub(super) async fn body(
         Ok(text) => Ok(Json(body_value(&message, text, true))),
         Err(error) if matches!(error.code.as_str(), "remote-unavailable" | "blob-not-found" | "blob-expired") => {
             let origin = message.body_origin.clone().unwrap_or_default();
-            let note = format!(
-                "\n\n[The full text of this message ({} KiB) is on {origin}, which did not give it now. Read it there or try again.]",
-                message.body_bytes.unwrap_or_default().div_ceil(1024)
-            );
-            Ok(Json(body_value(&message, format!("{}{note}", message.content), false)))
+            let kib = message.body_bytes.unwrap_or_default().div_ceil(1024);
+            let expired = error.code == "blob-expired";
+            let note = if expired {
+                format!(
+                    "\n\n[The full text of this message ({kib} KiB) expired and was removed from {origin} after its retention; only this preview remains.]"
+                )
+            } else {
+                format!(
+                    "\n\n[The full text of this message ({kib} KiB) is on {origin}, which did not give it now. Read it there or try again.]"
+                )
+            };
+            let mut value = body_value(&message, format!("{}{note}", message.content), false);
+            if expired {
+                value["expired"] = json!(true);
+            }
+            Ok(Json(value))
         }
         Err(error) => Err(error),
     }

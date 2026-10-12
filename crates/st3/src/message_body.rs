@@ -36,15 +36,28 @@ pub const MEDIA_TYPE: &str = "text/plain";
 pub const OWNER_STORE_DEFAULT_MB: u64 = 1024;
 /// The most one sender may have there, unless `ST3_MESSAGE_BODIES_ACTOR_MAX_MB` says otherwise.
 pub const ACTOR_STORE_DEFAULT_MB: u64 = 256;
-/// How long the owner keeps a body at most, if it chose to: `ST3_MESSAGE_BODIES_RETENTION_DAYS`.
-/// Unset, nothing ages out. A message whose body has aged out reads as its preview, with a note
-/// that the rest is no longer on its owner's machine.
-fn retention() -> Option<Duration> {
-    std::env::var("ST3_MESSAGE_BODIES_RETENTION_DAYS")
-        .ok()
-        .and_then(|days| days.parse::<u64>().ok())
-        .filter(|days| *days > 0)
-        .map(|days| Duration::from_secs(days.saturating_mul(24 * 3600)))
+/// How many days the owner keeps a body unless `ST3_MESSAGE_BODIES_RETENTION_DAYS` says otherwise.
+pub const RETENTION_DEFAULT_DAYS: u64 = 30;
+
+/// How long the owner keeps a body: `ST3_MESSAGE_BODIES_RETENTION_DAYS`, 30 days when unset or
+/// not a number, and `0` to keep bodies for as long as the owner keeps its state. After that
+/// only the preview and the owner's name remain, and a reader that opens the body is told it
+/// expired.
+pub fn retention() -> Option<Duration> {
+    retention_from(
+        std::env::var("ST3_MESSAGE_BODIES_RETENTION_DAYS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// [`retention`] for a setting's value.
+pub fn retention_from(setting: Option<&str>) -> Option<Duration> {
+    let days = match setting.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => value.parse::<u64>().unwrap_or(RETENTION_DEFAULT_DAYS),
+        None => RETENTION_DEFAULT_DAYS,
+    };
+    (days > 0).then(|| Duration::from_secs(days.saturating_mul(24 * 3600)))
 }
 
 /// How long a body with no claim may sit before reconcile removes it.
@@ -67,6 +80,9 @@ pub struct BodyFile {
     /// A write that has not been committed: `.<id>.<n>.part`. It counts against the quotas and
     /// is swept once it is old, and it is never a message's body.
     pub temporary: bool,
+    /// The marker `<id>.expired` left where a body aged out, so a reader is told it expired
+    /// rather than that it was lost. It holds no text.
+    pub expired: bool,
 }
 
 /// A body written to its temporary name and not yet renamed into place.
@@ -79,6 +95,12 @@ impl Staged {
     /// Make the body visible, atomically, and make the rename durable.
     pub fn commit(self) -> std::io::Result<()> {
         fs::rename(&self.temporary, &self.target)?;
+        // A body written again is a live body: it no longer reads as expired.
+        if let Some(name) = self.target.file_name() {
+            let mut marker = name.to_owned();
+            marker.push(".expired");
+            let _ = fs::remove_file(self.target.with_file_name(marker));
+        }
         if let Some(directory) = self.target.parent() {
             fs::File::open(directory)?.sync_all()?;
         }
@@ -115,7 +137,7 @@ pub fn spawn_reconciler(store: std::sync::Arc<crate::store::Store>, state_dir: P
             let (store, state_dir) = (store.clone(), state_dir.clone());
             let _ = tokio::task::spawn_blocking(move || {
                 let bodies = bodies(&state_dir);
-                bodies.reconcile(|file| body_is_named(&store, file));
+                bodies.reconcile(retention(), |file| body_is_named(&store, file));
             })
             .await;
             tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -226,6 +248,24 @@ impl Bodies {
         file.actor_dir == actor_dir(actor)
     }
 
+    /// Whether this body aged out here, so it is gone on purpose and only its preview remains.
+    pub fn is_expired(&self, actor: &str, subject: &str) -> bool {
+        self.path(actor, subject).is_some_and(|path| {
+            let mut name = path.file_name().map(|name| name.to_owned()).unwrap_or_default();
+            name.push(".expired");
+            path.with_file_name(name).is_file()
+        })
+    }
+
+    /// Remove a body and leave the marker that says it aged out, in that order of intent: the
+    /// marker is written first so a reader never sees neither.
+    fn expire(&self, file: &BodyFile) {
+        let directory = self.root.join(&file.actor_dir);
+        if fs::write(directory.join(format!("{}.expired", file.id)), b"").is_ok() {
+            let _ = fs::remove_file(directory.join(&file.id));
+        }
+    }
+
     pub fn exists(&self, actor: &str, subject: &str) -> bool {
         self.path(actor, subject).is_some_and(|path| path.is_file())
     }
@@ -255,15 +295,23 @@ impl Bodies {
                     continue;
                 };
                 let temporary = name.starts_with('.') && name.ends_with(".part");
-                if !metadata.is_file() || !(temporary || message_id(&name).is_some()) {
+                let marker = name
+                    .strip_suffix(".expired")
+                    .filter(|id| message_id(id).is_some())
+                    .map(str::to_owned);
+                if !metadata.is_file()
+                    || !(temporary || marker.is_some() || message_id(&name).is_some())
+                {
                     continue;
                 }
+                let expired = marker.is_some();
                 files.push(BodyFile {
                     actor_dir: actor_dir.clone(),
-                    id: name,
-                    bytes: metadata.len(),
+                    id: marker.unwrap_or(name),
+                    bytes: if expired { 0 } else { metadata.len() },
                     modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                     temporary,
+                    expired,
                 });
             }
         }
@@ -289,7 +337,7 @@ impl Bodies {
         let (mine, id) = (actor_dir(actor), message_id(subject).unwrap_or_default().to_owned());
         let (mut total, mut sender) = (0_u64, 0_u64);
         for file in self.files() {
-            if !file.temporary && file.actor_dir == mine && file.id == id {
+            if !file.temporary && !file.expired && file.actor_dir == mine && file.id == id {
                 return Ok(());
             }
             total += file.bytes;
@@ -319,25 +367,44 @@ impl Bodies {
         Ok(())
     }
 
-    /// Remove the bodies whose messages no claim here names: those a checkpoint dropped, or
-    /// left by a write that never got its claim. A file younger than an hour is left alone, so
-    /// a send in flight is never taken. Returns how many were removed.
-    pub fn reconcile(&self, names_a_body: impl Fn(&BodyFile) -> bool) -> usize {
-        let mut removed = 0;
+    /// Keep the store to what is named and what is young enough. Returns how many files it
+    /// removed or expired.
+    ///
+    /// - A temporary file older than an hour is a write that never committed: removed.
+    /// - A body whose message the store says does not exist, older than an hour, is removed; a
+    ///   file younger than an hour is left alone so a send in flight is never taken.
+    /// - A body older than `retention` is expired: its text is removed and a marker left, so
+    ///   the message reads as its preview with a typed "expired" state.
+    /// - A marker whose message no longer exists is removed.
+    pub fn reconcile(
+        &self,
+        retention: Option<Duration>,
+        names_a_body: impl Fn(&BodyFile) -> bool,
+    ) -> usize {
+        let mut changed = 0;
         for file in self.files() {
-            let old = file.modified.elapsed().is_ok_and(|age| age > ORPHAN_GRACE);
-            // Past a retention the owner chose, a body goes too. None is chosen by default.
-            let expired = retention().is_some_and(|keep| {
-                !file.temporary && file.modified.elapsed().is_ok_and(|age| age > keep)
-            });
-            // An old temporary file is a write that never committed; a body is kept unless its
-            // message is known not to exist, or the owner's retention has passed.
-            if expired || (old && (file.temporary || !names_a_body(&file))) {
-                let _ = fs::remove_file(self.root.join(&file.actor_dir).join(&file.id));
-                removed += 1;
+            let age = file.modified.elapsed().ok();
+            let old = age.is_some_and(|age| age > ORPHAN_GRACE);
+            let path = self.root.join(&file.actor_dir);
+            if file.expired {
+                if old && !names_a_body(&file) {
+                    let _ = fs::remove_file(path.join(format!("{}.expired", file.id)));
+                    changed += 1;
+                }
+            } else if file.temporary {
+                if old {
+                    let _ = fs::remove_file(path.join(&file.id));
+                    changed += 1;
+                }
+            } else if old && !names_a_body(&file) {
+                let _ = fs::remove_file(path.join(&file.id));
+                changed += 1;
+            } else if retention.is_some_and(|keep| age.is_some_and(|age| age > keep)) {
+                self.expire(&file);
+                changed += 1;
             }
         }
-        removed
+        changed
     }
 }
 

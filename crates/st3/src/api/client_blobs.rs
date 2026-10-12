@@ -384,10 +384,23 @@ pub(super) async fn chunk(
         .map_err(ApiError::internal)?
         .ok_or_else(|| {
             if body {
-                blob_error(St3Error::new(
-                    "blob-not-found",
-                    "the full text of this message is no longer on this machine",
-                ))
+                let expired = query
+                    .message
+                    .as_deref()
+                    .map(message_subject)
+                    .and_then(|subject| state.store.message(&subject).ok().flatten())
+                    .is_some_and(|message| {
+                        crate::message_body::bodies(&state.state_dir)
+                            .is_expired(&message.from, &message.subject)
+                    });
+                if expired {
+                    super::message_bodies::expired_error(&client_host_id(&state.node))
+                } else {
+                    blob_error(St3Error::new(
+                        "blob-not-found",
+                        "the full text of this message is no longer on this machine",
+                    ))
+                }
             } else {
                 blob_error(St3Error::new(
                     "blob-expired",
