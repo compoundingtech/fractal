@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, ensure};
 use crate::model::StepRunView;
 use super::generated::*;
-use super::Runtime;
+pub use super::Runtime;
 
 #[derive(Clone, Debug)]
 pub struct Facts {
