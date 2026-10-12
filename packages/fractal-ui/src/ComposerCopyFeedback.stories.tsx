@@ -8,6 +8,7 @@ import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { Markdown } from './assistant-ui/composition/Markdown'
 import { CopyAnswerButton } from './assistant-ui/composition/Transcript'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
+import { Icon } from './assistant-ui/composition/Icons'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { geometryVars as g, interactionVars as interaction, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
@@ -24,6 +25,8 @@ function ComposerCopyFeedback({ scheme, width, variant }: { scheme: Scheme; widt
     <Markdown text={'```typescript\n' + source + '```'} />
     <section aria-label="Answer action"><p>{answer}</p><CopyAnswerButton text={answer} onCopy={async () => { if (failure) throw new Error('Host copy rejected'); await navigator.clipboard.writeText(answer) }} /></section>
     <span data-testid="focus-reference" {...stylex.props(styles.reference)} />
+    <span data-testid="copy-glyph" hidden><Icon name="copy" size={14} /></span>
+    <span data-testid="check-glyph" hidden><Icon name="check" size={14} /></span>
   </ThemePortal></main>
 }
 const styles = stylex.create({
@@ -61,21 +64,35 @@ const play: Story['play'] = async ({ canvasElement, args }) => {
       await expect(getComputedStyle(button).outlineColor).toBe(reference.outlineColor)
       await expect(getComputedStyle(button).outlineWidth).toBe(reference.outlineWidth)
     }
+    const glyph = (testId: string) => canvas.getByTestId(testId).querySelector('svg')!.innerHTML
+    const tooltip = () => within(document.body).queryByRole('tooltip')
     for (const name of ['Copy code', 'Copy answer']) {
       const button = canvas.getByRole('button', { name, exact: true })
-      await userEvent.click(button)
-      await waitFor(() => expect(button).toHaveAccessibleName(`${name}: Copied`))
-      await rerender()
-      await expect(button).toHaveAccessibleName(`${name}: Copied`)
-      await expect(button.querySelector('svg path')?.getAttribute('d')).toBe('M3 8.5 6.5 12 13 4.5')
       const status = name === 'Copy code' ? button.closest('[data-testid="markdown-code-block"]')!.querySelector('[role="status"]')! : canvas.getByRole('region', { name: 'Answer action' }).querySelector('[role="status"]')!
       await expect(status).toHaveAttribute('aria-live', 'polite')
+      await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('copy-glyph'))
+      // Pointer copy: the tooltip opens on its own and reads Copied, even though the press closed the hover tooltip.
+      await userEvent.click(button)
+      await waitFor(() => expect(button).toHaveAccessibleName(`${name}: Copied`))
+      await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('check-glyph'))
       await expect(status).toHaveTextContent('Copied')
-      await userEvent.hover(button)
-      await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Copied'))
-      await userEvent.unhover(button)
+      await waitFor(() => expect(tooltip()).toHaveTextContent('Copied'))
+      await rerender()
+      await expect(button).toHaveAccessibleName(`${name}: Copied`)
+      await expect(tooltip()).toHaveTextContent('Copied')
       await waitFor(() => expect(button).toHaveAccessibleName(name), { timeout: 2200 })
+      await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('copy-glyph'))
       await expect(status).toHaveTextContent('')
+      await waitFor(() => expect(tooltip()).toBeNull())
+      // Keyboard copy keeps focus on the action while it copies and acknowledges.
+      button.focus()
+      await userEvent.keyboard('{Enter}')
+      await waitFor(() => expect(button).toHaveAccessibleName(`${name}: Copied`))
+      await expect(button).toHaveFocus()
+      await waitFor(() => expect(tooltip()).toHaveTextContent('Copied'))
+      await waitFor(() => expect(button).toHaveAccessibleName(name), { timeout: 2200 })
+      await waitFor(() => expect(tooltip()?.textContent ?? '').not.toContain('Copied'))
+      button.blur()
       // Passing negative control: a rejected operation never claims success, including after rerender.
       denied = true
       if (name === 'Copy answer') await userEvent.click(canvas.getByRole('button', { name: 'Toggle copy failure' }))
@@ -83,11 +100,13 @@ const play: Story['play'] = async ({ canvasElement, args }) => {
       await waitFor(() => expect(status).toHaveTextContent('Could not copy'))
       await rerender()
       await expect(button).toHaveAccessibleName(name)
+      await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('copy-glyph'))
       await expect(status).not.toHaveTextContent('Copied')
+      await expect(tooltip()?.textContent ?? '').not.toContain('Copied')
       denied = false
       if (name === 'Copy answer') await userEvent.click(canvas.getByRole('button', { name: 'Toggle copy failure' }))
     }
-    await expect(writes).toEqual([source, answer])
+    await expect(writes).toEqual([source, source, answer, answer])
   } finally {
     if (descriptor === undefined) Reflect.deleteProperty(navigator, 'clipboard')
     else Object.defineProperty(navigator, 'clipboard', descriptor)

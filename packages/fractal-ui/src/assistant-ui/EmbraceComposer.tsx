@@ -125,6 +125,7 @@ const styles = stylex.create({
   adaptiveRoot: { padding: s.md, gap: s.md },
   pill: { borderRadius: r.full, flexDirection: 'row', alignItems: 'center' },
   slab: { borderRadius: r.slab, flexDirection: 'column' },
+  focusSlab: { borderRadius: r.full, flexDirection: 'row', alignItems: 'center', ':focus-within': { borderRadius: r.slab, flexDirection: 'column', alignItems: 'stretch' } },
   growingEditor: { minHeight: g.controlLg, minWidth: 0, fieldSizing: 'content', flex: '1 1 auto' },
   field: { flex: '1 1 auto', minWidth: 0, width: '100%' },
   fieldRow: { flex: '1 1 0', minWidth: 0, width: 'auto' },
@@ -239,7 +240,7 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   const stacked = props.variant === 'C2' || wrapped || cramped || runtimeText.includes('\n')
   const composerProps = {
     ...props,
-    style: [styles.adaptiveRoot, stacked ? styles.slab : styles.pill, props.style],
+    style: [styles.adaptiveRoot, stacked ? styles.slab : props.variant === 'C3' ? styles.focusSlab : styles.pill, props.style],
     inputStyle: [styles.input, styles.growingEditor, props.inputStyle],
     fieldStyle: [stacked ? styles.field : styles.fieldRow, props.fieldStyle],
     footerStyle: [styles.adaptiveFooter, props.footerStyle],

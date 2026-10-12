@@ -74,8 +74,8 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
 }
 /** The callback must resolve only after the host has successfully copied the answer. */
 export function CopyAnswerButton({ text, onCopy }: { readonly text: string; readonly onCopy?: CopyAction }) {
-  const { state, copied, copy, announcement } = useCopyFeedback(text, onCopy ?? (() => navigator.clipboard.writeText(text)))
-  return <><Tooltip label={copied ? 'Copied' : 'Copy answer'}><Button aria-label={copied ? 'Copy answer: Copied' : 'Copy answer'} isDisabled={state.tag === 'copying'} onPress={copy} {...stylex.props(styles.copy)}><Icon name={copied ? 'check' : 'copy'} size={14} /></Button></Tooltip><VisuallyHidden><span role="status" aria-live="polite">{state.tag === 'failed' ? 'Could not copy answer. Check clipboard permissions and try again.' : announcement}</span></VisuallyHidden></>
+  const { state, copied, copy, tooltip, announcement } = useCopyFeedback(text, onCopy ?? (() => navigator.clipboard.writeText(text)))
+  return <><Tooltip {...tooltip('Copy answer')}><Button aria-label={copied ? 'Copy answer: Copied' : 'Copy answer'} onPress={copy} {...stylex.props(styles.copy)}><Icon name={copied ? 'check' : 'copy'} size={14} /></Button></Tooltip><VisuallyHidden><span role="status" aria-live="polite">{state.tag === 'failed' ? 'Could not copy answer. Check clipboard permissions and try again.' : announcement}</span></VisuallyHidden></>
 }
 function RuntimeCopyAnswer() {
   const text = useAuiState(state => state.message.content.filter(part => part.type === 'text').map(part => part.text).join('\n\n'))

@@ -7,6 +7,7 @@ const feedbackDuration = 1500
 /** Both code and answer actions acknowledge only a fulfilled clipboard/host operation. */
 export function useCopyFeedback(source: string, action: CopyAction) {
   const [state, setState] = React.useState<CopyState>({ tag: 'ready' })
+  const [tooltipOpen, setTooltipOpen] = React.useState(false)
   const timer = React.useRef<number | undefined>(undefined)
   const mounted = React.useRef(true)
   const pending = React.useRef(false)
@@ -31,5 +32,7 @@ export function useCopyFeedback(source: string, action: CopyAction) {
     }
   }
   const copied = state.tag === 'copied' && state.source === source
-  return { state, copied, copy, announcement: copied ? 'Copied' : '' }
+  /** Props for the shared `Tooltip`: it reads "Copied" and stays open for the acknowledgement, even after a pointer press closed it. */
+  const tooltip = (label: string) => ({ label: copied ? 'Copied' : label, isOpen: copied || tooltipOpen, onOpenChange: setTooltipOpen })
+  return { state, copied, copy, tooltip, announcement: copied ? 'Copied' : '' }
 }
