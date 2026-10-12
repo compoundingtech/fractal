@@ -139,3 +139,131 @@ fn complete_core_ddl_does_not_take_a_held_writer_lock() {
     assert!(reader.is_autocommit());
     assert!(reader.execute_batch("BEGIN IMMEDIATE;").is_err());
 }
+
+
+#[test]
+fn a_sqlite_prefixed_user_table_keeps_the_populated_store_path() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch("CREATE TABLE sqlitebirds(value TEXT); INSERT INTO sqlitebirds VALUES('preserved'); PRAGMA user_version=18;").unwrap();
+    let began = Arc::new(AtomicUsize::new(0));
+    let first_meta = Arc::new(AtomicUsize::new(0));
+    let seen_begin = began.clone();
+    let observed_meta = first_meta.clone();
+    connection.authorizer(Some(move |context: AuthContext<'_>| {
+        match context.action {
+            AuthAction::Transaction {
+                operation: TransactionOperation::Begin,
+            } => {
+                seen_begin.store(1, Ordering::Relaxed);
+            }
+            AuthAction::CreateTable { table_name: "meta" } => {
+                let before = seen_begin.load(Ordering::Relaxed);
+                let _ = observed_meta.compare_exchange(
+                    0,
+                    before + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
+            _ => {}
+        }
+        Authorization::Allow
+    }));
+    Store::create_schema(&connection, &Plain).unwrap();
+    assert_eq!(
+        first_meta.load(Ordering::Relaxed),
+        1,
+        "core DDL must run without an explicit fresh-install transaction"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM sqlitebirds", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        "preserved"
+    );
+}
+
+#[test]
+fn catalog_eligibility_ignores_only_literal_internal_prefixes() {
+    let predicates = |connection: &Connection| {
+        let old = connection
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        let new = connection
+            .query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        (old, new)
+    };
+    for (case, setup, expected) in [
+        ("empty", "", (true, true)),
+        (
+            "sequence only",
+            "CREATE TABLE ordinary(id INTEGER PRIMARY KEY AUTOINCREMENT); DROP TABLE ordinary;",
+            (true, true),
+        ),
+        (
+            "statistics only",
+            "CREATE TABLE ordinary(value TEXT); ANALYZE; DROP TABLE ordinary;",
+            (true, true),
+        ),
+        (
+            "user prefix",
+            "CREATE TABLE sqlitebirds(value TEXT);",
+            (true, false),
+        ),
+        (
+            "mixed user prefix",
+            "CREATE TABLE SQLITEbirds(value TEXT);",
+            (true, false),
+        ),
+        ("core table", "CREATE TABLE meta(key TEXT);", (false, false)),
+    ] {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(setup).unwrap();
+        if case == "sequence only" {
+            assert!(
+                connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sqlite_sequence')",
+                        [],
+                        |row| row.get::<_, bool>(0)
+                    )
+                    .unwrap()
+            );
+        }
+        if case == "statistics only" {
+            assert!(
+                connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sqlite_stat1')",
+                        [],
+                        |row| row.get::<_, bool>(0)
+                    )
+                    .unwrap()
+            );
+        }
+        assert_eq!(predicates(&connection), expected, "{case}");
+    }
+    let internal = Connection::open_in_memory().unwrap();
+    for reserved in ["sqlite_x", "SQLITE_x"] {
+        let error = internal
+            .execute_batch(&format!("CREATE TABLE {reserved}(value TEXT);"))
+            .unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
+    }
+    assert_eq!(predicates(&internal), (true, true));
+    // A synthetic internal catalog row checks the literal prefix without claiming user DDL
+    // can create this name. This private in-memory connection is never used as a real store.
+    internal.execute_batch("PRAGMA writable_schema=ON; INSERT INTO sqlite_schema(type,name,tbl_name,rootpage,sql) VALUES('table','sqlite_x','sqlite_x',0,NULL);").unwrap();
+    assert_eq!(predicates(&internal), (true, true));
+}
