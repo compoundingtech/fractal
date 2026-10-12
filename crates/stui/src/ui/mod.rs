@@ -2656,7 +2656,7 @@ impl Ui {
         };
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
-        // rows from the conversation and never more than a third of the pane.
+        // rows from the conversation and never more than half of the pane.
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
@@ -2665,7 +2665,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize / 3).max(1)));
+        band.truncate(room.min((area.height as usize / 2).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
