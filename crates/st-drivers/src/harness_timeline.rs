@@ -1477,7 +1477,8 @@ mod claim_socket_tests {
     fn native_failed_claim_socket_output_retains_cause_but_redacts_tool_payload() {
         let receipt = crate::work_claim_failure::Receipt {
             actor: "agent/node.worker".into(), step_run: "step-run/sample/work".into(),
-            socket: "/tmp/st.sock".into(), os_error: libc::EPERM, observed_at_unix_ms: 1234,
+            socket: "/tmp/st.sock".into(), os_error: libc::EPERM,
+            started_at_unix_ms: 1233, observed_at_unix_ms: 1234,
         };
         let output = format!("{}{}\nst: Operation not permitted (os error 1)\nprivate unrelated output",
             crate::work_claim_failure::PREFIX, serde_json::to_string(&receipt).unwrap());

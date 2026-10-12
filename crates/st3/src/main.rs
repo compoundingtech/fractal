@@ -16300,25 +16300,26 @@ async fn post_work(
     reject_foreign_agent_actor(&actor)?;
     let subject = if args.subject.starts_with("step-run/") { args.subject.clone() }
         else { format!("step-run/{}", args.subject) };
+    let started_at_unix_ms = st_drivers::message::now_ms();
     let response: Result<StepRunView> = async {
-    let incarnation = match args.incarnation {
-        Some(incarnation) => Some(incarnation),
-        None => current_agent_incarnation(client, &actor).await?,
-    };
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    client
-        .post(
-            &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
-            &WorkRequest {
-                actor: Some(actor.clone()),
-                incarnation,
-                summary: args.summary,
-                reason: args.reason,
-                evidence: args.evidence,
-                idempotency_key: format!("work:{action}:{}:{actor}:{nonce}", args.subject),
-            },
-        )
-        .await
+        let incarnation = match args.incarnation {
+            Some(incarnation) => Some(incarnation),
+            None => current_agent_incarnation(client, &actor).await?,
+        };
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        client
+            .post(
+                &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
+                &WorkRequest {
+                    actor: Some(actor.clone()),
+                    incarnation,
+                    summary: args.summary,
+                    reason: args.reason,
+                    evidence: args.evidence,
+                    idempotency_key: format!("work:{action}:{}:{actor}:{nonce}", args.subject),
+                },
+            )
+            .await
     }.await;
     let response = response.inspect_err(|error| {
         if action == "claim" && let Some(outage) = st3::client::daemon_unreachable(error)
@@ -16326,7 +16327,7 @@ async fn post_work(
         {
             let receipt = st_drivers::work_claim_failure::Receipt {
                 actor: actor.clone(), step_run: subject.clone(),
-                socket: outage.endpoint().into(), os_error,
+                socket: outage.endpoint().into(), os_error, started_at_unix_ms,
                 observed_at_unix_ms: st_drivers::message::now_ms(),
             };
             if receipt.valid() {
@@ -20060,7 +20061,6 @@ async fn native_timeline_claim(
         && operation.body["code"] == st_drivers::work_claim_failure::CODE
         && let Ok(receipt) = serde_json::from_value::<st_drivers::work_claim_failure::Receipt>(operation.body["details"].clone())
         && receipt.valid() && receipt.actor == subject
-        && receipt.observed_at_unix_ms <= operation.observed_at_unix_ms
     {
         let work: Vec<StepRunView> = client.get(&format!(
             "/v1/work?actor={}", urlencoding::encode(subject))).await?;
@@ -20068,7 +20068,7 @@ async fn native_timeline_claim(
             step.subject == receipt.step_run && step.status == "ready"
                 && step.wake.as_ref().is_some_and(|wake| {
                     wake.incarnation_id == incarnation && wake.attempts > 0
-                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| receipt.observed_at_unix_ms as u128 >= sent)
+                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| receipt.follows_wake(sent, operation.observed_at_unix_ms))
                 })
         }) {
             failure = Some((receipt, step));
