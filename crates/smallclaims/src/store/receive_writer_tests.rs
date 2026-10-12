@@ -738,6 +738,16 @@ fn sealing_recovery_ignores_trimmed_sources_and_preserves_a_complete_cursor() {
             .unwrap(),
         2
     );
+    drop(store);
+    // A pre-cursor store should likewise discover that no retained claim needs recovery.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("DELETE FROM meta WHERE key='seeded_batch_rowid'", [])
+        .unwrap();
+    let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 2);
+    store.recover_sealing_frontier().unwrap();
+    assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 2);
 }
 
 #[test]

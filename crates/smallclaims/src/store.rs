@@ -955,7 +955,7 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?
-            .unwrap_or(0);
+            .unwrap_or(max_rowid);
         let transaction = connection.unchecked_transaction()?;
         transaction.execute(
             "INSERT OR IGNORE INTO meta(key,value) VALUES('batch_rowid_high_water',?1)",
