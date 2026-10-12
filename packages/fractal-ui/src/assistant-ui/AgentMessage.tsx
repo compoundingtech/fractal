@@ -140,13 +140,18 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
       <header data-message-header {...stylex.props(styles.workHeader)} title={at}>
         <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name="message" scale="status" /></span>
         <Button slot="trigger" aria-label={`To ${target ?? ''} · ${firstLine}`} {...stylex.props(styles.trigger)}>
-          <span {...stylex.props(styles.meta)}>To</span>
+          <span {...stylex.props(styles.rowTitle)}>
+          <span {...stylex.props(styles.meta)}>To </span>
           {target !== undefined ? <strong {...stylex.props(styles.sender)}>{delivery._tag === 'Broadcast' ? target : <AgentIdHierarchy id={target} />}</strong> : null}
+          {' · '}
           <span {...stylex.props(styles.excerpt)} title={firstLine}>{firstLine}</span>
+          </span>
+          <span data-message-disclosure aria-hidden="true" {...stylex.props(styles.disclosureGlyph)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span>
         </Button>
-        {receiptCount > 0 ? <span {...stylex.props(styles.meta)}>{receiptCount} {receiptCount === 1 ? 'receipt' : 'receipts'}</span> : null}
-        {onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : null}
-        <span aria-hidden="true" {...stylex.props(styles.disclosureGlyph)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span>
+        <span {...stylex.props(styles.rowMetadata)}>
+          {receiptCount > 0 ? <span {...stylex.props(styles.meta)}>{receiptCount} {receiptCount === 1 ? 'receipt' : 'receipts'}</span> : null}
+          {onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : null}
+        </span>
       </header>
       {isExpanded ? <DisclosurePanel>
         <div data-opened-body {...stylex.props(styles.openedBody)}>
@@ -168,9 +173,11 @@ const styles = stylex.create({
   outgoing: { padding: 0, backgroundColor: surfaceVars.transparent },
   human: { paddingBlock: s.xs, paddingInline: s.lg, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accentVars.primary, backgroundColor: surfaceVars.transparent },
   header: { display: 'flex', alignItems: 'center', gap: s.sm, height: g.icon, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  workHeader: { display: 'flex', alignItems: 'center', gap: s.sm, height: g.toolRow, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  disclosureGlyph: { width: g.icon, flex: '0 0 auto', display: 'inline-flex', justifyContent: 'center', color: textVars.fgMuted },
-  openedBody: { marginTop: s.xs2, marginLeft: `calc(${g.icon} + ${s.sm})`, paddingBlock: s.md, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.border, borderRadius: r.sm, display: 'flex', flexDirection: 'column', gap: s.md },
+  workHeader: { position: 'relative', display: 'grid', gridTemplateColumns: g.workRowColumns, alignItems: 'center', gap: s.sm, height: g.toolRow, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  rowMetadata: { gridColumn: 3, gridRow: 1, pointerEvents: 'none', display: 'inline-flex', alignItems: 'center', gap: s.sm, whiteSpace: 'nowrap', minWidth: 0 },
+  rowTitle: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap' },
+  disclosureGlyph: { position: 'absolute', insetInlineEnd: `calc(${g.durationColumn} + ${s.sm})`, top: s.xs, width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
+  openedBody: { marginTop: s.xs2, marginLeft: g.textColumn, paddingBlock: s.md, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.border, borderRadius: r.sm, display: 'flex', flexDirection: 'column', gap: s.md },
   openedSubject: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   counterpart: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
@@ -185,8 +192,8 @@ const styles = stylex.create({
   subject: { margin: 0, marginTop: s.xs, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   button: { padding: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   headerAction: { flex: '0 1 auto', minWidth: 0, height: g.icon, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  copy: { opacity: { default: 0, ':hover': 1, ':focus-visible': 1 }, flex: '0 0 auto', width: g.icon },
-  trigger: { flex: '1 1 auto', minWidth: 0, display: 'flex', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  copy: { pointerEvents: 'auto', opacity: { default: 0, ':hover': 1, ':focus-visible': 1 }, flex: '0 0 auto', width: g.icon },
+  trigger: { gridColumn: '2 / 5', gridRow: 1, height: g.toolRow, minWidth: 0, display: 'grid', gridTemplateColumns: 'subgrid', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   receipt: { flex: '0 1 auto', minWidth: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.denseSize, lineHeight: t.metaLeading, color: textVars.fgMuted, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
   danger: { color: statusVars.dangerFg },

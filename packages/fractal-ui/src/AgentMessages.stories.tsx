@@ -595,6 +595,11 @@ export const HierarchyOutgoing: Story = {
     const header = message.querySelector<HTMLElement>('[data-message-header]')!
     const assertWorkRow = async () => {
       await expect(header.getBoundingClientRect().height).toBe(24)
+      const columns = getComputedStyle(header).gridTemplateColumns.split(' ').map(parseFloat)
+      await expect(getComputedStyle(header).display).toBe('grid')
+      await expect(columns.slice(-2)).toEqual([16, 80])
+      const disclosure = header.querySelector<HTMLElement>('[data-message-disclosure]')!
+      await expect(header.getBoundingClientRect().right - disclosure.getBoundingClientRect().left).toBe(102)
       await expect(parseFloat(getComputedStyle(message).borderLeftWidth)).toBe(0)
       await expect(header.querySelector('time')).toBeNull()
       await expect(header.querySelector('button[slot="trigger"]')?.textContent?.match(/\bReview\b/g) ?? []).toHaveLength(1)
@@ -611,6 +616,8 @@ export const HierarchyOutgoing: Story = {
     try { await expect(assertWorkRow()).rejects.toThrow() } finally { message.style.borderLeft = '' }
     header.style.height = '1rem'
     try { await expect(assertWorkRow()).rejects.toThrow() } finally { header.style.height = '' }
+    header.style.display = 'flex'
+    try { await expect(assertWorkRow()).rejects.toThrow() } finally { header.style.display = '' }
     const trigger = within(header).getByRole('button', { name: /To Review/ })
     const duplicateId = document.createElement('span')
     duplicateId.textContent = 'Review'

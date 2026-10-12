@@ -104,6 +104,9 @@ export const geometryVars = stylex.defineVars({
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
   toolIndent: '28px', gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
+  workRowColumns: '16px minmax(0, 1fr) auto 16px 80px',
+  durationColumn: '80px',
   /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
   textColumn: '22px',
   sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
