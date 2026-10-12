@@ -4429,7 +4429,8 @@ struct MessageWaitArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Message)))]
     #[arg(long)]
     after: Option<String>,
-    /// How long to wait, such as 30s or 2m. Zero checks once and returns.
+    /// How long to wait, such as 30s or 2m, at most 10m (issue the wait again for longer). Zero
+    /// checks once and returns.
     #[arg(long, default_value = "30s")]
     timeout: String,
 }
@@ -16826,6 +16827,10 @@ async fn run_message(
             reject_foreign_agent_actor(&actor)?;
             let sender = normalize_message_subject(&args.sender);
             let timeout = parse_timeout(&args.timeout)?;
+            anyhow::ensure!(
+                timeout <= MAX_REPLY_WAIT,
+                "a wait lasts at most 10m; issue it again to wait longer"
+            );
             let after = match args.after.as_deref() {
                 Some(reference) => Some(read_message(client, reference).await?.created_index),
                 None => None,
@@ -17629,8 +17634,27 @@ async fn unread_replies(client: &Client, actor: &str, sender: &str, after: u64) 
     Ok(earliest_reply(candidates, sender, after))
 }
 
+/// The longest one wait holds a tool call and a connection; a longer wait is issued again.
+const MAX_REPLY_WAIT: Duration = Duration::from_secs(600);
+
+/// The least time between two reads of the event feed by one wait, so a busy store cannot make a
+/// waiting seat poll.
+const REPLY_WAIT_PACE: Duration = Duration::from_millis(500);
+
+/// Whether an event may be new mail from `sender` to `actor`. An event whose body names its
+/// endpoints is judged by them; one that does not is a candidate the message itself settles.
+fn may_be_reply(event: &EventRecord, actor: &str, sender: &str) -> bool {
+    if event.kind != "message.sent" || !event.subject.starts_with("message/") {
+        return false;
+    }
+    let endpoint = |name: &str| event.body.pointer(&format!("/fields/{name}")).and_then(Value::as_str);
+    endpoint("to").is_none_or(|to| to == actor) && endpoint("from").is_none_or(|from| from == sender)
+}
+
 /// Wait until `sender` writes to `actor` or the deadline passes. The graph's event feed wakes the
-/// wait as soon as a message lands, so an early reply returns at once.
+/// wait, but only a `message.sent` event addressed to the seat from the sender costs a read, and
+/// that read is the one message it names, never the mailbox. The mailbox is listed once, and only
+/// for `--after`, to find a reply that landed before the wait began. Event reads are paced.
 async fn wait_for_reply(
     client: &Client,
     actor: &str,
@@ -17639,29 +17663,57 @@ async fn wait_for_reply(
     timeout: Duration,
 ) -> Result<Option<MessageView>> {
     let deadline = tokio::time::Instant::now() + timeout;
-    // Capture the index before looking, so a message that lands during the look still wakes the
-    // event wait instead of being missed.
+    // Capture the index before looking, so a message that lands during the look is still on the
+    // event feed from this cursor.
     let health: Value = client.get("/v1/health").await?;
     let started = health["store_index"]
         .as_u64()
         .context("the daemon health response has no store index")?;
-    let after = after.unwrap_or(started);
-    let mut cursor = started;
-    let mut event_feed = LocalEventFeed::default();
-    loop {
-        if let Some(message) = unread_replies(client, actor, sender, after).await? {
+    let floor = after.unwrap_or(started);
+    if after.is_some() {
+        if let Some(message) = unread_replies(client, actor, sender, floor).await? {
             return Ok(Some(message));
         }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    }
+    let mut cursor = started;
+    let mut event_feed = LocalEventFeed::default();
+    let mut last_read: Option<tokio::time::Instant> = None;
+    loop {
+        let mut remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Some(last) = last_read {
+            let pause = REPLY_WAIT_PACE.saturating_sub(last.elapsed()).min(remaining);
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+                remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            }
+        }
         if remaining.is_zero() {
             return Ok(None);
         }
+        last_read = Some(tokio::time::Instant::now());
         let wait_ms = remaining.as_millis().clamp(1, 30_000);
         let page = event_feed
             .read(client, &format!("after={cursor}&wait=true&timeout_ms={wait_ms}"))
             .await?;
+        for event in &page.items {
+            if event.store_index <= floor || !may_be_reply(event, actor, sender) {
+                continue;
+            }
+            let message = read_message(client, &event.subject).await?;
+            if message.from == sender
+                && message.to == actor
+                && message.created_index > floor
+                && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+            {
+                return Ok(Some(message));
+            }
+        }
         if let Some(scanned) = page.next_after {
             cursor = cursor.max(scanned);
+        }
+        // A full page means more events are waiting: read the next one without a pause.
+        if page.items.len() >= 200 {
+            last_read = None;
         }
     }
 }
