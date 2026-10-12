@@ -27,7 +27,9 @@ type Story = StoryObj
 export const HoverAndDialog: Story = { name: 'Hover and dialog · no native titles', render: () => <main {...stylex.props(styles.root)}><div {...stylex.props(styles.frame)}><ResourceCardV1 resource={resource} variant="RC-2" /></div></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
-  const trigger = canvas.getByRole('button', { name: 'Open 2 changed files' })
+  // Label-in-name: every resource button is named by its own visible content.
+  for (const button of canvas.getAllByRole('button')) await expect(button).not.toHaveAttribute('aria-label')
+  const trigger = canvas.getByRole('button', { name: /^2 changed files\b/ })
   // Keyboard focus opens the custom hover immediately (RAC tooltips open on focus-visible without the hover warmup).
   await userEvent.tab()
   await expect(trigger).toHaveFocus()
