@@ -80,6 +80,8 @@ impl TransactionFinalizers {
 pub struct WriterTransaction<'connection> {
     transaction: Transaction<'connection>,
     finalizers: Arc<TransactionFinalizers>,
+    /// Declared last, so it records after COMMIT or the rollback on drop.
+    _timer: crate::windows::Timer,
 }
 
 impl<'connection> WriterTransaction<'connection> {
@@ -90,6 +92,7 @@ impl<'connection> WriterTransaction<'connection> {
         Self {
             transaction,
             finalizers,
+            _timer: crate::windows::Timer::start(crate::windows::StoreWork::WriteTransaction),
         }
     }
 
@@ -109,6 +112,7 @@ impl<'connection> WriterTransaction<'connection> {
         self.finalizers.run(&self.transaction)?;
         check()?;
         self.transaction.commit()?;
+        crate::profile::managed_commit_succeeded();
         Ok(())
     }
 
@@ -341,6 +345,7 @@ mod tests {
         for (id, success) in [(1, true), (2, false), (3, true)] {
             let (done, answer) = mpsc::sync_channel(1);
             writer.send(WriterJob::Batched {
+                enqueued: std::time::Instant::now(),
                 run: Box::new(move |tx| {
                     free_write(tx, id, "queued").unwrap();
                     success
@@ -378,6 +383,7 @@ mod tests {
         for id in [1, 2] {
             let (done, answer) = mpsc::sync_channel(1);
             writer.send(WriterJob::Batched {
+                enqueued: std::time::Instant::now(),
                 run: Box::new(move |tx| {
                     free_write(tx, id, "batch").unwrap();
                     true
@@ -613,6 +619,7 @@ mod tests {
         for (id, success) in [(1, true), (2, false), (3, true)] {
             let (done, answer) = mpsc::sync_channel(1);
             writer.send(WriterJob::Batched {
+                enqueued: std::time::Instant::now(),
                 run: Box::new(move |tx| {
                     assert_eq!(
                         tx.query_row("SELECT active FROM managed_scope", [], |r| r

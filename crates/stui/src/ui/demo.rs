@@ -300,6 +300,7 @@ fn usage() -> Vec<st3_client::UsageRow> {
 fn attention() -> Vec<Attention> {
     vec![
         Attention {
+            conversations: vec![],
             id: s("attention/1"),
             tier: Tier::Stopped,
             title: s("Approve the atlas store cut-over"),
@@ -334,6 +335,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/2"),
             tier: Tier::Stopped,
             title: s("Feedback on the new pricing page"),
@@ -363,6 +365,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/3"),
             tier: Tier::Today,
             title: s("Launch harbor/nightly-audit"),
@@ -426,6 +429,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/4"),
             tier: Tier::Alert,
             title: s("Release Captain keeps restarting"),
@@ -449,6 +453,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/5"),
             tier: Tier::Today,
             title: s("Add an audit step to the rekey mission"),
@@ -477,6 +482,7 @@ fn attention() -> Vec<Attention> {
             },
         },
         Attention {
+            conversations: vec![],
             id: s("attention/6"),
             tier: Tier::Later,
             title: s("Weekly usage is up 18%"),
@@ -658,12 +664,15 @@ fn agents() -> Vec<Agent> {
             claimed: Some(s(claimed)),
             next: next.map(s),
             queue: queue.iter().map(|item| s(item)).collect(),
+            next_mission: next.map(|_| s("mission/fleet/atlas/store-move")),
+            queue_missions: queue.iter().map(|_| s("mission/fleet/atlas/store-move")).collect(),
             queued: queue.len() as u64,
             harness_state: Some(s(state)),
             runtime: Some(s("running · incarnation 3")),
             fault: None,
             under: None,
             model: Some(s("claude-sonnet-5-5")),
+            effort: Some(s("high")),
             progress: None,
         };
     list[0].details = detail(
@@ -685,12 +694,15 @@ fn agents() -> Vec<Agent> {
         claimed: Some(s("1h ago")),
         next: Some(s("Weekly release › publish")),
         queue: vec![],
+        next_mission: Some(s("mission/fleet/release/weekly")),
+        queue_missions: vec![],
         queued: 0,
         harness_state: Some(s("exited 4 times in 10 minutes")),
         runtime: Some(s("restarts paused")),
         fault: Some(s("401 Unauthorized: the API key expired at 08:40.")),
         under: None,
         model: Some(s("gpt-5.5-codex")),
+        effort: None,
         progress: None,
     };
     list[3].details = detail(

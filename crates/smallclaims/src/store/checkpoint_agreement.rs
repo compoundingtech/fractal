@@ -369,6 +369,10 @@ pub enum CheckpointAction {
     TrimGraphChanged {
         checkpoint: String,
     },
+    /// Signature and verdict rows of claims an earlier build's trim dropped were deleted.
+    SweptTrimmedClaimRows {
+        rows: usize,
+    },
 }
 
 /// `st replication checkpoint status`: the newest stable checkpoint and the one being agreed.
@@ -814,6 +818,11 @@ impl Store {
     pub fn checkpoint_step(&self, context: &CheckpointContext) -> Result<Vec<CheckpointAction>> {
         self.runtime.checkpoint_preflight()?;
         let mut actions = Vec::new();
+        // Local rows outside every digest, so this does not wait for a peer.
+        let rows = self.sweep_trimmed_claim_rows()?;
+        if rows > 0 {
+            actions.push(CheckpointAction::SweptTrimmedClaimRows { rows });
+        }
         if self.replication_catching_up() {
             return Ok(actions);
         }
@@ -908,6 +917,7 @@ impl Store {
         if failures.in_backoff(context.now_unix_ms) {
             return Ok(());
         }
+        let _completion = super::checkpoint_completion::Completion::outer();
         let sealed = self.checkpoint_sealed_set_through(terms.cut_unix_ms, Some(seal_rowid))?;
         let plan = self.runtime.plan_checkpoint_drops(&sealed);
         if plan.sealed_digest != terms.sealed_digest {

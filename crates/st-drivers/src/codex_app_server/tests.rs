@@ -1164,6 +1164,7 @@ fn delivery_config(root: &Path) -> CodexDeliveryConfig {
         supervisor: None,
         producer_version: Some("codex-cli 0.153.0".into()),
         model: None,
+        prompt_answers: None,
     }
 }
 
@@ -3195,6 +3196,7 @@ fn expected_resume_waits_for_tui_loaded_thread_and_binds_from_control_response()
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: false,
                 preloaded: None,
@@ -3217,6 +3219,7 @@ fn expected_resume_waits_for_tui_loaded_thread_and_binds_from_control_response()
             sandbox: Some(sandbox),
             model: None,
             effort: None,
+                    permissions: None,
         }) if policy == "never" && sandbox == "danger-full-access"
     ));
     assert!(matches!(
@@ -3309,6 +3312,7 @@ fn declared_resume_policy_preloads_before_the_tui_can_load_read_only() {
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: true,
                 preloaded: Some(preloaded_tx),
@@ -3421,6 +3425,7 @@ fn rejected_declared_resume_settings_fail_without_downgrading_the_policy() {
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: false,
                 preloaded: None,
@@ -3549,6 +3554,7 @@ fn successful_resume_with_wrong_model_or_effort_fails_before_binding() {
                         sandbox: Some("danger-full-access".into()),
                         model: Some("gpt-6.1-sol".into()),
                         effort: Some("high".into()),
+                    permissions: None,
                     }),
                     preload: false,
                     preloaded: None,
@@ -5504,6 +5510,234 @@ fn an_unclassified_item_holds_until_the_next_idle_status() {
 }
 
 #[test]
+fn a_persons_answer_takes_each_approval_methods_own_decision_words() {
+    let none = Value::Null;
+    for (method, allow, deny) in [
+        (
+            "item/commandExecution/requestApproval",
+            json!({"decision": "accept"}),
+            json!({"decision": "decline"}),
+        ),
+        (
+            "item/fileChange/requestApproval",
+            json!({"decision": "accept"}),
+            json!({"decision": "decline"}),
+        ),
+        (
+            "execCommandApproval",
+            json!({"decision": "approved"}),
+            json!({"decision": {"denied": {"rejection": "The person denied this from st."}}}),
+        ),
+        (
+            "applyPatchApproval",
+            json!({"decision": "approved"}),
+            json!({"decision": {"denied": {"rejection": "The person denied this from st."}}}),
+        ),
+    ] {
+        assert_eq!(
+            approval_decision(method, &none, "allow"),
+            Some(allow),
+            "{method}"
+        );
+        assert_eq!(
+            approval_decision(method, &none, "deny"),
+            Some(deny),
+            "{method}"
+        );
+    }
+    // A permissions request is granted exactly what it asked for, or nothing.
+    let asked = json!({"threadId": "thread-main", "permissions": {"network": {"enabled": true}}});
+    assert_eq!(
+        approval_decision("item/permissions/requestApproval", &asked, "allow"),
+        Some(json!({"permissions": {"network": {"enabled": true}}, "scope": "turn"}))
+    );
+    assert_eq!(
+        approval_decision("item/permissions/requestApproval", &asked, "deny"),
+        Some(json!({"permissions": {}}))
+    );
+    assert_eq!(
+        approval_decision("item/commandExecution/requestApproval", &none, "maybe"),
+        None
+    );
+    assert_eq!(
+        approval_decision("item/tool/requestUserInput", &none, "allow"),
+        None
+    );
+}
+
+#[test]
+fn an_approval_answered_in_st_is_sent_once_and_only_for_this_thread() {
+    use crate::session_control::PromptAnswer;
+    let root = tempfile::tempdir().unwrap();
+    let mut writer =
+        harness_state::Writer::new(root.path(), "h.worker", "codex", Some("h.worker".into()));
+    let mut write = |observed: CodexObservedState| {
+        writer
+            .observe(observed.harness_observation().unwrap())
+            .unwrap()
+    };
+    let waiting = || CodexObservedState::Held {
+        reason: CodexHoldReason::WaitingOnApproval,
+        turn_id: Some("turn-1".into()),
+    };
+    let active = || CodexObservedState::Active {
+        turn_id: "turn-1".into(),
+    };
+    let path = harness_state::harness_state_path(root.path());
+    let record = || harness_state::read(&path, None);
+    let sequences = || {
+        let observed = record().unwrap();
+        (
+            observed.ownership_sequence.unwrap(),
+            observed.transition_sequence.unwrap(),
+        )
+    };
+    let answered = |answer: &str| {
+        let answer = answer.to_owned();
+        move |_: u64, _: u64| {
+            Some(PromptAnswer::Answered {
+                answer: answer.clone(),
+            })
+        }
+    };
+    let request = |id: u64, thread: &str| {
+        json!({"id": id, "method": "item/commandExecution/requestApproval",
+            "params": {"threadId": thread, "turnId": "turn-1", "command": "make"}})
+    };
+    let mut at = Instant::now();
+    let mut tick = || {
+        at += APPROVAL_ANSWER_POLL;
+        at
+    };
+    let mut approval = CodexApprovalAnswer::default();
+    write(active());
+
+    // Another thread's request, or one without an id, is never remembered.
+    approval.observe(&request(7, "thread-other"), "thread-main");
+    approval.observe(
+        &json!({"method": "item/commandExecution/requestApproval",
+            "params": {"threadId": "thread-main"}}),
+        "thread-main",
+    );
+    assert_eq!(
+        approval.answer_if_due(tick(), || unreachable!(), |_, _| unreachable!()),
+        None
+    );
+
+    // Until the request's wait is written, nothing names the prompt and st is not asked.
+    approval.observe(&request(8, "thread-main"), "thread-main");
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |_, _| unreachable!()),
+        None
+    );
+    // Then st is asked about exactly that observation, and again only a second later.
+    write(waiting());
+    let prompt = sequences();
+    let mut asked = Vec::new();
+    let now = tick();
+    assert_eq!(
+        approval.answer_if_due(now, record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Open)
+        }),
+        None
+    );
+    assert_eq!(asked, vec![prompt]);
+    assert_eq!(
+        approval.answer_if_due(
+            now + Duration::from_millis(500),
+            || unreachable!(),
+            |_, _| unreachable!()
+        ),
+        None
+    );
+    // A request for another thread does not replace this one.
+    approval.observe(&request(9, "thread-other"), "thread-main");
+    assert_eq!(
+        approval.answer_if_due(tick(), record, answered("deny")),
+        Some(json!({"id": 8, "result": {"decision": "decline"}}))
+    );
+    assert_eq!(
+        approval.answer_if_due(tick(), record, answered("deny")),
+        None,
+        "an answer is sent once"
+    );
+
+    // A second request whose wait wrote nothing new would find the first one's observation, and
+    // with it the first one's answer: it never binds, so st never answers it.
+    approval.observe(&request(10, "thread-main"), "thread-main");
+    assert_eq!(sequences(), prompt);
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |_, _| unreachable!()),
+        None
+    );
+    // Answered in the TUI: the resolution forgets it; another request's resolution does not.
+    approval.observe(
+        &json!({"method": "serverRequest/resolved",
+            "params": {"threadId": "thread-main", "requestId": 9}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_some());
+    approval.observe(
+        &json!({"method": "serverRequest/resolved",
+            "params": {"threadId": "thread-main", "requestId": 10}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_none());
+
+    // A request whose wait is a new transition binds to it; st reporting it gone forgets it.
+    write(active());
+    write(waiting());
+    approval.observe(&request(11, "thread-main"), "thread-main");
+    let mut asked = Vec::new();
+    assert_eq!(
+        approval.answer_if_due(tick(), record, |ownership, transition| {
+            asked.push((ownership, transition));
+            Some(PromptAnswer::Gone)
+        }),
+        None
+    );
+    assert_ne!(asked, vec![prompt]);
+    assert_eq!(asked, vec![sequences()]);
+    assert!(approval.pending.is_none());
+
+    // The thread moving on forgets a request too: a status without the flag, a completed turn.
+    approval.observe(&request(12, "thread-main"), "thread-main");
+    approval.observe(
+        &json!({"method": "thread/status/changed", "params": {"threadId": "thread-main",
+            "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_some());
+    approval.observe(
+        &json!({"method": "thread/status/changed", "params": {"threadId": "thread-main",
+            "status": {"type": "active", "activeFlags": []}}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_none());
+    approval.observe(&request(13, "thread-main"), "thread-main");
+    approval.observe(
+        &json!({"method": "turn/completed", "params": {"threadId": "thread-main",
+            "turn": {"id": "turn-1", "status": "completed"}}}),
+        "thread-main",
+    );
+    assert!(approval.pending.is_none());
+
+    // A legacy request names its thread as a conversation and takes its own words.
+    write(active());
+    write(waiting());
+    approval.observe(
+        &json!({"id": "legacy-1", "method": "execCommandApproval",
+            "params": {"conversationId": "thread-main"}}),
+        "thread-main",
+    );
+    assert_eq!(
+        approval.answer_if_due(tick(), record, answered("allow")),
+        Some(json!({"id": "legacy-1", "result": {"decision": "approved"}}))
+    );
+}
+
+#[test]
 fn approval_request_blocks_until_matching_thread_reports_resolution() {
     let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
     let mut state = CodexControlState::new(&runtime, "thread-main".into());
@@ -6520,6 +6754,7 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
             sandbox: Some("workspace-write".into()),
             model: Some("gpt-test".into()),
             effort: None,
+                    permissions: None,
         }
     );
     assert_eq!(
@@ -6598,6 +6833,7 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
             sandbox: Some("danger-full-access".into()),
             model: Some("gpt-5.6-sol".into()),
             effort: Some("xhigh".into()),
+            permissions: None,
         })
     );
     let request = control_resume_request("thread-prior", prepared.resume_permissions.as_ref());
@@ -8111,4 +8347,64 @@ fn native_codex_login_recovery_requires_a_successful_current_thread_turn() {
             .provider_auth,
         None
     );
+}
+
+#[test]
+fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resume() {
+    use crate::access::AccessMode;
+    let socket = Some("/run/example/st.sock");
+    let workspace = Path::new("/work/example");
+    let plain = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
+    let bypass = managed_codex_argv(AccessMode::Bypass, socket, workspace, plain.clone()).unwrap();
+    assert!(bypass.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    assert!(bypass.contains(&"--dangerously-bypass-hook-trust".into()));
+    assert!(bypass.ends_with(&plain[1..]));
+    let auto = managed_codex_argv(AccessMode::Auto, socket, workspace, plain).unwrap();
+    assert!(!auto.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    let profile = auto.iter().find(|value| value.starts_with("permissions.st-managed=")).unwrap();
+    let parsed: toml::Value = toml::from_str(profile).unwrap();
+    assert_eq!(parsed["permissions"]["st-managed"]["workspace_roots"]["/work/example"].as_bool(), Some(true));
+    assert_eq!(parsed["permissions"]["st-managed"]["network"]["unix_sockets"]["/run/example/st.sock"].as_str(), Some("allow"));
+    let resumed = prepare_controlled_launch_args("unix:///control.sock", &auto[1..], Some("prior")).unwrap();
+    let overrides = resumed.resume_permissions.unwrap();
+    assert_eq!(overrides.permissions.as_deref(), Some("st-managed"));
+    assert_eq!(overrides.approval_policy.as_deref(), Some("on-request"));
+    assert_eq!(overrides.approvals_reviewer.as_deref(), Some("auto_review"));
+    assert!(overrides.sandbox.is_none());
+    let request = control_resume_request("prior", Some(&overrides));
+    assert_eq!(request["params"]["permissions"], "st-managed");
+    let accepted = json!({"result":{"approvalPolicy":"on-request", "approvalsReviewer":"auto_review", "activePermissionProfile":{"id":"st-managed"}, "model":"gpt-example"}});
+    assert!(resume_permission_overrides_applied(&accepted, &overrides));
+    assert!(!resume_permission_overrides_applied(&json!({"result":{}}), &overrides));
+    for authored in [
+        vec!["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+        vec!["-s", "workspace-write"], vec!["-sworkspace-write"],
+        vec!["--config=default_permissions=custom"], vec!["-capproval_policy=never"],
+        vec!["-c", "sandbox_mode=read-only"],
+    ] {
+        let mut argv = vec!["codex".to_owned()];
+        argv.extend(authored.into_iter().map(str::to_owned));
+        argv.push("boot".into());
+        let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, argv.clone()).unwrap();
+        assert!(merged.ends_with(&argv[1..]));
+        assert!(!merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+        assert_eq!(merged.iter().filter(|arg| arg.as_str() == "--dangerously-bypass-hook-trust").count(), 1);
+    }
+    let prompt = vec!["codex".into(), "--".into(), "--dangerously-bypass-approvals-and-sandbox".into()];
+    let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, prompt).unwrap();
+    assert!(merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+}
+
+#[test]
+fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
+    use crate::access::AccessMode;
+    let workspace = Path::new("/work/example");
+    let plain = vec!["codex".into(), "boot".into()];
+    let bypass = managed_codex_argv(AccessMode::Bypass, None, workspace, plain.clone()).unwrap();
+    assert!(bypass.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    let authored = vec!["codex".into(), "--dangerously-bypass-approvals-and-sandbox".into(), "boot".into()];
+    let preserved = managed_codex_argv(AccessMode::Auto, None, workspace, authored.clone()).unwrap();
+    assert!(preserved.ends_with(&authored[1..]));
+    let error = managed_codex_argv(AccessMode::Auto, None, workspace, plain).unwrap_err();
+    assert!(error.to_string().contains("ST3_ENDPOINT"));
 }

@@ -1,17 +1,17 @@
 {
   "version": 1,
-  "summary": "Stream the affected checkpoint operation index and retain only digest extrema",
+  "summary": "Use covering checkpoint metadata reads for affected operation repair",
   "replay": {
     "status": "none",
-    "detail": "No replay. expected_operation keeps stored claim decoding and reads checkpoint digest extrema for its selected operation instead of copying/sorting its entire dropped-candidate vector."
+    "detail": "No replay or caller changes. Current-main OperationMetadata fold already streams checkpoint candidates without a retained vector; preserve that fold and all selected typed decoding, while the affected checkpoint lookup uses a partial covering index. No first/last LIMIT or old stored-vector reducer is adopted."
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds checkpoint_claims_operation_digest, a partial covering index on operation_id, request_digest and id, at ordinary Store open. Schema version remains17; existing checkpoint data is unchanged. First upgraded open builds the index over existing checkpoint metadata; time and writer cost are unmeasured."
+    "detail": "Adds checkpoint_claims_operation_digest, a partial covering index on operation_id, request_digest and id, at ordinary Store open. Current schema version18 and checkpoint data are unchanged. First-open index construction over existing metadata remains a cost requiring measurement; older builds ignore the additive index."
   },
   "rules": {
     "status": "none",
-    "detail": "Unchanged canonical stored ID/fallback, conflict decision, repaired and duplicate membership, snapshot and corruption refusal. No checkpoint/rules digest change."
+    "detail": "Current-main stored canonical/fallback, conflict decision, repaired exclusions and live/checkpoint membership remain unchanged. Selected malformed metadata still refuses. No rules/digest change."
   },
   "compatibility": {
     "status": "none",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "unknown",
-    "detail": "Normal restart plus first-open additive index construction; construction duration/writer cost is unmeasured. Selected checkpoint history is still decoded for legacy corruption refusal; complete heal repair-list and stored affected-operation history remain unbounded. No production latency acceptance."
+    "detail": "First-open additive index construction remains disclosed. Complete affected-operation checkpoint history is still scanned/decoded; no bound on full repair lists or whole heal. Actual current-main and integrated hetz2 perf figures are recorded separately when available; no historical pass transfer or production claim."
   },
   "manual": {
     "status": "none",

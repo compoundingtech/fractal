@@ -62,8 +62,7 @@ pub fn agent_document(
         }
         body.nodes_mut().push(checkout);
     }
-    let arguments: &[&str] = match args.harness.as_str() {
-        "claude" => {
+    if args.harness == "claude" {
             let mut environment = KdlNode::new("env");
             let mut variables = KdlDocument::new();
             variables
@@ -78,18 +77,7 @@ pub fn agent_document(
                     [".claude/settings.local.json", CLAUDE_SEAT_SETTINGS],
                 ),
             ]));
-            &[
-                "--dangerously-skip-permissions",
-                "--settings",
-                CLAUDE_SEAT_SETTINGS,
-            ]
-        }
-        "codex" => &[
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--dangerously-bypass-hook-trust",
-        ],
-        _ => &[],
-    };
+    }
     let mut harness = kdl_node("harness", [args.harness.as_str()]);
     let mut harness_body = KdlDocument::new();
     if let Some(model) = &args.model {
@@ -102,11 +90,6 @@ pub fn agent_document(
             .nodes_mut()
             .push(kdl_node("effort", [effort.as_str()]));
     }
-    if !arguments.is_empty() {
-        harness_body
-            .nodes_mut()
-            .push(kdl_node("args", arguments.iter().copied()));
-    }
     if let Some(message) = &args.message {
         let mut node = kdl_node("message", [message.as_str()]);
         node.entries_mut().push(KdlEntry::new_prop(
@@ -115,9 +98,7 @@ pub fn agent_document(
         ));
         harness_body.nodes_mut().push(node);
     }
-    if !harness_body.nodes().is_empty() {
-        harness.set_children(harness_body);
-    }
+    harness.set_children(harness_body);
     body.nodes_mut().push(harness);
     if let Some(key) = creation_key {
         body.nodes_mut().push(creation_tags(key));
