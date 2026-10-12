@@ -152,9 +152,9 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{pendingFields.map(([name,value])=>{
           if(value===undefined)return null
           const identity=name==='Machine'?overview.machine:name==='Model'?overview.model:undefined
-          return <React.Fragment key={name}><dt aria-hidden={identity===undefined||undefined} {...stylex.props(styles.muted)}>{identity!==undefined?name:<span inert {...stylex.props(styles.pendingText)}>{name}</span>}</dt><dd aria-hidden={identity===undefined||undefined} {...stylex.props(styles.value)}>{identity??<span inert {...stylex.props(styles.pendingText)}>{value}</span>}</dd></React.Fragment>
+          return <React.Fragment key={name}><dt aria-hidden={identity===undefined||undefined} {...stylex.props(styles.muted)}>{identity!==undefined?name:<span inert {...stylex.props(styles.pendingText)}>{name}</span>}</dt><dd aria-hidden={identity===undefined||undefined} {...stylex.props(styles.value)}>{identity!==undefined?<span {...stylex.props(styles.pendingIdentity)}>{identity}</span>:<span inert {...stylex.props(styles.pendingText)}>{value}</span>}</dd></React.Fragment>
         })}</dl>:<>
-          <div {...stylex.props(styles.line)}><StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="unobserved"/><span>{knownIdentity}<span aria-hidden="true" {...stylex.props(styles.pendingText)}>{knownIdentity!==''?' · ':''}{pendingOverview.since}</span></span></div>
+          <div {...stylex.props(styles.line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="unobserved"/>}<span>{knownIdentity}<span aria-hidden="true" {...stylex.props(styles.pendingText)}>{knownIdentity!==''?' · ':''}{pendingOverview.since}</span></span></div>
           {variants.overview==='O2'&&<>
             <div aria-hidden="true" {...stylex.props(styles.line)}><span {...stylex.props(styles.pendingText)}>{pendingOverviewLine}</span></div>
             <div aria-hidden="true"><span {...stylex.props(styles.muted)}><span {...stylex.props(styles.pendingText)}>{pendingContextLine}</span></span><div {...stylex.props(meterStyles.track)}/></div>
@@ -163,7 +163,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         </>:<>
         {overview.title!==undefined&&<strong data-details-name {...stylex.props(styles.name)}>{overview.title}</strong>}
         {variants.overview==='O3'?<dl {...stylex.props(styles.grid)}>{fields.map(([name,value])=><React.Fragment key={name}><dt {...stylex.props(styles.muted)}>{name}</dt><dd {...stylex.props(styles.value)}><OverviewValue label={name} value={value}/></dd></React.Fragment>)}</dl>:<>
-          <div data-details-overview-line {...stylex.props(styles.line)}><StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness={state==='unknown'?'unobserved':'live'}/><OverviewValue label="Machine" value={overview.machine}/><span>·</span><OverviewValue label="Model" value={overview.model}/><span>·</span><OverviewValue label="Status since" value={overview.since}/></div>
+          <div data-details-overview-line {...stylex.props(styles.line)}>{glyphStatus!=='unobserved'&&<StatusGlyphV1 status={glyphStatus} variant="SG-1" freshness="live"/>}<OverviewValue label="Machine" value={overview.machine}/><span>·</span><OverviewValue label="Model" value={overview.model}/><span>·</span><OverviewValue label="Status since" value={overview.since}/></div>
           {variants.overview==='O2'&&<>
             <div data-details-overview-line {...stylex.props(styles.line)}><OverviewValue label="Harness" value={overview.harness}/><span>·</span><OverviewValue label="Incarnation age" value={overview.age}/>{spend.totalUsd._tag==='Known'&&<> · {spend.totalUsdCoverage._tag==='Partial'?'Recorded spend ':''}${spend.totalUsd.value.toFixed(2)}</>}</div>
             {occupancy!==undefined&&<ProgressBar aria-label="Context window" value={occupancy} maxValue={100}>{({percentage})=><><span {...stylex.props(styles.muted)}>Context {Math.round(percentage??0)}%</span><div {...stylex.props(meterStyles.track)}><div {...stylex.props(meterStyles.fill(percentage??0))}/></div></>}</ProgressBar>}
@@ -198,6 +198,8 @@ const styles=stylex.create({
   shortLabel:{flexShrink:0,color:tx.fgMuted},
   durationLabel:{maxWidth:'var(--details-label-max-width, 45%)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
   overviewValue:{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,color:tx.fgMuted,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  // Known identity while pending keeps the settled one-line truncation, so the footprint does not reflow when values arrive.
+  pendingIdentity:{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'},
   overviewTooltip:{maxWidth:g.tooltipMax,padding:s.md,backgroundColor:sf.raised,color:tx.fg,borderRadius:r.sm,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
   iconButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0,width:g.controlSm,height:g.controlSm,padding:s.zero,borderWidth:0,borderRadius:r.sm,backgroundColor:sf.transparent,color:tx.fgMuted,cursor:'pointer',':hover':{backgroundColor:sf.rowHover,color:tx.fg},':focus-visible':{outline:`2px solid ${ac.primary}`}},
   iconSlot:{flexShrink:0,width:g.controlSm,height:g.controlSm},

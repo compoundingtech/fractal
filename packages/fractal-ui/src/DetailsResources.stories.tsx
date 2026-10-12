@@ -154,7 +154,8 @@ function assertCraft(pane: HTMLElement, item: Case) {
   const history = pane.querySelector('section[aria-label$="History"]')
   if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:name=>/^Open Incarnation|^Incarnation/.test(name)}).length>0, 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
-  if (changes) requireContract(/897\.2K → 133K/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')
+  // Compactions paint context occupancy: 897,170 → 132,952 of a 1M window, excluding the straddling bucket.
+  if (changes) requireContract(/90% → 13%/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')
   if (item.state === 'busy' && item.variants.empty === 'E3' && item.variants.spend !== 'S1') {
     const chart = pane.querySelector(`[data-details-chart="${item.variants.spend}"]`), meter = chart?.querySelector('dl[aria-label="Trace spend meters"]')
     requireContract(meter?.textContent?.includes('Cumulative tokens') && meter.querySelector('[data-details-metric="subagent-usd"] dd') && chart?.querySelector('[aria-label="Subagent spend breakdown"]')?.textContent?.includes('Worker 1'), 'E3 chart omits known spend meter rows')

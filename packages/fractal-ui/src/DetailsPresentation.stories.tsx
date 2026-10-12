@@ -161,11 +161,12 @@ export const NarrowValueColumns:Story={
       const rows=[...pane.querySelectorAll<HTMLElement>('[data-testid="taste-agent-row"]')];requireContract(rows.length===2,'Missing production subagent rows')
       for(const row of rows){
         const button=row.querySelector<HTMLButtonElement>(':scope > button'),title=row.querySelector('[data-row-column="title-text"]')?.textContent?.trim(),location=row.querySelector('[data-row-field="host"]')?.textContent?.trim();requireContract(button&&title&&location,'Missing production row name fields')
-        const assertRowName=()=>requireContract(within(row).queryByRole('button',{name:name=>name.includes(title)&&name.includes(location)})===button,'Subagent row name omits its visible title or location')
-        const assertOneTitle=()=>requireContract(button.innerText.split(title).length===2,'Subagent current work repeats its painted title')
+        // The row button is named by exactly its visible title (label-in-name); the painted location and every other fact live in its description.
+        const assertRowName=()=>requireContract(within(row).queryByRole('button',{name:title,description:description=>description.includes(location)})===button,'Subagent row name differs from its visible title or its description omits the location')
+        const assertOneTitle=()=>requireContract(row.innerText.split(title).length===2,'Subagent current work repeats its painted title')
         assertRowName();assertOneTitle()
         button.setAttribute('aria-label',`${title}, 0 unread`)
-        try{await rejectsControl('Subagent row name omits its visible title or location',assertRowName)}finally{button.removeAttribute('aria-label')}
+        try{await rejectsControl('Subagent row name differs from its visible title or its description omits the location',assertRowName)}finally{button.removeAttribute('aria-label')}
         assertRowName()
         const duplicate=button.ownerDocument.createElement('span');duplicate.textContent=title;button.append(duplicate)
         try{await rejectsControl('Subagent current work repeats its painted title',assertOneTitle)}finally{duplicate.remove()}
