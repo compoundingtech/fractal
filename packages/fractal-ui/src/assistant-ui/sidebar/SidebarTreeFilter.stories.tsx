@@ -19,7 +19,8 @@ const fixture: readonly Agent[] = Array.from({ length: 78 }, (_, index) => ({
 const emptyExpanded = new Set<Key>()
 const onExpandedChange = (_keys: Set<Key>) => {}
 const onRowContextMenu = (_item: Agent, event: React.MouseEvent) => event.preventDefault()
-const sampleCount = 10
+/** Samples per input per phase; p90 is the 18th of 20, so two load spikes cannot set it alone. */
+const sampleCount = 20
 /** Asynchronous settling on a contended CI host; the samples themselves carry the measurements. */
 const settled = { timeout: 10_000 }
 /** Filter keystroke-to-next-frame p90 may be at most this multiple of the reference keystroke p90. */
@@ -139,7 +140,7 @@ const meta = {
   component: SidebarTree,
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke typed into the same page just before it; a busy-wait control of 4x that reference p90 must reject. This kit-only probe does not measure application agent-search latency.' } },
+    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only painted rows whose keyed DOM row changed, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke in the same page, the two alternating keystroke by keystroke; a busy-wait control of 4x a fresh reference p90 must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
 } satisfies Meta<typeof SidebarTree>
 export default meta
@@ -148,16 +149,24 @@ type Story = StoryObj<typeof meta>
 const read = (root: HTMLElement, key: 'filterSamples' | 'referenceSamples'): readonly Sample[] => JSON.parse(root.dataset[key] ?? '[]') as Sample[]
 const p90 = (samples: readonly Sample[]) => [...samples].map(sample => sample.durationMs).sort((a, b) => a - b)[Math.ceil(samples.length * 0.9) - 1]!
 
-// One keystroke per sample; the next keystroke waits until the previous sample has settled.
-async function collect(root: HTMLElement, input: HTMLInputElement, key: 'filterSamples' | 'referenceSamples', toggle: string) {
-  const before = read(root, key).length
-  await expect(input.value).toBe('')
+type Inputs = { readonly reference: HTMLInputElement; readonly filter: HTMLInputElement }
+
+// One keystroke per sample, each waiting until the previous sample has settled. Reference
+// and filter keystrokes alternate so both distributions see the same host-load windows.
+async function collect(root: HTMLElement, inputs: Inputs) {
+  const before = { reference: read(root, 'referenceSamples').length, filter: read(root, 'filterSamples').length }
+  await expect(inputs.reference.value).toBe('')
+  await expect(inputs.filter.value).toBe('')
   for (let index = 0; index < sampleCount; index++) {
-    await userEvent.type(input, index % 2 === 0 ? toggle : '{Backspace}')
-    await waitFor(() => expect(read(root, key)[before + index]?.renders).toBeDefined(), settled)
+    const toggle = index % 2 === 0
+    await userEvent.type(inputs.reference, toggle ? 'r' : '{Backspace}')
+    await waitFor(() => expect(read(root, 'referenceSamples')[before.reference + index]?.renders).toBeDefined(), settled)
+    await userEvent.type(inputs.filter, toggle ? 'x' : '{Backspace}')
+    await waitFor(() => expect(read(root, 'filterSamples')[before.filter + index]?.renders).toBeDefined(), settled)
   }
-  await expect(input.value).toBe('')
-  return read(root, key).slice(before)
+  await expect(inputs.reference.value).toBe('')
+  await expect(inputs.filter.value).toBe('')
+  return { reference: read(root, 'referenceSamples').slice(before.reference), samples: read(root, 'filterSamples').slice(before.filter) }
 }
 
 // Primary check. Every keystroke renders only painted rows whose keyed DOM row changed
@@ -177,7 +186,7 @@ async function assertWork(samples: readonly Sample[]) {
   }
 }
 
-// Secondary check, calibrated against the reference keystroke measured just before.
+// Secondary check, calibrated against reference keystrokes interleaved with the filter ones.
 async function assertRatio(filter: readonly Sample[], reference: readonly Sample[]) {
   await expect(filter).toHaveLength(sampleCount)
   await expect(reference).toHaveLength(sampleCount)
@@ -191,14 +200,12 @@ export const FilterKeystrokeToPaint: Story = {
     // Allow initial virtualizer measurements to settle outside all samples.
     for (let index = 0; index < 6; index++) await nextFrame()
     for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-testid^="filter-probe-"]')) {
-      const filter = within(root).getByRole('searchbox') as HTMLInputElement
-      const referenceInput = within(root).getByRole('textbox') as HTMLInputElement
+      const inputs: Inputs = { filter: within(root).getByRole('searchbox') as HTMLInputElement, reference: within(root).getByRole('textbox') as HTMLInputElement }
       await expect(root.dataset.visibleCount).toBe('78')
       const phase = async (name: string) => {
-        const reference = await collect(root, referenceInput, 'referenceSamples', 'r')
-        const samples = await collect(root, filter, 'filterSamples', 'x')
-        root.dataset[`${name}Ratio`] = String(p90(samples) / p90(reference))
-        return { reference, samples }
+        const sampled = await collect(root, inputs)
+        root.dataset[`${name}Ratio`] = String(p90(sampled.samples) / p90(sampled.reference))
+        return sampled
       }
       const production = await phase('production')
       await assertWork(production.samples)
@@ -211,11 +218,11 @@ export const FilterKeystrokeToPaint: Story = {
         root.dataset.rebuildControl = 'false'
       }
       try {
-        const reference = await collect(root, referenceInput, 'referenceSamples', 'r')
-        root.dataset.synchronousCostMs = String(controlRatio * p90(reference))
-        const samples = await collect(root, filter, 'filterSamples', 'x')
-        root.dataset.busyRatio = String(p90(samples) / p90(reference))
-        await expect(assertRatio(samples, reference)).rejects.toThrow()
+        // Size the busy wait from a fresh unloaded phase's reference p90, then measure it.
+        const calibration = await phase('calibration')
+        root.dataset.synchronousCostMs = String(controlRatio * p90(calibration.reference))
+        const busy = await phase('busy')
+        await expect(assertRatio(busy.samples, busy.reference)).rejects.toThrow()
       } finally {
         root.dataset.synchronousCostMs = '0'
       }
