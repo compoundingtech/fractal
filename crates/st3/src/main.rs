@@ -16341,7 +16341,7 @@ async fn post_work(
         && let Some(path) = std::env::var_os("AGENT_TRACE_FILE")
         && matches!(action, "claim" | "complete" | "fail" | "release" | "submit")
     {
-        refresh_agent_trace(client, &actor, Path::new(&path), None, None).await?;
+        refresh_agent_trace(client, &actor, Path::new(&path), None, None).await;
     }
     if json_output {
         print_value(&response, true)
@@ -16377,6 +16377,9 @@ fn agent_trace_path(subject: &str) -> Option<PathBuf> {
 }
 
 fn trace_model_route(driver: &str, model: &str, provider: Option<&str>) -> Option<String> {
+    if let Some(provider) = provider {
+        return Some(format!("{provider}/{model}"));
+    }
     if model.contains('/') {
         return Some(model.to_owned());
     }
@@ -16426,7 +16429,34 @@ async fn trace_mission_name(client: &Client, lease: Option<&StepRunView>) -> Res
     Ok(Some(mission.strip_prefix("mission/").unwrap_or(&mission).to_owned()))
 }
 
+fn omit_failed_agent_trace(subject: &str, path: &Path, error: &anyhow::Error) {
+    let cleanup_error = fs::remove_file(path).err()
+        .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
+        .map(|error| error.to_string());
+    eprintln!("{}", json!({
+        "event": "agent_trace_omitted", "subject": subject,
+        "error": format!("{error:#}"), "cleanup_error": cleanup_error,
+    }));
+}
+
+async fn trace_current_incarnation(client: &Client, subject: &str) -> Result<Option<String>> {
+    let status: StatusResponse = client.get(&format!(
+        "/v1/status?subject={}&harness_only=true", urlencoding::encode(subject),
+    )).await?;
+    Ok(status.subjects.first().and_then(|seat| seat.harness.as_ref())
+        .map(|harness| harness.incarnation_id.clone()))
+}
+
 async fn initialize_agent_trace(
+    client: &Client, subject: &str, driver: &str, incarnation: &str, path: &Path,
+    argv: &[String],
+) {
+    if let Err(error) = try_initialize_agent_trace(client, subject, driver, incarnation, path, argv).await {
+        omit_failed_agent_trace(subject, path, &error);
+    }
+}
+
+async fn try_initialize_agent_trace(
     client: &Client,
     subject: &str,
     driver: &str,
@@ -16437,7 +16467,7 @@ async fn initialize_agent_trace(
     use st3::agent_trace::issuer;
     let _lock = lock_agent_trace(path).await?;
     anyhow::ensure!(
-        current_agent_incarnation(client, subject).await?.as_deref() == Some(incarnation),
+        trace_current_incarnation(client, subject).await?.as_deref() == Some(incarnation),
         "the runtime changed before agent trace issuance",
     );
     let principal: Option<String> = client
@@ -16474,14 +16504,16 @@ async fn trace_launch_facts(
     mission_name: Option<String>,
 ) -> Result<st3::agent_trace::issuer::Facts> {
     let status: StatusResponse = client
-        .get(&format!("/v1/status?subject={}", urlencoding::encode(subject))).await?;
+        .get(&format!("/v1/status?subject={}&harness_only=true", urlencoding::encode(subject))).await?;
     let seat = status.subjects.iter().find(|seat| seat.subject == subject)
         .context("agent trace has no recorded seat")?;
     let driver = driver.or_else(|| seat.harness.as_ref()
         .filter(|harness| harness.incarnation_id == incarnation)
         .and_then(|harness| harness.driver.as_deref()))
         .context("agent trace has no observed harness tool")?;
-    let declaration = seat.desired.as_ref().map(declaration_node).transpose()?;
+    let desired: st3::model::DesiredSubject = client
+        .get(&format!("/v1/desired/{}", urlencoding::encode(subject))).await?;
+    let declaration = Some(declaration_node(&desired.desired)?);
     let harness = declaration.as_ref().and_then(KdlNode::children)
         .and_then(|body| body.get("harness")).and_then(KdlNode::children);
     let declared = |name: &str| harness.and_then(|body| body.get(name))
@@ -16508,21 +16540,30 @@ async fn trace_launch_facts(
 }
 
 async fn refresh_agent_trace(
+    client: &Client, subject: &str, path: &Path, source_incarnation: Option<&str>,
+    observed: Option<&st_drivers::harness_context::Observed>,
+) {
+    if let Err(error) = try_refresh_agent_trace(client, subject, path, source_incarnation, observed).await {
+        omit_failed_agent_trace(subject, path, &error);
+    }
+}
+
+async fn try_refresh_agent_trace(
     client: &Client,
     subject: &str,
     path: &Path,
     source_incarnation: Option<&str>,
     observed: Option<&st_drivers::harness_context::Observed>,
-) -> Result<Vec<StepRunView>> {
+) -> Result<()> {
     use st3::agent_trace::issuer;
     let _lock = lock_agent_trace(path).await?;
     let work: Vec<StepRunView> = client
         .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
-    let current_incarnation = current_agent_incarnation(client, subject).await?;
+    let current_incarnation = trace_current_incarnation(client, subject).await?;
     // An event from a predecessor provider cannot restate its model or lease after restart.
     if source_incarnation.is_some_and(|source| current_incarnation.as_deref() != Some(source))
     {
-        return Ok(work);
+        return Ok(());
     }
     let incarnation = current_incarnation.as_deref().unwrap_or_default();
     let principal: Option<String> = client
@@ -16534,7 +16575,7 @@ async fn refresh_agent_trace(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        return Ok(work);
+        return Ok(());
     };
     let raw = match fs::read(path) {
         Ok(raw) => Some(raw),
@@ -16542,7 +16583,7 @@ async fn refresh_agent_trace(
         Err(error) => return Err(error.into()),
     };
     if raw.is_none() && incarnation.is_empty() {
-        return Ok(work);
+        return Ok(());
     }
     let (lease, diagnostic) = trace_lease(&work, subject, incarnation);
     if let Some(diagnostic) = diagnostic {
@@ -16566,14 +16607,14 @@ async fn refresh_agent_trace(
         && let Some(route) = trace_model_route(observed.harness.as_str(), model, observed.provider.as_deref())
     {
         // Context reports carry no effort; never restate a previous model's effort.
-        issuer::update_model(&mut runtime, &route, None)?;
+        issuer::update_model(&mut runtime, &route, None);
     }
     // Avoid file churn for an unchanged lease and model.
     let encoded = serde_json::to_vec(&runtime)?;
     if raw.as_deref().is_none_or(|raw| encoded.as_slice() != raw.strip_suffix(b"\n").unwrap_or(raw)) {
         issuer::write_atomic(path, &runtime)?;
     }
-    Ok(work)
+    Ok(())
 }
 
 /// This machine's host documents, which a claim prints because they describe where the claimed
@@ -18361,7 +18402,7 @@ async fn run_st2_native_driver(
         ..NativeLoopState::default()
     };
     initialize_agent_trace(client, subject, driver, &incarnation,
-        &paths.agent_dir.join("agent-trace.json"), &argv).await?;
+        &paths.agent_dir.join("agent-trace.json"), &argv).await;
     let task = spawn_st3_provider(
         driver,
         &paths,
@@ -20074,7 +20115,7 @@ async fn publish_harness_usage(
     if let Some(path) = client.event.map(|(_, _, dir, _)| dir.join("agent-trace.json"))
         .or_else(|| agent_trace_path(subject))
     {
-        refresh_agent_trace(client.client, subject, &path, Some(incarnation), Some(observed)).await?;
+        refresh_agent_trace(client.client, subject, &path, Some(incarnation), Some(observed)).await;
     }
     // A context-window occupancy reading and cumulative session spend are
     // different measurements. Publish them as distinct durable records; never
@@ -20808,7 +20849,7 @@ async fn run_pi_channel(
         && !paths.agent_dir.join("agent-trace.json").exists()
     {
         initialize_agent_trace(client, subject, driver, &incarnation,
-            &paths.agent_dir.join("agent-trace.json"), &[]).await?;
+            &paths.agent_dir.join("agent-trace.json"), &[]).await;
     }
     let mut observer = if let Some(paths) = observation_paths
         && st_drivers::harness_events::enabled(&paths.agent_dir)
@@ -22073,7 +22114,7 @@ async fn drive_codex_native(
         .flatten();
     if matches!(start, ProviderStart::Launch(_, _)) {
         initialize_agent_trace(client, subject, "codex", &incarnation,
-            &paths.agent_dir.join("agent-trace.json"), &argv).await?;
+            &paths.agent_dir.join("agent-trace.json"), &argv).await;
     }
     let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
     let mut reported_session = None;
@@ -22699,14 +22740,21 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
 }
 
 async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
-    let work: Vec<StepRunView> = if let Some(path) = agent_trace_path(subject) {
-        refresh_agent_trace(client, subject, &path, None, None).await?
-    } else {
-        client.get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?
-    };
+    let path = agent_trace_path(subject);
+    renew_claimed_work_with_trace(client, subject, minute, path.as_deref()).await
+}
+
+async fn renew_claimed_work_with_trace(
+    client: &Client, subject: &str, minute: u64, trace_path: Option<&Path>,
+) -> Result<()> {
+    let work: Vec<StepRunView> =
+        client.get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
     // Most resident seats hold no work. Only a held claim needs the status reduction
     // that proves its harness incarnation is still live before renewing the lease.
     if !work.iter().any(|step| work_claim_is_held_by(step, subject)) {
+        if let Some(path) = trace_path {
+            refresh_agent_trace(client, subject, path, None, None).await;
+        }
         return Ok(());
     }
     let status: StatusResponse = client
@@ -22752,6 +22800,9 @@ async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Resu
                 failure.get_or_insert(error);
             }
         }
+    }
+    if let Some(path) = trace_path {
+        refresh_agent_trace(client, subject, path, None, None).await;
     }
     failure.map_or(Ok(()), Err)
 }
@@ -25590,6 +25641,99 @@ mod claude_attachment_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_model_route_keeps_explicit_provider_for_namespaced_model_ids() {
+        assert_eq!(trace_model_route("omp", "anthropic/claude-sonnet-4", Some("openrouter")),
+            Some("openrouter/anthropic/claude-sonnet-4".into()));
+        assert_eq!(trace_model_route("codex", "openai/gpt-5", None), Some("openai/gpt-5".into()));
+    }
+
+    #[tokio::test]
+    async fn agent_trace_failures_do_not_block_launch_lease_renewal_or_event_publication() {
+        use axum::{Json, Router, extract::OriginalUri};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let subject = "agent/invalid whitespace";
+        let step = json!({
+            "subject":"step-run/0123456789abcdef0123456789abcdef/work",
+            "run":"mission-run/example/repo/check/abcdef0123456789abcdef0123456789",
+            "generation":"run-generation/0123456789abcdef0123456789abcdef",
+            "step":"work","definition_hash":"hash","status":"working","attempt":1,
+            "assigned_to":subject,"agentless":false,"title":null,"worker_reported":false,
+            "claimant":subject,"claim_incarnation":"current","claim_expires_at_unix_ms":u64::MAX,
+            "readiness_epoch":1,"blocked_reason":null,"not_before_unix_ms":null,
+            "created_at_unix_ms":0,"updated_at_unix_ms":0,
+        });
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let count = renewals.clone();
+        let app = Router::new().fallback(move |OriginalUri(uri): OriginalUri| {
+            let count = count.clone();
+            let step = step.clone();
+            async move {
+                let value = match uri.path() {
+                    "/v1/work" => json!([step]),
+                    "/v1/status" => {
+                        assert!(uri.query().unwrap().contains("harness_only=true"));
+                        json!({"store_index":0,"pending_actions":[],"subjects":[{
+                            "subject":subject,"conflicts":[],"claims":[],"reachability":"local",
+                            "harness":{"state":"ready","driver":"omp","incarnation_id":"current",
+                                "claim":"claim/current","observed_at_unix_ms":0},
+                        }]})
+                    }
+                    path if path.starts_with("/v1/work/renew/") => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        step
+                    }
+                    "/v1/harness-events" => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        json!({"id":"claim/usage","store_index":1,"batch_id":"batch/usage",
+                            "subject":subject,"kind":"harness.usage","origin":"fixture",
+                            "body":{},"predecessors":[],"accepted_at_unix_ms":0})
+                    }
+                    path if path.starts_with("/v1/agent-trace/principal/") => json!("person/avery"),
+                    path if path.starts_with("/v1/agent-trace/mission/") => json!("mission/example/repo/check"),
+                    path if path.starts_with("/v1/desired/") => json!({
+                        "subject":subject,"kind":"agent","desired":{"name":"agent","arguments":[subject]},
+                        "revision":"revision","token":"token","sources":[],
+                    }),
+                    _ => panic!("unexpected trace request: {uri}"),
+                };
+                Json(value)
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(Endpoint::Http(format!("http://{address}")));
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent-trace.json");
+        fs::write(&path, b"stale predecessor").unwrap();
+        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        assert!(!path.exists(), "rejected identity must remove stale trace without aborting launch");
+        let unavailable = root.path().join("missing/agent-trace.json");
+        initialize_agent_trace(&client, subject, "omp", "current", &unavailable, &[]).await;
+        renew_claimed_work_with_trace(&client, subject, 1, Some(&unavailable)).await.unwrap();
+        assert_eq!(renewals.load(Ordering::SeqCst), 1);
+        assert!(!unavailable.exists());
+        fs::create_dir(&path).unwrap();
+        let observed = st_drivers::harness_context::Observed {
+            harness: st_drivers::harness_context::Harness::Omp,
+            used_tokens: Some(1), window_tokens: Some(100), used_percent: Some(1.0),
+            model: Some("x".repeat(65)), provider: Some("openrouter".into()),
+            cost_usd: None, session_total_tokens: None, rate_limits: Default::default(),
+            account: None, plan: None, compactions: 0, last_compaction_ms: None,
+            last_compaction_trigger: None, observed_at_ms: 0, age_ms: 0, stale: false,
+        };
+        let publisher = ObservationClient {
+            client: &client, event: Some(("current", 1, root.path(), None)),
+        };
+        let mut fingerprint = None;
+        publish_harness_usage(&publisher, subject, "omp", "current", &observed, &mut fingerprint)
+            .await.unwrap();
+        assert!(fingerprint.is_some(), "usage publication must still complete");
+        assert_eq!(renewals.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
 
     #[test]
     fn ambiguous_trace_purpose_reports_all_current_claims_without_selecting_one() {

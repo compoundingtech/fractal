@@ -198,15 +198,20 @@ impl Drop for Daemon {
 
 #[tokio::test]
 async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
-    check_trace_claim_complete(false).await;
+    check_trace_claim_complete(false, false).await;
 }
 
 #[tokio::test]
 async fn ad_hoc_post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
-    check_trace_claim_complete(true).await;
+    check_trace_claim_complete(true, false).await;
 }
 
-async fn check_trace_claim_complete(ad_hoc: bool) {
+#[tokio::test]
+async fn post_work_reports_committed_result_when_trace_publication_fails() {
+    check_trace_claim_complete(true, true).await;
+}
+
+async fn check_trace_claim_complete(ad_hoc: bool, broken_trace: bool) {
     use st3::agent_trace::issuer::{self, Facts};
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
@@ -264,7 +269,11 @@ mission "trace-check" state="ready" {
         worktree: None,
         mission_name: None,
     }, None).unwrap();
-    issuer::write_atomic(&path, &runtime).unwrap();
+    if broken_trace {
+        std::fs::create_dir(&path).unwrap();
+    } else {
+        issuer::write_atomic(&path, &runtime).unwrap();
+    }
     for action in ["claim", "complete"] {
         let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
         command.env("HOME", root.path())
@@ -278,6 +287,14 @@ mission "trace-check" state="ready" {
                 "--summary", "Trace lifecycle checked", "--evidence", "file:trace"]);
         let output = command.output().await.unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let committed: st3::model::StepRunView = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(committed.subject, step);
+        assert_eq!(committed.status, if action == "claim" { "claimed" } else { "completed" });
+        if broken_trace {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("agent_trace_omitted"));
+            assert!(path.is_dir(), "a failed trace must not replace unrelated directory contents");
+            continue;
+        }
         let runtime: st3::agent_trace::Runtime =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let value = serde_json::to_value(&runtime).unwrap();

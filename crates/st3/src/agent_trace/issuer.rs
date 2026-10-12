@@ -24,16 +24,16 @@ pub struct Facts {
     pub mission_name: Option<String>,
 }
 
-/// Serialize lifecycle read/modify/write transactions across the driver and work CLI.
+/// Try to serialize lifecycle read/modify/write transactions without waiting.
 ///
 /// # Errors
-/// Returns filesystem or advisory-lock failures.
+/// Returns filesystem or advisory-lock failures, including contention.
 pub fn lock(path: &Path) -> Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false)
         .read(true).write(true).mode(0o600)
         .open(path.with_extension("lock"))?;
-    lock.lock()?;
+    lock.try_lock()?;
     Ok(lock)
 }
 
@@ -41,21 +41,16 @@ fn now_ms() -> Result<u128> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())
 }
 
-fn trace_agent(subject: &str) -> &str {
-    subject.strip_prefix("agent/")
-        .filter(|name| name.contains('.') && !name.contains('/'))
-        .unwrap_or(subject)
-}
-
 /// Build a runtime document from observed launch facts, without inventing a model.
+/// Unrepresentable model facts are diagnosed and omitted.
 ///
 /// # Errors
-/// Rejects facts that the authoritative schema cannot represent and invalid lease references.
+/// Rejects non-model facts that the authoritative schema cannot represent and invalid lease references.
 pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
     let mut runtime = Runtime {
         r#type: "agent-trace-runtime/v1".to_owned().try_into()?,
         who: AgentTraceRuntimeV1Who {
-            agent: trace_agent(&facts.agent).to_owned().try_into()?,
+            agent: facts.agent.clone().try_into()?,
             principal: facts.principal.clone().try_into()?,
             actor: None,
             persona: None,
@@ -81,7 +76,7 @@ pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
         },
     };
     if let Some(route) = &facts.model_route {
-        update_model(&mut runtime, route, facts.model_effort.as_deref())?;
+        update_model(&mut runtime, route, facts.model_effort.as_deref());
     }
     update_lease(&mut runtime, &facts.agent, &facts.incarnation, lease, facts.mission_name.as_deref(), now_ms()?)?;
     Ok(runtime)
@@ -100,7 +95,7 @@ pub fn update_lease(
     mission_name: Option<&str>,
     now_ms: u128,
 ) -> Result<()> {
-    ensure!(runtime.who.agent.as_str() == trace_agent(actor), "trace belongs to another agent");
+    ensure!(runtime.who.agent.as_str() == actor, "trace belongs to another agent");
     let lease = lease.filter(|step| {
         matches!(step.status.as_str(), "claimed" | "working" | "verifying" | "blocked")
             && step.claimant.as_deref() == Some(actor)
@@ -180,15 +175,26 @@ pub fn update_principal(runtime: &mut Runtime, principal: String) -> Result<()> 
 
 /// Replace model facts only when an actual selected route is known.
 ///
-/// # Errors
-/// Rejects a route or effort that the authoritative schema cannot represent.
-pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) -> Result<()> {
-    let model = AgentTraceRuntimeV1HowModel {
-        route: route.to_owned().try_into()?,
-        effort: effort.map(str::to_owned).map(TryInto::try_into).transpose()?,
+/// A route or effort outside the authoritative schema clears the previous model
+/// and emits a structured diagnostic; trace metadata must not block execution.
+pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) {
+    let model = (|| -> Result<_> {
+        Ok(AgentTraceRuntimeV1HowModel {
+            route: route.to_owned().try_into()?,
+            effort: effort.map(str::to_owned).map(TryInto::try_into).transpose()?,
+        })
+    })();
+    runtime.how.model = match model {
+        Ok(model) => Some(model),
+        Err(error) => {
+            tracing::warn!(
+                event = "agent_trace_model_unrepresentable",
+                agent = %runtime.who.agent.as_str(), route, effort,
+                %error, "runtime authority cannot represent model facts"
+            );
+            None
+        }
     };
-    runtime.how.model = Some(model);
-    Ok(())
 }
 
 /// Same-directory exclusive temporary creation and rename keep readers atomic.
@@ -337,7 +343,8 @@ mod tests {
     fn logical_and_dotted_identities_keep_human_principal() {
         for (subject, expected) in [
             ("agent/example/worker", "agent/example/worker"),
-            ("agent/demo.worker", "demo.worker"),
+            ("agent/demo.worker", "agent/demo.worker"),
+            ("agent/host-a.ci-watcher", "agent/host-a.ci-watcher"),
         ] {
             let mut facts = facts();
             facts.agent = subject.into();
@@ -356,7 +363,7 @@ mod tests {
     fn model_update_preserves_lease_and_launch_facts() {
         let mut runtime = build(&facts(), Some(&lease())).unwrap();
         let initial = runtime.clone();
-        update_model(&mut runtime, "anthropic/claude-sonnet-4", None).unwrap();
+        update_model(&mut runtime, "anthropic/claude-sonnet-4", None);
         assert_eq!(runtime.why, initial.why);
         assert_eq!(runtime.how.issuance, initial.how.issuance);
         assert_eq!(runtime.how.harness, initial.how.harness);
@@ -365,9 +372,91 @@ mod tests {
         let model = runtime.how.model.as_ref().unwrap();
         assert_eq!(model.route.as_str(), "anthropic/claude-sonnet-4");
         assert!(model.effort.is_none());
-        let updated = runtime.clone();
-        assert!(update_model(&mut runtime, "not-a-route", None).is_err());
-        assert_eq!(runtime, updated);
+    }
+
+    #[test]
+    fn unrepresentable_model_build_omits_model_and_preserves_launch_and_lease() {
+        let initial = build(&facts(), Some(&lease())).unwrap();
+        for (route, effort) in [
+            ("provider/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789", None),
+            ("invalid provider/model", None),
+            ("", None),
+            ("anthropic/claude-sonnet-4", Some("invalid-effort")),
+        ] {
+            let mut facts = facts();
+            facts.model_route = Some(route.into());
+            facts.model_effort = effort.map(str::to_owned);
+            let runtime = build(&facts, Some(&lease())).unwrap();
+            let mut expected = initial.clone();
+            expected.how.model = None;
+            assert_eq!(runtime, expected, "{route} {effort:?}");
+            let value = serde_json::to_value(&runtime).unwrap();
+            assert!(value["how"].get("model").is_none());
+            assert_eq!(serde_json::from_value::<Runtime>(value).unwrap(), runtime);
+        }
+    }
+
+    #[test]
+    fn unrepresentable_model_update_clears_stale_model_and_preserves_other_facts() {
+        let initial = build(&facts(), Some(&lease())).unwrap();
+        for (route, effort) in [
+            ("provider/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789", None),
+            ("invalid provider/model", None),
+            ("", None),
+            ("anthropic/claude-sonnet-4", Some("invalid-effort")),
+        ] {
+            let mut runtime = initial.clone();
+            update_model(&mut runtime, route, effort);
+            let mut expected = initial.clone();
+            expected.how.model = None;
+            assert_eq!(runtime, expected, "{route} {effort:?}");
+            update_model(&mut runtime, "anthropic/claude-sonnet-4", Some("high"));
+            let model = runtime.how.model.as_ref().unwrap();
+            assert_eq!(model.route.as_str(), "anthropic/claude-sonnet-4");
+            assert_eq!(model.effort.as_ref().unwrap().as_str(), "high");
+        }
+    }
+
+    #[test]
+    fn namespaced_model_route_preserves_selected_route() {
+        for route in [
+            "openrouter/anthropic/claude-sonnet-4",
+            "openrouter/Anthropic/Claude-Sonnet:latest",
+        ] {
+            let mut facts = facts();
+            facts.model_route = Some(route.into());
+            let mut runtime = build(&facts, Some(&lease())).unwrap();
+            assert_eq!(runtime.how.model.as_ref().unwrap().route.as_str(), route);
+            update_model(&mut runtime, route, None);
+            let model = runtime.how.model.as_ref().unwrap();
+            assert_eq!(model.route.as_str(), route);
+            assert!(model.effort.is_none());
+            let value = serde_json::to_value(&runtime).unwrap();
+            assert_eq!(value["how"]["model"]["route"], route);
+            assert_eq!(serde_json::from_value::<Runtime>(value).unwrap(), runtime);
+        }
+    }
+
+    #[test]
+    fn unrepresentable_seat_identity_rejects_build() {
+        let mut facts = facts();
+        facts.agent = "agent/demo.invalid seat".into();
+        let error = build(&facts, None).unwrap_err();
+        assert!(error.to_string().contains("AgentTraceRuntimeV1WhoAgent"));
+    }
+
+    #[test]
+    fn contended_sidecar_lock_returns_without_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.json");
+        let guard = lock(&path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            sender.send(lock(&path).is_err()).unwrap();
+        });
+        assert!(receiver.recv_timeout(std::time::Duration::from_secs(1)).unwrap());
+        contender.join().unwrap();
+        drop(guard);
     }
 
     #[test]
