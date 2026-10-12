@@ -70,6 +70,8 @@ fn fetch(repo: &Path, repository: &str, revisions: &[String]) -> Result<()> {
         .args([
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "transfer.fsckObjects=true",
             "fetch",
             "--no-tags",
             "--no-recurse-submodules",

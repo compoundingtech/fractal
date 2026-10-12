@@ -34,7 +34,8 @@ reviewer's supplied timestamp.
 record IDs. Every citation must have a trusted full signature in the configured
 test role, name the same change, pass its checks, and include the reviewed head
 in its Git ancestry with unchanged reviewed file blobs. This supports the
-platform's tested synthetic merge. The operator's required checks must all be
+platform's tested queue merge. PR self-reported source remains degraded and
+cannot supply a GO citation. The operator's required checks must all be
 cited. Stage verification still requires tests on its exact target tree.
 `comment` is refused as a verdict. `request-changes` means STOP and can have
 no test citations, including when CI has not run. A newer applicable full STOP
@@ -58,7 +59,7 @@ its automatic invocation, publication and production provisioning are separate.
 The JSON response contains the result, explicit tier, immutable references and a
 public object pack. A caller imports it, verifies with an operator allowed-signers
 file, and publishes the additive evidence ref through its existing Git transport.
-The export contains enumerated source/review objects, no key or private config.
+The export contains enumerated source/base/review objects, no key or private config.
 Cited tests retain their own public refs. Fresh-record count, full-trust share and
 signing latency exclude replays; a replay reports a null share with no denominator.
 Test-tier keys never satisfy production policy. Tests use only throwaway keys.
