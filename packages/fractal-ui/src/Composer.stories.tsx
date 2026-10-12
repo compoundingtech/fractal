@@ -536,7 +536,7 @@ export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { sch
 /** C1 grows from a pill into a slab once the draft wraps or breaks lines; C3 becomes a slab while focused (the pending shape pick). */
 export const LayoutShapes: Story = {
   beforeEach: clearDrafts,
-  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.geometryLane(768))}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.shapeGallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.shapeLane)}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
   play: async ({ canvasElement }) => {
     const formOf = (layout: ComposerLayout) => canvasElement.querySelector<HTMLElement>(`[data-composer-frame="layout.${layout}"] form`)!
     await expect(getComputedStyle(formOf('C1')).flexDirection).toBe('row')
@@ -637,6 +637,9 @@ const styles = stylex.create({
   fillFrameBody: { flexGrow: 1, justifyContent: 'flex-end' },
   narrow: { width: g.tooltipMax, minWidth: 0 },
   gallery: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl },
+  // Shapes are compared at one desktop lane; narrow viewports scroll instead of letting the footer cramp C1 into a slab.
+  shapeGallery: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: s.xl, maxWidth: '100%', overflowX: 'auto' },
+  shapeLane: { width: 768, flexShrink: 0 },
   budgetPreviews: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.md },
   budgetFrame: (width: number) => ({ width: `calc(${width}px + ${s.md} + ${s.md} + ${g.hairline} + ${g.hairline})`, boxSizing: 'border-box', flexShrink: 0, overflow: 'visible' }),
   budgetFrameBody: { overflow: 'visible' },
