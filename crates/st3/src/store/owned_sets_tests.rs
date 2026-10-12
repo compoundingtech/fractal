@@ -15,7 +15,7 @@ fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() 
     // Use a different real claim for foreign-key columns and valid JSON for
     // expression-indexed columns; this control preserves the actual schema constraints.
     let alternative = store.append_claim(&ClaimInput {
-        subject: "custom/invented-projection-fixture".into(),
+        subject: "custom/projection/invented-fixture".into(),
         kind: "custom.projection.note".into(), actor: Some("person/operator".into()),
         fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None,
         idempotency_key: None,

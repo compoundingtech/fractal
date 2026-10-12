@@ -126,10 +126,10 @@ fn directive_note_dirty_and_pending_hooks_advance_observation_without_changing_t
             ("features".into(), json!({"person_directive_note": 1})),
         ]), evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap();
-    let note = store.set_directive_note("person/gardener", "person/gardener", Some("Harvest the orchard"), None)
+    let note = store.set_directive_note("person/alex", "person/alex", Some("Harvest the orchard"), None)
         .unwrap().unwrap();
     assert!(store.project_replication_backlog().unwrap());
-    let notes = store.directive_notes("person/gardener").unwrap();
+    let notes = store.directive_notes("person/alex").unwrap();
     for pending in [false, true] {
         let incremental = cached_stop(&store);
         let before = store.replication_projection_observation();
@@ -139,7 +139,7 @@ fn directive_note_dirty_and_pending_hooks_advance_observation_without_changing_t
             ).unwrap();
         } else {
             store.connection.write().execute(
-                "INSERT INTO local_directive_note_dirty(subject) VALUES('person/gardener')", [],
+                "INSERT INTO local_directive_note_dirty(subject) VALUES('person/alex')", [],
             ).unwrap();
         }
         assert!(store.project_replication_backlog().unwrap());
@@ -148,7 +148,7 @@ fn directive_note_dirty_and_pending_hooks_advance_observation_without_changing_t
         assert!(!store.replication_projection_observation().1);
         incremental.observe(&store).unwrap();
         assert!(incremental.needs("stop:agent/invented-settled", 0));
-        assert_eq!(store.directive_notes("person/gardener").unwrap(), notes);
+        assert_eq!(store.directive_notes("person/alex").unwrap(), notes);
         for table in ["local_directive_note_pending", "local_directive_note_dirty"] {
             assert_eq!(store.readers.get().query_row(&format!("SELECT COUNT(*) FROM {table}"), [],
                 |row| row.get::<_, u64>(0)).unwrap(), 0);
