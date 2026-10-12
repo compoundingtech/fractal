@@ -448,6 +448,7 @@ describe('ConversationPane composition activation', () => {
     expect(container.querySelector('[data-testid="history-boundary"] button')).toBeNull()
   })
 
+
   it('hands an opened tool call to the host surface from the kit work log', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario.slice(0, 5), hasOlder: false, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -456,16 +457,16 @@ describe('ConversationPane composition activation', () => {
     const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')
     expect(fold?.textContent).toContain('Worked for 7s')
     await act(async () => { fold!.click() })
-    const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
+    const raw = container.querySelector<HTMLButtonElement>('[data-tool-status="success"] > button')
     await act(async () => { raw!.click() })
     const open = await act(async () => {
-      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Open Reading information tool detail"]')
+      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Open Reading tool detail"]')
       button?.click()
       return button
     })
     expect(open).not.toBeNull()
     expect(opened).toHaveLength(1)
-    expect(opened[0]).toMatchObject({ id: 'read', kind: 'read', title: 'Reading information', argsSummary: undefined })
+    expect(opened[0]).toMatchObject({ id: 'read', kind: 'read', title: 'Reading', argsSummary: 'src/rows.ts' })
   })
 
   it('shows native text-block tool output on the expanded row instead of No output', async () => {
@@ -481,10 +482,8 @@ describe('ConversationPane composition activation', () => {
     await act(async () => { fold!.click() })
     const log = container.querySelector('[data-testid="work-log"]')!
     expect(log.querySelector('[data-tool-status="success"]')?.textContent).not.toContain('No output')
-    const preview = log.querySelector('[data-testid="tool-detail-preview"]')!
-    expect(preview.textContent).not.toContain(output)
-    expect(preview.querySelector('pre')).toBeNull()
-    const raw = [...preview.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
+    expect(log.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
+    const raw = log.querySelector<HTMLButtonElement>('[data-tool-status="success"] > button')
     expect(raw?.getAttribute('aria-expanded')).toBe('false')
     await act(async () => { raw!.click() })
     expect(log.querySelector('[data-testid="tool-detail-preview"]')?.textContent).toContain('export const rows = []')
@@ -532,7 +531,7 @@ describe('ConversationPane composition activation', () => {
     const open = row.querySelector<HTMLButtonElement>('button')
     if (open !== null) await act(async () => { open.click() })
     expect(row.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe(reason)
-    expect(row.querySelector('pre')).toBeNull()
+    expect([...row.querySelectorAll('pre')].map(pre => pre.textContent).join('\n')).toContain(diagnostic)
   })
 
   it('shows a subprocess script only as unescaped code in the raw disclosure', async () => {
@@ -572,8 +571,6 @@ describe('ConversationPane composition activation', () => {
     if (open !== null) await act(async () => { open.click() })
     const preview = container.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
     expect(preview.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe(reason)
-    const raw = [...preview.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
-    await act(async () => { raw.click() })
     expect(preview.querySelector('[data-testid="tool-command"] code')?.textContent).toBe(command)
   })
 

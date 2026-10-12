@@ -2,6 +2,8 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, spyOn, userEvent, waitFor, within } from 'storybook/test'
+import { Button } from 'react-aria-components'
+import { arrivingSuccess, fixtureToolKind, scopedToolCases, scopedToolItems, toolArrivalInitial } from './transcript-tool-fixtures'
 import { Transcript, type TranscriptAvailability, type TranscriptHistory, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 import type { TranscriptEmptyState } from './assistant-ui/composition/TranscriptFeedback'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
@@ -71,14 +73,13 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
   await userEvent.click(fold)
   await expect(fold).toHaveAttribute('aria-expanded', 'true')
-  await expect(canvas.queryByTestId('tool-preview-remaining')).toBeNull()
+  await expect(canvas.queryByTestId('tool-detail-preview')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: 'read src/rows.ts: raw input/output' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'run pnpm test rows: raw input/output' }))
   const previews = canvas.getAllByTestId('tool-detail-preview')
   await expect(previews).toHaveLength(2)
-  await expect(previews[0]!.querySelector('pre')).toBeNull()
-  for (const preview of previews) await userEvent.click(within(preview).getByRole('button', { name: 'Show raw input/output' }))
-  await expect(canvas.getByTestId('tool-preview-remaining')).toHaveTextContent('+2 lines')
-  await waitFor(() => expect(previews[0]!.querySelector('[data-syntax-token~="keyword"]')).not.toBeNull())
-  await expect(previews[0]).toHaveTextContent('export const visibleRows')
+  await expect(canvas.queryByRole('button', { name: 'Show raw input/output' })).toBeNull()
+  await expect(previews[0]).toHaveTextContent(source)
   await expect(previews[1]).toHaveTextContent('selection retained')
   await expect(canvasElement.querySelector('[data-testid="work-log"] hr')).toBeNull()
   await expect(canvas.getByTestId('work-log-children')).toContainElement(canvas.getByTestId('thinking-entry'))
@@ -86,7 +87,7 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   // E18/C3: Thinking shares the fold scroller, so the final tool row is no longer its last child.
   const empty = Array.from(canvasElement.querySelectorAll('[data-tool-status="success"]')).at(-1)!
   await expect(empty.querySelector('button')).toBeNull()
-  await expect(empty).not.toHaveTextContent('No output')
+  await expect(empty).toHaveTextContent('No output')
   await userEvent.click(canvas.getByRole('button', { name: 'Open read tool detail' }))
   await expect(canvas.getByRole('region', { name: 'Opened tool detail' }).querySelector('pre')?.textContent).toBe(source)
 } }
@@ -496,13 +497,12 @@ export const MidTurnHistoryLight: Story = { ...MidTurnHistory, args: { scheme: '
 
 export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={cases.settled} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const work = await within(canvasElement).findByTestId('work-log')
-  await expect(work.querySelector(':scope > button, :scope > [role="button"]')).toBeNull()
+  await userEvent.click(within(work).getByRole('button', { name: /Worked for 24s/ }))
   const rows = work.querySelectorAll<HTMLElement>('[data-tool-status]')
   await expect(rows).toHaveLength(3)
   for (const row of rows) {
-    await expect(row.querySelector('[data-row-disclosure]')).toBeNull()
     await expect(row.querySelector('button[aria-label^="Open "]')).toBeNull()
-    const raw = within(row).queryByRole('button', { name: 'Show raw input/output' })
+    const raw = row.querySelector<HTMLButtonElement>('button[aria-expanded]')
     if (raw !== null) {
       await expect(raw).toHaveAttribute('aria-expanded', 'false')
       await userEvent.click(raw)
@@ -577,8 +577,8 @@ export const SemanticItems: Story = { render: args => <main {...stylex.props(sty
   const canvas = within(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 24s/ }))
   await userEvent.click(canvas.getByRole('button', { name: 'Thinking' }))
-  await expect(canvas.getByTestId('tool-detail-preview')).toBeVisible()
-  await userEvent.click(canvas.getByRole('button', { name: 'Show raw input/output' }))
+  await expect(canvas.queryByTestId('tool-detail-preview')).toBeNull()
+  await userEvent.click(canvasElement.querySelector<HTMLButtonElement>('[data-tool-status] > button')!)
   await expect(canvas.getByTestId('tool-detail-preview')).toHaveTextContent('export const semantic = true')
   for (const text of ['User content retained.', 'System context retained.', 'Notice content retained.', 'Error notice retained.', 'Error detail retained.', 'Message handoff retained.', 'Message untitled-handoff', 'Event title retained.', 'Event body retained.', 'future.semantic.event', 'Status detail retained.', 'Usage · response · 123 input · 45 output', 'Reasoning content retained.', 'Assistant content retained.']) {
     await expect(canvas.getByText(text, { exact: false })).toBeVisible()
@@ -686,3 +686,63 @@ const styles = stylex.create({
   thread: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }, composerDock: { flexShrink: 0, boxSizing: 'border-box', width: '100%', maxWidth: g.lane, marginInline: 'auto', padding: s.lg },
   all: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: s.lg, padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
 })
+
+const semanticKinds = ['read', 'search', 'run', 'change', 'subagent', 'web', 'decision', 'todo'] as const
+const semanticTargets = ['src/rows.ts', 'visibleRows in src/', 'pnpm test rows', 'src/rows.ts', 'Review selection', 'https://example.com/guide', 'Choose a row order', 'Verify selection']
+export const SemanticToolKinds: Story = {
+  render: args => <section data-scheme={args.scheme} {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={{ calls: semanticKinds.map((kind, index) => ({ id: `semantic/${kind}`, kind, title: `Inspect ${kind} operation`, argsSummary: semanticTargets[index], status: index === 2 ? 'running' : index === 3 ? 'error' : 'success', startedAt: at, detail: index === 3 ? 'Selection assertion failed.' : `Observed ${kind} result.` })), running: false, failed: false, interrupted: false, foldable: false, durationMs: undefined }} /></section>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    for (const kind of semanticKinds) await expect(canvasElement.querySelector(`[data-tool-kind="${kind}"]`)).not.toBeNull()
+    await expect(canvas.queryByTestId('work-call-output')).toBeNull()
+    await expect(canvasElement.querySelector('[data-tool-title] [data-syntax-token]')).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'Inspect read operation src/rows.ts: raw input/output' }))
+    await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('Observed read result.')
+    await expect([...canvasElement.querySelectorAll('button')].filter(button => button.textContent === 'Show raw input/output' && !button.closest('[data-error-overlay]'))).toHaveLength(0)
+  },
+}
+export const SemanticToolKindsLight: Story = { ...SemanticToolKinds, args: { scheme: 'light' } }
+
+function SuccessfulArrivalStory({ scheme = 'dark' }: { scheme?: Scheme }) {
+  const [arrived, setArrived] = React.useState(false)
+  const items = arrived ? [...toolArrivalInitial, arrivingSuccess] : toolArrivalInitial
+  const data: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'arrival', items, work: workLogTurnFromItems(items, { kindFor: fixtureToolKind, running: false, failed: false, interrupted: false, completeHistory: false }) }] }
+  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><Button isDisabled={arrived} onPress={() => setArrived(true)}>Deliver successful tool result</Button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} /></div></main>
+}
+export const SuccessfulToolArrival: Story = {
+  render: args => <SuccessfulArrivalStory scheme={args.scheme} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await canvas.findByTestId('agent-message')
+    await expect(canvasElement.querySelector('[data-tool-status="success"]')).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'Deliver successful tool result' }))
+    const trigger = await canvas.findByRole('button', { name: 'bash pnpm test rows: raw input/output' })
+    const row = trigger.closest('[data-tool-status]')!
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(row.querySelectorAll('[data-testid="tool-detail-preview"]')).toHaveLength(0)
+    await userEvent.click(trigger)
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    await expect(row.querySelectorAll(':scope > [data-testid="tool-detail-preview"]')).toHaveLength(1)
+    await expect(row).toHaveTextContent('Selection retained. Three checks passed.')
+    await userEvent.click(trigger)
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(row.querySelectorAll('[data-testid="tool-detail-preview"]')).toHaveLength(0)
+  },
+}
+export const SuccessfulToolArrivalLight: Story = { ...SuccessfulToolArrival, args: { scheme: 'light' } }
+const scopedTargetsData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'scoped-targets', items: scopedToolItems, work: workLogTurnFromItems(scopedToolItems, { kindFor: fixtureToolKind, running: false, failed: false, interrupted: false, completeHistory: false }) }] }
+export const ScopedToolTargets: Story = {
+  render: args => <main data-scheme={args.scheme} {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={scopedTargetsData} onOpenTool={() => {}} onRetry={() => {}} /></main>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await canvas.findByTestId('work-log')
+    for (const example of scopedToolCases) {
+      const row = canvasElement.querySelector<HTMLElement>(`[data-item-id="scoped/${example.kind}"][data-tool-status]`)!
+      await expect(row.querySelector('[data-tool-kind]')).toHaveTextContent(example.kind)
+      await expect(within(row).getByText(example.target, { exact: true })).toBeVisible()
+      await expect(row.querySelector(':scope > button')).toHaveAttribute('aria-expanded', 'false')
+      await expect(row.querySelectorAll('[data-testid="tool-detail-preview"]')).toHaveLength(0)
+    }
+  },
+}
+export const ScopedToolTargetsLight: Story = { ...ScopedToolTargets, args: { scheme: 'light' } }

@@ -45,11 +45,17 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
 
 const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent'
 
-/** The host owns work-log classification: how a tool reads, runs or edits. */
-const toolKindFor = (name: string): WorkKind => {
+/** Preserve the semantic operation rather than collapsing every tool into read/run/edit. */
+export const toolKindFor = (name: string): WorkKind => {
   const tool = name.toLowerCase()
-  if (/(?:^|[/_.-])(?:bash|sh|shell|exec|execute|run|command|eval|task|infra)(?:$|[/_.-])/.test(tool)) return 'run'
-  return /(?:edit|write|patch|apply)/.test(tool) ? 'edit' : 'read'
+  if (/(?:subagent|agent|task)/.test(tool)) return 'subagent'
+  if (/(?:todo|plan)/.test(tool)) return 'todo'
+  if (/(?:decision|question|ask)/.test(tool)) return 'decision'
+  if (/(?:web|browser|fetch)/.test(tool)) return 'web'
+  if (/(?:search|grep|glob|find)/.test(tool)) return 'search'
+  if (/(?:edit|write|patch|apply)/.test(tool)) return 'change'
+  if (/(?:^|[/_.-])(?:bash|sh|shell|exec|execute|run|command|eval|infra)(?:$|[/_.-])/.test(tool)) return 'run'
+  return 'read'
 }
 
 /** Human intent belongs in the header; raw paths and commands remain on the source tool item. */
@@ -60,8 +66,10 @@ const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): 
     if (typeof value === 'string' && value.trim().length > 0 && !/(?:[a-z]+:\/\/|\/[\w.-]+\/)/i.test(value))
       return value.trim().replace(/\s+/g, ' ').slice(0, 100)
   }
-  return toolKindFor(item.name) === 'run' ? 'Running a command'
-    : toolKindFor(item.name) === 'edit' ? 'Updating a file' : 'Reading information'
+  if (!item.callSeen) return 'Invocation not loaded'
+  if (Object.keys(input).length === 0) return 'Input not recorded'
+  const kind = toolKindFor(item.name)
+  return { read: 'Reading', search: 'Searching', run: 'Running', change: 'Changing', subagent: 'Delegating', web: 'Browsing', decision: 'Deciding', todo: 'Planning', unknown: 'Invocation not loaded' }[kind]
 }
 
 const activeRunStatuses: Record<RunStatus, boolean> = { queued: true, running: true, waiting: true, completed: false, failed: false, cancelled: false }
@@ -142,7 +150,7 @@ export const prepareTranscriptTurns = (
       items: turnItems,
       work: { ...work, calls: work.calls.map(call => {
         const item = tools.get(call.id)
-        return { ...call, title: item === undefined ? 'Working' : toolSummary(item), summary: item === undefined ? 'Working' : toolSummary(item), argsSummary: undefined }
+        return { ...call, title: item === undefined ? call.title : toolSummary(item), summary: item === undefined ? call.summary : toolSummary(item) }
       }) },
       ...(Object.keys(senderCaptions).length === 0 ? {} : { senderCaptions }),
     })

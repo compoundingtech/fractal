@@ -40,3 +40,11 @@ test('live activity shares compact header durations and host-supplied waiting st
   assert.ok(noStart.includes('Waiting for your answer'))
   assert.ok(!noStart.includes('Working'))
 })
+
+test('successful output is never automatically previewed and human titles are not shell highlighted', async () => {
+  const { WorkLogV1 } = await server.ssrLoadModule('/src/assistant-ui/taste/WorkLogV1.tsx')
+  const markup = renderToStaticMarkup(React.createElement(WorkLogV1, { turn: { calls: [{ id: 'call/example', kind: 'run', title: 'Checking visible rows', argsSummary: 'pnpm test rows', status: 'success', startedAt: '2026-01-15T12:00:00Z', detail: 'Hidden successful output' }], foldable: false, running: false, failed: false, interrupted: false } }))
+  assert.doesNotMatch(markup, /Hidden successful output|work-call-output|data-syntax-token/)
+  assert.match(markup, /data-tool-kind="run"/)
+  assert.match(markup, /Checking visible rows/)
+})

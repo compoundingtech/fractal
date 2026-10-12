@@ -149,24 +149,15 @@ function RunCopy({ text, visible }: { readonly text: string; readonly visible: b
   }
   return <Button aria-label="Copy answer" data-copied={isCopied ? 'true' : undefined} onPress={copy} {...stylex.props(styles.copy, visible && styles.copyVisible)}><Icon name="copy" size={12} /></Button>
 }
-/** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. */
+/** The row disclosure is the sole route to the full raw input/output. */
 export function ToolDetailPreview({ call, onOpen }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void }) {
-  const [rawOpen, setRawOpen] = React.useState(false)
   const output = call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')
-  const lines = output.split('\n')
-  const remaining = Math.max(0, lines.length - Number(output.endsWith('\n')) - 4)
   const command = readableCommand(call)
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
-    <p>{call.summary ?? call.title} · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
-    <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
-      <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>
-      <DisclosurePanel>{rawOpen && <>
-        {command !== undefined ? <pre data-testid="tool-command" {...stylex.props(styles.output, styles.command)}><code>{command}</code></pre> : call.argsSummary !== undefined && <pre {...stylex.props(styles.output)}>{call.argsSummary}</pre>}
-        <pre {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>
-        {onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}
-      </>}</DisclosurePanel>
-    </Disclosure>
+    {command !== undefined ? <pre data-testid="tool-command" {...stylex.props(styles.output, styles.command)}><code>{command}</code></pre> : call.argsSummary !== undefined && <pre {...stylex.props(styles.output)}>{call.argsSummary}</pre>}
+    <pre {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={output} language={workLogOutputLanguage(call)} /></code></pre>
+    {onOpen !== undefined && <Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open inspector</Button>}
   </div>
 }
 /** Source text an unadopted item can show without the runtime; absent when the item carries none. */
@@ -225,7 +216,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
   })
   return <section data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} text={item.text} streaming={item.streaming} />)} />}
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} text={item.text} streaming={item.streaming} />)} />}
     {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
   </section>

@@ -1,7 +1,7 @@
 /** Controlled presentation types for the work log. */
 import type { ConversationItem } from '../embrace-data/model'
 import { toolHumanSummary, toolOutput } from '../embrace-tool-preview'
-export type WorkKind = 'read' | 'run' | 'edit'
+export type WorkKind = 'read' | 'search' | 'run' | 'change' | 'subagent' | 'web' | 'decision' | 'todo' | 'unknown'
 export interface WorkLogCall {
   readonly id: string
   readonly kind: WorkKind
@@ -39,10 +39,22 @@ export interface WorkLogProjection {
   readonly items: readonly ConversationItem[]
   readonly turn: WorkLogTurn
 }
-const summarizeArgs = (input: unknown): string | undefined => {
+const summarizeArgs = (input: unknown, kind: WorkKind, command?: string): string | undefined => {
   if (typeof input !== 'object' || input === null) return undefined
   const record = input as Record<string, unknown>
-  for (const key of ['path', 'command', 'pattern', 'query', 'url']) {
+  if (kind === 'run' && command !== undefined) return command.split('\n').find(line => line.trim().length > 0)?.trim()
+  const path = ['path', 'file_path', 'filePath'].map(key => record[key]).find((value): value is string => typeof value === 'string' && value.length > 0)
+  const paths = Array.isArray(record['paths']) ? record['paths'].filter((value): value is string => typeof value === 'string').join(', ') : undefined
+  const cwd = typeof record['cwd'] === 'string' ? record['cwd'].split('/').filter(Boolean).slice(-2).join('/') : undefined
+  const scope = path ?? (paths || undefined) ?? cwd
+  const query = ['pattern', 'query'].map(key => record[key]).find((value): value is string => typeof value === 'string' && value.length > 0)
+  if (query !== undefined) return scope === undefined ? query : `${query} in ${scope}`
+  if (scope !== undefined) return scope
+  if (Array.isArray(record['tasks'])) {
+    const names = record['tasks'].flatMap(task => typeof task === 'object' && task !== null && 'name' in task && typeof task.name === 'string' ? [task.name] : [])
+    if (names.length > 0) return names.join(', ')
+  }
+  for (const key of ['command', 'url', 'target', 'name', 'task', 'question']) {
     const value = record[key]
     if (typeof value === 'string' && value.length > 0) return value
   }
@@ -137,24 +149,27 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
 }): WorkLogTurn {
   const calls: WorkLogCall[] = items.flatMap(call => {
     if (call._tag !== 'ToolCall') return []
-    const kind = facts.kindFor(call.name)
+    const kind = call.callSeen ? facts.kindFor(call.name) : 'unknown'
     const input = typeof call.input === 'object' && call.input !== null ? call.input as Record<string, unknown> : undefined
     const path = [input?.['path'], input?.['file_path'], input?.['filePath']].find((value): value is string => typeof value === 'string' && value.length > 0)
     const media = call.result?.mediaType?.split(';')[0]?.trim().toLowerCase()
     const filename = path?.split('/').at(-1) ?? ''
     const dot = filename.lastIndexOf('.')
     const extension = dot > 0 ? filename.slice(dot + 1).toLowerCase() : undefined
+    const detail = toolOutput(call.result?.content) || undefined
+    const command = kind === 'run' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined
+    const displayedCommand = kind === 'run' ? (detail === undefined ? undefined : failedCommandSource(detail)) ?? command : undefined
     return [{
-      id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input),
+      id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input, kind, displayedCommand),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,
-      detail: toolOutput(call.result?.content) || undefined,
+      detail,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
-      changedPath: kind === 'edit' && call.callSeen && call.status === 'success' ? path : undefined,
-      command: kind === 'run' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
+      changedPath: kind === 'change' && call.callSeen && call.status === 'success' ? path : undefined,
+      command,
     }]
   })
   const complete = facts.completeHistory === true
-  const edits = calls.filter(call => call.kind === 'edit' && call.status === 'success')
+  const edits = calls.filter(call => call.kind === 'change' && call.status === 'success')
   return {
     calls,
     durationMs: facts.durationMs !== undefined && Number.isFinite(facts.durationMs) && facts.durationMs >= 0 ? facts.durationMs : undefined,

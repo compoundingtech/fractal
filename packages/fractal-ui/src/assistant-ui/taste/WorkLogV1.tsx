@@ -10,14 +10,13 @@ import { errorReason, failedCommandSource, formatWorkDuration, readableCommand, 
 
 export type WorkLogCallDetailRenderer = (call: WorkLogCall) => React.ReactNode
 const CallDetailRenderer = React.createContext<WorkLogCallDetailRenderer | undefined>(undefined)
-const CallPresentation = React.createContext({ preview: false, interactive: true })
+const CallPresentation = React.createContext({ interactive: true })
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
 /** Host-owned facts and actions; incomplete, running and failed work never folds. */
-export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail = false, interactiveCalls = true, hideLiveRow = false, expandedBody, ariaLabel = 'Work log', onRetry, onOpenOutput }: {
+export function WorkLogV1({ turn, listStyle, renderCallDetail, interactiveCalls = true, hideLiveRow = false, expandedBody, ariaLabel = 'Work log', onRetry, onOpenOutput }: {
   readonly turn: WorkLogTurn
   readonly listStyle?: stylex.StyleXStyles
   readonly renderCallDetail?: WorkLogCallDetailRenderer
-  readonly previewCallDetail?: boolean
   readonly interactiveCalls?: boolean
   readonly hideLiveRow?: boolean
   readonly expandedBody?: React.ReactNode
@@ -35,8 +34,9 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   const started = turn.running ? NaN : Date.parse(turn.startedAt ?? '')
   const failedCommand = failedCall?.kind === 'run' ? failedCall.argsSummary ?? failedCall.title : undefined
   const detail = [failedCommand, failedCall?.detail, turn.failureNote].filter((value, index, values) => value !== undefined && values.indexOf(value) === index).join('\n') || undefined
+  const presentation = React.useMemo(() => ({ interactive: interactiveCalls }), [interactiveCalls])
   const summaryContent = <><span {...stylex.props(styles.summaryLabel)}>{summary}</span>{Number.isFinite(started) && <time dateTime={new Date(started).toISOString()} {...stylex.props(styles.time)}>{timeFormat.format(started)}</time>}</>
-  return <CallDetailRenderer.Provider value={renderCallDetail}><CallPresentation.Provider value={{ preview: previewCallDetail, interactive: interactiveCalls }}><section aria-label={ariaLabel} data-testid="work-log">
+  return <CallDetailRenderer.Provider value={renderCallDetail}><CallPresentation.Provider value={presentation}><section aria-label={ariaLabel} data-testid="work-log">
     {turn.running && !hideLiveRow && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.live)}><Icon name="spinner" spinning /><span>Working</span></div>}
     {interactiveCalls ? <Button isDisabled={!settled} aria-expanded={!settled || open} onPress={() => setOpen(value => !value)} {...stylex.props(styles.summary, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)}><span {...stylex.props(styles.chevron, (!settled || open) && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span></span>{summaryContent}</Button> : <div {...stylex.props(styles.summary, styles.staticCall, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)} />{summaryContent}</div>}
     {(!interactiveCalls || !settled || open) && <div data-testid="work-log-children" {...stylex.props(styles.children)}><div {...stylex.props(styles.list, listStyle)}>{turn.calls.map(call => <TimelineCall key={call.id} call={call} />)}{expandedBody}</div></div>}
@@ -47,17 +47,17 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
 function TimelineCall({ call }: { call: WorkLogCall }) {
   const [open, setOpen] = React.useState(false)
   const renderDetail = React.useContext(CallDetailRenderer)
-  const { preview, interactive } = React.useContext(CallPresentation)
+  const { interactive } = React.useContext(CallPresentation)
   const hasOutput = call.detail !== undefined && call.detail.length > 0
-  const displayed = hasOutput && (!interactive || open || preview && call.status !== 'error')
+  const displayed = hasOutput && open
   const result = call.detail ?? (call.status === 'running' ? 'Running…' : 'No output')
   const label = call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // A non-success outcome stays visible as a word beside the pinned disclosure; running rows say so in the duration column until they end.
   const word = call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : undefined
-  const row = <><span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : call.kind === 'read' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} spinning={call.status === 'running'} size={14} /></span><span data-call-title {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-word {...stylex.props(styles.callWord)}>{word}</span><span aria-hidden="true" data-row-disclosure={hasOutput && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{hasOutput && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span></>
-  return <div data-tool-status={call.status}>{hasOutput && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <pre data-testid="work-call-output" {...stylex.props(styles.output)}><code><HighlightedSource code={result} language={workLogOutputLanguage(call)} /></code></pre> : renderDetail(call))}</div>
+  const row = <><span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : call.kind === 'read' || call.kind === 'search' ? 'search' : call.kind === 'run' ? 'drawer' : 'pencil'} spinning={call.status === 'running'} size={14} /></span><span data-call-title {...stylex.props(styles.callLabel)}><span data-tool-kind={call.kind}>{call.kind}</span>{' '}<span data-tool-title>{call.title}</span>{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</span><span data-call-word {...stylex.props(styles.callWord)}>{word}{!hasOutput && call.status !== 'running' ? ' · No output' : ''}</span><span aria-hidden="true" data-row-disclosure={hasOutput && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{hasOutput && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration ?? (call.status === 'running' ? 'Running' : '')}</span></>
+  return <div data-item-id={call.id} data-tool-status={call.status}>{hasOutput && interactive ? <TooltipTrigger delay={150}><Button aria-label={`${label}: raw input/output`} aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && (renderDetail === undefined ? <pre data-testid="work-call-output" {...stylex.props(styles.output)}><code><HighlightedSource code={result} language={workLogOutputLanguage(call)} /></code></pre> : renderDetail(call))}</div>
 }
 const styles = stylex.create({
   summary: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.toolRow, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.uiSize, padding: 0, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
