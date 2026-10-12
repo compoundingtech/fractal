@@ -35,6 +35,7 @@ Stories:
 - **Fractal UI / Details Recovery** and **Details Resources**: canonical production-mounted plays preserve Details-specific loading footprints, first-load and retained-content failure recovery, keyboard focus, polite announcements, delayed loading glyphs, accessibility of known identity, resource containment/fit, chart scope, section visibility and open intents. Workbench/sidebar host wiring is not reimplemented in these stories.
 - Details stories supply only their own pane observations and explicit empty Workbench resource maps. Their chart assertions consume the production percentage projection, including a missing-percentage control, rather than relying on removed token-count chart fields.
 - **Fractal UI / Details Presentation**: production standalone Details at 440/1440 in light/dark. Plays and falsifying controls cover the 52px band, 16px icon close, Escape/focus return, keyboard provenance tooltips, one unavailable line per section and single-line Overview.
+- `Details Presentation/AllStates` combines all eight production content states on one canvas. It checks complete state coverage, concise unavailable sections, close/focus return and restoration; removing a mounted pane falsifies the same coverage oracle.
 
 ## Details and TabStrip
 

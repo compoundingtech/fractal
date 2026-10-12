@@ -9,10 +9,10 @@ import { detailsTraceFixtures } from './assistant-ui/details/trace/fixture-provi
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
-import { surfaceVars as surface } from './assistant-ui/composition-tokens.stylex'
+import { spaceVars as space, surfaceVars as surface } from './assistant-ui/composition-tokens.stylex'
 
 interface Args { scheme: 'light'|'dark'; width: 440|1440; opening:'UserOpened'|'Restored' }
-const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),pane:{height:660}})
+const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),pane:{height:660},comparison:{display:'flex',flexWrap:'wrap',alignItems:'flex-start',gap:space.xl,backgroundColor:surface.canvas},card:{width:440,maxWidth:'100%',height:640}})
 const meta={title:'Fractal UI/Details Presentation',component:DetailsPane,parameters:{layout:'fullscreen'},args:{scheme:'dark',width:440,opening:'UserOpened'},render:function Render({scheme,width,opening}:Args){
   const [open,setOpen]=React.useState(false)
   const [showOpener,setShowOpener]=React.useState(true)
@@ -91,3 +91,30 @@ export const RestoredNarrowDark:Story={args:{width:440,scheme:'dark',opening:'Re
 export const RestoredNarrowLight:Story={args:{width:440,scheme:'light',opening:'Restored'},play:restoredPlay}
 export const RestoredWideDark:Story={args:{width:1440,scheme:'dark',opening:'Restored'},play:restoredPlay}
 export const RestoredWideLight:Story={args:{width:1440,scheme:'light',opening:'Restored'},play:restoredPlay}
+
+const combinedStates=['busy','partial','unknown','new','idle','absent','loading','error'] as const
+function assertCombined(root:HTMLElement,states:readonly string[]){
+  const panes=root.querySelectorAll('[data-testid="details-pane"]')
+  requireContract(panes.length===states.length,'Combined AllStates omitted a production pane')
+  for(const state of states)requireContract(root.querySelectorAll(`[data-details-all-state="${state}"] [data-testid="details-pane"][data-details-pane-state="${state}"]`).length===1,'Combined AllStates omitted a named state')
+  panes.forEach(pane=>{requireContract(!/\bUnknown\b/.test(pane.textContent??''),'Combined AllStates exposed a raw missing-value tag');assertSections(pane as HTMLElement)})
+}
+export const AllStates:Story={
+  args:{opening:'Restored',width:1440},
+  render:function Render({scheme}:Args){
+    const [visible,setVisible]=React.useState<readonly (typeof combinedStates)[number][]>(combinedStates)
+    const restoreRef=React.useRef<HTMLButtonElement>(null)
+    return <div {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal><Button ref={restoreRef} onPress={()=>setVisible(combinedStates)}>Restore all states</Button><div {...stylex.props(styles.comparison)}>{visible.map(state=><section key={state} aria-label={`Details ${state}`} data-details-all-state={state} {...stylex.props(styles.card)}><DetailsPane {...detailsStoryInputs(state)} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state={state} intent={{hiddenSections:[]}} onIntentChange={()=>{}} onOpen={()=>{}} onRetry={()=>{}} opening={{_tag:'Restored'}} onClose={()=>setVisible(current=>current.filter(item=>item!==state))} closeFocusTarget={()=>restoreRef.current}/></section>)}</div></ThemePortal></div>
+  },
+  play:async({canvasElement})=>{
+    assertCombined(canvasElement,combinedStates)
+    const wrong=canvasElement.cloneNode(true) as HTMLElement
+    wrong.querySelector('[data-testid="details-pane"]')?.remove()
+    await rejectsControl('Combined AllStates omitted a production pane',()=>assertCombined(wrong,combinedStates))
+    const partial=canvasElement.querySelector<HTMLElement>('[data-details-all-state="partial"]');requireContract(partial,'Missing combined partial state')
+    within(partial).getByRole('button',{name:'Close details'}).focus();await userEvent.keyboard('{Escape}')
+    const remaining=combinedStates.filter(state=>state!=='partial')
+    await waitFor(()=>{assertCombined(canvasElement,remaining);requireContract(canvasElement.ownerDocument.activeElement===within(canvasElement).getByRole('button',{name:'Restore all states'}),'Combined close lost host focus')})
+    await userEvent.click(within(canvasElement).getByRole('button',{name:'Restore all states'}));await waitFor(()=>assertCombined(canvasElement,combinedStates))
+  },
+}
