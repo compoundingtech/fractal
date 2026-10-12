@@ -6,7 +6,6 @@ import { Markdown } from './Markdown'
 import { Icon } from './Icons'
 
 const reasoningType = stylex.createTheme(t, { bodySize: t.codeSize, bodyLeading: t.uiLeading })
-const reasoningInk = stylex.createTheme(text, { fgSoft: text.fgMuted, fg: text.fgMuted })
 
 /** Muted reasoning as a work row: glyph slot, label, and the shared pinned disclosure; the opened body starts on the text column. */
 export function ThinkingEntry({ text: value, streaming = false }: { text: string; streaming?: boolean }) {
@@ -20,7 +19,7 @@ export function ThinkingEntry({ text: value, streaming = false }: { text: string
       <span aria-hidden="true" data-row-disclosure={open ? 'open' : 'closed'} {...stylex.props(styles.slot, styles.disclosure, open && styles.disclosureOpen)}><Icon name="chevron-right" size={12} /></span>
       <span data-call-duration />
     </AriaButton>
-    {open ? <div id={contentId} data-testid="thinking-body" {...stylex.props(styles.body, reasoningType, reasoningInk)}><Markdown text={value} streaming={streaming} /></div> : null}
+    {open ? <div id={contentId} data-testid="thinking-body" {...stylex.props(styles.body, reasoningType)}><Markdown text={value} streaming={streaming} tone="muted" /></div> : null}
   </div>
 }
 

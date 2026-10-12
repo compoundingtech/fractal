@@ -29,6 +29,11 @@ const calls: readonly WorkLogCall[] = [
   { id: 'fold/cancelled', kind: 'read', title: cancelledTitle, status: 'interrupted', startedAt: at, endedAt: ended(3599000) },
   { id: 'fold/scan', kind: 'read', title: 'Search release notes', argsSummary: 'identity', status: 'success', startedAt: at, endedAt: ended(12000), detail: 'Two matches.' },
   { id: 'fold/check', kind: 'run', title: 'Check signatures', argsSummary: 'verify --all', status: 'success', startedAt: at, endedAt: ended(31000), detail: 'All signatures verified.' },
+  // Fourteen rows (more than twelve) overflow the fold's height cap, so the shared child scroller is exercised.
+  { id: 'fold/tag', kind: 'run', title: 'Tag release', argsSummary: 'git tag --list', status: 'success', startedAt: at, endedAt: ended(1000), detail: 'Tag listed.' },
+  { id: 'fold/pack', kind: 'run', title: 'Pack archive', argsSummary: 'tar -czf release.tgz dist', status: 'success', startedAt: at, endedAt: ended(18000), detail: 'Archive written.' },
+  { id: 'fold/notes', kind: 'read', title: 'Read changelog', argsSummary: 'CHANGELOG.md', status: 'success', startedAt: at, endedAt: ended(700), detail: 'Four entries.' },
+  { id: 'fold/draft', kind: 'edit', title: 'Draft announcement', argsSummary: 'notes/announce.md', status: 'success', startedAt: at, endedAt: ended(5000), detail: 'Draft saved.' },
   { id: 'fold/wait', kind: 'read', title: 'Await the next observation', status: 'running', startedAt: at },
 ]
 const work: WorkLogTurn = { calls, running: true, failed: false, interrupted: false, durationMs: undefined, startedAt: at }
@@ -37,6 +42,7 @@ const richText = [
   '- Confirm the retained snapshot\n  - Compare each identity\n  - Record the reviewed hash\n- Publish the summary',
   '> Hold the release if any identity changes during review.',
   '```ts\nexport const releaseGate = (changed: number) => changed === 0\n```',
+  '1. Confirm the retained snapshot.\n\n   Record the reviewed hash beside it.\n\n2. Publish the summary.',
 ].join('\n\n')
 const assistant = (id: string, text: string): TextItem & { role: 'assistant' } => ({ _tag: 'Text', id, role: 'assistant', attachments: [], at, streaming: false, text })
 const rich = assistant('hierarchy/rich', richText)
@@ -47,11 +53,12 @@ const run = [
 ]
 const idle: WorkLogTurn = { calls: [], running: false, failed: false, interrupted: false, durationMs: undefined }
 const caption = 'Release reviewer'
-const turns: readonly TranscriptTurn[] = [
+const turns = (splitRun: boolean): readonly TranscriptTurn[] => [
   { id: 'hierarchy/rich-turn', items: [rich], work: idle, senderCaptions: { [rich.id]: caption } },
-  { id: 'hierarchy/run-turn', items: run, work: idle, senderCaptions: Object.fromEntries(run.map(item => [item.id, caption])) },
+  // The split restores a header Copy that only covers the first block: later blocks lose the shared sender.
+  { id: 'hierarchy/run-turn', items: run, work: idle, senderCaptions: splitRun ? { [run[0]!.id]: caption } : Object.fromEntries(run.map(item => [item.id, caption])) },
 ]
-const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'answer-footer', 'markdown-margin', 'prose-run'] as const
+const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'fold-scroll', 'answer-footer', 'markdown-margin', 'loose-list', 'run-copy', 'prose-run'] as const
 type Failure = typeof failures[number]
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
@@ -74,14 +81,16 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none' }: { sche
     if (failure === 'word-clip') element('[data-tool-status="interrupted"] [data-call-word]').style.maxWidth = '2ch'
     if (failure === 'title-wrap') element('[data-tool-status="error"] [data-call-title]').style.whiteSpace = 'normal'
     if (failure === 'thinking-row') element('[data-testid="thinking-entry"] button').style.gridTemplateColumns = 'auto auto'
+    if (failure === 'fold-scroll') element('[data-testid="work-log-children"]').append(element('[data-testid="thinking-entry"]'))
     if (failure === 'answer-footer') element('[data-item-id="hierarchy/rich"] [data-testid="message-header"]').style.order = '1'
     if (failure === 'markdown-margin') (element('[data-item-id="hierarchy/rich"] [data-testid="markdown"]').lastElementChild as HTMLElement).style.marginBlockEnd = '10px'
+    if (failure === 'loose-list') element('[data-item-id="hierarchy/rich"] ol > li > p + p').style.marginBlockStart = '0'
     if (failure === 'prose-run') { const header = element('[data-item-id="hierarchy/run-1"] [data-testid="message-header"]'); element('[data-item-id="hierarchy/run-2"]').prepend(header.cloneNode(true)) }
   }, [failure, revision])
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><span>{failure}</span></div>
     <section aria-label="Fold example"><WorkLogV1 turn={work} hideLiveRow ariaLabel="Release work" expandedBody={<ThinkingEntry text="Check the **retained snapshot** first, then compare identities." />} /></section>
-    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={turns} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={turns(failure === 'run-copy' && revision > 0)} /></EmbraceRuntimeProvider></section>
   </main>
 }
 const meta = {
@@ -108,7 +117,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const rail = getComputedStyle(children, '::before')
   const rows = Array.from(children.querySelectorAll<HTMLElement>('[data-tool-status]'), entry => entry.firstElementChild as HTMLElement)
   const thinkingRow = within(children).getByTestId('thinking-entry').querySelector('button')!
-  await expect(rows).toHaveLength(10)
+  await expect(rows).toHaveLength(14)
   await expect(fold.querySelector('hr')).toBeNull()
   for (const entry of [...rows, thinkingRow]) await expect(entry.getBoundingClientRect().left - lane.left).toBeCloseTo(22, 1)
   await expect(rail.display).toBe('block')
@@ -116,19 +125,27 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(rail.width).toBe('1px')
   await expect(rail.bottom).toBe('4px')
 
+  // Scrolling fold: tool rows and Thinking share one scroller, so a classic scrollbar narrows them alike
+  // and every row ends on the scroller's content edge.
+  const scroller = rows[0]!.parentElement!.parentElement!
+  await expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight)
+  await expect(scroller).toContainElement(thinkingRow)
+  const edge = scroller.getBoundingClientRect().left + scroller.clientLeft + scroller.clientWidth
+  for (const entry of [...rows, thinkingRow]) await expect(Math.abs(entry.getBoundingClientRect().right - edge)).toBeLessThan(0.5)
+
   // Rows: every chevron shares one x and every duration ends at the lane edge, including the longest values.
   const chevron = rows[0]!.children[3]!.getBoundingClientRect().left
   for (const entry of [...rows, thinkingRow]) {
     await expect(entry.getBoundingClientRect().height).toBe(24)
     await expect(Math.abs(entry.children[3]!.getBoundingClientRect().left - chevron)).toBeLessThan(0.5)
   }
-  await expect(Math.abs(chevron - (lane.right - 80 - 6 - 16))).toBeLessThan(0.5)
+  await expect(Math.abs(chevron - (edge - 80 - 6 - 16))).toBeLessThan(0.5)
   for (const entry of rows) {
     const duration = entry.querySelector<HTMLElement>('[data-call-duration]')!
     await expect(getComputedStyle(duration).fontVariantNumeric).toBe('tabular-nums')
     const text = document.createRange()
     text.selectNodeContents(duration)
-    await expect(Math.abs(text.getBoundingClientRect().right - lane.right)).toBeLessThan(1)
+    await expect(Math.abs(text.getBoundingClientRect().right - edge)).toBeLessThan(1)
     await expect(duration.scrollWidth).toBeLessThanOrEqual(duration.clientWidth)
   }
   const status = (state: string) => children.querySelector<HTMLElement>(`[data-tool-status="${state}"]`)!.firstElementChild as HTMLElement
@@ -173,7 +190,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
 
   // Markdown rhythm: 8 between siblings, no outer margin, nested list rail and open marker, quote rail, compact code.
   const blocks = Array.from(markdown.children) as HTMLElement[]
-  await expect(blocks).toHaveLength(4)
+  await expect(blocks).toHaveLength(5)
   for (const block of blocks) {
     await expect(getComputedStyle(block).marginBlockStart).toBe('0px')
     await expect(getComputedStyle(block).marginBlockEnd).toBe('0px')
@@ -193,8 +210,28 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(getComputedStyle(code.querySelector('code')!).fontSize).toBe('12px')
   await expect(getComputedStyle(code.querySelector('code')!).lineHeight).toBe('18px')
 
-  // Prose run: one sender line with the time, then the following blocks without a header.
+  // Loose list: 8 between blocks inside an item, 2 between items, nothing after the last block.
+  const loose = markdown.querySelector<HTMLElement>('ol')!
+  const items = Array.from(loose.children) as HTMLElement[]
+  const [lead, follow] = Array.from(items[0]!.querySelectorAll('p'))
+  await expect(follow).toBeDefined()
+  await expect(follow!.getBoundingClientRect().top - lead!.getBoundingClientRect().bottom).toBeCloseTo(8, 1)
+  await expect(lead!.getBoundingClientRect().top).toBeCloseTo(items[0]!.getBoundingClientRect().top, 1)
+  await expect(items[1]!.getBoundingClientRect().top - items[0]!.getBoundingClientRect().bottom).toBeCloseTo(2, 1)
+  await expect(loose.getBoundingClientRect().bottom).toBeCloseTo(items[1]!.querySelector('p')!.getBoundingClientRect().bottom, 1)
+
+  // Prose run: the single header Copy takes every block of the run, joined by a blank line.
   const runBlocks = run.map(item => canvasElement.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)!)
+  const clipboard = navigator.clipboard
+  const original = Object.getOwnPropertyDescriptor(clipboard, 'writeText')
+  let copied = ''
+  Object.defineProperty(clipboard, 'writeText', { configurable: true, value: async (text: string) => { copied = text } })
+  try {
+    await userEvent.click(within(runBlocks[0]!).getByRole('button', { name: 'Copy answer' }))
+    await waitFor(() => expect(copied).toBe(run.map(item => item.text).join('\n\n')))
+  } finally { if (original === undefined) delete (clipboard as unknown as Record<string, unknown>)['writeText']; else Object.defineProperty(clipboard, 'writeText', original) }
+
+  // Prose run: one sender line with the time, then the following blocks without a header.
   await expect(within(runBlocks[0]!).getByTestId('message-sender')).toHaveTextContent(caption)
   await expect(within(runBlocks[0]!).getByTestId('message-header')).toContainElement(runBlocks[0]!.querySelector('time'))
   for (const block of runBlocks.slice(1)) {

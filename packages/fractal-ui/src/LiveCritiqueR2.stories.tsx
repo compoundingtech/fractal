@@ -27,7 +27,15 @@ const work: WorkLogTurn = { running: true, failed: false, interrupted: false, du
 ] }
 const hint = 'Messages can be sent once this conversation loads.'
 const draft = 'Keep this retained draft'
-const failures = ['none', 'answer-meta', 'cold-composer', 'cold-slab', 'retained-reason', 'tool-rows', 'tool-overflow', 'thinking', 'row-fade'] as const
+const failures = ['none', 'answer-meta', 'cold-composer', 'cold-slab', 'retained-reason', 'tool-rows', 'tool-overflow', 'thinking', 'thinking-ink', 'row-fade'] as const
+/** WCAG contrast of a computed `rgb()`/`rgba()` ink over an opaque computed background, alpha composited first. */
+const contrast = (fg: string, bg: string) => {
+  const [br, bgreen, bb] = bg.match(/[\d.]+/g)!.map(Number)
+  const [r, green, b, a = 1] = fg.match(/[\d.]+/g)!.map(Number)
+  const luminance = (channels: readonly number[]) => channels.map(value => value / 255).map(value => value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index]!, 0)
+  const text = luminance([r!, green!, b!].map((value, index) => a * value + (1 - a) * [br!, bgreen!, bb!][index]!)), paper = luminance([br!, bgreen!, bb!])
+  return (Math.max(text, paper) + 0.05) / (Math.min(text, paper) + 0.05)
+}
 type Failure = typeof failures[number]
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
@@ -52,8 +60,10 @@ function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { schem
     if (failure === 'tool-rows') element('[data-tool-status="success"] [data-call-duration]').textContent = 'OK · 2s'
     if (failure === 'tool-overflow') element('[data-tool-status="interrupted"] [data-call-word]').textContent = 'Interrupted after the retained cancellation request'
     if (failure === 'thinking') element('[data-testid="thinking-body"]').style.marginInlineStart = '0'
+    // The opposite scheme's muted ink: the dark value in light (the shipped 3.79:1 bug), the light value in dark.
+    if (failure === 'thinking-ink') element('[data-testid="thinking-body"] p').style.color = scheme === 'light' ? '#818181' : '#66666e'
     if (failure === 'row-fade') element('[data-tool-status="success"] > button').style.transitionDuration = '0s'
-  }, [failure, revision, locked])
+  }, [failure, revision, locked, scheme])
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><Button onPress={() => setLocked(true)}>Lock retained draft</Button><span>{failure}</span></div>
     <section aria-label="Answer example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [answer, next], onNew: async () => {} }}><Transcript title="Review answers" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={[{ id: 'critique', items: [answer, next], work: { ...work, calls: [], running: false } }]} /></EmbraceRuntimeProvider></section>
@@ -164,7 +174,8 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(success[0]!).toHaveAttribute('aria-expanded', 'true')
   await expect(canvas.getByTestId('work-call-output')).toHaveTextContent('stable identity')
 
-  // 11: Thinking is a work row; its framed body starts on the text column and renders muted 13px Markdown.
+  // 11: Thinking is a work row; its framed body starts on the text column and renders muted 13px Markdown
+  // in this scheme's muted ink, which must clear AA (4.5:1) on the canvas in light and dark.
   await expect(parseFloat(getComputedStyle(thinking).fontSize)).toBe(14)
   await expect(thinking.getBoundingClientRect().height).toBe(24)
   const body = canvas.getByTestId('thinking-body')
@@ -173,6 +184,8 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const paragraph = body.querySelector('p')!
   await expect(parseFloat(getComputedStyle(paragraph).fontSize)).toBe(13)
   await expect(getComputedStyle(paragraph).color).toBe(getComputedStyle(thinking.querySelector('[data-call-title]')!).color)
+  await expect(getComputedStyle(body.querySelector('strong')!).color).toBe(getComputedStyle(paragraph).color)
+  await expect(contrast(getComputedStyle(paragraph).color, getComputedStyle(canvasElement.querySelector('main')!).backgroundColor)).toBeGreaterThanOrEqual(4.5)
   await expect(getComputedStyle(thinking).transitionDuration).toBe(reduced ? '0s' : '0.15s')
   await userEvent.click(thinking)
   await expect(canvas.queryByTestId('thinking-body')).toBeNull()
