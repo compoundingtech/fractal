@@ -186,14 +186,20 @@ the caller's preferred unit. Mixed-unit subtotals remain separate.
 Drawer accounts use one 22px native table row: 18px inline content and 2px
 vertical padding. `src/UsageMeterGrid.stylex.ts` supplies schema-agnostic grid
 geometry shared with other meter tables; inset separators do not add row height.
-Name and provider share a truncated, titled line, percentages keep their micro
-bars inline, and amount/reset cells align to sticky headers. Variant meters stay
-inside the same row rather than growing the account into a card.
+Account identity takes the remaining table width; governing usage and reset have
+protected character-unit tracks. Secondary windows fold first, then amount,
+into the accessible all-evidence action. Its +N counts secondary windows only.
+The governing reset never folds or ellipsizes. The `quotaOverflowPolicy` constant
+is the single swap point for collapse/hide/truncate pending the overflow decision.
+Variant meters stay inside the same row rather than growing an account into a card.
 
 Every Drawer S/M/L and drawer-variant story proves that all 11 fictional accounts
 fit the stated height without scrolling and that each cell's x-offset matches its
-header within 1px. The browser runner repeats this proof and injects a 6px cell
-translation in each story; every misalignment control must fail the same proof.
+header within 1px. Actual visible text-fragment and SVG centres must occupy one
+line within the shared tolerance, even when the row's height is forcibly fixed.
+Priority stories mount the production drawer at 200, 240 and 320 widths; wrapped
+account text and a displaced exhaustion SVG must fail the same proof, then pass
+after restoration and real controlled refresh rerenders.
 
 Every quota story also disables the real refresh action and proves that the
 controlled snapshot cannot change, restores the action, then asserts both
@@ -201,9 +207,11 @@ snapshot transitions after React rerenders. Empty and matrix stories carry
 the same control. Strict static Storybook lifecycle checks run these stories
 at 440 and 1440 viewport widths in light and dark.
 
-`src/quota-geometry.stylex.ts` holds the shared pixel geometry tokens; production
-surfaces and story frames use the same values. Sort and reset glyphs use the
-existing SVG icon family. Missing readings are explicitly unreported.
+`src/quota-geometry.stylex.ts` holds semantic geometry tokens; existing spacing
+and typography tokens are reused directly. Production surfaces and story frames
+use the same values. Sort, collapse and exhaustion glyphs use the existing SVG
+icon family. Missing readings and human-facing account states use Unreported;
+canonical IDs and state keys remain unchanged.
 
 Provider, plan and state filters use controlled React Aria Select/ListBox
 controls. Each change reports only that filter field; retained selections that

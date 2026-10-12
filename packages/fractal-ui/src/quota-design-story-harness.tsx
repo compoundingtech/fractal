@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
+import { usageMeterGridVars } from './UsageMeterGrid.stylex.ts'
 import { Button } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { QuotaDrawer } from './QuotaDrawer.tsx'
@@ -15,7 +16,7 @@ import { accentVars as accent, borderVars as border, radiusVars as radius, space
 
 export interface QuotaStoryArgs {
   scheme: Scheme
-  width: 240 | 320 | 420
+  width: 200 | 240 | 320 | 420
   pageWidth: 900 | 1440
   drawerVariant: QuotaDrawerProps['variant']
   usageVariant: QuotaUsageProps['variant']
@@ -27,7 +28,7 @@ export interface QuotaStoryArgs {
 }
 export const quotaStoryDefaults: QuotaStoryArgs = { scheme: 'dark', width: 320, pageWidth: 1440, drawerVariant: 'columns', usageVariant: 'overview', status: 'current', empty: false, initialView: 'drawer' }
 export const quotaStoryControls = {
-  scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [240, 320, 420], control: 'radio' },
+  scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [200, 240, 320, 420], control: 'radio' },
   pageWidth: { options: [900, 1440], control: 'radio' }, drawerVariant: { options: ['columns', 'stacked', 'chips'], control: 'radio' },
   usageVariant: { options: ['overview', 'multiples', 'heatmap'], control: 'radio' }, status: { options: Object.keys(quotaStatuses), control: 'select' }, empty: { control: 'boolean' }, initialView: { control: false },
 } as const
@@ -46,7 +47,7 @@ export function QuotaStoryHarness(args: QuotaStoryArgs) {
       : args.empty && sourceStatus.kind === 'failed' ? { kind: 'failed', text: 'Collection failed · no previous snapshot available' }
         : sourceStatus
   const usage = state.view === 'usage'
-  return <div {...stylex.props(styles.frame, ...baselineTheme, args.scheme === 'light' && lightTheme, !usage && (args.width === 240 ? styles.small : args.width === 420 ? styles.large : styles.medium), usage && (args.pageWidth === 900 ? styles.pageNarrow : styles.pageWide))}
+  return <div {...stylex.props(styles.frame, ...baselineTheme, args.scheme === 'light' && lightTheme, !usage && (args.width === 200 ? styles.pressure : args.width === 240 ? styles.small : args.width === 420 ? styles.large : styles.medium), usage && (args.pageWidth === 900 ? styles.pageNarrow : styles.pageWide))}
     data-quota-story data-quota-account-count={accounts.length} data-sort-key={state.sort.key} data-sort-direction={state.sort.direction} data-unit={state.unit} data-range={`${state.range[0]}:${state.range[1]}`} data-selected-day={state.selectedDay ?? ''} data-selected-account={state.selectedAccount ?? ''} data-view={state.view} data-collapsed={String(state.collapsed)} data-escaped={state.escaped} data-refreshed={String(state.refreshed)} data-provider={state.provider} data-plan={state.plan} data-state={state.state}>
     <ThemePortal>
       <div {...stylex.props(styles.proofToolbar)}>
@@ -97,6 +98,40 @@ export const quotaDensityPlay = async ({ canvasElement }: { canvasElement: HTMLE
   // for supplied inventory, not for the presence of already-rendered rows.
   if (Number(drawer.closest<HTMLElement>('[data-quota-story]')?.dataset.quotaAccountCount) > 0) await waitFor(() => assertQuotaDrawerDensity(drawer))
  }
+}
+
+/** Keep the forced row height while breaking its real content geometry. */
+export const quotaLinePlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaDensityPlay({ canvasElement })
+  const drawer = canvasElement.querySelector<HTMLElement>('[data-quota-drawer]')!
+  const root = storyRoot(canvasElement)
+  const canvas = within(canvasElement)
+  const glyph = drawer.querySelector<SVGSVGElement>('[data-quota-row="harbor"] [data-quota-cell="primary"] svg')!
+  const originalTransform = glyph.style.transform
+  try {
+    glyph.style.transform = `translateY(${usageMeterGridVars.rowHeight})`
+    await expect(() => assertQuotaDrawerDensity(drawer)).toThrow('misaligned glyph')
+  } finally {
+    glyph.style.transform = originalTransform
+  }
+  await userEvent.click(canvas.getByRole('button', { name: 'Refresh snapshot' }))
+  await waitFor(() => expect(root.dataset.refreshed).toBe('true'))
+  await waitFor(() => assertQuotaDrawerDensity(drawer))
+  const label = drawer.querySelector<HTMLElement>('[data-quota-row="north"] [data-quota-account-label]')!
+  const originalStyle = label.getAttribute('style')
+  try {
+    label.style.display = 'inline-block'
+    label.style.width = '1ch'
+    label.style.whiteSpace = 'normal'
+    label.style.overflowWrap = 'anywhere'
+    await expect(() => assertQuotaDrawerDensity(drawer)).toThrow('wraps')
+  } finally {
+    if (originalStyle === null) label.removeAttribute('style')
+    else label.setAttribute('style', originalStyle)
+  }
+  await userEvent.click(canvas.getByRole('button', { name: 'Refresh snapshot' }))
+  await waitFor(() => expect(root.dataset.refreshed).toBe('false'))
+  await waitFor(() => assertQuotaDrawerDensity(drawer))
 }
 export const quotaSortPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaDensityPlay({ canvasElement })
@@ -217,7 +252,8 @@ export const quotaRefreshPlay = async ({ canvasElement }: { canvasElement: HTMLE
 }
 const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', boxSizing: 'border-box', backgroundColor: surface.canvas, color: ink.fg, fontFamily: type.fontSans, fontSize: type.metaSize, maxWidth: '100%', minWidth: 0 },
-  small: { width: quotaGeometry.px240, height: quotaGeometry.drawerFixtureHeight }, medium: { width: quotaGeometry.px320, height: quotaGeometry.drawerFixtureHeight }, large: { width: quotaGeometry.drawerLargeWidth, height: quotaGeometry.drawerFixtureHeight },
+  pressure: { width: quotaGeometry.drawerPressureWidth, height: quotaGeometry.drawerFixtureHeight },
+  small: { width: quotaGeometry.drawerSmallWidth, height: quotaGeometry.drawerFixtureHeight }, medium: { width: quotaGeometry.drawerMediumWidth, height: quotaGeometry.drawerFixtureHeight }, large: { width: quotaGeometry.drawerLargeWidth, height: quotaGeometry.drawerFixtureHeight },
   pageNarrow: { width: quotaGeometry.usageNarrowWidth }, pageWide: { width: quotaGeometry.usageWideWidth },
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: space.xxl, padding: space.xl, backgroundColor: surface.canvas, boxSizing: 'border-box', maxWidth: '100%' },
   matrixItem: { minWidth: 0, maxWidth: '100%' },

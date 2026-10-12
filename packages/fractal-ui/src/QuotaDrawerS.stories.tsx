@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { QuotaStoryHarness, quotaStoryDefaults, quotaStoryControls, quotaSortPlay, quotaKeyboardPlay, quotaRefreshPlay } from './quota-design-story-harness.tsx'
+import { QuotaStoryHarness, quotaStoryDefaults, quotaStoryControls, quotaSortPlay, quotaKeyboardPlay, quotaRefreshPlay, quotaLinePlay } from './quota-design-story-harness.tsx'
 import { expect } from 'storybook/test'
 import { assertQuotaDrawerDisclosure } from './quota-design-density-proof.ts'
 const meta = { title: 'Fractal/App/Quota/Drawer S', component: QuotaStoryHarness, args: { ...quotaStoryDefaults, width: 240 }, argTypes: quotaStoryControls, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof QuotaStoryHarness>
@@ -29,3 +29,6 @@ export const FullValueDisclosure: Story = {
     assertQuotaDrawerDisclosure(drawer)
   },
 }
+export const Priority200: Story = { args: { width: 200 }, play: quotaLinePlay }
+export const Priority240: Story = { play: quotaLinePlay }
+export const Priority320: Story = { args: { width: 320 }, play: quotaLinePlay }
