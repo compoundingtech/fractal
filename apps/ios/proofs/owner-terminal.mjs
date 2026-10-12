@@ -50,6 +50,8 @@ try {
       if (event === 'open') opened ??= performance.now() - started;
       if (event === 'screen') {
         assert.equal(frame.value.runtime_incarnation, fixture.incarnation);
+        assert.equal(frame.snapshot.host_id, mode.startsWith('direct') ? 'host/owner-demo' : 'host/gateway-demo');
+        assert(frame.value.lines.some(line => line.text?.includes('isolated owner ready')));
         first ??= performance.now() - started; doneResolve();
       }
     };
