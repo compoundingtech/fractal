@@ -30,7 +30,7 @@ export interface MarkdownImageOptions { readonly resolveImage?: MarkdownImageRes
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
 /** `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes. */
-export interface MarkdownProps { text: string; streaming?: boolean; tone?: 'default' | 'muted'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
+export interface MarkdownProps { text: string; streaming?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
 const REMARK_PLUGINS = [remarkGfm]
 const STREAMING_PLUGINS = [markStreamingTail]
@@ -60,7 +60,7 @@ export const Markdown = React.memo(function Markdown({ text, streaming = false, 
   const inherited = React.useContext(MarkdownImagePolicy)
   const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
   const source = React.useMemo(() => streaming ? completeStreamingTail(text) : text, [text, streaming])
-  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted)}><ReactMarkdown skipHtml urlTransform={(url, key) => key === 'src' ? url : defaultUrlTransform(url)} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div></MutedTone.Provider></ReferenceContext.Provider>
+  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}><ReactMarkdown skipHtml urlTransform={(url, key) => key === 'src' ? url : defaultUrlTransform(url)} remarkPlugins={REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></div></MutedTone.Provider></ReferenceContext.Provider>
 })
 
 function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
@@ -319,6 +319,7 @@ const styles = stylex.create({
   // Prose blocks inherit ink from here (or a blockquote), so tone is one themed declaration rather than a var override.
   markdown: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0, maxWidth: '100%', color: textColor.fgSoft },
   muted: { color: textColor.fgMuted },
+  foreground: { color: textColor.fg },
   image: { maxWidth: '100%', height: 'auto' },
   imagePlaceholder: { display: 'inline-flex', alignItems: 'center', gap: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, color: textColor.fgSoft, backgroundColor: surface.controlFill, fontSize: t.metaSize },
   imageAction: { borderWidth: 0, padding: s.xs, backgroundColor: surface.transparent, color: status.runningFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },

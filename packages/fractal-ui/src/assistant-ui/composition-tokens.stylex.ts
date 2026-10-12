@@ -19,7 +19,6 @@ export const textVars = stylex.defineVars({
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
 })
 
@@ -102,7 +101,7 @@ export const geometryVars = stylex.defineVars({
   heroSize: '30px', heroLeading: '36px',
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
-  toolIndent: '28px', gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
   sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
   /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
@@ -169,7 +168,6 @@ export const colorVars = stylex.defineVars({
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
   border: 'rgba(255, 255, 255, 0.06)',
   borderStrong: 'rgba(255, 255, 255, 0.08)',

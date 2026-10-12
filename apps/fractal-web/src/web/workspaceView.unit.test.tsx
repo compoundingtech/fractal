@@ -7,13 +7,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { WorkspaceBody } from './LiveAgentWorkspace.tsx'
 import { retainPane, workspaceView, type RetainedPane } from './workspaceView.ts'
 
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
-  props: () => ({}),
-}))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 describe('workspace body', () => {
   it('renders the terminal as a drawer beside the shown thread', () => {
