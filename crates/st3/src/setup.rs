@@ -207,9 +207,20 @@ async fn prepare_harness(
         return Ok(None);
     }
     let found = if daemon_ready(config).await {
-        Client::new(Endpoint::Unix(config.client_socket()))
+        match Client::new(Endpoint::Unix(config.client_socket()))
             .get::<Vec<String>>("/v1/harnesses")
-            .await?
+            .await
+        {
+            Ok(found) => found,
+            // A running daemon from before this route cannot answer; read the login PATH here.
+            Err(error)
+                if crate::client::is_missing_route(&error) || crate::client::is_not_found(&error) =>
+            {
+                println!("The running daemon is older than this st; checking the login PATH from here.");
+                crate::environment::available_harnesses()?
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         crate::environment::available_harnesses()?
     };

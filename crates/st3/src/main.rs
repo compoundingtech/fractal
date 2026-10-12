@@ -13718,12 +13718,22 @@ async fn run_agent_new(
         .unwrap_or(local)
         .trim_start_matches("host/");
     if host == local || host == "local" {
-        let available: Vec<String> = client.get("/v1/harnesses").await?;
-        anyhow::ensure!(
-            available.contains(&args.harness),
-            "{} is not installed on the daemon's login PATH; install it and open a new login shell before creating a seat",
-            args.harness
-        );
+        match client.get::<Vec<String>>("/v1/harnesses").await {
+            Ok(available) => anyhow::ensure!(
+                available.contains(&args.harness),
+                "{} is not installed on the daemon's login PATH; install it and open a new login shell before creating a seat",
+                args.harness
+            ),
+            // An install does not restart the daemon, so a new st can meet an older daemon.
+            Err(error)
+                if st3::client::is_missing_route(&error) || st3::client::is_not_found(&error) =>
+            {
+                eprintln!(
+                    "st: the daemon is older than this st and cannot check which providers are installed; creating the seat anyway"
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
     let source_name = format!("st agents new {}", args.name);
     let preview: MissionResponse = client

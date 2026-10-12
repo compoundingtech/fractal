@@ -291,18 +291,28 @@ fn claude_trust_prompt(screen: &str) -> bool {
 
 fn claude_development_channel_prompt(screen: &str) -> bool {
     let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
-    [
+    const OPTION: &str = "❯ 1. I am using this for local development";
+    let fixed = [
         "WARNING: Loading development channels",
         "--dangerously-load-development-channels",
-        "Channels:",
-        "❯ 1. I am using this for local development",
+        OPTION,
         "2. Exit",
         "Enter to confirm",
         "Esc to cancel",
-    ]
-    .iter()
-    .all(|text| screen.contains(text))
-        && (screen.contains("plugin:st-channel@st") || screen.contains("server:st3"))
+    ];
+    if !fixed.iter().all(|text| screen.contains(text)) {
+        return false;
+    }
+    // Approve the dialog only when it lists exactly the one st channel: any other development
+    // channel in the same dialog is the person's to accept.
+    let Some((_, listed)) = screen.split_once("Channels:") else {
+        return false;
+    };
+    let listed = listed.split_once(OPTION).map_or(listed, |(before, _)| before);
+    matches!(
+        listed.split_whitespace().collect::<Vec<_>>().as_slice(),
+        ["plugin:st-channel@st"] | ["server:st3"]
+    )
 }
 
 /// How long a resume that ended without a reason waits for its driver's typed refusal.
@@ -36328,6 +36338,24 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         ));
         assert!(!super::claude_development_channel_prompt(
             "I am using this for local development"
+        ));
+        for listed in [
+            "plugin:st-channel@st plugin:other@market",
+            "server:other plugin:st-channel@st",
+            "plugin:st-channel@st, server:st3",
+            "plugin:other@market",
+            "",
+        ] {
+            assert!(
+                !super::claude_development_channel_prompt(
+                    &DEVELOPMENT_CHANNEL_SCREEN
+                        .replace("Channels: plugin:st-channel@st", &format!("Channels: {listed}"))
+                ),
+                "approved a dialog that lists {listed:?}"
+            );
+        }
+        assert!(super::claude_development_channel_prompt(
+            &DEVELOPMENT_CHANNEL_SCREEN.replace("plugin:st-channel@st", "server:st3")
         ));
         for _ in 0..2 {
             reconciler
