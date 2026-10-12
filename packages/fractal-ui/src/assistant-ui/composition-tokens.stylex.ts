@@ -19,7 +19,6 @@ export const textVars = stylex.defineVars({
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
 })
 
@@ -169,7 +168,6 @@ export const colorVars = stylex.defineVars({
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
   border: 'rgba(255, 255, 255, 0.06)',
   borderStrong: 'rgba(255, 255, 255, 0.08)',

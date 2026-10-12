@@ -21,7 +21,6 @@ const textVarsTheme = stylex.createTheme(textVars, {
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
 })
 

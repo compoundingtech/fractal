@@ -45,17 +45,16 @@ const meta = { title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: {
     probe.remove()
     return value
   }
-  // C18: both light ink contracts match #2348; restore the former low-contrast alpha as a failing control.
-  if (args.scheme === 'light') {
-    for (const token of [text.fgFaint, color.fgFaint]) {
-      const property = token.slice(4, -1)
-      const original = scope.style.getPropertyValue(property)
-      await expect(paint(token)).toBe('rgb(107, 107, 115)')
-      scope.style.setProperty(property, 'rgba(39, 39, 42, 0.55)')
-      await expect(paint(token)).not.toBe('rgb(107, 107, 115)')
-      if (original) scope.style.setProperty(property, original); else scope.style.removeProperty(property)
-      await expect(paint(token)).toBe('rgb(107, 107, 115)')
-    }
+  // C18 v1.1: secondary ink uses muted, not a fourth grey. Restore the retired alpha as a failing control.
+  for (const token of [text.fgMuted, color.fgMuted]) {
+    const property = token.slice(4, -1)
+    const original = scope.style.getPropertyValue(property)
+    const expected = args.scheme === 'light' ? 'rgb(102, 102, 110)' : 'rgb(129, 129, 129)'
+    await expect(paint(token)).toBe(expected)
+    scope.style.setProperty(property, args.scheme === 'light' ? 'rgba(39, 39, 42, 0.55)' : 'rgba(245, 245, 245, 0.52)')
+    await expect(paint(token)).not.toBe(expected)
+    if (original) scope.style.setProperty(property, original); else scope.style.removeProperty(property)
+    await expect(paint(token)).toBe(expected)
   }
   const aliases = () => [paint(tokens.good) === paint(text.fgSoft), paint(tokens.added) === paint(status.diffAddTint)]
   if (args.scheme === 'light' || args.theme === 'embrace') {
