@@ -1685,16 +1685,25 @@ mod tests {
     }
 
     fn admit_projection_test_claims(source: &Store, target: &Store) {
-        let inventory = target
-            .export_replication_summary(PROJECTION_TEST_FLEET)
-            .unwrap()
-            .inventory;
+        // This fixture requires one direct payload exchange, including a new envelope in a
+        // range both nodes already hold. A compact summary has no identity listing and can
+        // legitimately return negotiation-only data instead of the newer payload.
+        let inventory = target.replication_inventory().unwrap();
+        assert!(inventory.buckets.is_empty());
         let exchange = source
             .export_replication_exchange(PROJECTION_TEST_FLEET, &inventory)
             .unwrap();
-        target
+        assert!(
+            !exchange.envelopes.is_empty(),
+            "fixture must transport a new payload"
+        );
+        let receipt = target
             .receive_replication_exchange("source", PROJECTION_TEST_FLEET, &exchange)
             .unwrap();
+        assert!(
+            receipt.received > 0,
+            "fixture must receive a previously unknown envelope"
+        );
         assert!(target.validate_replication_backlog().unwrap().changed);
         assert!(target.replication_projection_observation().1);
     }
@@ -1827,6 +1836,18 @@ mod tests {
         assert!(incremental.needs("observer:unrelated", 0));
         clean_projection_test_items(&incremental);
         observe(&source, "newer");
+        // Retain the former setup as a protocol negative: the known differing range must
+        // first be listed when the request contains only its digest, not payload identities.
+        let compact = target
+            .export_replication_summary(PROJECTION_TEST_FLEET)
+            .unwrap();
+        assert!(compact.inventory.envelopes.is_empty() && !compact.inventory.buckets.is_empty());
+        let negotiation = source
+            .export_replication_exchange(PROJECTION_TEST_FLEET, &compact.inventory)
+            .unwrap();
+        assert!(negotiation.envelopes.is_empty());
+        assert!(!negotiation.inventory.envelopes.is_empty());
+        assert_eq!(projected_resource_count(&target, "resource/newer"), 0);
         assert!(
             target
                 .project_replication_backlog_before_clear(|| {
