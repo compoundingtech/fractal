@@ -230,7 +230,7 @@ function lastLineRects(block: HTMLElement) {
 }
 function reservedMetaHeight(block: HTMLElement) {
   const height = block.getBoundingClientRect().height
-  const metadata = Array.from(block.querySelectorAll<HTMLElement>('[data-meta-time], [data-time-divider], [data-copy], [data-seat-meta-overlay]'))
+  const metadata = Array.from(block.querySelectorAll<HTMLElement>('[data-meta-time], [data-time-divider], [data-copy], [data-seat-meta-overlay], time'))
   const previous = metadata.map(element => element.style.display)
   metadata.forEach(element => { element.style.display = 'none' })
   const bare = block.getBoundingClientRect().height
@@ -276,6 +276,11 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         if (getComputedStyle(overlay).position === 'absolute') await expect(overlay.getBoundingClientRect().right - block.getBoundingClientRect().right).toBe(32)
         await expect(overlay.getBoundingClientRect().left).toBeGreaterThanOrEqual(lane.getBoundingClientRect().left)
       }
+    }
+    const work = lane.querySelector<HTMLElement>('[data-work-fixture]')!
+    await expect(reservedMetaHeight(work)).toBe(0)
+    for (const label of work.querySelectorAll('time')) {
+      await expect(distance(label.getBoundingClientRect(), work.getBoundingClientRect())).toBeLessThanOrEqual(distance(label.getBoundingClientRect(), work.nextElementSibling!.getBoundingClientRect()))
     }
     if (lane.hasAttribute('data-recommended')) {
       for (const input of lane.querySelectorAll('[data-turn-kind="Relay"], [data-turn-kind="Agent"]')) {
