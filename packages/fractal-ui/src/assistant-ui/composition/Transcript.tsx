@@ -34,6 +34,7 @@ export interface TranscriptTurn {
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
 export type TranscriptHistory = VirtualViewportHistory
 export type TranscriptHandle = VirtualViewportHandle
+export type { JumpResult } from '../EmbraceScrollViewport'
 export interface TranscriptProps {
   readonly turns: readonly TranscriptTurn[]
   readonly ref?: React.Ref<TranscriptHandle>
@@ -242,7 +243,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, ref }: TranscriptProps) {
+export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, availability = { _tag: 'Available' }, history = { _tag: 'Pending' }, emptyState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, ref }: TranscriptProps) {
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. Recording the snapshot after its commit is the adoption epoch.
@@ -252,7 +253,19 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   // adoption, so neither is recorded while every id is published: a freshly mounted pane commits once.
   const [adoptionEpoch, setAdoptionEpoch] = React.useState<readonly TranscriptTurn[]>()
   const published = React.useMemo(() => new Set(messages.map(message => message.id)), [messages])
-  const unpublished = React.useMemo(() => turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]).filter(id => !published.has(id)), [turns, published])
+  const sourceIds = React.useMemo(() => {
+    const ids = new Set<string>()
+    for (const turn of turns) {
+      if (turn.prompt !== undefined) ids.add(turn.prompt.id)
+      for (const item of turn.items) ids.add(item.id)
+    }
+    return ids
+  }, [turns])
+  const unpublished = React.useMemo(() => {
+    const ids: string[] = []
+    for (const id of sourceIds) if (!published.has(id)) ids.push(id)
+    return ids
+  }, [sourceIds, published])
   const adoption = React.useContext(RuntimeAdoptedIds)
   const getHeldKey = () => {
     const held = adoption?.get()
@@ -290,7 +303,10 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   }, [strandedIds])
   const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage }), [resolveImage, onLoadImage])
   // New rows or changed content are news; send state, tool status and timing are metadata.
-  const rows = React.useMemo(() => committed.map(turn => ({ id: turn.id, turn, version: (turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).map(contentVersion).join(' ') })), [committed])
+  const rows = React.useMemo(() => committed.map(turn => {
+    const items = turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]
+    return { id: turn.id, turn, targetIds: items.map(item => item.id), version: items.map(contentVersion).join(' ') }
+  }), [committed])
   const running = [...committed].reverse().find(turn => turn.work.running)
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   const failure = syncLine({ status: sync, label: 'conversation', now, observedAt })
@@ -309,12 +325,12 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
       {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
       {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><span data-testid="run-elapsed">Running{Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''}</span></>}
     </header>
-    <ErrorOverlayHost lane><EmbraceVirtualScrollViewport key={viewportKey} ref={ref} items={rows} history={history} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+    <ErrorOverlayHost lane><EmbraceVirtualScrollViewport key={viewportKey} ref={ref} items={rows} sourceIds={sourceIds} history={history} stateKey={viewportKey} scrollToBottomKey={scrollToBottomKey} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
       empty={empty}
-      boundary={history._tag === 'More' ? null : <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}>
+      boundary={retry => history._tag === 'More' || history._tag === 'Pending' ? null : <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}>
         {history._tag === 'Complete' ? <span data-testid="history-start" {...stylex.props(styles.historyNote)}>Start of conversation</span>
           : history._tag === 'Loading' ? <span role="status" data-testid="history-loading" {...stylex.props(styles.historyNote)}>Loading earlier messages…</span>
-          : <><span role="status" data-testid="history-error" {...stylex.props(styles.historyNote)}>Earlier messages could not be loaded.</span><Link data-testid="history-retry" onPress={history.retry} {...stylex.props(styles.historyLoad)}>Try again</Link></>}
+          : <><span role="status" data-testid="history-error" {...stylex.props(styles.historyNote)}>Earlier messages could not be loaded.</span>{history.detail !== undefined && <span data-testid="history-error-detail" {...stylex.props(styles.historyNote)}>{history.detail}</span>}<Link data-testid="history-retry" onPress={retry} {...stylex.props(styles.historyLoad)}>Try again</Link></>}
       </div>}
       renderItem={({ turn }) => <PreparedTurn turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />}
     />{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>

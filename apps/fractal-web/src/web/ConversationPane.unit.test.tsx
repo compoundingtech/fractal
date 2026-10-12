@@ -119,6 +119,8 @@ describe('ConversationPane kit composition', () => {
     expect(html).toContain('aria-label="Loading conversation"')
     expect(html).not.toContain('Waiting for the first conversation observation')
     expect(html).not.toContain('data-testid="transcript-turn"')
+    expect(html).not.toContain('data-testid="history-start"')
+    expect(html).not.toContain('Start of conversation')
   })
 
   it('renders the kit unavailable state without the transcript lane', () => {

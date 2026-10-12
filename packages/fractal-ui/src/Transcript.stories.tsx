@@ -260,7 +260,7 @@ export const UnavailableWithComposer: Story = { render: args => <UnavailableComp
   await expect(input).toHaveValue('Still here')
 } }
 export const UnavailableWithComposerLight: Story = { ...UnavailableWithComposer, args: { scheme: 'light' } }
-const loadOlder = fn()
+const loadOlder = fn(async () => {})
 export const MoreHistory: Story = { args: { history: { _tag: 'More', loadOlder } }, beforeEach: () => { loadOlder.mockClear() }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByRole('button', { name: /Worked for 24s/ })
@@ -286,7 +286,7 @@ export const LoadingHistory: Story = { args: { history: { _tag: 'Loading' } }, p
   await expect(within(canvas.getByTestId('history-boundary')).queryByRole('button')).toBeNull()
 } }
 export const LoadingHistoryLight: Story = { ...LoadingHistory, args: { ...LoadingHistory.args, scheme: 'light' } }
-const retryHistory = fn()
+const retryHistory = fn(async () => {})
 export const FailedHistory: Story = { args: { history: { _tag: 'Failed', retry: retryHistory } }, play: async ({ canvasElement }) => {
   retryHistory.mockClear()
   const canvas = within(canvasElement)

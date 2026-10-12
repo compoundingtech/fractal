@@ -33,7 +33,7 @@ function makeTurn(index: number): TranscriptTurn {
 }
 // Shared immutable fixtures, matching Transcript.stories' runtime-source/work-log pattern.
 const turns = Array.from({ length: total + 2 }, (_, index) => makeTurn(index))
-const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'empty-latch', 'touch-latch', 'touch-scroll-required', 'failed-auto-retry', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
+const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'empty-latch', 'touch-latch', 'touch-scroll-required', 'failed-auto-retry', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start', 'pending-default', 'pending-explicit', 'jump-anchored', 'jump-missing', 'jump-superseded'] as const
 type Failure = typeof failures[number]
 type Page = { readonly _tag: 'Ready' } | { readonly _tag: 'Loading' } | { readonly _tag: 'Failed' }
 const styles = stylex.create({
@@ -45,6 +45,9 @@ const styles = stylex.create({
 function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { scheme?: Scheme; narrow?: boolean; failure?: Failure }) {
   const root = React.useRef<HTMLElement>(null)
   const handle = React.useRef<TranscriptHandle>(null)
+  const pendingPage = React.useRef<{ promise: Promise<void>; resolve: () => void; reject: (error: Error) => void } | null>(null)
+  const queuedJump = React.useRef(false)
+  const [jumpResult, setJumpResult] = React.useState('')
   const [start, setStart] = React.useState(initialStart)
   const [end, setEnd] = React.useState(total)
   const [page, setPage] = React.useState<Page>({ _tag: 'Ready' })
@@ -56,19 +59,46 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
   const [switchedTheme, setSwitchedTheme] = React.useState(false)
   const [followKey, setFollowKey] = React.useState<string | undefined>(undefined)
   const effectiveScheme = switchedTheme ? scheme === 'dark' ? 'light' : 'dark' : scheme
-  const loadOlder = () => {
-    if (failure === 'empty-latch' && action === 'empty') return
+  const loadOlder = (): Promise<void> => {
+    if (pendingPage.current !== null) return pendingPage.current.promise
+    if (failure === 'empty-latch' && action === 'empty') return Promise.resolve()
+    let resolve!: () => void
+    let reject!: (error: Error) => void
+    const promise = new Promise<void>((accept, fail) => { resolve = accept; reject = fail })
+    pendingPage.current = { promise, resolve, reject }
     setRequests(value => value + 1)
     setPage({ _tag: 'Loading' })
     setAction('request')
     setRevision(value => value + 1)
+    return promise
+  }
+  const requestOlder = () => { void loadOlder().catch(error => console.warn('History fixture request failed', error)) }
+  const finishPage = (error?: Error) => {
+    const pending = pendingPage.current
+    pendingPage.current = null
+    if (error === undefined) pending?.resolve()
+    else pending?.reject(error)
   }
   const deliver = () => {
-    if (failNext) { setFailNext(false); setPage({ _tag: 'Failed' }); setAction('error') }
-    else { setStart(value => Math.max(0, value - pageSize)); setPage({ _tag: 'Ready' }); setAction('prepend') }
+    if (failNext) {
+      setFailNext(false); setPage({ _tag: 'Failed' }); setAction('error')
+      finishPage(new Error('Checkpoint source unavailable'))
+    } else {
+      setStart(value => Math.max(0, value - pageSize)); setPage({ _tag: 'Ready' }); setAction('prepend')
+      finishPage()
+    }
     setRevision(value => value + 1)
   }
-  const history: TranscriptHistory = start === 0 ? failure === 'start' ? { _tag: 'More', loadOlder: () => {} } : { _tag: 'Complete' } : page._tag === 'Loading' ? { _tag: 'Loading' } : page._tag === 'Failed' ? { _tag: 'Failed', retry: failure === 'retry' ? () => {} : loadOlder } : { _tag: 'More', loadOlder }
+  const history: TranscriptHistory = start === 0 ? failure === 'start' ? { _tag: 'More', loadOlder: async () => {} } : { _tag: 'Complete' } : page._tag === 'Loading' ? { _tag: 'Loading' } : page._tag === 'Failed' ? { _tag: 'Failed', retry: failure === 'retry' ? async () => {} : loadOlder, detail: 'Checkpoint source unavailable' } : { _tag: 'More', loadOlder }
+  // The host loads an absent target first. Only a committed loaded snapshot may
+  // issue jumpTo: an absent target now resolves Missing on the next commit.
+  React.useLayoutEffect(() => {
+    if (!queuedJump.current || page._tag !== 'Ready') return
+    if (start > 50) { requestOlder(); return }
+    queuedJump.current = false
+    const promise = handle.current?.jumpTo('history/50/answer')
+    if (promise !== undefined) void promise.then(result => setJumpResult(result._tag))
+  }, [start, page._tag])
   const loaded = React.useMemo(() => turns.slice(start, end), [start, end])
   const messages = React.useMemo(() => loaded.flatMap(turn => [turn.prompt!, ...turn.items]), [loaded])
   // Like LiveCritiqueR2: selected negative controls change the real rendered tree or
@@ -86,13 +116,13 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
     const frame = requestAnimationFrame(() => {
       applyOffset()
       if (failure === 'prepend-focus' && action === 'prepend') lane.focus()
-      if (failure === 'empty-page' && action === 'empty') loadOlder()
+      if (failure === 'empty-page' && action === 'empty') requestOlder()
       if (failure === 'unread' && action === 'append') {
         const unread = [...root.current!.querySelectorAll('button')].find(button => button.textContent?.includes('New messages'))
         if (unread !== undefined) unread.hidden = true
       }
-      if (failure === 'stale-jump' && action === 'prepend' && followKey !== undefined) handle.current?.jumpTo('history/50')
-      if (failure === 'append-following' && action === 'append') handle.current?.jumpTo('history/1300')
+      if (failure === 'stale-jump' && action === 'prepend' && followKey !== undefined) handle.current?.jumpTo('history/50/answer')
+      if (failure === 'append-following' && action === 'append') handle.current?.jumpTo('history/1300/answer')
       if ((failure === 'prepend' && action === 'prepend') || (failure === 'append-reading' && action === 'append')) setFollowKey(value => `${value ?? 'regression'}/lost-anchor`)
       if (failure === 'dom-bound' && revision > 0) {
         const row = lane.querySelector('[data-testid="transcript-turn"]')
@@ -101,36 +131,34 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
     })
     return () => { cancelAnimationFrame(frame); observer.disconnect() }
   }, [failure, revision, action, start])
-  return <main ref={root} data-scheme={effectiveScheme} data-requests={requests} data-loaded={loaded.length} data-start={start} data-page={page._tag} data-end={end} {...stylex.props(styles.root, (narrow !== resized) && styles.narrow, ...baselineTheme, effectiveScheme === 'light' && lightTheme)}>
+  return <main ref={root} data-scheme={effectiveScheme} data-jump-result={jumpResult} data-requests={requests} data-loaded={loaded.length} data-start={start} data-page={page._tag} data-end={end} {...stylex.props(styles.root, (narrow !== resized) && styles.narrow, ...baselineTheme, effectiveScheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}>
       <button type="button" onClick={() => { setAction('control'); setRevision(value => value + 1) }}>Apply selected regression</button>
-      <button type="button" disabled={page._tag !== 'Ready' || start === 0} onClick={loadOlder}>Request older page</button>
+      <button type="button" disabled={page._tag !== 'Ready' || start === 0} onClick={requestOlder}>Request older page</button>
       <button type="button" disabled={page._tag !== 'Loading'} onMouseDown={event => event.preventDefault()} onClick={deliver}>Deliver older page</button>
-      <button type="button" disabled={page._tag !== 'Loading'} onClick={() => { setPage({ _tag: 'Ready' }); setAction('empty'); setRevision(value => value + 1) }}>Deliver empty page</button>
+      <button type="button" disabled={page._tag !== 'Loading'} onClick={() => { setPage({ _tag: 'Ready' }); setAction('empty'); setRevision(value => value + 1); finishPage() }}>Deliver empty page</button>
       <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => { setResized(value => !value); setAction('resize'); setRevision(value => value + 1) }}>Resize reading lane</button>
       <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => { setSwitchedTheme(value => !value); setAction('theme'); setRevision(value => value + 1) }}>Switch reading theme</button>
-      <button type="button" onClick={() => setFollowKey(value => value === undefined ? 'latest/1' : `${value}/next`)}>Follow latest</button>
+      <button type="button" onClick={() => { queuedJump.current = false; setFollowKey(value => value === undefined ? 'latest/1' : `${value}/next`) }}>Follow latest</button>
       <button type="button" onClick={() => setFailNext(true)}>Fail next page</button>
       <button type="button" disabled={end === total + 2} onMouseDown={event => event.preventDefault()} onClick={() => { setEnd(value => value + 1); setAction('append'); setRevision(value => value + 1) }}>Append turn</button>
-      <button type="button" onClick={() => { if (failure !== 'jump') handle.current?.jumpTo('history/50') }}>Jump to unloaded checkpoint 50</button>
-      <button type="button" onClick={() => handle.current?.jumpTo('history/1300')}>Jump to loaded checkpoint 1300</button>
+      <button type="button" onClick={() => { if (failure !== 'jump') { queuedJump.current = true; setJumpResult('Pending'); setRevision(value => value + 1); if (start > 50) requestOlder(); else { queuedJump.current = false; void handle.current?.jumpTo('history/50/answer').then(result => setJumpResult(result._tag)) } } }}>Jump to unloaded checkpoint 50</button>
+      <button type="button" onClick={() => { queuedJump.current = false; void handle.current?.jumpTo('history/1300/answer').then(result => setJumpResult(result._tag)) }}>Jump to loaded checkpoint 1300</button>
+      <button type="button" onClick={() => { queuedJump.current = false; void handle.current?.jumpTo('history/1302/answer').then(result => setJumpResult(result._tag)) }}>Jump to loaded checkpoint 1302</button>
     </div>
-    <section aria-label="Paged conversation" {...stylex.props(styles.frame)} onScrollCapture={() => { if (failure === 'failed-auto-retry' && page._tag === 'Failed') loadOlder() }} onTouchStartCapture={event => { if (failure === 'touch-latch') event.stopPropagation() }} onTouchMoveCapture={event => { if (failure === 'touch-scroll-required' || failure === 'touch-latch') event.stopPropagation() }} onPointerDownCapture={event => { if (failure === 'touch-latch' && event.pointerType === 'touch') event.stopPropagation() }} onKeyDownCapture={event => { if (failure === 'keyboard' && (event.key === 'Home' || event.key === 'PageUp')) { event.preventDefault(); event.stopPropagation() } }} onClickCapture={event => { if (failure === 'fold' && (event.target as Element).closest('[data-testid="work-log"]')) { event.preventDefault(); event.stopPropagation() } }}>
+    <section aria-label="Paged conversation" {...stylex.props(styles.frame)} onScrollCapture={() => { if (failure === 'failed-auto-retry' && page._tag === 'Failed') requestOlder() }} onTouchStartCapture={event => { if (failure === 'touch-latch') event.stopPropagation() }} onTouchMoveCapture={event => { if (failure === 'touch-scroll-required' || failure === 'touch-latch') event.stopPropagation() }} onPointerDownCapture={event => { if (failure === 'touch-latch' && event.pointerType === 'touch') event.stopPropagation() }} onKeyDownCapture={event => {
+      if (failure === 'keyboard' && (event.key === 'Home' || event.key === 'PageUp')) { event.preventDefault(); event.stopPropagation() }
+    }} onClickCapture={event => { if (failure === 'fold' && (event.target as Element).closest('[data-testid="work-log"]')) { event.preventDefault(); event.stopPropagation() } }}>
       <EmbraceRuntimeProvider options={{ messages, onNew: async () => {} }}><Transcript ref={handle} scrollToBottomKey={followKey} title="Checkpoint review" turns={loaded} history={history} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} /></EmbraceRuntimeProvider>
     </section>
   </main>
 }
-const meta = { title: 'Fractal UI/Transcript virtual history', component: PagedHistory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', narrow: false, failure: 'none' }, argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failure: { control: 'select', options: failures, description: 'Restore one broken behavior. The corresponding production Transcript play assertion must fail.' } } } satisfies Meta<typeof PagedHistory>
+const meta = { title: 'Fractal UI/Transcript virtual history', component: PagedHistory, render: args => contractFailures.includes(args.failure as ContractFailure) ? <ContractFixture target={args.failure as ContractFailure} failure={args.failure} scheme={args.scheme} narrow={args.narrow} /> : <PagedHistory {...args} />, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', narrow: false, failure: 'none' }, argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failure: { control: 'select', options: failures, description: 'Restore one broken behavior. The corresponding production Transcript play assertion must fail.' } } } satisfies Meta<typeof PagedHistory>
 export default meta
 type Story = StoryObj<typeof meta>
 
 function historyElementIsActionable(element: HTMLElement, lane: HTMLElement): boolean {
-  if (!element.isConnected || element.getBoundingClientRect().height === 0) return false
-  for (let ancestor: HTMLElement | null = element; ancestor !== null; ancestor = ancestor.parentElement) {
-    if (getComputedStyle(ancestor).pointerEvents === 'none') return false
-    if (ancestor === lane) return true
-  }
-  return false
+  return element.isConnected && lane.contains(element) && getComputedStyle(element).pointerEvents !== 'none' && element.getBoundingClientRect().height > 0
 }
 
 function activeHistoryRow(lane: HTMLElement, id: number): HTMLElement | null {
@@ -142,7 +170,7 @@ function activeHistoryRow(lane: HTMLElement, id: number): HTMLElement | null {
 }
 
 async function focusHistoryKeyboardRow(lane: HTMLElement, id?: number): Promise<void> {
-  await waitFor(async () => {
+  const focusedRow = await waitFor(async () => {
     const viewport = lane.getBoundingClientRect()
     const candidates = id === undefined ? lane.querySelectorAll<HTMLElement>('[role="row"]') : [activeHistoryRow(lane, id)?.closest<HTMLElement>('[role="row"]') ?? null]
     let target: HTMLElement | null = null
@@ -155,7 +183,28 @@ async function focusHistoryKeyboardRow(lane: HTMLElement, id?: number): Promise<
     if (target === null) return
     if (document.activeElement !== target) target.focus({ preventScroll: true })
     await expect(document.activeElement, 'History keyboard setup: RAC row focus identity').toBe(target)
+    return target
   })
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  await expect(document.activeElement === focusedRow, 'History keyboard setup: settled RAC row focus identity').toBe(true)
+}
+
+async function leaveHistoryBoundary(lane: HTMLElement): Promise<void> {
+  await focusHistoryKeyboardRow(lane)
+  // PageDown can legitimately retain a row taller than the viewport. RAC's
+  // sequential row navigation exits the boundary regardless of that geometry.
+  for (let index = 0; index < 12 && lane.scrollTop <= lane.clientHeight * 1.5; index++) {
+    const previous = document.activeElement
+    await userEvent.keyboard('{ArrowDown}')
+    const id = await waitFor(() => {
+      const focused = document.activeElement
+      expect(focused !== previous && focused instanceof HTMLElement && lane.contains(focused)).toBe(true)
+      return focused?.querySelector<HTMLElement>('[data-embrace-entry-id]')?.getAttribute('data-embrace-entry-id')
+    })
+    if (id !== null && id !== undefined) await focusHistoryKeyboardRow(lane, Number(id.slice('history/'.length)))
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  }
+  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
 }
 async function settleInitialHistoryPage(canvasElement: HTMLElement, lane: HTMLElement): Promise<number> {
   const canvas = within(canvasElement), root = canvasElement.querySelector('main')!
@@ -168,7 +217,6 @@ async function settleInitialHistoryPage(canvasElement: HTMLElement, lane: HTMLEl
     await waitFor(() => expect(root.getAttribute('data-start')).toBe(String(expectedStart)))
     await waitFor(() => expect(root.getAttribute('data-page')).toBe('Ready'))
   }
-  await waitFor(() => expect(activeHistoryRow(lane, total - 1) !== null, 'History setup: settled latest row').toBe(true))
   await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight, 'History setup: initial following gap').toBeLessThanOrEqual(1), { timeout: 5000 })
   return Number(root.getAttribute('data-start'))
 }
@@ -178,6 +226,7 @@ async function settleInitialHistoryPage(canvasElement: HTMLElement, lane: HTMLEl
 // Each detector has its own positive story and routes selected regressions directly
 // to that detector. An unrelated assertion in the full tour cannot mask a control.
 async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'pointer-retry') {
+  if (contractFailures.includes(target as ContractFailure)) return exerciseContract(canvasElement, target as ContractFailure)
   if (target === 'stale-jump') return exerciseNewerFollow({ canvasElement })
   if (target === 'touch-latch' || target === 'touch-scroll-required') return exerciseTouchAtZero({ canvasElement }, target)
   const detector = `History detector: ${target}`
@@ -212,6 +261,7 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
     }
     if (target === 'jump') {
       await waitFor(() => expect(currentRow(50), detector).not.toBeNull())
+      await waitFor(() => expect(root.getAttribute('data-jump-result'), detector).toBe('Anchored'))
       const rect = currentRow(50)!.getBoundingClientRect(), viewport = lane.getBoundingClientRect()
       await expect(rect.top, detector).toBeGreaterThanOrEqual(viewport.top)
       await expect(rect.top, detector).toBeLessThan(viewport.bottom)
@@ -224,6 +274,7 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
     return
   }
   if (target === 'empty-page' || target === 'empty-latch' || target === 'retry' || target === 'failed-auto-retry' || target === 'pointer-retry') {
+    await settleInitialHistoryPage(canvasElement, lane)
     if (target === 'retry' || target === 'failed-auto-retry' || target === 'pointer-retry') await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
     await focusHistoryKeyboardRow(lane)
     await userEvent.keyboard('{Home}')
@@ -238,9 +289,7 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
         await expect(root.getAttribute('data-page'), detector).toBe('Ready')
         await expect(Number(root.getAttribute('data-requests')), detector).toBe(requests)
       } else {
-        await focusHistoryKeyboardRow(lane)
-        await userEvent.keyboard('{PageDown}{PageDown}{PageDown}')
-        await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
+        await leaveHistoryBoundary(lane)
         await userEvent.keyboard('{Home}')
         await waitFor(() => expect(root.getAttribute('data-page'), detector).toBe('Loading'))
         await expect(Number(root.getAttribute('data-requests')), detector).toBe(requests + 1)
@@ -285,11 +334,13 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
     await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight, detector).toBeLessThanOrEqual(1))
     return
   }
-  await userEvent.click(canvas.getByRole('button', { name: 'Jump to loaded checkpoint 1300' }))
-  await waitFor(() => expect(currentRow(1300)).not.toBeNull())
+  const readingId = target === 'keyboard' ? 1302 : 1300
+  await userEvent.click(canvas.getByRole('button', { name: `Jump to loaded checkpoint ${readingId}` }))
+  await waitFor(() => expect(currentRow(readingId)).not.toBeNull())
   await settle()
   if (target === 'keyboard') {
-    await focusHistoryKeyboardRow(lane, 1300)
+    await expect(currentRow(readingId)!.getBoundingClientRect().height, 'History keyboard setup: short row fits viewport').toBeLessThan(lane.clientHeight)
+    await focusHistoryKeyboardRow(lane, readingId)
     const top = lane.scrollTop
     await userEvent.keyboard('{PageUp}')
     await waitFor(() => expect(lane.scrollTop, detector).toBeLessThan(top))
@@ -460,9 +511,12 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   // scroller key default. Native scroller-focus keys are covered by ui-design.
   // Start the keyboard slice from a fresh host navigation after the preceding
   // width/theme/disclosure changes; no key default or scroll amount is emulated.
-  await userEvent.click(canvas.getByRole('button', { name: 'Jump to loaded checkpoint 1300' }))
-  await waitFor(() => expect(row(1300) !== null, 'History keyboard setup: current mid-list turn').toBe(true))
-  await focusHistoryKeyboardRow(lane, 1300)
+  // Checkpoint 1302 has one answer paragraph and no code fence at either width.
+  // RAC may correctly retain the same key when the current row is taller than a page.
+  await userEvent.click(canvas.getByRole('button', { name: 'Jump to loaded checkpoint 1302' }))
+  await waitFor(() => expect(row(1302) !== null, 'History keyboard setup: current short turn').toBe(true))
+  await expect(row(1302)!.getBoundingClientRect().height, 'History keyboard setup: short row fits viewport').toBeLessThan(lane.clientHeight)
+  await focusHistoryKeyboardRow(lane, 1302)
   await new Promise<void>(resolve => setTimeout(resolve, 200))
   const beforePageUp = lane.scrollTop
   await userEvent.keyboard('{PageUp}')
@@ -480,9 +534,7 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
   // Leaving and re-entering the boundary is new reading intent, not an automatic
   // empty-page loop: it must re-arm fetching without the fixture request button.
-  await focusHistoryKeyboardRow(lane)
-  await userEvent.keyboard('{PageDown}{PageDown}{PageDown}')
-  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
+  await leaveHistoryBoundary(lane)
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
   await waitFor(() => expect(lane.scrollTop).toBe(0))
@@ -509,9 +561,10 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   await deliver(100)
   await expect(canvas.queryByTestId('history-error')).toBeNull()
 
-  // The imperative jump holds an unloaded target across page adoption, then lands on it.
+  // The host pages until the target is committed, then observes an Anchored jump.
   await userEvent.click(canvas.getByRole('button', { name: 'Jump to unloaded checkpoint 50' }))
   await deliver(0)
+  await waitFor(() => expect(root).toHaveAttribute('data-jump-result', 'Anchored'))
   await waitFor(() => expect(row(50)).not.toBeNull())
   await waitFor(() => {
     const target = row(50)!.getBoundingClientRect(), viewport = lane.getBoundingClientRect()
@@ -662,9 +715,9 @@ function HistoryStates({ scheme = 'dark', narrow = false }: { scheme?: Scheme; n
   const [retried, setRetried] = React.useState(false)
   const examples: readonly { readonly label: string; readonly history: TranscriptHistory }[] = [
     { label: 'Complete', history: { _tag: 'Complete' } },
-    { label: 'More', history: { _tag: 'More', loadOlder: () => setRequested(true) } },
+    { label: 'More', history: { _tag: 'More', loadOlder: async () => { setRequested(true) } } },
     { label: 'Loading', history: { _tag: 'Loading' } },
-    { label: 'Failed', history: { _tag: 'Failed', retry: () => setRetried(true) } },
+    { label: 'Failed', history: { _tag: 'Failed', retry: async () => { setRetried(true) } } },
   ]
   return <main data-scheme={scheme} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
     {examples.map(({ label, history }) => <section key={label} aria-label={`${label} history example`}>
@@ -692,3 +745,90 @@ export const AllStates: Story = { render: args => <HistoryStates scheme={args.sc
   await waitFor(() => expect(canvas.getByLabelText('History actions')).toHaveTextContent('Older page requested.'))
 } }
 export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
+
+const contractFailures = ['pending-default', 'pending-explicit', 'jump-anchored', 'jump-missing', 'jump-superseded'] as const
+type ContractFailure = typeof contractFailures[number]
+
+function ContractFixture({ target, failure = 'none', scheme = 'dark', narrow = false }: { target: ContractFailure; failure?: Failure; scheme?: Scheme; narrow?: boolean }) {
+  const handle = React.useRef<TranscriptHandle>(null)
+  const committed = React.useRef(0)
+  const observedResult = React.useRef('Waiting')
+  const [revision, setRevision] = React.useState(0)
+  const [complete, setComplete] = React.useState(false)
+  const [result, setResult] = React.useState('')
+  const [resultCommit, setResultCommit] = React.useState(-1)
+  const [synchronous, setSynchronous] = React.useState('')
+  const pending = target === 'pending-default' || target === 'pending-explicit'
+  React.useLayoutEffect(() => { committed.current = revision }, [revision])
+  const run = () => {
+    observedResult.current = 'Waiting'
+    setResult('Waiting')
+    const id = target === 'jump-missing' && failure !== target ? 'history/absent/answer' : 'history/1300/read'
+    const promise = handle.current!.jumpTo(id)
+    void promise.then(outcome => { observedResult.current = outcome._tag; setResult(outcome._tag); setResultCommit(committed.current) })
+    setSynchronous(observedResult.current)
+    if ((target === 'jump-superseded' && failure !== target) || (target === 'jump-anchored' && failure === target)) {
+      void handle.current!.jumpTo('history/1302/answer')
+    }
+    setRevision(value => value + 1)
+  }
+  const history: TranscriptHistory | undefined = complete || (pending && failure === target)
+    ? { _tag: 'Complete' }
+    : target === 'pending-default' ? undefined : { _tag: 'Pending' }
+  const loaded = React.useMemo(() => turns.slice(1200, 1400), [])
+  const messages = React.useMemo(() => loaded.flatMap(turn => [turn.prompt!, ...turn.items]), [loaded])
+  return <main data-result={result} data-result-commit={resultCommit} data-call-stack={synchronous} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <div {...stylex.props(styles.controls)}>
+      <button type="button" onClick={() => setComplete(true)}>Observe complete history</button>
+      <button type="button" onClick={run}>Run jump contract</button>
+    </div>
+    <section aria-label="Promise contract history" {...stylex.props(styles.frame)}>
+      <EmbraceRuntimeProvider options={{ messages, onNew: async () => {} }}>
+        <Transcript ref={handle} title="Promise contract review" turns={loaded} history={history} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} />
+      </EmbraceRuntimeProvider>
+    </section>
+  </main>
+}
+
+async function exerciseContract(canvasElement: HTMLElement, target: ContractFailure) {
+  const canvas = within(canvasElement)
+  const root = canvasElement.querySelector('main')!
+  const lane = await canvas.findByTestId('transcript-scroll')
+  const detector = `History detector: ${target}`
+  await waitFor(() => expect(lane.querySelector('[data-testid="transcript-turn"]')).not.toBeNull())
+  if (target === 'pending-default' || target === 'pending-explicit') {
+    await focusHistoryKeyboardRow(lane)
+    await userEvent.keyboard('{Home}')
+    await waitFor(() => expect(lane.scrollTop).toBe(0))
+    lane.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -120 }))
+    lane.dispatchEvent(new Event('scroll'))
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    await expect(canvas.queryByTestId('history-start') !== null, detector).toBe(false)
+    await expect(canvas.queryByTestId('history-loading') !== null, detector).toBe(false)
+    await expect(canvas.queryByTestId('history-error') !== null, detector).toBe(false)
+    await expect(canvas.queryByTestId('history-retry') !== null, detector).toBe(false)
+    await expect(canvas.getByRole('grid'), detector).toHaveAttribute('aria-busy', 'false')
+    await userEvent.click(canvas.getByRole('button', { name: 'Observe complete history' }))
+    await expect(await canvas.findByTestId('history-start'), detector).toHaveTextContent('Start of conversation')
+    return
+  }
+  await userEvent.click(canvas.getByRole('button', { name: 'Run jump contract' }))
+  const expected = target === 'jump-anchored' ? 'Anchored' : target === 'jump-missing' ? 'Missing' : 'Superseded'
+  await waitFor(() => expect(root.getAttribute('data-result'), detector).toBe(expected))
+  await expect(root, detector).toHaveAttribute('data-call-stack', 'Waiting')
+  if (target === 'jump-missing') await expect(root, detector).toHaveAttribute('data-result-commit', '1')
+  if (target === 'jump-anchored') {
+    await waitFor(() => expect(activeHistoryRow(lane, 1300), detector).not.toBeNull())
+    await expect(within(activeHistoryRow(lane, 1300)!).getByRole('button', { name: /Worked/ }), detector).toHaveAttribute('aria-expanded', 'false')
+    const row = activeHistoryRow(lane, 1300)!.getBoundingClientRect()
+    const viewport = lane.getBoundingClientRect()
+    await expect(row.top, detector).toBeGreaterThanOrEqual(viewport.top)
+    await expect(row.top, detector).toBeLessThan(viewport.bottom)
+  }
+}
+
+export const PendingDefaultProbe: Story = { render: args => <ContractFixture {...args} target="pending-default" />, play: ({ canvasElement }) => exerciseContract(canvasElement, 'pending-default') }
+export const PendingExplicitProbe: Story = { render: args => <ContractFixture {...args} target="pending-explicit" />, play: ({ canvasElement }) => exerciseContract(canvasElement, 'pending-explicit') }
+export const JumpAnchoredProbe: Story = { render: args => <ContractFixture {...args} target="jump-anchored" />, play: ({ canvasElement }) => exerciseContract(canvasElement, 'jump-anchored') }
+export const JumpMissingProbe: Story = { render: args => <ContractFixture {...args} target="jump-missing" />, play: ({ canvasElement }) => exerciseContract(canvasElement, 'jump-missing') }
+export const JumpSupersededProbe: Story = { render: args => <ContractFixture {...args} target="jump-superseded" />, play: ({ canvasElement }) => exerciseContract(canvasElement, 'jump-superseded') }
