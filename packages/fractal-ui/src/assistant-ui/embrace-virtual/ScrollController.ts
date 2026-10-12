@@ -227,6 +227,7 @@ export class ScrollController {
     }
     const release = () => {
       if (this.pressed === undefined) return
+      const held = this.pressed
       this.pressed = undefined
       // The held gesture is finished. Measurement-generated scroll events must
       // not replace its saved anchor before a new reader input takes ownership.
@@ -235,7 +236,7 @@ export class ScrollController {
         this.pendingAnchor = undefined
         element.scrollTop = element.scrollHeight
       } else {
-        this.captureAnchor()
+        this.anchor = held
         this.pendingAnchor = this.anchor
       }
     }

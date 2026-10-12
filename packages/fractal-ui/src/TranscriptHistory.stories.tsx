@@ -336,6 +336,7 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
   }
   const readingId = target === 'keyboard' ? 1302 : 1300
   await userEvent.click(canvas.getByRole('button', { name: `Jump to loaded checkpoint ${readingId}` }))
+  await waitFor(() => expect(root.getAttribute('data-jump-result'), 'History setup: checkpoint jump resolves Anchored').toBe('Anchored'), { timeout: 5000 })
   await waitFor(() => expect(currentRow(readingId)).not.toBeNull())
   await settle()
   if (target === 'keyboard') {
@@ -455,6 +456,7 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   await waitFor(() => expect(bottomGap()).toBeLessThanOrEqual(1))
   await userEvent.click(canvas.getByRole('button', { name: 'Jump to loaded checkpoint 1300' }))
+  await waitFor(() => expect(root.getAttribute('data-jump-result'), 'History setup: checkpoint jump resolves Anchored').toBe('Anchored'), { timeout: 5000 })
   await waitFor(() => expect(row(1300)).not.toBeNull())
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   const anchor = row(1300)!
