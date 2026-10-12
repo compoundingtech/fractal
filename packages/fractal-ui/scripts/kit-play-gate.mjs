@@ -4,6 +4,7 @@ import { resolve, sep, extname, join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { strictStoryGuard } from './details-strict-story-guard.mjs'
 import { availableParallelism } from 'node:os'
+import { storyIdsFromIndex } from './kit-play-index.mjs'
 
 // Own an ephemeral localhost server: missing assets remain real, standard 404s.
 const [buildDirectory, outputDirectory] = process.argv.slice(2)
@@ -48,9 +49,7 @@ const writeReceipt = async () => {
 try {
   const response = await fetch(`${base}/index.json`)
   if (!response.ok) throw new Error(`Storybook index: HTTP ${response.status}`)
-  const index = await response.json()
-  ids = Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => entry.id).sort()
-  if (!ids.length || new Set(ids).size !== ids.length) throw new Error('Storybook index must contain unique, nonempty story IDs')
+  ids = storyIdsFromIndex(await response.json())
   const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
   browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
   const cases = ids.flatMap(id => ['dark', 'light'].flatMap(scheme => [440, 1440].map(width => ({ id, scheme, width }))))
