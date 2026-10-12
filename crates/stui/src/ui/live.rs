@@ -3313,7 +3313,7 @@ mod tests {
         }
         let mut requested = HashSet::from([session.clone(), "session/example-open".to_owned()]);
         // On screen, the failure stays and is not asked again in a loop.
-        retry_failed_opens(&mut requested, &failed, &[session.clone()]);
+        retry_failed_opens(&mut requested, &failed, std::slice::from_ref(&session));
         assert!(requested.contains(&session));
         // Left, it is forgotten, so opening it again asks st once more; a good open is kept.
         retry_failed_opens(&mut requested, &failed, &[]);
@@ -3392,7 +3392,7 @@ mod tests {
         let conversing = [target.clone()];
         assert_eq!(
             moved_sessions(&conversing, &model, &timelines, &mut asked),
-            [target.clone()]
+            std::slice::from_ref(&target)
         );
         // Asked once for that session, not on every pass.
         assert!(moved_sessions(&conversing, &model, &timelines, &mut asked).is_empty());

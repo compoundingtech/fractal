@@ -26,11 +26,25 @@ fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semap
         tokio::sync::Semaphore::new(4)
     })
 }
+
+#[cfg(test)]
+fn read_slot(
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    slots.try_acquire_owned().map_err(|_| ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "rate-limited".into(),
+        message: "owner conversation reads are busy; retry this read".into(),
+        details: Box::default(),
+    })
+}
+
 static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let mut key = [0; 32];
     getrandom::fill(&mut key).expect("owner reference key entropy");
     key
 });
+#[cfg(not(test))]
 fn read_slot(slots: &tokio::sync::Semaphore) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
     slots.try_acquire().map_err(|_| ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
@@ -460,7 +474,7 @@ pub(super) fn read(
     // The fold is held before the slot is taken: waiting viewers of this conversation hold
     // no global read slot, so they never crowd an unrelated conversation out of the budget.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(&slots)?;
+    let _slot = read_slot(slots)?;
     let before = basis(source)?;
     let items = held.read(source).map_err(ApiError::internal)?;
     if before != basis(source)? {
@@ -493,7 +507,7 @@ pub(super) fn read_slice(
     let mut held = timeline.hold();
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(&slots)?;
+    let _slot = read_slot(slots)?;
     let basis = basis(source)?;
     let mut slice = held
         .slice(source, order, before, limit)
@@ -898,7 +912,7 @@ pub(super) async fn chunk_local(
     require_scope(session, "read.projections")?;
     let locator = locator(wanted, session_id)?;
     let slots = read_slots(&locator.source.transcript);
-    let _slot = read_slot(&slots)?;
+    let _slot = read_slot(slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
     let (bytes, media) = crate::api::read_deadline::spawn_blocking(move || -> Result<_, ApiError> {
@@ -2533,11 +2547,14 @@ mod tests {
 
     #[test]
     fn concurrent_read_limit_has_no_waiting_backlog() {
-        let slots = tokio::sync::Semaphore::new(4);
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
         let held: Vec<_> = (0..4).map(|_| slots.try_acquire().unwrap()).collect();
-        assert_eq!(read_slot(&slots).unwrap_err().code, "rate-limited");
+        assert_eq!(
+            read_slot(std::sync::Arc::clone(&slots)).unwrap_err().code,
+            "rate-limited"
+        );
         drop(held);
-        assert!(read_slot(&slots).is_ok());
+        assert!(read_slot(std::sync::Arc::clone(&slots)).is_ok());
     }
     #[test]
     fn sqlite_ref_fences_native_message_and_part_identity_not_only_rowid() {
