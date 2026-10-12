@@ -423,7 +423,7 @@ const unrecognized = (raw: unknown, issue: string): UnrecognizedEntry | undefine
 
 /** Decode entries without confusing discarded payloads or omitted pagination with an empty page. */
 export const decodeConversationChunk = (
-  frame: Omit<Extract<CollectionFrame, { kind: 'conversation' }>, 'items'> & { readonly items: readonly unknown[]; readonly header?: unknown },
+  frame: Omit<Extract<CollectionFrame, { kind: 'conversation' }>, 'items' | 'header'> & { readonly items: readonly unknown[]; readonly header?: unknown },
 ): ConversationChunk => ({
   id: frame.id,
   replace: frame.replace,
