@@ -1653,7 +1653,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             *last = Some(now);
         }
-        for fault in self.store.fault_snapshot(now)? {
+        let faults = {
+            let _span = crate::profile::span("fault.snapshot");
+            self.store.fault_snapshot(now)?
+        };
+        let _delivery_span = crate::profile::span("fault.delivery");
+        for fault in faults {
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
             };
@@ -16306,6 +16311,7 @@ fn now_ms() -> u128 {
 mod tests {
     mod channel_recovery;
     mod differential;
+    mod fault_phase_spans;
     mod first_readiness_tests;
     mod github_watch_selection;
     mod incremental_deadlines;
