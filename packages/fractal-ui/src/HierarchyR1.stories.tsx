@@ -58,7 +58,7 @@ const turns = (splitRun: boolean, runShown: boolean): readonly TranscriptTurn[] 
   // The split restores a header Copy that only covers the first block: later blocks lose the shared sender.
   ...runShown ? [{ id: 'hierarchy/run-turn', items: run, work: idle, senderCaptions: splitRun ? { [run[0]!.id]: caption } : Object.fromEntries(run.map(item => [item.id, caption])) }] : [],
 ]
-const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'fold-scroll', 'answer-footer', 'markdown-margin', 'loose-list', 'quote-strong', 'run-copy', 'copy-reject', 'copy-late', 'prose-run'] as const
+const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'fold-scroll', 'answer-footer', 'markdown-margin', 'loose-list', 'quote-strong', 'run-copy', 'copy-reject', 'copy-late', 'prose-run', 'seat-header'] as const
 type Failure = typeof failures[number]
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
@@ -67,7 +67,7 @@ const styles = stylex.create({
   controls: { display: 'flex', flexWrap: 'wrap', gap: s.md, paddingBlock: s.lg },
 })
 
-function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none' }: { scheme?: Scheme; narrow?: boolean; failure?: Failure }) {
+function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none', showSeatHeader = true }: { scheme?: Scheme; narrow?: boolean; failure?: Failure; showSeatHeader?: boolean }) {
   const root = React.useRef<HTMLElement>(null)
   const [revision, rerender] = React.useState(0)
   const [runShown, setRunShown] = React.useState(true)
@@ -97,7 +97,7 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none' }: { sche
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}><Button onPress={() => rerender(value => value + 1)}>Apply selected regression</Button><Button onPress={() => setRunShown(false)}>Hide run</Button><Button onPress={() => { setRunShown(true); setRemounts(value => value + 1) }}>Show run</Button><span>{failure}</span></div>
     <section aria-label="Fold example"><WorkLogV1 turn={work} hideLiveRow ariaLabel="Release work" expandedBody={<ThinkingEntry text="Check the **retained snapshot** first, then compare identities." />} /></section>
-    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} turns={turns(failure === 'run-copy' && revision > 0, runShown)} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Message example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={{ messages: [rich, ...run], onNew: async () => {} }}><Transcript title="Release review" now={now} observedAt={now} sync={{ _tag: 'Live', since: now }} showSeatHeader={failure === 'seat-header' && revision > 0 ? !showSeatHeader : showSeatHeader} turns={turns(failure === 'run-copy' && revision > 0, runShown)} /></EmbraceRuntimeProvider></section>
   </main>
 }
 const meta = {
@@ -282,3 +282,22 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
 export const Light1440: Story = { ...Dark1440, args: { scheme: 'light' } }
 export const Dark440: Story = { ...Dark1440, args: { narrow: true } }
 export const Light440: Story = { ...Dark1440, args: { narrow: true, scheme: 'light' } }
+
+/** C8/E14: compare headerless seat prose without changing the current default before the T pick. */
+export const HeaderlessDark1440: Story = { args: { showSeatHeader: false }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await canvas.findAllByTestId('agent-message')
+  await userEvent.click(canvas.getByRole('button', { name: 'Apply selected regression' }))
+  await waitFor(() => expect(canvasElement.querySelector('main')).toHaveAttribute('data-revision', '1'))
+  for (const item of [rich, ...run]) {
+    const answer = canvasElement.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)!
+    await expect(within(answer).getByTestId('markdown')).toBeVisible()
+    await expect(answer.querySelector('[data-testid="message-header"]')).toBeNull()
+    await expect(within(answer).queryByRole('button', { name: 'Copy answer' })).toBeNull()
+    await expect(answer.querySelector('time')).toBeNull()
+  }
+  for (const item of run.slice(1)) await expect(canvasElement.querySelector(`[data-item-id="${item.id}"]`)).toHaveAttribute('data-run-continuation', 'true')
+} }
+export const HeaderlessLight1440: Story = { ...HeaderlessDark1440, args: { showSeatHeader: false, scheme: 'light' } }
+export const HeaderlessDark440: Story = { ...HeaderlessDark1440, args: { showSeatHeader: false, narrow: true } }
+export const HeaderlessLight440: Story = { ...HeaderlessDark1440, args: { showSeatHeader: false, narrow: true, scheme: 'light' } }

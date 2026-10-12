@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect } from 'storybook/test'
-import { statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
+import { colorVars as color, statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import { tokens } from './assistant-ui/embrace-tokens.stylex'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
@@ -44,6 +44,18 @@ const meta = { title: 'Fractal UI/Diff Tint', component: DiffTintCanvas, args: {
     const value = getComputedStyle(probe).color
     probe.remove()
     return value
+  }
+  // C18: both light ink contracts match #2348; restore the former low-contrast alpha as a failing control.
+  if (args.scheme === 'light') {
+    for (const token of [text.fgFaint, color.fgFaint]) {
+      const property = token.slice(4, -1)
+      const original = scope.style.getPropertyValue(property)
+      await expect(paint(token)).toBe('rgb(107, 107, 115)')
+      scope.style.setProperty(property, 'rgba(39, 39, 42, 0.55)')
+      await expect(paint(token)).not.toBe('rgb(107, 107, 115)')
+      if (original) scope.style.setProperty(property, original); else scope.style.removeProperty(property)
+      await expect(paint(token)).toBe('rgb(107, 107, 115)')
+    }
   }
   const aliases = () => [paint(tokens.good) === paint(text.fgSoft), paint(tokens.added) === paint(status.diffAddTint)]
   if (args.scheme === 'light' || args.theme === 'embrace') {
