@@ -4,6 +4,7 @@
 pub mod transport;
 pub mod config;
 pub mod service;
+pub mod mutation;
 pub mod discovery;
 pub mod view;
 

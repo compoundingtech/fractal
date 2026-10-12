@@ -61,13 +61,18 @@ impl Transport for AuthorizedTransport {
         self.check_destination()?;
         self.repository.sync(&self.remote)
     }
+    fn capacity(&self) -> Result<(Advertisement, usize)> {
+        self.check_destination()?;
+        self.repository.discover_capacity(&self.remote)
+    }
 }
 
 pub struct Entry {
     pub configuration: RepositoryConfig,
     pub owner: Option<Owner>,
     pub service_user: Option<String>,
-    repository: Option<Repository>,
+    pub(crate) repository: Option<Repository>,
+    pub(crate) publishing: tokio::sync::Mutex<()>,
     unavailable: Option<String>,
     indexing: Arc<tokio::sync::Mutex<()>>,
     pins: std::sync::Mutex<VecDeque<Pin>>,
@@ -139,6 +144,7 @@ impl Registry {
                 owner: None,
                 service_user: None,
                 repository: None,
+                publishing: tokio::sync::Mutex::new(()),
                 unavailable: None,
                 indexing: Arc::new(tokio::sync::Mutex::new(())),
                 pins: std::sync::Mutex::new(VecDeque::new()),
@@ -197,6 +203,20 @@ impl Registry {
 }
 
 impl Entry {
+    pub(crate) fn check_destination(&self) -> Result<()> {
+        let repository = self
+            .repository
+            .as_ref()
+            .context("Git transport unavailable")?;
+        AuthorizedTransport {
+            repository: repository.clone(),
+            directory: std::fs::canonicalize(&self.configuration.transport_directory)?,
+            remote: self.configuration.remote.clone(),
+            destination: self.configuration.remote_url.clone(),
+        }
+        .check_destination()
+    }
+
     pub async fn snapshot(
         &self,
         offline: bool,

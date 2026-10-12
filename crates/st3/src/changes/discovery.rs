@@ -15,6 +15,9 @@ const READS_PER_WINDOW: usize = 6;
 pub trait Transport: Send + Sync + 'static {
     fn discover(&self) -> Result<Advertisement>;
     fn sync(&self) -> Result<()>;
+    fn capacity(&self) -> Result<(Advertisement, usize)> {
+        anyhow::bail!("managed-ref capacity transport is unavailable")
+    }
 }
 
 pub struct GitTransport {
@@ -29,6 +32,9 @@ impl Transport for GitTransport {
 
     fn sync(&self) -> Result<()> {
         self.repository.sync(&self.remote)
+    }
+    fn capacity(&self) -> Result<(Advertisement, usize)> {
+        self.repository.discover_capacity(&self.remote)
     }
 }
 
@@ -117,6 +123,7 @@ struct State {
 pub struct Counters {
     pub discoveries_started: u64,
     pub fetches_started: u64,
+    pub capacity_reads_started: u64,
     pub joined_requests: u64,
     pub reused_observations: u64,
     pub offline_requests: u64,
@@ -266,6 +273,75 @@ impl Owner {
         }
     }
 
+    /// Publication inventory is one admitted read sharing discovery/fetch budget.
+    /// A canceled requester cannot create another owner operation.
+    pub async fn capacity(&self) -> Result<CapacityAdmission> {
+        let mut state = self.state.lock().await;
+        if state.syncing || state.discovery.is_some() {
+            return Ok(CapacityAdmission::InFlight);
+        }
+        let now = Instant::now();
+        let available = state.budget.available_at(now);
+        if !state.budget.admit(now) {
+            return Ok(CapacityAdmission::Deferred {
+                retry_after_ms: available
+                    .duration_since(now)
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            });
+        }
+        state.syncing = true;
+        state.counters.capacity_reads_started =
+            state.counters.capacity_reads_started.saturating_add(1);
+        let (sender, mut receiver) = watch::channel(None);
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let attempted_at = chrono::Utc::now().to_rfc3339();
+            let started = Instant::now();
+            let transport = owner.transport.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let (advertisement, count) = transport.capacity()?;
+                let observation = Observation::from_advertisement(advertisement)?;
+                Ok::<_, anyhow::Error>((observation, count))
+            })
+            .await;
+            let mut state = owner.state.lock().await;
+            state.syncing = false;
+            let result = match result {
+                Ok(Ok((mut observation, count))) => {
+                    observation.attempted_at = Some(attempted_at.clone());
+                    observation.operation_ms =
+                        Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+                    state.observation = observation.clone();
+                    Ok((observation, count))
+                }
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = &result {
+                state.observation.error = Some(error.clone());
+                state.observation.attempted_at = Some(attempted_at);
+                state.observation.operation_ms =
+                    Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+            }
+            let _ = sender.send(Some(result));
+        });
+        drop(state);
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                let (observation, managed_ref_count) = result.map_err(anyhow::Error::msg)?;
+                return Ok(CapacityAdmission::Completed {
+                    observation,
+                    managed_ref_count,
+                });
+            }
+            receiver
+                .changed()
+                .await
+                .context("Git capacity owner stopped")?;
+        }
+    }
+
     /// Fixed-size diagnostic reduction; reading it does not perform Git I/O.
     pub async fn diagnostics(&self) -> Diagnostics {
         let mut state = self.state.lock().await;
@@ -281,6 +357,18 @@ impl Owner {
             in_flight: state.syncing || state.discovery.is_some(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum CapacityAdmission {
+    Completed {
+        observation: Observation,
+        managed_ref_count: usize,
+    },
+    InFlight,
+    Deferred {
+        retry_after_ms: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

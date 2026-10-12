@@ -255,6 +255,47 @@ impl Repository {
         })
     }
 
+    /// A publication capacity observation includes immutable gate evidence refs in
+    /// the same Git read. Core list/show discovery still uses only the change pattern.
+    pub fn discover_capacity(&self, remote: &str) -> Result<(Advertisement, usize)> {
+        let remote = self.remote(remote)?;
+        let raw = self.text(
+            &[
+                "ls-remote",
+                "--refs",
+                &remote,
+                "refs/st/changes/v1/*",
+                "refs/notes/evidence/*",
+            ],
+            None,
+        )?;
+        let mut refs = BTreeMap::new();
+        let mut names = std::collections::BTreeSet::new();
+        for line in raw.lines() {
+            let (target, name) = line
+                .split_once('\t')
+                .context("malformed managed Git advertisement")?;
+            oid(target)?;
+            ensure!(names.insert(name.to_owned()), "duplicate managed Git ref");
+            if name.starts_with(PREFIX) {
+                refs.insert(name.into(), target.into());
+            } else {
+                let record = name
+                    .strip_prefix(crate::evidence::NOTES_PREFIX)
+                    .context("unexpected managed Git namespace")?;
+                oid(record)?;
+                ensure!(record == target, "evidence ref is not immutable");
+            }
+        }
+        Ok((
+            Advertisement {
+                observed_at: chrono::Utc::now().to_rfc3339(),
+                refs,
+            },
+            names.len(),
+        ))
+    }
+
     /// Explicit fetch into an isolated tracking namespace, not the writer's active refs.
     pub fn sync(&self, remote: &str) -> Result<()> {
         let remote = self.remote(remote)?;
@@ -359,6 +400,32 @@ impl Repository {
         let tree = self.text(&["rev-parse", &format!("{source}^{{tree}}")], None)?;
         oid(&tree)?;
         Ok((source, tree))
+    }
+
+    /// A selected multi-commit unit cannot silently absorb another stable identity.
+    pub fn validate_grouping(&self, base: &str, source: &str, expected_id: &str) -> Result<()> {
+        oid(base)?;
+        oid(source)?;
+        super::change_id(expected_id)?;
+        let commits = self.text(
+            &["rev-list", "--max-count=101", &format!("{base}..{source}")],
+            None,
+        )?;
+        let commits: Vec<_> = commits.lines().collect();
+        ensure!(
+            commits.len() <= 100,
+            "selected change range exceeds 100-commit validation budget; use the PR path"
+        );
+        for commit in commits {
+            oid(commit)?;
+            if let Some(id) = self.trailer(commit)? {
+                ensure!(
+                    id == expected_id,
+                    "selected range contains incompatible Change-Ids; choose an explicit change unit or use the PR path"
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn trailer(&self, revision: &str) -> Result<Option<String>> {
@@ -496,7 +563,7 @@ impl Repository {
         old: Option<&Revision>,
         candidate: &Revision,
     ) -> Result<()> {
-        self.publish_with_release(remote, old, candidate, None)
+        self.publish_with_release(remote, old, candidate, None, None)
     }
 
     /// Claim release has an explicit worker/nonce proof. The caller still validates
@@ -509,7 +576,20 @@ impl Repository {
         worker: &str,
         nonce: &str,
     ) -> Result<()> {
-        self.publish_with_release(remote, Some(old), candidate, Some((worker, nonce)))
+        self.publish_with_release(remote, Some(old), candidate, Some((worker, nonce)), None)
+    }
+
+    /// Recheck caller-owned runtime authority after object/refspec validation,
+    /// immediately before starting the remote atomic push.
+    pub fn publish_guarded(
+        &self,
+        remote: &str,
+        old: Option<&Revision>,
+        candidate: &Revision,
+        release: Option<(&str, &str)>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.publish_with_release(remote, old, candidate, release, Some(guard))
     }
 
     fn publish_with_release(
@@ -518,6 +598,7 @@ impl Repository {
         old: Option<&Revision>,
         candidate: &Revision,
         release: Option<(&str, &str)>,
+        guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
         let loaded = self.load(&candidate.oid)?;
         ensure!(
@@ -580,6 +661,9 @@ impl Repository {
         }
         args.push(self.remote(remote)?);
         args.extend(updates);
+        if let Some(guard) = guard {
+            guard()?;
+        }
         self.git(&args.iter().map(String::as_str).collect::<Vec<_>>(), None)?;
         Ok(())
     }

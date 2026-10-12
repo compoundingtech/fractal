@@ -2,6 +2,7 @@
 //! claim kind, replicated scheduling authority, or a signed landing observation.
 use super::*;
 use crate::changes::{Revision, change_id, oid};
+use anyhow::Context;
 
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 
@@ -29,6 +30,14 @@ pub struct IndexedChange {
     pub indexed_at: String,
 }
 
+struct WorkLease {
+    attempt: u32,
+    status: String,
+    worker: Option<String>,
+    incarnation: Option<String>,
+    expiry: Option<String>,
+}
+
 fn repository_key(key: &str) -> Result<()> {
     anyhow::ensure!(
         !key.is_empty() && key.len() <= 256 && !key.chars().any(char::is_control),
@@ -38,8 +47,124 @@ fn repository_key(key: &str) -> Result<()> {
 }
 
 impl Store {
-    pub fn install_git_change_registry(&self, registry: Arc<crate::changes::service::Registry>) -> Result<()> {
-        self.smalltalk.git_change_registry.set(registry).map_err(|_| anyhow::anyhow!("Git change registry already installed"))
+    pub(crate) fn git_change_work_binding(
+        &self,
+        actor: &str,
+        step: &str,
+        incarnation: &str,
+    ) -> Result<crate::changes::WorkBinding> {
+        let connection = self.readers.get();
+        let claim_id: String = connection
+            .prepare_cached(&format!(
+                "{} LIMIT 1",
+                super::newest_claims_of_kind_query("claims.id", "work.claimed")
+            ))?
+            .query_row(params![step, i64::MAX], |row| row.get(0))?;
+        drop(connection);
+        let binding = crate::changes::WorkBinding {
+            step: step.into(),
+            incarnation: incarnation.into(),
+            claim_id,
+        };
+        self.validate_git_change_work(actor, &binding)?;
+        Ok(binding)
+    }
+
+    /// Point-read the owner runtime's live lease and the exact durable work claim.
+    /// A replicated lease deadline can never prove local authority.
+    pub(crate) fn validate_git_change_work(
+        &self,
+        actor: &str,
+        binding: &crate::changes::WorkBinding,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            binding.step.starts_with("step-run/")
+                && binding.step.len() <= 512
+                && binding.incarnation.len() <= 256,
+            "invalid stage work binding"
+        );
+        let connection = self.readers.get();
+        let row: Option<WorkLease> = connection.query_row(
+            "SELECT s.attempt,s.status,s.lease_owner,s.lease_incarnation,s.lease_expires_at_unix_ms
+             FROM step_runs s JOIN mission_runs r ON r.id=s.run_id
+             JOIN mission_runs root ON root.id=r.root_run_id
+             JOIN run_generations g ON g.id=s.generation_id
+             WHERE s.subject=?1 AND s.generation_id=r.current_generation_id
+               AND r.status NOT IN ('completed','failed','cancelled') AND r.phase!='terminal'
+               AND root.status NOT IN ('completed','failed','cancelled') AND root.phase!='terminal'
+               AND g.status NOT IN ('superseded','completed','failed','cancelled')",
+            [&binding.step], |row| Ok(WorkLease { attempt: row.get(0)?, status: row.get(1)?, worker: row.get(2)?, incarnation: row.get(3)?, expiry: row.get(4)? }),
+        ).optional()?;
+        let WorkLease {
+            attempt,
+            status,
+            worker,
+            incarnation,
+            expiry,
+        } = row
+            .ok_or_else(|| anyhow::anyhow!("stage work is not in its current active generation"))?;
+        anyhow::ensure!(
+            matches!(status.as_str(), "claimed" | "working")
+                && worker.as_deref() == Some(actor)
+                && incarnation.as_deref() == Some(binding.incarnation.as_str()),
+            "stage work lease belongs to another worker/incarnation"
+        );
+        let expiry: u128 = expiry.context("stage work lease has no expiry")?.parse()?;
+        anyhow::ensure!(
+            expiry > super::now_ms().saturating_add(30_000),
+            "stage work lease expired or too close to expiry; renew it before Git publication"
+        );
+        // This existing fold uses bounded incarnation probes without the presentation
+        // history refinement or work-activity fold of current_harness().
+        let runtime = super::current_harness_fold_at(&connection, actor, None, false, false)?
+            .context("stage runtime is unknown")?;
+        anyhow::ensure!(
+            runtime.incarnation_id == binding.incarnation && runtime.is_ready(),
+            "stage runtime is no longer the bound live incarnation"
+        );
+        let newest: Option<String> = connection
+            .prepare_cached(&format!(
+                "{} LIMIT 1",
+                super::newest_claims_of_kind_query("claims.id", "work.claimed")
+            ))?
+            .query_row(params![binding.step, i64::MAX], |row| row.get(0))
+            .optional()?;
+        anyhow::ensure!(
+            newest.as_deref() == Some(binding.claim_id.as_str()),
+            "stage binding names a superseded work claim"
+        );
+        drop(connection);
+        let runtime_claim = self
+            .claim_by_id(&runtime.claim)?
+            .context("stage runtime observation is unavailable")?;
+        anyhow::ensure!(
+            runtime_claim.origin == self.origin(),
+            "stage runtime belongs to another authoritative owner"
+        );
+        let claim = self
+            .claim_by_id(&binding.claim_id)?
+            .context("bound work claim is unavailable")?;
+        anyhow::ensure!(
+            claim.kind == "work.claimed"
+                && claim.subject == binding.step
+                && claim.actor.as_deref() == Some(actor)
+                && claim.origin == self.origin()
+                && claim.body["fields"]["attempt"].as_u64() == Some(u64::from(attempt))
+                && claim.body["fields"]["claim_incarnation"].as_str()
+                    == Some(binding.incarnation.as_str()),
+            "bound claim is not this owner runtime's exact work attempt/incarnation"
+        );
+        Ok(())
+    }
+
+    pub fn install_git_change_registry(
+        &self,
+        registry: Arc<crate::changes::service::Registry>,
+    ) -> Result<()> {
+        self.smalltalk
+            .git_change_registry
+            .set(registry)
+            .map_err(|_| anyhow::anyhow!("Git change registry already installed"))
     }
 
     pub fn git_change_registry(&self) -> Option<Arc<crate::changes::service::Registry>> {

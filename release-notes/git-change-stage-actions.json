@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add bounded opt-in Git change publication and build/review stage claims",
+  "replay": {
+    "status": "none",
+    "detail": "No new replicated claim kind, binding field, replay or history scan."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Uses existing local record index and owner-runtime work projections."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Explicitly enabled owner-runtime agent mutations check exact durable work claim, attempt, live incarnation and current lease again before atomic Git publication. Main and landing authority remain with the curator."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Adds changes create/ready/draft/claim/release, bounded work-binding read and control.work mutation route. New mutations_enabled defaults false."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No activation, pruning or live stack migration."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Operator must explicitly enable same-runtime pilot, name its start, and retain PR fallback. Creation stops at 100 distinct changes or 14 days; every ref increase must fit 5000 managed change/evidence refs. Landing, takeover, dependency composition and pruning are outside this adapter."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Voluntary release requires exact worker/work/nonce and remains possible after pilot expiry. Unknown, conflicting or unindexed Git data cannot authorize a write; uncertain push results require explicit inspection."
+  }
+}

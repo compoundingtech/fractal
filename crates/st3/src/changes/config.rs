@@ -15,6 +15,7 @@ pub struct Config {
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Repository {
+    pub mutations_enabled: bool,
     pub name: String,
     pub reader_node: String,
     pub transport_directory: PathBuf,

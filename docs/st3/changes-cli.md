@@ -78,3 +78,56 @@ slice does not add claim/state/source mutation commands, a landing observer,
 production pruning, a new claim kind or a binding-contract field. Pilot creation
 and stage actions remain off until their separately reviewed authority and bound
 checks are available.
+
+## Explicit stage publication
+
+The stage adapter is disabled by default. An operator can separately set
+`mutations_enabled: true` for the named owner repository and its explicit pilot
+start. It permits draft creation, draft/ready/next marker changes, and cooperative
+build/review claims. Source commits must already contain exactly one canonical
+Change-Id; absence requires explicit recovery in the owned workspace. Creation
+never amends a commit or invents an association. It validates at most 100 selected
+commits and rejects incompatible IDs in that range. A previously indexed identity
+whose remote refs disappeared requires explicit owner repair, never fresh creation.
+
+```text
+st changes create --repository fixture/garden --step STEP --source FULL_SOURCE --base FULL_BASE
+st changes ready ID --repository fixture/garden --step STEP --expected-current RECORD --next build
+st changes claim ID --repository fixture/garden --step STEP --expected-current RECORD --lane build
+st changes release ID --repository fixture/garden --step STEP --expected-current CLAIMED_RECORD --nonce NONCE --next review
+st changes draft ID --repository fixture/garden --step STEP --expected-current RECORD
+```
+
+An agent seat supplies its exact incarnation through `ST3_INCARNATION` (or the
+explicit `--incarnation` flag). Before publication, a bounded owner-runtime read
+obtains the exact durable work-claim reference; `--work-claim` can supply it
+explicitly. The API derives the actor from the authenticated local Unix session,
+requires `control.work`, and checks the current generation, attempt, worker,
+incarnation, original local claim, ready runtime and actual locally renewed lease.
+It repeats the proof immediately before push and requires at least 30 seconds of
+lease remaining. A Git timestamp or a replica's remembered lease is insufficient.
+Another work claim or runtime incarnation invalidates the fence.
+
+One designated owner serializes publication. Canceling a requester leaves the
+owner operation running and holding its publication slot; another requester gets
+an explicit in-flight result. Every publication capacity check shares discovery's
+six-read/minute and ten-second admission budget. It reads change and immutable
+evidence refs together, then preserves a normal change-only observation for reads.
+Budget refusal reports an explicit retry delay or PR fallback, with no hidden wait
+or polling. An increase must fit 5,000 managed refs. Creation counts both remotely
+visible and previously indexed distinct IDs toward 100, and the pilot lasts at
+most 14 days. Voluntary release remains available after that window.
+
+Claims always advance current and create the lane claim ref in one atomic leased
+push. Release checks the worker, originating work binding and nonce, advances
+current and removes the old claim. No claim is inferred from an uncertain push
+result; inspect the remote record and binding before retrying. Runtime cancellation
+can race a network operation, so a newly published scheduling claim must still
+pass live authority checks for every subsequent transition. It grants no merge
+permission.
+
+This adapter refuses landing lanes and dependency-bearing claims: independent
+landing/composition receipts remain with the existing PR and curator path. It does
+not steal an expired claim, prune records, recover deleted refs, or amend sources.
+Those actions require their separate verified adapters and reviews. A failure can
+always continue through the existing PR path.

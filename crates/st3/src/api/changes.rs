@@ -167,6 +167,66 @@ pub(super) async fn sync(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BindingQuery {
+    step: String,
+    incarnation: String,
+}
+
+fn stage_actor(session: &client_v0::ClientSession) -> Result<String, ApiError> {
+    client_v0::require_scope(session, "control.work")?;
+    if session.transport != "unix" || !session.authority_actor.starts_with("agent/") {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "forbidden".into(),
+            message: "Git stage actions require a local live agent work lease".into(),
+            details: Box::default(),
+        });
+    }
+    Ok(session.authority_actor.clone())
+}
+
+pub(super) async fn work_binding(
+    State(state): State<AppState>,
+    Extension(session): Extension<client_v0::ClientSession>,
+    Query(query): Query<BindingQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = stage_actor(&session)?;
+    let binding = blocking_store(move || {
+        Ok(state
+            .store
+            .git_change_work_binding(&actor, &query.step, &query.incarnation)
+            .map_err(|error| error.to_string()))
+    })
+    .await?
+    .map_err(client_v0::validation)?;
+    Ok(Json(
+        serde_json::to_value(binding).map_err(ApiError::internal)?,
+    ))
+}
+
+pub(super) async fn mutate(
+    State(state): State<AppState>,
+    Extension(session): Extension<client_v0::ClientSession>,
+    Json(request): Json<crate::changes::mutation::Request>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = stage_actor(&session)?;
+    request
+        .operation
+        .validate()
+        .map_err(|error| client_v0::validation(error.to_string()))?;
+    let entry = entry(&state, &request.repository)?;
+    let published = entry
+        .mutate(state.store.clone(), actor, request)
+        .await
+        .map_err(|error| client_v0::validation(format!("{error:#}")))?;
+    state.notify.notify_waiters();
+    Ok(Json(
+        serde_json::to_value(published).map_err(ApiError::internal)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +398,38 @@ mod tests {
         assert_eq!(value["sync"]["status"], "unavailable");
         assert_eq!(value["sync"]["reader_node"], "fixture-other");
         assert_eq!(value["fallback"], "pull_request");
+    }
+    #[tokio::test]
+    async fn stage_routes_refuse_readers_and_persons_before_transport_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests::state(root.path());
+        let query = || {
+            Query(BindingQuery {
+                step: "step-run/fixture/build".into(),
+                incarnation: "fixture:one".into(),
+            })
+        };
+        let person = work_binding(State(state.clone()), session(&["control.work"]), query())
+            .await
+            .unwrap_err();
+        assert_eq!(person.status, StatusCode::FORBIDDEN);
+        let agent = Extension(client_v0::ClientSession::for_tests_scoped(
+            "agent/fixture/worker",
+            "agent/fixture/worker",
+            &["read.projections"],
+        ));
+        let reader = work_binding(State(state.clone()), agent, query())
+            .await
+            .unwrap_err();
+        assert_eq!(reader.status, StatusCode::FORBIDDEN);
+        let agent = Extension(client_v0::ClientSession::for_tests_scoped(
+            "agent/fixture/worker",
+            "agent/fixture/worker",
+            &["control.work"],
+        ));
+        let unavailable = work_binding(State(state), agent, query())
+            .await
+            .unwrap_err();
+        assert_eq!(unavailable.code, "validation-failed");
     }
 }

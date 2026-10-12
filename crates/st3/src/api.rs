@@ -582,6 +582,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/work", get(client_work))
         .route("/v1/client/changes", get(changes::list))
         .route("/v1/client/changes/sync", post(changes::sync))
+        .route("/v1/client/changes/work-binding", get(changes::work_binding))
+        .route("/v1/client/changes/mutate", post(changes::mutate))
         .route("/v1/client/change", get(changes::show))
         .route("/v1/client/work/{*id}", get(client_work_detail))
         .route("/v1/client/agents", get(client_agents))
