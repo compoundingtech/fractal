@@ -1464,9 +1464,11 @@ fn run(seed: u64, sabotage: Sabotage) -> Outcome {
         ));
     }
     let failure = (!world.failures.is_empty()).then(|| world.report());
-    if failure.is_some() && std::env::var_os("CONVERGENCE_SAVE_FAILURE").is_some() {
+    if let Some(report) = &failure
+        && std::env::var_os("CONVERGENCE_SAVE_FAILURE").is_some()
+    {
         let root = std::mem::replace(&mut world.root, tempfile::tempdir().unwrap()).keep();
-        std::fs::write(root.join("failure.txt"), failure.as_ref().unwrap()).unwrap();
+        std::fs::write(root.join("failure.txt"), report).unwrap();
         eprintln!(
             "convergence failure fixture: {} (seed {seed}, sabotage {sabotage:?})",
             root.display()
@@ -1640,8 +1642,7 @@ fn fixed_sweep() {
     let failures = std::thread::scope(|scope| {
         let threads = (0..workers).map(|_| scope.spawn(|| {
             let mut failures = Vec::new();
-            loop {
-                let Some(&seed) = seeds.get(next.fetch_add(1, Ordering::Relaxed)) else { break; };
+            while let Some(&seed) = seeds.get(next.fetch_add(1, Ordering::Relaxed)) {
                 let output = directory.join(format!("seed-{seed}.json"));
                 if output.exists() {
                     // Resume completed work without selecting only successful outcomes.
