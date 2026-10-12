@@ -12,13 +12,14 @@ const SplitSurface = ({ scheme = 'dark', width = 1440, ignoreReverse = false }: 
   const [value, setValue] = React.useState(300)
   const [locked, setLocked] = React.useState(false)
   const [committed, setCommitted] = React.useState(300)
-  return <main data-split-surface="" style={{ width, maxWidth: '100%' }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+  return <section aria-label={`${scheme} resizable split`} data-split-surface="" style={{ width, maxWidth: '100%' }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <h1>Resizable split</h1>
     <div {...stylex.props(styles.track)}><ResizableSplit id="sample-inspector" reverse={!ignoreReverse} value={value} min={240} max={locked ? 240 : 380} collapsed={false} label="Inspector width" onChange={setValue} onCommit={setCommitted} onToggle={() => setLocked(current => !current)} onReset={() => setValue(300)} /></div>
     <output aria-label="Current width">{value}</output><output aria-label="Committed width">{committed}</output>
     <Button onPress={() => setLocked(current => !current)}>{locked ? 'Allow resizing' : 'Lock resizing'}</Button>
-  </main>
+  </section>
 }
-const meta = { title: 'Fractal UI/Shell/Resizable split', component: SplitSurface, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } } } satisfies Meta<typeof SplitSurface>
+const meta = { title: 'Fractal UI/Shell/Resizable split', component: SplitSurface, decorators: [Story => <main><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } } } satisfies Meta<typeof SplitSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 const play: NonNullable<Story['play']> = async ({ canvasElement }) => {

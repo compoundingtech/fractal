@@ -15,15 +15,16 @@ const serviceCall = (ready: boolean): WorkLogCall => ({ ...call, id: 'sample-ser
 const PolicySurface = ({ scheme = 'dark', width = 1440, omitServiceFacts = false }: { readonly scheme?: Scheme; readonly width?: number; readonly omitServiceFacts?: boolean }) => {
   const [ready, setReady] = React.useState(false)
   const service = serviceCall(ready)
-  return <main data-policy-surface="" data-scheme={scheme} style={{ width, maxWidth: '100%' }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
-    <section aria-label="Routine command failure"><WorkLogV1 turn={turn} interactiveCalls={false} /></section>
-    <section aria-label="Run-ending failure"><WorkLogV1 turn={{ ...turn, failed: true, failureNote: 'The command ended the run.' }} interactiveCalls={false} /></section>
-    <section aria-label="Interrupted run"><WorkLogV1 turn={{ ...turn, failed: true, interrupted: true }} interactiveCalls={false} /></section>
-    <section aria-label="Service readiness"><WorkLogV1 turn={{ ...turn, calls: [{ ...service, metadata: omitServiceFacts ? undefined : service.metadata }, { ...call, id: 'sample-command-timeout', status: 'success', metadata: { timedOut: true } }] }} interactiveCalls={false} /></section>
+  return <section aria-label={`${scheme} work log policy`} data-policy-surface="" data-scheme={scheme} style={{ width, maxWidth: '100%' }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <h1>Work log policy</h1>
+    <section aria-label="Routine command failure"><WorkLogV1 ariaLabel="Routine command work" turn={turn} interactiveCalls={false} /></section>
+    <section aria-label="Run-ending failure"><WorkLogV1 ariaLabel="Run-ending command work" turn={{ ...turn, failed: true, failureNote: 'The command ended the run.' }} interactiveCalls={false} /></section>
+    <section aria-label="Interrupted run"><WorkLogV1 ariaLabel="Interrupted command work" turn={{ ...turn, failed: true, interrupted: true }} interactiveCalls={false} /></section>
+    <section aria-label="Service readiness"><WorkLogV1 ariaLabel="Recorded service work" turn={{ ...turn, calls: [{ ...service, metadata: omitServiceFacts ? undefined : service.metadata }, { ...call, id: 'sample-command-timeout', status: 'success', metadata: { timedOut: true } }] }} interactiveCalls={false} /></section>
     <Button onPress={() => setReady(value => !value)}>{ready ? 'Record readiness timeout' : 'Record ready service'}</Button>
-  </main>
+  </section>
 }
-const meta = { title: 'Fractal UI/Transcript/Work log policy', component: PolicySurface, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } } } satisfies Meta<typeof PolicySurface>
+const meta = { title: 'Fractal UI/Transcript/Work log policy', component: PolicySurface, decorators: [Story => <main><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } } } satisfies Meta<typeof PolicySurface>
 export default meta
 type Story = StoryObj<typeof meta>
 const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
@@ -49,5 +50,5 @@ export const Light1440: Story = { args: { scheme: 'light' }, play }
 export const Dark440: Story = { args: { width: 440 }, play }
 export const Light440: Story = { args: { width: 440, scheme: 'light' }, play }
 export const MissingServiceFactsControl: Story = { args: { omitServiceFacts: true }, play }
-export const AllStates: Story = { render: () => <><PolicySurface width={440} /><PolicySurface width={440} scheme="light" /></> }
+export const AllStates: Story = { render: args => <PolicySurface {...args} /> }
 const styles = stylex.create({ root: { boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans } })
