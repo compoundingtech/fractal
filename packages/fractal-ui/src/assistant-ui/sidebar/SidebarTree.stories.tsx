@@ -177,7 +177,8 @@ export const ColdRevealBeforeMeasurement: Story = { render: () => <Pair cold />,
   await waitFor(() => expect(no.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0), settled)
   await frames()
   const control = real(no, deepKey)
-  await expect(control === null || !clear(no, control)).toBe(true)
+  await expect(control).not.toBeNull()
+  await expect(clear(no, control!)).toBe(false)
 } }
 export const RevealUnvisitedAncestors: Story = { render: pair, play: async ({ canvasElement }) => {
   const [yes, no] = examples(canvasElement)
