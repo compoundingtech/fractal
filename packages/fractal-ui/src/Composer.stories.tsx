@@ -14,7 +14,7 @@ import { developmentMeasurements } from './assistant-ui/perf/measurement'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
 type EffortSupport = keyof typeof fixtureEffortControls
 interface ComposerArgs {
@@ -636,7 +636,7 @@ const styles = stylex.create({
   frameTitle: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading },
   caption: { color: ink.fgMuted, flexGrow: 1 },
   frameBody: { minWidth: 0, padding: s.md, display: 'flex', flexDirection: 'column', gap: s.xl },
-  button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-start', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  button: { display: 'inline-flex', justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-start', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   receipts: { display: 'flex', flexDirection: 'column', gap: s.md },
   receipt: { margin: 0, padding: s.md, backgroundColor: surface.rowActive, borderRadius: r.sm, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   text: { margin: 0, marginBlock: s.sm, whiteSpace: 'pre-wrap' },

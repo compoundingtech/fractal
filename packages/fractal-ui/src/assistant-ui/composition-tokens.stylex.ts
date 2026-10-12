@@ -37,6 +37,13 @@ export const accentVars = stylex.defineVars({
   onPrimary: '#ffffff',
 })
 
+/** Shared interaction ink; geometry remains in the fixed scale. */
+export const interactionVars = stylex.defineVars({
+  focusRing: accentVars.primary,
+  composerFocusBorder: 'rgba(52, 107, 241, 0.4)',
+  wash: 'rgba(245, 245, 245, 0.06)',
+})
+
 export const statusVars = stylex.defineVars({
   running: '#3b82f6',
   runningFg: '#60a5fa',
@@ -92,7 +99,7 @@ export const geometryVars = stylex.defineVars({
   panelDefault: '540px', panelMin: '360px',
   controlSm: '24px', controlMd: '28px', controlLg: '32px',
   toolRow: '24px',
-  menuRow: '32px',
+  menuRow: '28px', checkbox: '14px',
   gutter: 'clamp(12px, 1.25vw, 20px)',
   drawerDefault: '220px', drawerMin: '120px',
   footer: '40px',
@@ -134,14 +141,14 @@ export const geometryNumbers = {
   footer: 40,
   drawerMin: 120, drawerMax: 600,
   resizeStep: 8, resizeStepLarge: 32, splitMinRatio: 0.1, splitMaxRatio: 0.9,
-  tooltipOffset: 6, contextOffset: 8, scrollEndTolerance: 1,
+  tooltipOffset: 4, contextOffset: 8, scrollEndTolerance: 1,
   estimatedMessageHeight: 160,
   threadViewportMin: 96,
 } as const
 
 export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
-  ease: 'ease', linear: 'linear',
+  ease: 'ease', linear: 'linear', surfaceTransform: 'scale(0.98)',
 })
 
 export const elevationVars = stylex.defineVars({

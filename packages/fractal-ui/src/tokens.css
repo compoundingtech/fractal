@@ -97,9 +97,6 @@
 }
 [data-workshop] { color-scheme: light; }
 [data-workshop][data-scheme='dark'] { color-scheme: dark; }
-[data-focus-visible], [data-workshop] :focus-visible {
-  outline: 2px solid var(--accent); outline-offset: 3px;
-}
 [data-workshop] ::selection { background: var(--selection); }
 @media (prefers-reduced-motion: reduce) {
   [data-workshop], [data-workshop] * { --motion-duration: 0ms; }

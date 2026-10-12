@@ -88,7 +88,7 @@ const geometryVarsTheme = stylex.createTheme(geometryVars, {
   panelDefault: '540px', panelMin: '360px',
   controlSm: '24px', controlMd: '28px', controlLg: '32px',
   toolRow: '24px',
-  menuRow: '32px',
+  menuRow: '28px', checkbox: '14px',
   gutter: 'clamp(12px, 1.25vw, 20px)',
   drawerDefault: '220px', drawerMin: '120px',
   footer: '40px',
@@ -119,7 +119,7 @@ const geometryVarsTheme = stylex.createTheme(geometryVars, {
 
 const motionVarsTheme = stylex.createTheme(motionVars, {
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
-  ease: 'ease', linear: 'linear',
+  ease: 'ease', linear: 'linear', surfaceTransform: 'scale(0.98)',
 })
 
 const elevationVarsTheme = stylex.createTheme(elevationVars, {
