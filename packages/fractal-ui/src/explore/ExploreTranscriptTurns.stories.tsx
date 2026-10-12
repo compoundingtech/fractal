@@ -89,8 +89,8 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
   return <div ref={root} {...hoverProps} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-hovered={isHovered || undefined} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && previous !== undefined && styles.turnStart, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, collapsedKind && styles.quiet)}>
     {turn === `T${3}` && !collapsedKind ? <span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name={glyphs[block.kind]} /></span> : null}
     {meta === 'M3' && isDivider(block, previous) ? <div data-time-divider {...stylex.props(styles.divider)}>{time}</div> : null}
-    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary, marker && styles.marker)}><span data-input-kind-icon aria-hidden="true" {...stylex.props(styles.summarySlot)}><Icon name={glyphs[block.kind]} scale="status" /></span><strong data-input-sender {...stylex.props(styles.summarySender)}>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}><span data-input-title-run {...stylex.props(styles.summaryRun)}>{block.text.split('\n')[0]}</span></span><span data-input-chevron data-expanded={expanded || undefined} {...stylex.props(styles.summarySlot)}><Icon name="chevron-right" scale="disclosure" /></span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{expanded ? <>{header}{body}</> : null}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
     {meta === 'M1' && seat ? <div data-seat-meta-overlay data-affordance="reveal" {...stylex.props(styles.seatMeta)}><span data-meta-time>{time}</span>{copy}</div> : null}
+    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary, meta === 'M4' && styles.trailingSummary, marker && styles.marker)}><span data-input-kind-icon aria-hidden="true" {...stylex.props(styles.summarySlot)}><Icon name={glyphs[block.kind]} scale="status" /></span><strong data-input-sender {...stylex.props(styles.summarySender)}>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}><span data-input-title-run {...stylex.props(styles.summaryRun)}>{block.text.split('\n')[0]}</span></span><span data-input-chevron data-expanded={expanded || undefined} {...stylex.props(styles.summarySlot)}><Icon name="chevron-right" scale="disclosure" /></span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{expanded ? <>{header}{body}</> : null}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
     {meta === 'M1' && collapsedKind && !expanded ? <span data-collapsed-meta {...stylex.props(styles.collapsedMeta)}>{copy}<span data-meta-time>{time}</span></span> : null}
     {meta === 'M2' ? <div data-meta-time data-affordance="reveal" {...stylex.props(styles.timeOverlay, styles.gutterTime)}>{time}</div> : null}
     {meta === 'M4' && tail !== null && (!collapsedKind || expanded) ? createPortal(<span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span>, tail) : null}
@@ -180,16 +180,17 @@ const styles = stylex.create({
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
-  seatMeta: { position: 'absolute', bottom: '100%', right: `calc(-1 * clamp(${s.zero}, calc((100vw - ${g.lane}) / 2 - ${s.section}), ${s.panel}))`, height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
-  coveredLine: { top: 0, bottom: 'auto', left: 0, right: 'auto' },
-  noOverhang: { right: 0 },
+  seatMeta: { position: geometry.metaPosition, bottom: '100%', right: `calc(-1 * clamp(${s.zero}, calc((100vw - ${g.lane}) / 2 - ${s.section}), ${s.panel}))`, width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: g.toolRow, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  coveredLine: { position: 'absolute', top: 0, bottom: 'auto', left: 0, right: 'auto' },
+  noOverhang: { position: 'absolute', right: 0 },
   overhangControl: { width: g.previewMax, maxWidth: '100%', display: 'flex', flexDirection: 'column', gap: s.md },
   controlLine: { margin: 0, paddingRight: s.section, textAlign: 'right' },
   collapsedMeta: { position: 'absolute', right: 0, top: 0, display: 'flex', gap: s.md, alignItems: 'center', height: g.toolRow },
   divider: { position: 'absolute', bottom: '100%', left: 0, right: 0, textAlign: 'center', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  summary: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, lineHeight: g.toolRow, whiteSpace: 'nowrap', borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { flex: '1 1 auto', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
+  summary: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: `min(${geometry.metaRoom}, 25%)`, minHeight: g.toolRow, lineHeight: g.toolRow, whiteSpace: 'nowrap', borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { flex: '1 1 auto', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
+  trailingSummary: { paddingRight: 0 },
   summaryRun: { display: 'inline-block', whiteSpace: 'nowrap' },
-  summarySender: { fontWeight: t.weightMedium, flexShrink: 0 },
+  summarySender: { fontWeight: t.weightMedium, flexShrink: 0, maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   summarySlot: { width: g.icon, height: g.icon, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' },
   marker: { minHeight: t.uiLeading, lineHeight: t.uiLeading, fontSize: t.metaSize, color: ink.fgMuted },
   stackedInputControl: { width: geometry.metaRoom, fontSize: t.uiSize, lineHeight: g.toolRow },
@@ -229,7 +230,7 @@ function lastLineRects(block: HTMLElement) {
 }
 function reservedMetaHeight(block: HTMLElement) {
   const height = block.getBoundingClientRect().height
-  const metadata = Array.from(block.querySelectorAll<HTMLElement>('[data-meta-time], [data-time-divider], [data-copy]'))
+  const metadata = Array.from(block.querySelectorAll<HTMLElement>('[data-meta-time], [data-time-divider], [data-copy], [data-seat-meta-overlay]'))
   const previous = metadata.map(element => element.style.display)
   metadata.forEach(element => { element.style.display = 'none' })
   const bare = block.getBoundingClientRect().height
@@ -332,7 +333,9 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
     const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
     for (const [index, block] of blocks.entries()) {
-      await expect(reservedMetaHeight(block)).toBe(0)
+      const seatToolbar = block.querySelector('[data-seat-meta-overlay]')
+      const inFlow = seatToolbar !== null && getComputedStyle(seatToolbar).position === 'static'
+      await expect(reservedMetaHeight(block)).toBe(inFlow ? 24 : 0)
       if (lane.getAttribute('data-meta-variant') === 'M4') await expect(block.querySelectorAll('time[data-turn-time]')).toHaveLength(1)
       const next = blocks[index + 1]
       if (next === undefined) continue
