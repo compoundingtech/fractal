@@ -3573,8 +3573,9 @@ struct AgentRestartArgs {
 #[derive(Subcommand)]
 enum GhCommand {
     /// Watch an issue or pull request. Each new comment or review that this seat did not post,
-    /// each time the required checks on its current head turn pass or fail, and its close or
-    /// merge wake this seat once; the close or merge, or the deadline, ends the watch. Watching
+    /// each time the required checks on its current head turn pass or fail, changes to its
+    /// head, draft state or queue membership, and its close or merge wake this seat once;
+    /// the close or merge, or the deadline, ends the watch. Watching
     /// it again keeps the watch and takes the new deadline.
     #[command(
         after_help = "Examples:\n  st gh watch acme/garden#12\n  st gh watch https://github.com/acme/garden/pull/12 --until 4h"
