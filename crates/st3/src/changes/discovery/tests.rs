@@ -45,7 +45,10 @@ impl Transport for Probe {
         );
         Ok(Advertisement {
             observed_at: "2026-01-01T00:00:00Z".into(),
-            refs: BTreeMap::from([("synthetic-ref".into(), "synthetic-object".into())]),
+            refs: BTreeMap::from([(
+                format!("{}I{}/current", super::super::PREFIX, "1".repeat(40)),
+                "a".repeat(40),
+            )]),
         })
     }
 
@@ -153,4 +156,21 @@ async fn explicit_sync_consumes_the_same_read_budget() {
     assert_eq!(diagnostics.counters.fetches_started, 1);
     assert_eq!(diagnostics.counters.discoveries_started, 0);
     assert_eq!(diagnostics.remote_read_operations_in_last_minute, 1);
+}
+
+#[tokio::test]
+async fn repeated_and_offline_reads_share_inventory_and_id_reduction_allocations() {
+    let probe = Probe::new(false);
+    let owner = Owner::new(probe.clone());
+    let first = owner.observe(false).await.unwrap();
+    for offline in [false, true] {
+        let second = owner.observe(offline).await.unwrap();
+        assert!(Arc::ptr_eq(
+            first.advertisement.as_ref().unwrap(),
+            second.advertisement.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(&first.ids, &second.ids));
+    }
+    assert_eq!(probe.discoveries.load(Ordering::SeqCst), 1);
+    assert_eq!(first.advertised_ids().len(), 1);
 }

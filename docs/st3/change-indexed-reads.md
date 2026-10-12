@@ -12,7 +12,9 @@ Discovery and explicit fetch share a sliding limit of six reads a minute. Offlin
 reads perform no transport operation. A failed observation retains the prior
 successful inventory and reports the failed attempt separately; it cannot become
 an empty successful inventory. A denied fetch reports its next admission delay.
-There is no per-seat reader or timer loop.
+There is no per-seat reader or timer loop. Successful inventories and their ID
+reduction are validated once and shared through immutable Arc allocations; joined,
+reused, offline and paginated reads do not copy or rebuild the inventory.
 
 The node-local graph database holds immutable metadata-object receipts and a
 latest indexed pointer per repository and change ID. Tables are empty at creation;
@@ -21,7 +23,8 @@ replicated digest contribution. An explicit importer validates Git objects,
 source/tree/trailer/parents outside the writer before publishing a receipt in one
 short transaction. Reindexing an existing object preserves its original indexed
 time. Conflicting bodies for the same object fail. A late old generation does not
-regress the latest pointer. Record bodies are bounded at 16 KiB.
+regress the latest pointer. Record bodies are bounded at 16 KiB. Growth is one immutable row per metadata
+object; pruning is a later slice and is not enabled here.
 
 List/show join the exact advertised current object with that local index. An
 unknown object reports `sync_needed`, with old indexed data explicitly labelled as
@@ -29,6 +32,8 @@ history. Absent previously indexed IDs report `remote_missing`; absence is never
 interpreted as a landing or abandonment. An inconsistent marker set reports
 `marker_conflict`. A never-observed ID absent from a successful inventory reports
 `not_found`. Offline data and observation errors retain their actual timestamps.
+Consumers must read the page-level observation before displaying an item: a failed
+refresh can leave an exact indexed receipt alongside an aged inventory and error.
 Even `indexed` means cooperative Git scheduling data, not an independent landing
 receipt or runtime-lease proof. Evidence freshness stays unknown because evidence
 refs are outside the discovery pattern.

@@ -2,8 +2,8 @@
 //! of a client does not cancel the owner task or permit a second concurrent read.
 use super::transport::{Advertisement, Repository};
 use anyhow::{Context, Result};
-use serde::Serialize;
-use std::collections::VecDeque;
+use serde::{Serialize, Serializer};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, watch};
@@ -32,15 +32,45 @@ impl Transport for GitTransport {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Observation {
     /// Last successful inventory, retained after transport failure.
-    pub advertisement: Option<Advertisement>,
+    #[serde(serialize_with = "serialize_advertisement")]
+    advertisement: Option<Arc<Advertisement>>,
+    #[serde(skip)]
+    ids: Arc<BTreeMap<String, Option<String>>>,
     pub attempted_at: Option<String>,
     pub operation_ms: Option<u64>,
     pub error: Option<String>,
     pub offline: bool,
     pub reused: bool,
+}
+
+impl Observation {
+    /// Validate and reduce an inventory once, before sharing it with requests.
+    pub fn from_advertisement(advertisement: Advertisement) -> Result<Self> {
+        let ids = super::view::advertised_ids(&advertisement)?;
+        Ok(Self {
+            advertisement: Some(Arc::new(advertisement)),
+            ids: Arc::new(ids),
+            ..Self::default()
+        })
+    }
+
+    pub fn advertisement(&self) -> Option<&Advertisement> {
+        self.advertisement.as_deref()
+    }
+
+    pub(crate) fn advertised_ids(&self) -> &BTreeMap<String, Option<String>> {
+        &self.ids
+    }
+}
+
+fn serialize_advertisement<S: Serializer>(
+    advertisement: &Option<Arc<Advertisement>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    advertisement.as_deref().serialize(serializer)
 }
 
 #[derive(Default)]
@@ -114,14 +144,7 @@ impl Owner {
             transport,
             state: Arc::new(Mutex::new(State {
                 budget: Budget::default(),
-                observation: Observation {
-                    advertisement: None,
-                    attempted_at: None,
-                    operation_ms: None,
-                    error: None,
-                    offline: false,
-                    reused: false,
-                },
+                observation: Observation::default(),
                 discovery: None,
                 syncing: false,
                 counters: Counters::default(),
@@ -159,29 +182,30 @@ impl Owner {
                 let attempted_at = chrono::Utc::now().to_rfc3339();
                 let started = Instant::now();
                 let transport = owner.transport.clone();
-                let result = tokio::task::spawn_blocking(move || transport.discover()).await;
+                let result = tokio::task::spawn_blocking(move || {
+                    transport
+                        .discover()
+                        .and_then(Observation::from_advertisement)
+                })
+                .await;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => Err(anyhow::Error::from(error)),
+                };
                 let mut state = owner.state.lock().await;
-                let (advertisement, error) = match result {
-                    Ok(Ok(advertisement)) => (Some(advertisement), None),
-                    Ok(Err(error)) => (
-                        state.observation.advertisement.clone(),
-                        Some(error.to_string()),
-                    ),
-                    Err(error) => (
-                        state.observation.advertisement.clone(),
-                        Some(error.to_string()),
-                    ),
+                let mut observation = match result {
+                    Ok(observation) => observation,
+                    Err(error) => {
+                        let mut observation = state.observation.clone();
+                        observation.error = Some(error.to_string());
+                        observation
+                    }
                 };
-                let observation = Observation {
-                    advertisement,
-                    attempted_at: Some(attempted_at),
-                    operation_ms: Some(
-                        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
-                    ),
-                    error,
-                    offline: false,
-                    reused: false,
-                };
+                observation.attempted_at = Some(attempted_at);
+                observation.operation_ms =
+                    Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+                observation.offline = false;
+                observation.reused = false;
                 state.observation = observation.clone();
                 state.discovery = None;
                 let _ = sender.send(Some(observation));

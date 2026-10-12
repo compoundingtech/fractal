@@ -8,6 +8,7 @@ use crate::store::git_changes::IndexedChange;
 use anyhow::{Result, ensure};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Unbounded};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,12 +60,10 @@ impl From<&Observation> for Freshness {
     fn from(observation: &Observation) -> Self {
         Self {
             refs_observed_at: observation
-                .advertisement
-                .as_ref()
+                .advertisement()
                 .map(|advertisement| advertisement.observed_at.clone()),
             ref_count: observation
-                .advertisement
-                .as_ref()
+                .advertisement()
                 .map(|advertisement| advertisement.refs.len()),
             attempted_at: observation.attempted_at.clone(),
             operation_ms: observation.operation_ms,
@@ -82,28 +81,26 @@ pub struct Detail {
     pub item: Change,
 }
 
-fn advertised_ids(
-    advertisement: Option<&Advertisement>,
+pub(crate) fn advertised_ids(
+    advertisement: &Advertisement,
 ) -> Result<BTreeMap<String, Option<String>>> {
     let mut ids = BTreeMap::new();
-    if let Some(advertisement) = advertisement {
-        ensure!(
-            advertisement.refs.len() <= 5000,
-            "change namespace exceeds read inventory budget; use the PR path"
-        );
-        for (name, object) in &advertisement.refs {
-            let suffix = name
-                .strip_prefix(PREFIX)
-                .ok_or_else(|| anyhow::anyhow!("unexpected Git namespace"))?;
-            let (id, marker) = suffix
-                .split_once('/')
-                .ok_or_else(|| anyhow::anyhow!("malformed change ref"))?;
-            change_id(id)?;
-            oid(object)?;
-            let current = ids.entry(id.to_owned()).or_insert(None);
-            if marker == "current" {
-                *current = Some(object.to_owned());
-            }
+    ensure!(
+        advertisement.refs.len() <= 5000,
+        "change namespace exceeds read inventory budget; use the PR path"
+    );
+    for (name, object) in &advertisement.refs {
+        let suffix = name
+            .strip_prefix(PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("unexpected Git namespace"))?;
+        let (id, marker) = suffix
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("malformed change ref"))?;
+        change_id(id)?;
+        oid(object)?;
+        let current = ids.entry(id.to_owned()).or_insert(None);
+        if marker == "current" {
+            *current = Some(object.to_owned());
         }
     }
     Ok(ids)
@@ -123,15 +120,15 @@ pub fn list(
     if !after.is_empty() {
         change_id(after)?;
     }
-    let advertised = advertised_ids(observation.advertisement.as_ref())?;
+    let advertised = observation.advertised_ids();
     let mut ids: BTreeSet<_> = store
         .indexed_git_change_ids(repository, after, limit + 1)?
         .into_iter()
         .collect();
     ids.extend(
         advertised
-            .keys()
-            .filter(|id| id.as_str() > after)
+            .range::<str, _>((Excluded(after), Unbounded))
+            .map(|(id, _)| id)
             .take(limit + 1)
             .cloned(),
     );
@@ -148,7 +145,7 @@ pub fn list(
             store,
             repository,
             &observation,
-            &advertised,
+            advertised,
             &indexed,
             id,
         )?);
@@ -168,7 +165,7 @@ pub fn list(
 
 pub fn show(store: &Store, repository: &str, observation: Observation, id: &str) -> Result<Detail> {
     change_id(id)?;
-    let advertised = advertised_ids(observation.advertisement.as_ref())?;
+    let advertised = observation.advertised_ids();
     let objects: Vec<_> = advertised
         .get(id)
         .and_then(Clone::clone)
@@ -179,7 +176,7 @@ pub fn show(store: &Store, repository: &str, observation: Observation, id: &str)
         store,
         repository,
         &observation,
-        &advertised,
+        advertised,
         &indexed,
         id.into(),
     )?;
@@ -208,7 +205,7 @@ fn join(
     } else {
         None
     };
-    let status = if let Some(advertisement) = &observation.advertisement {
+    let status = if let Some(advertisement) = observation.advertisement() {
         if !advertised.contains_key(&id) {
             if last_indexed.is_some() {
                 Status::RemoteMissing
@@ -252,17 +249,14 @@ mod tests {
     use crate::store::git_changes::tests::revision;
 
     fn observation(refs: BTreeMap<String, String>) -> Observation {
-        Observation {
-            advertisement: Some(Advertisement {
-                observed_at: "2026-01-01T00:00:00Z".into(),
-                refs,
-            }),
-            attempted_at: Some("2026-01-01T00:00:00Z".into()),
-            operation_ms: Some(1),
-            error: None,
-            offline: false,
-            reused: false,
-        }
+        let mut observation = Observation::from_advertisement(Advertisement {
+            observed_at: "2026-01-01T00:00:00Z".into(),
+            refs,
+        })
+        .unwrap();
+        observation.attempted_at = Some("2026-01-01T00:00:00Z".into());
+        observation.operation_ms = Some(1);
+        observation
     }
 
     #[test]
