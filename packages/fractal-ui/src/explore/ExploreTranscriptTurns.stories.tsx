@@ -359,7 +359,9 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   const identity = canvasElement.querySelector<HTMLElement>('[data-lane] [data-agent-id="Workspace.Review"] [data-agent-id-trigger]')
   if (identity !== null) {
     const tooltips = () => Array.from(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).filter(tip => tip.textContent === 'Workspace.Review')
-    await expect(identity).toHaveAccessibleName('Workspace.Review')
+    // Hidden dots join the flex parts; name computation may pad them with spaces.
+    await expect(identity).toHaveAccessibleName(/^Workspace\s*\.\s*Review$/)
+    await expect(identity.textContent).toBe('Workspace.Review')
     // Earlier steps leave keyboard modality; React Aria opens hover tooltips only under pointer modality.
     await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
     await userEvent.hover(identity)
