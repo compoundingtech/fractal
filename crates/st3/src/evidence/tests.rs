@@ -93,11 +93,29 @@ impl Fixture {
             Some(format!("100644 blob {recipe}\tci-evidence-source\n").as_bytes()),
         )
         .unwrap();
+        let workflow = git_text(
+            self.repo(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"fixture-workflow"),
+        )
+        .unwrap();
+        let workflows = git_text(
+            self.repo(),
+            &["mktree"],
+            Some(format!("100644 blob {workflow}\tfleet.yml\n").as_bytes()),
+        )
+        .unwrap();
+        let github = git_text(
+            self.repo(),
+            &["mktree"],
+            Some(format!("040000 tree {workflows}\tworkflows\n").as_bytes()),
+        )
+        .unwrap();
         let tree = git_text(
             self.repo(),
             &["mktree"],
             Some(
-                format!("040000 tree {policy_tree}\t.st\n100644 blob {file}\tcheck.rs\n040000 tree {scripts}\tscripts\n")
+                format!("040000 tree {github}\t.github\n040000 tree {policy_tree}\t.st\n100644 blob {file}\tcheck.rs\n040000 tree {scripts}\tscripts\n")
                     .as_bytes(),
             ),
         )
@@ -595,18 +613,21 @@ fn ci_observation(
         run: 123,
         attempt: 2,
         recipe_sha256: recipe_digest.clone(),
+        accepted_base: f.base.clone(),
+        workflow_sha256: hex::encode(Sha256::digest(b"fixture-workflow")),
         required_checks: BTreeSet::from(["unit-tests".into()]),
     };
     let run = serde_json::json!({
         "id":123, "run_attempt":2, "repository":{"full_name":"example/project"},
         "name":"Workspace CI", "path":".github/workflows/fleet.yml",
-        "status":"completed", "event":"pull_request", "head_sha":f.base,
+        "status":"completed", "event":"merge_group", "head_sha":f.head,
+        "head_branch":format!("gh-readonly-queue/main/pr-7-{}", f.head),
         "pull_requests":[{"number":7}]
     });
     let receipt = observers::SourceReceipt {
         version: 1,
         repository: "example/project".into(),
-        event: "pull_request".into(),
+        event: "merge_group".into(),
         run_id: "123".into(),
         run_attempt: "2".into(),
         source: f.head.clone(),
@@ -647,7 +668,8 @@ fn ci_observer_signs_retained_merge_tree_and_reports_observed_job() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].tier, TrustTier::Full);
     let statement = verify_record(f.repo(), &records[0].record, &f.trusted).unwrap();
-    assert_eq!(statement.subject[0].name, f.head); // run.head_sha deliberately names another tree
+    assert_eq!(statement.subject[0].name, f.head);
+    assert_eq!(run["head_sha"], f.head); // Queue source is platform-bound.
     let Fact::Tests { runner, checks, .. } = statement.predicate.fact else {
         panic!()
     };
@@ -784,4 +806,138 @@ fn ci_failed_and_skipped_checks_are_recorded_as_failures() {
         };
         assert_eq!(checks["unit-tests"].exit_code, 1);
     }
+}
+
+#[test]
+fn pull_request_self_reported_tree_never_gets_full_trust_even_with_a_pinned_recipe() {
+    let f = Fixture::new();
+    let (binding, mut run, mut receipt, jobs) = ci_observation(&f);
+    run["event"] = "pull_request".into();
+    run["head_sha"] = f.head.clone().into();
+    receipt.event = "pull_request".into();
+    // The author retains an old clean tree, not the actual head. Every recipe byte matches.
+    receipt.source = f.base.clone();
+    receipt.tree = tree(f.repo(), &f.base).unwrap();
+    assert!(receipt.validate(f.repo(), &binding, &run).is_ok());
+    assert!(!binding.full_eligible(f.repo(), &receipt, &run).unwrap());
+    assert!(
+        observers::produce_ci(
+            f.repo(),
+            &binding,
+            &run,
+            &receipt,
+            &jobs,
+            &observers::ObserverSigner::Full {
+                principal: "fleet/fixture-observer",
+                key: &f.key
+            }
+        )
+        .is_err()
+    );
+    let grade = observers::produce_ci(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Unavailable,
+    )
+    .unwrap();
+    assert_eq!(grade[0].tier, TrustTier::Degraded);
+    assert_eq!(
+        verify_record(f.repo(), &grade[0].record, &f.trusted)
+            .unwrap()
+            .subject[0]
+            .name,
+        f.base
+    );
+}
+
+#[test]
+fn full_queue_trust_requires_exact_workflow_and_recipe_from_operator_accepted_base() {
+    let f = Fixture::new();
+    let (mut binding, mut run, mut receipt, jobs) = ci_observation(&f);
+    assert!(binding.full_eligible(f.repo(), &receipt, &run).unwrap());
+    let changed_workflow = git_text(
+        f.repo(),
+        &["hash-object", "-w", "--stdin"],
+        Some(b"always report success"),
+    )
+    .unwrap();
+    let workflows = git_text(
+        f.repo(),
+        &["mktree"],
+        Some(format!("100644 blob {changed_workflow}\tfleet.yml\n").as_bytes()),
+    )
+    .unwrap();
+    let github = git_text(
+        f.repo(),
+        &["mktree"],
+        Some(format!("040000 tree {workflows}\tworkflows\n").as_bytes()),
+    )
+    .unwrap();
+    let entries = git_text(
+        f.repo(),
+        &["ls-tree", &tree(f.repo(), &f.head).unwrap()],
+        None,
+    )
+    .unwrap();
+    let mut rows = entries
+        .lines()
+        .filter(|row| !row.ends_with("\t.github"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    rows.push(format!("040000 tree {github}\t.github"));
+    let tree = git_text(
+        f.repo(),
+        &["mktree"],
+        Some(format!("{}\n", rows.join("\n")).as_bytes()),
+    )
+    .unwrap();
+    receipt.source = f.commit_tree(&tree, Some(&f.head));
+    receipt.tree = tree;
+    run["head_sha"] = receipt.source.clone().into();
+    // Platform source binding alone is insufficient when the jobs' workflow is changed.
+    assert!(!binding.full_eligible(f.repo(), &receipt, &run).unwrap());
+    assert!(
+        observers::produce_ci(
+            f.repo(),
+            &binding,
+            &run,
+            &receipt,
+            &jobs,
+            &observers::ObserverSigner::Full {
+                principal: "fleet/fixture-observer",
+                key: &f.key
+            }
+        )
+        .is_err()
+    );
+    // Caller-controlled producer claims or an unreviewed baseline cannot replace the operator pin.
+    binding.accepted_base = receipt.source.clone();
+    assert!(binding.full_eligible(f.repo(), &receipt, &run).is_err());
+    binding.accepted_base = f.base.clone();
+    binding.recipe_sha256 = "a".repeat(64);
+    assert!(binding.full_eligible(f.repo(), &receipt, &run).is_err());
+}
+
+#[test]
+fn malformed_configured_signer_is_rejected_before_any_observation_write() {
+    let f = Fixture::new();
+    let (binding, run, receipt, jobs) = ci_observation(&f);
+    assert!(
+        observers::produce_ci(
+            f.repo(),
+            &binding,
+            &run,
+            &receipt,
+            &jobs,
+            &observers::ObserverSigner::Full {
+                principal: "invalid signer",
+                key: &f.key
+            }
+        )
+        .is_err()
+    );
+    assert!(records(f.repo()).unwrap().is_empty());
 }

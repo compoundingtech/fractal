@@ -10,6 +10,8 @@ struct Configuration {
     repository: String,
     scratch_repo: PathBuf,
     recipe_sha256: String,
+    accepted_base: String,
+    workflow_sha256: String,
     required_checks: BTreeSet<String>,
     /// Configured by the profile operator. The seat's CLI selectors cannot change it.
     tier: TrustTier,
@@ -149,11 +151,20 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
             ObserverSigner::Unavailable
         }
     };
+    if let ObserverSigner::Full { principal, .. } | ObserverSigner::Test { principal, .. } = &signer
+    {
+        ensure!(
+            !principal.is_empty() && !principal.chars().any(char::is_whitespace),
+            "invalid configured signer principal"
+        );
+    }
     let binding = CiBinding {
         repository: configuration.repository.clone(),
         run,
         attempt,
         recipe_sha256: configuration.recipe_sha256,
+        accepted_base: configuration.accepted_base,
+        workflow_sha256: configuration.workflow_sha256,
         required_checks: configuration.required_checks,
     };
     binding.validate()?;
@@ -203,10 +214,44 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
             && receipt.pack_sha256 == hex::encode(sha2::Sha256::digest(&pack)),
         "retained pack byte length/digest mismatch"
     );
-    // index-pack imports data into the operator-owned bare repo; it never checks out code.
-    git(repo, &["index-pack", "--stdin"], Some(&pack))?;
+    // Acquire the accepted baseline and platform head with their parents before strict
+    // import. Source retention packs intentionally contain no history. For PR merge
+    // artifacts the fixed main branch supplies the base history; they remain degraded.
+    let platform_head = observed_run["head_sha"]
+        .as_str()
+        .context("platform run head")?;
+    oid(platform_head)?;
+    fetch_source(
+        repo,
+        &binding.repository,
+        &[&binding.accepted_base, platform_head, "main"],
+    )?;
+    git(
+        repo,
+        &[
+            "-c",
+            "transfer.fsckObjects=true",
+            "index-pack",
+            "--strict",
+            "--stdin",
+        ],
+        Some(&pack),
+    )?;
     receipt.validate(repo, &binding, &observed_run)?;
-    let produced = produce_ci(repo, &binding, &observed_run, &receipt, &jobs, &signer)?;
+    let full_eligible = binding.full_eligible(repo, &receipt, &observed_run)?;
+    let effective_signer = if matches!(signer, ObserverSigner::Full { .. }) && !full_eligible {
+        &ObserverSigner::Unavailable
+    } else {
+        &signer
+    };
+    let produced = produce_ci(
+        repo,
+        &binding,
+        &observed_run,
+        &receipt,
+        &jobs,
+        effective_signer,
+    )?;
     // Export data only. The caller imports it with index-pack and verifies/puts each record;
     // the private profile need not write the caller's read-only checkout or expose its key.
     let mut objects = format!("{}\n", receipt.source).into_bytes();
@@ -244,6 +289,8 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
     Ok(serde_json::json!({
         "repository":binding.repository, "run":run, "attempt":attempt,
         "source":receipt.source, "tree":receipt.tree,
+        "full_trust_eligible":full_eligible,
+        "trust_limitation":(!full_eligible).then_some("PR source is self-reported or retained workflow differs from accepted pin"),
         "records":produced,
         "object_pack_base64":base64::engine::general_purpose::STANDARD.encode(object_pack),
         "metrics":{
@@ -257,3 +304,34 @@ pub fn observe_ci(run: u64, attempt: u64, artifact: u64) -> Result<Value> {
 }
 
 use sha2::Digest as _;
+
+/// Fixed public repository and validated revisions only, under the installed profile PATH.
+fn fetch_source(repo: &Path, repository: &str, revisions: &[&str]) -> Result<()> {
+    let status = Command::new("timeout")
+        .args(["--kill-after=2s", "30s", "git", "-C"])
+        .arg(repo)
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "transfer.fsckObjects=true",
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--",
+        ])
+        .arg(format!("https://github.com/{repository}.git"))
+        .args(revisions)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    ensure!(
+        status.success(),
+        "accepted baseline/platform source unavailable"
+    );
+    Ok(())
+}
