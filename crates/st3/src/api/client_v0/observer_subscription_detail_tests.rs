@@ -44,8 +44,8 @@ impl Drop for SnapshotConstructions {
     }
 }
 
-// These controls measure whole-router global SQL counters; keep their isolated stores
-// sequential without changing the host's RUST_TEST_THREADS or global clock.
+// Keep the fixture and admission controls sequential within this module, without
+// changing the host's RUST_TEST_THREADS or global clock.
 static SERIAL: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 const OBSERVER: &str = "observer/detail/watch/source";
 const SUBSCRIPTION: &str = "subscription/detail/watch/source";
@@ -832,7 +832,144 @@ async fn detail_width_type_encoding_and_cumulative_output_refusals_are_named() {
         .unwrap();
 }
 
-#[tokio::test]
+// Take the request reader before starting the scope: opening one executes four setup
+// PRAGMAs, whose timing depends on overlapping router polls rather than detail size.
+// The multithreaded runtime and handler marker keep nested blocking_store work on
+// this worker, so the scope counts the real handler, including its snapshot teardown.
+async fn measured_detail(
+    state: &AppState,
+    kind: &'static str,
+    subject: &'static str,
+    during: impl FnOnce() + Send + 'static,
+) -> (ClientSnapshot, Value, smallclaims::sqlite::work::SqliteWork) {
+    let state = state.clone();
+    super::super::read_deadline::spawn_handler(None, move || {
+        let store = state.store.clone();
+        store
+            .readers
+            .request_read(|| {
+                let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+                during();
+                let (Extension(snapshot), Json(value)) = tokio::runtime::Handle::current()
+                    .block_on(async move {
+                        let session = Extension(ClientSession::local(None).unwrap());
+                        match kind {
+                            "observer" => {
+                                observer_detail(State(state), session, AxumPath(subject.into()))
+                                    .await
+                            }
+                            "subscription" => {
+                                subscription_detail(State(state), session, AxumPath(subject.into()))
+                                    .await
+                            }
+                            _ => unreachable!(),
+                        }
+                    })
+                    .unwrap();
+                (snapshot, value, scope.finish())
+            })
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detail_sql_measurement_excludes_reader_setup_and_concurrent_sql() {
+    let _serial = SERIAL.acquire().await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = fixture(root.path());
+    let (_, expected, baseline) = measured_detail(&state, "observer", OBSERVER, || {}).await;
+    assert!(
+        baseline.statements > 0 && baseline.vm_steps > 0,
+        "{baseline:?}"
+    );
+
+    // Hold the only idle reader so the next measurement must open a new connection.
+    let held = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let holder = {
+        let state = state.clone();
+        let held = held.clone();
+        let release = release.clone();
+        std::thread::spawn(move || {
+            state
+                .store
+                .readers
+                .request_read(|| {
+                    held.wait();
+                    release.wait();
+                })
+                .unwrap()
+        })
+    };
+    held.wait();
+    let opened = state.store.readers.usage().opened;
+    assert_eq!(state.store.readers.usage().idle, 0);
+
+    // Force traced work in another store to finish inside the measured interval.
+    let other_root = tempfile::tempdir().unwrap();
+    let other = fixture(other_root.path());
+    let start = Arc::new(Barrier::new(2));
+    let finished = Arc::new(Barrier::new(2));
+    let other_reader = {
+        let start = start.clone();
+        let finished = finished.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+            // This read executes on this worker, so its scope proves SQL ran
+            // concurrently with the measured detail worker.
+            other.store.read_snapshot(|_| Ok(())).unwrap();
+            let cost = scope.finish();
+            finished.wait();
+            cost
+        })
+    };
+    let total = smallclaims::sqlite::work::total();
+    let (_, selected, cold) = measured_detail(&state, "observer", OBSERVER, move || {
+        start.wait();
+        finished.wait();
+    })
+    .await;
+    let global = smallclaims::sqlite::work::total() - total;
+    let unrelated = other_reader.join().unwrap();
+    release.wait();
+    holder.join().unwrap();
+    assert!(state.store.readers.usage().opened > opened);
+    assert!(
+        unrelated.statements > 0 && unrelated.vm_steps > 0,
+        "{unrelated:?}"
+    );
+    assert!(
+        global.statements >= cold.statements + unrelated.statements + 4,
+        "{global:?}"
+    );
+    assert_eq!(selected, expected);
+    assert_eq!(
+        cold, baseline,
+        "setup and unrelated SQL must not change handler cost"
+    );
+
+    // SQL on the measured worker still contributes: the control cannot silently
+    // skip handler work after it moves to a different thread.
+    let extra = state.clone();
+    let (_, selected, extra_cost) = measured_detail(&state, "observer", OBSERVER, move || {
+        extra.store.read_snapshot(|_| Ok(())).unwrap();
+    })
+    .await;
+    assert_eq!(selected, expected);
+    assert!(
+        extra_cost.statements > baseline.statements,
+        "{extra_cost:?}"
+    );
+    assert!(extra_cost.vm_steps > baseline.vm_steps, "{extra_cost:?}");
+    eprintln!(
+        "detail-accounting baseline={baseline:?} cold={cold:?} global={global:?} unrelated={unrelated:?} extra={extra_cost:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn detail_router_sql_work_stays_fixed_when_declarations_and_history_grow() {
     let _serial = SERIAL.acquire().await.unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -864,10 +1001,15 @@ async fn detail_router_sql_work_stays_fixed_when_declarations_and_history_grow()
             ("observers", "observer", OBSERVER),
             ("subscriptions", "subscription", SUBSCRIPTION),
         ] {
-            let start = smallclaims::sqlite::work::total();
+            let (snapshot, selected, cost) = measured_detail(&state, kind, subject, || {}).await;
             let (status, value) = get(&state, &format!("/v1/client/{collection}/{subject}")).await;
-            let cost = smallclaims::sqlite::work::total() - start;
             assert_eq!(status, StatusCode::OK, "{value}");
+            assert_eq!(value["value"], selected);
+            assert_eq!(value["snapshot"]["id"], snapshot.id);
+            assert!(
+                cost.statements > 0 && cost.vm_steps > 0,
+                "{kind}/{count}: {cost:?}"
+            );
             assert_eq!(value["value"]["id"], subject);
             assert_eq!(
                 value["value"]["state"],
