@@ -523,6 +523,9 @@ The Changes trigger mounts next to the build version in the existing status bar.
 Its React Aria popover anchors to the visible bar with an 8px gap and restores focus
 on dismissal. It uses the shared light/dark theme, glass surface, and change-kind pills.
 The contract and compiler do not depend on a status-bar package or disclosure slot.
+The button names unread changes directly for assistive technology; its dot is decorative.
+Popover dimensions and spacing use composition tokens. Story fixtures are synthetic, and
+already-open story disclosures seed the acknowledged cursor while retaining the opening baseline.
 
 The `fractal-changelog` PR check requires a newly added entry for product UI source changes
 under `apps/fractal-web` or `packages/fractal-ui`. The `no-changelog` label explicitly opts

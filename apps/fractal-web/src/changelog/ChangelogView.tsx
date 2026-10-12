@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as type, geometryVars as geometry, radiusVars as radius, spaceVars as space, elevationVars as elevation } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as type, geometryVars as geometry, geometryNumbers, radiusVars as radius, spaceVars as space, elevationVars as elevation } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { lightTheme as assistantLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { darkTheme as assistantDarkTheme } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-theme.ts'
 import type { ChangelogEntry, ChangelogManifest } from './contract.ts'
@@ -76,8 +76,8 @@ export const ChangelogPopover = ({ dark, isOpen, onOpenChange, hasUnseen, childr
     return detachOverflow.current
   }, [])
   return <Aria.DialogTrigger isOpen={isOpen} onOpenChange={onOpenChange}>
-    <Aria.Button ref={triggerRef} aria-label="Recent changes" {...stylex.props(styles.trigger)}><span>Changes</span>{hasUnseen ? <span data-testid="changelog-unseen" aria-label="Unread changes" {...stylex.props(styles.dot)} /> : null}</Aria.Button>
-    <Aria.Popover data-changelog-popover="" triggerRef={anchorRef} placement="top end" offset={8} {...stylex.props(styles.popover, !dark && styles.popoverLight, dark ? assistantDarkTheme : assistantLightTheme)}>
+    <Aria.Button ref={triggerRef} aria-label={hasUnseen ? 'Changes, unread' : 'Changes'} {...stylex.props(styles.trigger)}><span>Changes</span>{hasUnseen ? <span data-testid="changelog-unseen" aria-hidden="true" {...stylex.props(styles.dot)} /> : null}</Aria.Button>
+    <Aria.Popover data-changelog-popover="" triggerRef={anchorRef} placement="top end" offset={geometryNumbers.contextOffset} {...stylex.props(styles.popover, !dark && styles.popoverLight, dark ? assistantDarkTheme : assistantLightTheme)}>
       <Aria.Dialog aria-label="Recent changes" {...stylex.props(styles.dialog)}>
         <header {...stylex.props(styles.header)}><h1 {...stylex.props(styles.title)}>What's new</h1><Aria.Button slot="close" aria-label="Close recent changes" {...stylex.props(styles.button)}>Close</Aria.Button></header>
         <div {...stylex.props(styles.content)}>{isOpen ? children : null}</div>
@@ -86,18 +86,18 @@ export const ChangelogPopover = ({ dark, isOpen, onOpenChange, hasUnseen, childr
   </Aria.DialogTrigger>
 }
 const styles = stylex.create({
-  trigger: { display: 'inline-flex', alignItems: 'center', gap: 6, borderWidth: 0, padding: '3px 5px', backgroundColor: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: 2 },
-  dot: { width: 6, height: 6, borderRadius: '50%', backgroundColor: accent.primary, flexShrink: 0 },
-  popover: { width: 'min(420px, calc(100vw - 24px))', backgroundColor: `color-mix(in srgb, ${surface.raised} 80%, transparent)`, color: ink.fg, borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.base, backdropFilter: `blur(${geometry.blur})`, boxShadow: elevation.popover, zIndex: 1100, fontFamily: type.fontSans },
+  trigger: { display: 'inline-flex', alignItems: 'center', gap: space.sm, borderWidth: 0, paddingBlock: space.xs2, paddingInline: space.xs, backgroundColor: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', outline: { default: 'none', ':focus-visible': `${geometry.focusRing} solid ${accent.primary}` }, outlineOffset: geometry.focusRing },
+  dot: { width: geometry.statusDot, height: geometry.statusDot, borderRadius: radius.full, backgroundColor: accent.primary, flexShrink: 0 },
+  popover: { width: `min(${geometry.changelogMax}, calc(100vw - ${space.section}))`, backgroundColor: `color-mix(in srgb, ${surface.raised} 80%, transparent)`, color: ink.fg, borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.base, backdropFilter: `blur(${geometry.blur})`, boxShadow: elevation.popover, zIndex: 1100, fontFamily: type.fontSans },
   popoverLight: { borderColor: border.border },
-  dialog: { outline: 'none' }, header: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: 16, borderBottom: `1px solid ${border.border}` },
-  content: { padding: '0 16px', maxHeight: 'min(560px, 65vh)', overflowY: 'auto', overscrollBehavior: 'contain' },
-  heading: { fontSize: type.metaSize, color: ink.fgMuted, fontWeight: 500, margin: '18px 0 4px' }, list: { listStyle: 'none', margin: 0, padding: 0 },
-  entry: { padding: '14px 0', borderBottom: `1px solid ${border.border}`, ':last-child': { borderBottomWidth: 0 } },
-  meta: { display: 'flex', gap: 8, alignItems: 'center', color: ink.fgMuted, fontSize: type.metaSize }, badge: { border: `1px solid ${border.borderStrong}`, borderRadius: 4, padding: '1px 5px', fontSize: type.denseSize },
+  dialog: { outline: 'none' }, header: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: space.xl, borderBottom: `${geometry.hairline} solid ${border.border}` },
+  content: { paddingBlock: 0, paddingInline: space.xl, maxHeight: `min(${geometry.changelogHeight}, 65vh)`, overflowY: 'auto', overscrollBehavior: 'contain' },
+  heading: { fontSize: type.metaSize, color: ink.fgMuted, fontWeight: type.weightMedium, marginTop: space.xxl, marginInline: 0, marginBottom: space.xs }, list: { listStyle: 'none', margin: 0, padding: 0 },
+  entry: { paddingBlock: space.xl, paddingInline: 0, borderBottom: `${geometry.hairline} solid ${border.border}`, ':last-child': { borderBottomWidth: 0 } },
+  meta: { display: 'flex', gap: space.md, alignItems: 'center', color: ink.fgMuted, fontSize: type.metaSize }, badge: { border: `${geometry.hairline} solid ${border.borderStrong}`, borderRadius: radius.keyboard, paddingBlock: space.xxxs, paddingInline: space.sm, fontSize: type.denseSize },
   kind: { display: 'inline-flex', alignItems: 'center', borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.full, paddingBlock: space.xxxs, paddingInline: space.sm, backgroundColor: surface.controlFill, color: ink.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading, fontWeight: type.weightMedium, whiteSpace: 'nowrap' },
-  title: { fontSize: type.uiSize, fontWeight: 600, lineHeight: 1.5, margin: '5px 0' }, summary: { fontSize: type.uiSize, color: ink.fgSoft, lineHeight: 1.6, margin: '4px 0 0' },
-  build: { fontSize: type.metaSize, color: ink.fgMuted, margin: '4px 0 0', overflowWrap: 'anywhere' },
-  notice: { padding: '20px 0', fontSize: type.uiSize, lineHeight: 1.6 }, button: { border: `1px solid ${border.borderStrong}`, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: 5, fontSize: type.metaSize, padding: '4px 8px', cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: 2 },
-  link: { display: 'inline-block', marginTop: 8, color: accent.primary, fontSize: type.metaSize },
+  title: { fontSize: type.uiSize, fontWeight: type.weightSemibold, lineHeight: type.uiLeading, marginBlock: space.sm, marginInline: 0 }, summary: { fontSize: type.uiSize, color: ink.fgSoft, lineHeight: type.bodyLeading, marginTop: space.xs, marginInline: 0, marginBottom: 0 },
+  build: { fontSize: type.metaSize, color: ink.fgMuted, marginTop: space.xs, marginInline: 0, marginBottom: 0, overflowWrap: 'anywhere' },
+  notice: { paddingBlock: space.xxl, paddingInline: 0, fontSize: type.uiSize, lineHeight: type.bodyLeading }, button: { border: `${geometry.hairline} solid ${border.borderStrong}`, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: radius.sm, fontSize: type.metaSize, paddingBlock: space.xs, paddingInline: space.md, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `${geometry.focusRing} solid ${accent.primary}` }, outlineOffset: geometry.focusRing },
+  link: { display: 'inline-block', marginTop: space.md, color: accent.primary, fontSize: type.metaSize },
 })

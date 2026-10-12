@@ -5,7 +5,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as Aria from 'react-aria-components'
 import { lightTheme as assistantLightTheme } from './assistant-ui/composition-theme.ts'
 import { darkTheme as assistantDarkTheme } from './assistant-ui/embrace-theme.ts'
-import { surfaceVars as surface, textVars as ink } from './assistant-ui/composition-tokens.stylex.ts'
+import { surfaceVars as surface, textVars as ink, spaceVars as space, geometryVars as geometry, geometryNumbers, typeVars as type } from './assistant-ui/composition-tokens.stylex.ts'
 import { ChangelogPopover, ChangelogView, type ChangelogLoad } from '../../../apps/fractal-web/src/changelog/ChangelogView.tsx'
 import type { ChangelogManifest } from '../../../apps/fractal-web/src/changelog/contract.ts'
 import { acknowledgeEntryIds, initialSeen, type ChangelogSeen } from '../../../apps/fractal-web/src/changelog/seen.ts'
@@ -14,8 +14,8 @@ const fixtureRevision = '123456789abc'
 const fixture: ChangelogManifest = {
   schemaVersion: 1, product: 'fractal-web', build: { machineVersion: `0.1.0+local.${fixtureRevision}` },
   entries: [
-    { id: '2026-10-11-drafts', date: '2026-10-11', title: 'Drafts stay with your browser', summary: 'Browser-local drafts persist while you move between conversations.', kind: 'feature', visibility: 'public', publicPrUrl: 'https://github.com/compoundingtech/smalltalk/pull/2349' },
-    { id: '2026-10-10-reconnect', date: '2026-10-10', title: 'Clearer connection status', summary: 'Explicit reconnect and status wording makes connection changes easier to follow.', kind: 'improvement', visibility: 'public', publicPrUrl: 'https://github.com/compoundingtech/smalltalk/pull/2349' },
+    { id: '2026-10-11-drafts', date: '2026-10-11', title: 'Example draft update', summary: 'This example entry demonstrates a feature announcement.', kind: 'feature', visibility: 'public', publicPrUrl: 'https://github.com/example/example/pull/1' },
+    { id: '2026-10-10-reconnect', date: '2026-10-10', title: 'Example connection update', summary: 'This example entry demonstrates an improvement announcement.', kind: 'improvement', visibility: 'public', publicPrUrl: 'https://github.com/example/example/pull/2' },
   ],
 }
 type Scenario = 'unseen' | 'seen' | 'first' | 'loading' | 'empty' | 'failure'
@@ -26,10 +26,10 @@ const scenario = (value: Scenario): { readonly state: ChangelogLoad; readonly ba
 const ChangelogStoryHarness = ({ mode = 'unseen', dark = true, width = 1440 }: { readonly mode?: Scenario; readonly dark?: boolean; readonly width?: number }) => {
   const current = scenario(mode)
   const [open, setOpen] = React.useState(true)
-  const [cursor, setCursor] = React.useState(current.baseline)
+  const [cursor, setCursor] = React.useState(() => current.state._tag === 'Ready' ? acknowledgeEntryIds(current.state.manifest.entries.map((entry) => entry.id), current.baseline) : current.baseline)
   const [baseline, setBaseline] = React.useState(current.baseline)
   const [state, setState] = React.useState(current.state)
-  return <main data-changelog-story="" data-scheme={dark ? 'dark' : 'light'} style={{ width, maxWidth: '100vw', height: 900 }} {...stylex.props(styles.canvas, dark ? assistantDarkTheme : assistantLightTheme)}>
+  return <main data-changelog-story="" data-scheme={dark ? 'dark' : 'light'} {...stylex.props(styles.canvas, width === 440 ? styles.narrow : styles.wide, dark ? assistantDarkTheme : assistantLightTheme)}>
     <p {...stylex.props(styles.caption)}>Fractal · {mode}</p>
     <footer data-changelog-anchor="" {...stylex.props(styles.bar)}><span>{fixture.build.machineVersion}</span><ChangelogPopover dark={dark} isOpen={open} onOpenChange={(next) => {
       if (next && state._tag === 'Ready') { setBaseline(cursor); setCursor(acknowledgeEntryIds(state.manifest.entries.map((entry) => entry.id), cursor)) }
@@ -42,7 +42,7 @@ const ChangelogStoryHarness = ({ mode = 'unseen', dark = true, width = 1440 }: {
 /** Matches the live zero-height theme holder around its fixed visible status bar. */
 const ChangelogDesktopAnchorStoryHarness = ({ dark = true }: { readonly dark?: boolean }) => {
   const [open, setOpen] = React.useState(false)
-  return <main data-changelog-desktop-story="" style={{ width: '100vw', height: '100vh' }} {...stylex.props(styles.canvas, dark ? assistantDarkTheme : assistantLightTheme)}>
+  return <main data-changelog-desktop-story="" {...stylex.props(styles.canvas, styles.fullCanvas, dark ? assistantDarkTheme : assistantLightTheme)}>
     <div data-testid="wf-devbar">
       <aside {...stylex.props(styles.desktopBar)}>
         <ChangelogPopover dark={dark} isOpen={open} onOpenChange={setOpen} hasUnseen>
@@ -61,13 +61,13 @@ const desktopAnchorPlay = async ({ canvasElement }: { readonly canvasElement: HT
   expect(holder.getBoundingClientRect().height).toBe(0)
   expect(holder.getBoundingClientRect().top).toBe(0)
   expect(document.defaultView!.getComputedStyle(bar).position).toBe('fixed')
-  const trigger = body.getByRole('button', { name: 'Recent changes' })
+  const trigger = body.getByRole('button', { name: 'Changes, unread' })
   await userEvent.click(trigger)
   const dialog = await body.findByRole('dialog', { name: 'Recent changes' })
   expect(dialog).toBeVisible()
   expect(dialog.querySelector('[title]')).toBeNull()
   const popover = document.querySelector<HTMLElement>('[data-changelog-popover]')!
-  await waitFor(() => expect(Math.abs(bar.getBoundingClientRect().top - popover.getBoundingClientRect().bottom - 8)).toBeLessThan(0.75))
+  await waitFor(() => expect(Math.abs(bar.getBoundingClientRect().top - popover.getBoundingClientRect().bottom - geometryNumbers.contextOffset)).toBeLessThan(0.75))
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(body.queryByRole('dialog', { name: 'Recent changes' })).toBeNull())
   await waitFor(() => expect(trigger).toHaveFocus())
@@ -79,10 +79,10 @@ const ChangelogOverflowStoryHarness = ({ dark = true, width = 440 }: { readonly 
   const overflow = React.useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = React.useState(false)
   const [open, setOpen] = React.useState(false)
-  return <main data-changelog-overflow-story="" style={{ width, maxWidth: '100vw', height: 900 }} {...stylex.props(styles.canvas, dark ? assistantDarkTheme : assistantLightTheme)}>
+  return <main data-changelog-overflow-story="" {...stylex.props(styles.canvas, width === 440 ? styles.narrow : styles.wide, dark ? assistantDarkTheme : assistantLightTheme)}>
     <div data-testid="light-dismiss-target" {...stylex.props(styles.dismissTarget)}>Click this workspace area to dismiss both popovers.</div>
     <footer {...stylex.props(styles.bar)}>
-      <Aria.Button aria-label="More status items" aria-haspopup="dialog" aria-controls={id} aria-expanded={expanded} onPress={() => {
+      <Aria.Button aria-label="+N more status items" aria-haspopup="dialog" aria-controls={id} aria-expanded={expanded} onPress={() => {
         setExpanded(true)
         overflow.current?.showPopover()
         overflow.current?.focus()
@@ -99,12 +99,12 @@ const ChangelogOverflowStoryHarness = ({ dark = true, width = 440 }: { readonly 
 const overflowLightDismissPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
   const document = canvasElement.ownerDocument
   const body = within(document.body)
-  const trigger = body.getByRole('button', { name: 'More status items' })
+  const trigger = body.getByRole('button', { name: '+N more status items' })
   const controls = trigger.getAttribute('aria-controls')!
   const holder = document.getElementById(controls)!
   const open = async () => {
     await userEvent.click(trigger)
-    await userEvent.click(await body.findByRole('button', { name: 'Recent changes' }))
+    await userEvent.click(await body.findByRole('button', { name: 'Changes, unread' }))
     const dialog = await body.findByRole('dialog', { name: 'Recent changes' })
     expect(dialog).toBeVisible()
     expect(dialog.querySelector('[title]')).toBeNull()
@@ -136,7 +136,7 @@ const meta = {
       changelog1440: { name: 'Changelog desktop', styles: { width: '1440px', height: '900px' }, type: 'desktop' },
       changelog440: { name: 'Changelog narrow', styles: { width: '440px', height: '900px' }, type: 'mobile' },
     } },
-    docs: { description: { component: 'Live story and component contract ported from 0c24b983b. Deterministic public fixtures cover merged main PR #2349 only; private preview content and open PRs #2470, #2471, #2473, #2474 and #2476 are excluded. Both themes, 440/1440 widths, loading, retry, acknowledgement, desktop anchoring and native overflow focus restoration are covered.' } },
+    docs: { description: { component: 'Synthetic changelog entries demonstrate both themes, 440/1440 widths, loading, retry, acknowledgement, desktop anchoring and native overflow focus restoration. Links and build identity are examples, not release provenance.' } },
   },
   globals: { viewport: { value: 'changelog1440', isRotated: false } },
   args: { mode: 'unseen', dark: true, width: 1440 },
@@ -152,13 +152,13 @@ const visibleStatePlay: NonNullable<Story['play']> = async ({ canvasElement, arg
   if (args.mode === 'failure') {
     expect(content.getByRole('heading', { name: "Changes couldn't be loaded" })).toBeVisible()
     await userEvent.click(content.getByRole('button', { name: 'Retry' }))
-    expect(await content.findByRole('heading', { name: 'Drafts stay with your browser' })).toBeVisible()
+    expect(await content.findByRole('heading', { name: 'Example draft update' })).toBeVisible()
   } else if (args.mode === 'loading') {
     expect(content.getByRole('status')).toHaveTextContent('Loading recent changes…')
   } else if (args.mode === 'empty') {
     expect(content.getByRole('heading', { name: 'No changes yet' })).toBeVisible()
   } else {
-    expect(content.getByRole('heading', { name: 'Drafts stay with your browser' })).toBeVisible()
+    expect(content.getByRole('heading', { name: 'Example draft update' })).toBeVisible()
     if (args.mode === 'unseen') expect(content.getByRole('heading', { name: 'New since you last looked' })).toBeVisible()
     else expect(content.queryByRole('heading', { name: 'New since you last looked' })).toBeNull()
   }
@@ -175,7 +175,7 @@ const acknowledgementPlay: NonNullable<Story['play']> = async ({ canvasElement }
   expect(within(dialog).getByRole('heading', { name: 'New since you last looked' })).toBeVisible()
   await userEvent.click(body.getByRole('button', { name: 'Close recent changes' }))
   await waitFor(() => expect(body.queryByRole('dialog', { name: 'Recent changes' })).toBeNull())
-  const trigger = body.getByRole('button', { name: 'Recent changes' })
+  const trigger = body.getByRole('button', { name: 'Changes' })
   await waitFor(() => expect(trigger).toHaveFocus())
   await userEvent.click(trigger)
   const reopened = await body.findByRole('dialog', { name: 'Recent changes' })
@@ -226,12 +226,14 @@ export const AllStates: Story = {
   },
 }
 const styles = stylex.create({
-  canvas: { position: 'relative', backgroundColor: surface.canvas, color: ink.fg, fontFamily: 'system-ui, sans-serif' },
-  caption: { padding: 24, margin: 0, color: ink.fgMuted, fontSize: 13 },
-  bar: { position: 'absolute', bottom: 0, left: 0, right: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, padding: 12, backgroundColor: surface.raised, fontSize: 12 },
-  matrix: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, padding: 16, backgroundColor: surface.canvas, color: ink.fg },
-  card: { backgroundColor: surface.raised, color: ink.fg, padding: 16, fontFamily: 'system-ui, sans-serif' },
-  desktopBar: { position: 'fixed', bottom: 0, left: 0, right: 0, height: 32, boxSizing: 'border-box', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', padding: '0 12px', backgroundColor: surface.raised, fontSize: 12 },
-  dismissTarget: { padding: 24, minHeight: 100, color: ink.fgMuted },
-  overflow: { position: 'fixed', inset: 'auto', bottom: 60, right: 12, margin: 0, padding: 12, backgroundColor: surface.raised, color: ink.fg },
+  canvas: { position: 'relative', maxWidth: '100vw', minHeight: '100vh', backgroundColor: surface.canvas, color: ink.fg, fontFamily: type.fontSans },
+  narrow: { width: geometry.polishNarrow }, wide: { width: geometry.polishWide },
+  fullCanvas: { width: '100vw', height: '100vh' },
+  caption: { padding: space.section, margin: 0, color: ink.fgMuted, fontSize: type.codeSize },
+  bar: { position: 'absolute', bottom: 0, left: 0, right: 0, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: space.md, padding: space.lg, backgroundColor: surface.raised, fontSize: type.metaSize },
+  matrix: { display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(${geometry.tooltipMax}, 1fr))`, gap: space.xl, padding: space.xl, backgroundColor: surface.canvas, color: ink.fg },
+  card: { backgroundColor: surface.raised, color: ink.fg, padding: space.xl, fontFamily: type.fontSans },
+  desktopBar: { position: 'fixed', bottom: 0, left: 0, right: 0, height: geometry.controlLg, boxSizing: 'border-box', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', paddingBlock: 0, paddingInline: space.lg, backgroundColor: surface.raised, fontSize: type.metaSize },
+  dismissTarget: { padding: space.section, minHeight: geometry.threadViewportMin, color: ink.fgMuted },
+  overflow: { position: 'fixed', inset: 'auto', bottom: `calc(${geometry.controlLg} + ${space.control})`, right: space.lg, margin: 0, padding: space.lg, backgroundColor: surface.raised, color: ink.fg },
 })
