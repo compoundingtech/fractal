@@ -31265,7 +31265,7 @@ pub(crate) fn named_run_probes() -> usize {
 
 /// [`seat_queue_inputs_tx`], keeping only `seats` when given: every move and join is still read
 /// in one pass, but only those seats' named runs are probed, one query each.
-pub(crate) fn seat_queue_inputs_of_tx(
+fn seat_queue_inputs_of_tx(
     connection: &Connection,
     agent: Option<&str>,
     only: Option<&BTreeSet<String>>,

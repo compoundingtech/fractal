@@ -527,13 +527,13 @@ impl Store {
                 }
                 // A seat that left its step: that step's row no longer shows it.
                 steps.extend(seats.get(&subject).cloned());
-                if published_list::decides_asks(&kind) {
-                    requesters.insert(subject);
-                }
                 // A seat's queue order moves its ready work in its own windows.
                 if kind == crate::seat_queue::MOVED_CLAIM {
                     reorder = true;
                     moved_seats.insert(viewer_seat(&subject));
+                }
+                if published_list::decides_asks(&kind) {
+                    requesters.insert(subject);
                 }
             }
         }
