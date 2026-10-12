@@ -189,6 +189,9 @@ fn unrelated_same_subject_kinds_preserve_each_warmed_sorters_vm_and_fullscan_wor
     position(&connection, "fixed-sent", 9);
     position(&connection, "fixed-desired", 3);
     let messages = vec![message(subject, 0)];
+    let before_old_plan = explain(&connection, old_first_query(), subject);
+    let before_new_plan = explain(&connection, message_canonical_key_query(), subject);
+    println!("growth BEFORE full plans: OLD={before_old_plan:#?}\nNEW={before_new_plan:#?}");
     let before = measure(&connection, &messages);
     for index in 0..512 {
         // Earlier accepted times would precede the fixed candidates in a subject-only walk.
@@ -196,6 +199,9 @@ fn unrelated_same_subject_kinds_preserve_each_warmed_sorters_vm_and_fullscan_wor
         let kind = if index % 2 == 0 { "message.read" } else { "intent.closed" };
         claim(&connection, index + 3, &format!("unrelated-{index}"), "batch", subject, kind, "1");
     }
+    let after_old_plan = explain(&connection, old_first_query(), subject);
+    let after_new_plan = explain(&connection, message_canonical_key_query(), subject);
+    println!("growth AFTER full plans: OLD={after_old_plan:#?}\nNEW={after_new_plan:#?}");
     let after = measure(&connection, &messages);
     println!("unrelated-kind growth: rows=512, fixed_candidates=2; before={before:?}; after={after:?}");
     for (before, after) in [(before.0, after.0), (before.1, after.1)] {
@@ -270,9 +276,9 @@ struct PlanStep {
     detail: String,
 }
 
-fn explain(connection: &Connection, sql: &str) -> rusqlite::Result<Vec<PlanStep>> {
+fn explain(connection: &Connection, sql: &str, subject: &str) -> rusqlite::Result<Vec<PlanStep>> {
     connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
-        .query_map(["message/probe"], |row| {
+        .query_map([subject], |row| {
             Ok(PlanStep { id: row.get(0)?, parent: row.get(1)?, detail: row.get(3)? })
         })?
         .collect()
@@ -297,8 +303,8 @@ fn fused_message_key_plan_matches_old_subject_kind_seek_and_canonical_subtree() 
     // This does not establish the plan for differently populated or analyzed stores.
     let store = Store::open_memory("node").unwrap();
     let connection = store.readers.get();
-    let old_result = explain(&connection, old_first_query());
-    let new_result = explain(&connection, message_canonical_key_query());
+    let old_result = explain(&connection, old_first_query(), "message/probe");
+    let new_result = explain(&connection, message_canonical_key_query(), "message/probe");
     // Print both complete results before any unwrap/assertion, including SQL errors.
     println!("OLD full plan: {old_result:#?}\nNEW full plan: {new_result:#?}");
     let old = old_result.expect("old EXPLAIN failed (both results printed)");

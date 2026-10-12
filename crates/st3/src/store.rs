@@ -24338,6 +24338,8 @@ fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageVie
 }
 
 fn message_canonical_key_query() -> &'static str {
+    // Requires the named index: create_schema installs it before reader-pool creation.
+    // A dropped or renamed index makes preparation fail, rather than using a slower fallback.
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
         &format!(
             "SELECT chosen.accepted_at_unix_ms, batches.origin, batches.replica_sequence,
