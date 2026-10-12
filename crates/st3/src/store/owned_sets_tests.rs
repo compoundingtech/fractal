@@ -12,6 +12,14 @@ fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() 
         "amber",
     ).unwrap();
     apply(&store, &input, 1);
+    // Use a different real claim for foreign-key columns and valid JSON for
+    // expression-indexed columns; this control preserves the actual schema constraints.
+    let alternative = store.append_claim(&ClaimInput {
+        subject: "custom/invented-projection-fixture".into(),
+        kind: "custom.projection.note".into(), actor: Some("person/operator".into()),
+        fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
     use smallclaims::ivm::View as _;
@@ -49,7 +57,13 @@ fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() 
     assert_eq!(projection_digest::tables(&tx).unwrap(), digest);
     assert_eq!(tables.map(mission_state), mission_before);
     for column in columns.split(',') {
-        tx.execute(&format!("UPDATE desired SET {column}='invented-change' WHERE subject='agent/garden/orchard'"), []).unwrap();
+        let changed = match column {
+            "claim_id" => alternative.id.as_str(),
+            "body" | "member" => "{}",
+            _ => "invented-change",
+        };
+        tx.execute(&format!("UPDATE desired SET {column}=?1 WHERE subject='agent/garden/orchard'"), [changed]).unwrap();
+        assert_ne!(read_desired(), expected, "fixture must change desired column {column}");
         tx.execute("DELETE FROM projection_test_updates", []).unwrap();
         owned_sets::project_tx(&tx).unwrap();
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM projection_test_updates WHERE table_name='desired'", [], |r| r.get::<_, u64>(0)).unwrap(), 1, "changed desired column {column}");
@@ -61,7 +75,9 @@ fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() 
     ).unwrap();
     let expected = read_mission();
     for column in ["revision", "state", "claim_id"] {
-        tx.execute(&format!("UPDATE mission_definitions SET {column}='invented-change' WHERE mission_id='harvest'"), []).unwrap();
+        let changed = if column == "claim_id" { alternative.id.as_str() } else { "invented-change" };
+        tx.execute(&format!("UPDATE mission_definitions SET {column}=?1 WHERE mission_id='harvest'"), [changed]).unwrap();
+        assert_ne!(read_mission(), expected, "fixture must change mission column {column}");
         tx.execute("DELETE FROM projection_test_updates", []).unwrap();
         owned_sets::project_tx(&tx).unwrap();
         assert_eq!(tx.query_row("SELECT COUNT(*) FROM projection_test_updates WHERE table_name='mission_definitions'", [], |r| r.get::<_, u64>(0)).unwrap(), 1, "changed mission column {column}");
