@@ -948,7 +948,7 @@ def prove_claim_socket_denied(node, seats, evidence):
     assert "Operation not permitted" in fields["reason"] and str(node.endpoint) in fields["reason"]
     observed = [row for row in trace(node, subject) if row["kind"] == "harness.diagnostic"
                 and row["body"].get("fields", {}).get("code") == "work-claim-socket-failed"]
-    assert len(observed) == 1 and observed[0]["body"]["fields"]["os_error"] == 1
+    assert len(observed) == 1 and json.loads(observed[0]["body"]["fields"]["matched_line"])["os_error"] == 1
     assert observed[0]["id"] in fault["body"]["evidence"]
     claims = [row for row in receipts(node, "a") if row["event"] == "claim"]
     assert len(claims) == 1 and claims[0]["exit"] == 5 and claims[0]["seconds"] < 5
