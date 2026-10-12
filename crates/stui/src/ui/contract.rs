@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients")
+    PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients")
 }
 
 fn hex(color: Color) -> String {
@@ -99,6 +99,7 @@ pub fn words() -> Value {
         AgentState::NeedsLogin,
         AgentState::Fault,
         AgentState::Working,
+        AgentState::Compacting,
         AgentState::Idle,
         AgentState::Starting,
         AgentState::Stopped,
@@ -160,6 +161,12 @@ fn files() -> Vec<(&'static str, Value)> {
             "transcripts/deliveries.expected.json",
             conversation_of(include_str!(
                 "../../../../fixtures/clients/transcripts/deliveries.json"
+            )),
+        ),
+        (
+            "transcripts/noise.expected.json",
+            conversation_of(include_str!(
+                "../../../../fixtures/clients/transcripts/noise.json"
             )),
         ),
     ]

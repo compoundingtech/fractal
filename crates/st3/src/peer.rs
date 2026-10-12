@@ -40,6 +40,7 @@ use crate::model::{
     ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
 };
 use crate::store::Store;
+use crate::relay_trace::{self, Outcome, Phase};
 use crate::store::{
     CheckpointAction, CheckpointManifest, CheckpointManifestNeed, CheckpointManifestPage,
     CheckpointManifestRequest,
@@ -480,6 +481,7 @@ impl ClientRelay {
         let target = host_id
             .strip_prefix("host/")
             .context("the owner host ID is invalid")?;
+        crate::api::note_remote_read();
         let started = std::time::Instant::now();
         match self
             .send_toward(
@@ -595,12 +597,15 @@ impl ClientRelay {
         hops_left: u8,
     ) -> Result<(serde_json::Value, PeerConfig)> {
         let host = format!("host/{target}");
-        if self.is_dial_out_owner(&host) {
-            return Err(ClientReadRejected::dial_out_owner(&host).into());
-        }
+        let next_hops = relay_trace::result(Phase::Route, || -> Result<_> {
+            if self.is_dial_out_owner(&host) {
+                return Err(ClientReadRejected::dial_out_owner(&host).into());
+            }
+            Ok(self.next_hops(target, &path))
+        })?;
         let mut attempts = Vec::new();
         let mut last_reason = None;
-        for peer in self.next_hops(target, &path) {
+        for (ordinal, peer) in next_hops.into_iter().enumerate() {
             let relay = (peer.name != target).then(|| ClientReadRoute {
                 target: format!("host/{target}"),
                 path: path.clone(),
@@ -614,7 +619,23 @@ impl ClientRelay {
                 request: request.request.clone(),
                 relay,
             };
-            match self.send(&peer, &outgoing).await {
+            let diagnostic = relay_trace::current().map(|trace| {
+                trace.attempt(
+                    u8::try_from(ordinal).unwrap_or(u8::MAX),
+                    if peer.url.starts_with("fabric://") {
+                        "fabric"
+                    } else {
+                        "http"
+                    },
+                )
+            });
+            if let Some(trace) = &diagnostic { trace.selected_peer(&peer.name); }
+            let sent = relay_trace::scope(
+                diagnostic,
+                relay_trace::future(Phase::Attempt, self.send(&peer, &outgoing)),
+            )
+            .await;
+            match sent {
                 Ok(value) => return Ok((value, peer)),
                 Err(error) => {
                     let rejected = match error.downcast::<ClientReadRejected>() {
@@ -671,10 +692,14 @@ impl ClientRelay {
         let url = match parse_route(&peer.url).context("invalid peer client route")? {
             Route::Http(url) => url,
             Route::Fabric { node, protocol } => {
-                let address = match self.fabric.as_ref() {
-                    Some(fabric) => fabric.dial(&node, &protocol).await,
-                    None => Err(anyhow::anyhow!("Fabric is unavailable")),
-                }
+                if let Some(trace) = relay_trace::current() { trace.fabric_target(&node, &protocol); }
+                let address = relay_trace::future(Phase::FabricDial, async {
+                    match self.fabric.as_ref() {
+                        Some(fabric) => fabric.dial(&node, &protocol).await,
+                        None => Err(anyhow::anyhow!("Fabric is unavailable")),
+                    }
+                })
+                .await
                 .map_err(|error| {
                     ClientReadRejected::unreachable(
                         "dial-failed",
@@ -696,10 +721,14 @@ impl ClientRelay {
             "the client read request exceeds its bound"
         );
         let digest = FleetAuth::body_digest(&body);
+        if let Some(trace) = relay_trace::current() {
+            trace.bind(&digest);
+        }
         let headers = self
             .auth
             .request_headers_for(CLIENT_READ_PATH, &self.node, &body)?;
-        let mut response = self
+        let mut headers_span = relay_trace::span(Phase::Headers);
+        let response = self
             .http
             .post(format!("{}{}", url.trim_end_matches('/'), CLIENT_READ_PATH))
             .headers(headers)
@@ -707,18 +736,26 @@ impl ClientRelay {
             .timeout(timeout)
             .body(body)
             .send()
-            .await
-            .map_err(|error| {
-                let reason = if error.is_timeout() {
-                    "timed-out"
-                } else if error.is_connect() {
-                    "dial-failed"
-                } else {
-                    "transport-error"
-                };
-                ClientReadRejected::unreachable(reason, format!("peer {name}: {error}"))
-            })?;
+            .await;
+        headers_span.finish(match &response {
+            Ok(_) => Outcome::Completed,
+            Err(error) if error.is_timeout() => Outcome::TimedOut,
+            Err(_) => Outcome::Failed,
+        });
+        let mut response = response.map_err(|error| {
+            let reason = if error.is_timeout() {
+                "timed-out"
+            } else if error.is_connect() {
+                "dial-failed"
+            } else {
+                "transport-error"
+            };
+            ClientReadRejected::unreachable(reason, format!("peer {name}: {error}"))
+        })?;
         let status = response.status();
+        if let Some(trace) = relay_trace::current() {
+            trace.http_status(status.as_u16());
+        }
         if status == StatusCode::UNAUTHORIZED {
             return Err(ClientReadRejected::unreachable(
                 "refused",
@@ -727,42 +764,64 @@ impl ClientRelay {
             .into());
         }
         let response_headers = response.headers().clone();
-        anyhow::ensure!(
-            response
-                .content_length()
-                .is_none_or(|length| length <= MAX_CLIENT_READ_BYTES as u64),
-            "the peer client read response exceeds its bound"
-        );
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|error| {
-            ClientReadRejected::unreachable(
-                if error.is_timeout() {
-                    "timed-out"
-                } else {
-                    "transport-error"
-                },
-                format!("peer {name}: {error}"),
-            )
-        })? {
+        let mut body_span = relay_trace::span(Phase::Body);
+        let bytes: Result<Vec<u8>> = async {
             anyhow::ensure!(
-                bytes.len().saturating_add(chunk.len()) <= MAX_CLIENT_READ_BYTES,
+                response
+                    .content_length()
+                    .is_none_or(|length| length <= MAX_CLIENT_READ_BYTES as u64),
                 "the peer client read response exceeds its bound"
             );
-            bytes.extend_from_slice(&chunk);
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|error| {
+                body_span.finish(if error.is_timeout() {
+                    Outcome::TimedOut
+                } else {
+                    Outcome::Failed
+                });
+                ClientReadRejected::unreachable(
+                    if error.is_timeout() {
+                        "timed-out"
+                    } else {
+                        "transport-error"
+                    },
+                    format!("peer {name}: {error}"),
+                )
+            })? {
+                anyhow::ensure!(
+                    bytes.len().saturating_add(chunk.len()) <= MAX_CLIENT_READ_BYTES,
+                    "the peer client read response exceeds its bound"
+                );
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
         }
-        self.auth.verify(
-            &response_headers,
-            "RESPONSE",
-            CLIENT_READ_PATH,
-            &bytes,
-            Some(name),
-            Some(&digest),
-        )?;
-        let envelope: ApiResponse<serde_json::Value> = serde_json::from_slice(&bytes)?;
-        anyhow::ensure!(
-            envelope.api_version == "st3.v1",
-            "the peer client read protocol differs"
-        );
+        .await;
+        body_span.finish(if bytes.is_ok() {
+            Outcome::Completed
+        } else {
+            Outcome::Failed
+        });
+        let bytes = bytes?;
+        relay_trace::result(Phase::Verify, || {
+            self.auth.verify(
+                &response_headers,
+                "RESPONSE",
+                CLIENT_READ_PATH,
+                &bytes,
+                Some(name),
+                Some(&digest),
+            )
+        })?;
+        let envelope: ApiResponse<serde_json::Value> =
+            relay_trace::result(Phase::Decode, || -> Result<_> {
+                let envelope: ApiResponse<serde_json::Value> = serde_json::from_slice(&bytes)?;
+                anyhow::ensure!(
+                    envelope.api_version == "st3.v1",
+                    "the peer client read protocol differs"
+                );
+                Ok(envelope)
+            })?;
         if !status.is_success() {
             return Err(ClientReadRejected {
                 code: envelope.value["code"]
@@ -1036,7 +1095,7 @@ async fn receive_raw_terminal(
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "raw terminal signature failed").into_response(),
     };
     let mut response = websocket.max_message_size(64 * 1024).max_frame_size(64 * 1024)
-        .on_upgrade(move |socket| crate::api::raw_terminal_splice(socket, transport, None, None, None));
+        .on_upgrade(move |socket| crate::api::raw_terminal_splice(socket, transport, None, None, None, None, None));
     response.headers_mut().extend(signed);
     response
 }
@@ -1068,6 +1127,7 @@ async fn receive_client_read(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let authentication_clock = relay_trace::peer_authentication_clock();
     let sender =
         match state
             .auth()
@@ -1076,14 +1136,25 @@ async fn receive_client_read(
             Ok(sender) if state.accept(&sender).is_ok() => sender.name,
             _ => return (StatusCode::UNAUTHORIZED, "untrusted fleet client read").into_response(),
         };
+    let authentication_elapsed = authentication_clock.map(|clock| clock.elapsed());
     state.note_activity(&sender);
     let request_digest = FleetAuth::body_digest(&body);
+    let mut diagnostic = None;
+    let mut diagnostic_root = None;
     let result: Result<serde_json::Value> = async {
         anyhow::ensure!(
             body.len() <= 16_384,
             "the client read request exceeds its bound"
         );
         let request: ClientReadRequest = serde_json::from_slice(&body)?;
+        if matches!(&request.request, ClientReadOperation::Timeline { .. }) {
+            diagnostic = relay_trace::authenticated_peer(&request_digest, &sender);
+            diagnostic_root = diagnostic.as_ref().map(relay_trace::Trace::guard);
+            if let (Some(trace), Some(elapsed)) = (&diagnostic, authentication_elapsed) {
+                trace.authenticated_after(elapsed);
+            }
+        }
+        relay_trace::scope(diagnostic.clone(), relay_trace::future(Phase::Request, async {
         // Free mode: a member relays a read for a person or for one of the fleet's agents.
         anyhow::ensure!(
             request.authority_actor.starts_with("person/")
@@ -1099,7 +1170,7 @@ async fn receive_client_read(
                 "the relayed client read's path does not end at its sender"
             );
             if route.target != format!("host/{}", state.node()) {
-                return forward_client_read(&state, &request).await;
+                return relay_trace::future(Phase::ForwardCall, forward_client_read(&state, &request)).await;
             }
         }
         let client = st3_client::Client::unix_as(state.backend().socket(), &request.authority_actor);
@@ -1133,11 +1204,17 @@ async fn receive_client_read(
                 cursor,
             } => {
                 anyhow::ensure!((1..=200).contains(&limit), "the timeline limit is invalid");
-                let value = client
-                    .timeline(&session_id, cursor.as_deref(), Some(limit))
-                    .await?
-                    .value;
-                Ok(serde_json::to_value(value)?)
+                let answer = relay_trace::future(Phase::OwnerCall,
+                    client.timeline(&session_id, cursor.as_deref(), Some(limit))).await;
+                if let Some(trace) = relay_trace::current() {
+                    match &answer {
+                        Ok(envelope) => trace.response(&envelope.request_id),
+                        Err(st3_client::ClientError::Api(_, _, error)) => trace.response(&error.request_id),
+                        _ => {},
+                    }
+                }
+                let value = answer?.value;
+                relay_trace::result(Phase::Envelope, || Ok(serde_json::to_value(value)?))
             }
             ClientReadOperation::TerminalScreen { terminal_id, facts } => {
                 let value = if facts {
@@ -1276,9 +1353,10 @@ async fn receive_client_read(
                 Ok(serde_json::to_value(chunk)?)
             }
         }
+        })).await
     }
     .await;
-    match result {
+    let response = match result {
         Ok(value)
             if serde_json::to_vec(&value)
                 .is_ok_and(|bytes| bytes.len() <= MAX_CLIENT_READ_BYTES - 1024) =>
@@ -1348,7 +1426,16 @@ async fn receive_client_read(
             signed_client_read_failure(&state, &request_digest, status, &code, &message, details)
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
+    };
+    if let Some(trace) = &diagnostic {
+        trace.finish(if response.status().is_success() {
+            Outcome::Completed
+        } else {
+            Outcome::Failed
+        });
     }
+    drop(diagnostic_root);
+    response
 }
 
 fn signed_client_read_failure(
@@ -1576,6 +1663,7 @@ impl Backend for MainBackend {
 
 /// The routes smalltalk serves beside the sync routes on the peer listener.
 fn smalltalk_routes() -> Router<PeerState> {
+    relay_trace::init();
     Router::new()
         .route(
             CLIENT_READ_PATH,
@@ -1628,6 +1716,43 @@ pub async fn run_worker(config: Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_read_through_the_relay_marks_its_request_as_a_remote_read() {
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        // The only peer refuses connections: the read fails, but it was a read from another
+        // machine, so the request that made it counts toward the remote target.
+        let relay = ClientRelay::from_config(&Config {
+            node: "gateway-node".into(),
+            fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            peers: vec![PeerConfig {
+                name: "owner-node".into(),
+                url: "http://127.0.0.1:1".into(),
+            }],
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let read = ClientReadRequest {
+            authority_actor: "person/example".into(),
+            relay: None,
+            request: ClientReadOperation::Timeline {
+                session_id: "session/example".into(),
+                limit: 1,
+                cursor: None,
+            },
+        };
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = crate::api::track_remote_reads(flag.clone(), relay.read("host/owner-node", &read)).await;
+        assert!(result.is_err());
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+        // Outside a request there is nothing to mark, and the read still runs.
+        assert!(relay.read("host/owner-node", &read).await.is_err());
+    }
     use crate::model::ClaimInput;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
@@ -2334,6 +2459,240 @@ mod tests {
         let (status, bytes) = read("person/avery", message_elsewhere).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["code"], "remote-unavailable");
+    }
+
+    #[tokio::test]
+    async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let app_state = |root: &Path, node: &str| crate::api::AppState {
+            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.to_path_buf(),
+            pty_root: root.join("pty"),
+            pty_binary: root.join("unused-pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: crate::model::PlannerSpec::default(),
+        };
+        let owner = app_state(owner_root.path(), "owner-node");
+        let mut gateway = app_state(gateway_root.path(), "gateway-node");
+        let gateway_store = gateway.store.clone();
+        let owner_store = owner.store.clone();
+        let owner_socket = owner_root.path().join("st3.sock");
+        let main_socket = owner_socket.clone();
+        let owner_app = crate::api::router(owner);
+        tokio::spawn(async move { crate::api::serve_unix(&main_socket, owner_app).await });
+        let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "owner-node".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["gateway-node".into()])));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes())).await });
+        let secret = gateway_root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        gateway.client_relay = ClientRelay::from_config(&Config {
+            node: "gateway-node".into(),
+            fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            peers: vec![PeerConfig {
+                name: "owner-node".into(),
+                url: format!("http://{address}"),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let gateway_app = crate::api::router(gateway);
+        let gateway_socket = gateway_root.path().join("st3.sock");
+        let serving = gateway_socket.clone();
+        let served = gateway_app.clone();
+        tokio::spawn(async move { crate::api::serve_unix(&serving, served).await });
+        for _ in 0..100 {
+            if owner_socket.exists() && gateway_socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // Pasted on the owner: 256 KiB of multi-byte text.
+        let mut body = String::new();
+        while body.len() < crate::message_body::MAX_BYTES {
+            body.push_str(&format!("note {} é — pasted\n", body.len()));
+        }
+        while body.len() > crate::message_body::MAX_BYTES {
+            body.pop();
+        }
+        let hash = hex::encode(Sha256::digest(body.as_bytes()));
+        let message = crate::client::Client::unix(&owner_socket)
+            .send_message(&crate::model::MessageSendRequest {
+                idempotency_key: "pasted-notes".into(),
+                from: "person/avery".into(),
+                to: "agent/gateway-node.seat".into(),
+                content: body.clone(),
+                title: None,
+                in_reply_to: None,
+                tags: Vec::new(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap()
+            .message;
+        assert_eq!(message.body_origin.as_deref(), Some("host/owner-node"));
+        assert_eq!(message.body_ref, Some(format!("blob/{hash}")));
+        assert!(message.content.len() < 1100);
+        // The owner holds the text as a file, and its database holds no copy of it.
+        assert_eq!(
+            crate::message_body::bodies(owner_root.path()).read("person/avery", &message.subject).unwrap().unwrap(),
+            body.as_bytes()
+        );
+        assert!(owner_store.get_blob(&hash).unwrap().is_none());
+        // Sync carries the claim to the gateway: a preview and a reference.
+        let claim = owner_store.claims_for(&message.subject, Some("message.sent")).unwrap().remove(0);
+        let carried = serde_json::to_string(&claim.body).unwrap();
+        assert!(carried.len() < 2048, "{} bytes in the claim", carried.len());
+        gateway_store
+            .append_claim(&crate::model::ClaimInput {
+                subject: message.subject.clone(),
+                kind: "message.sent".into(),
+                actor: Some("person/avery".into()),
+                fields: claim.body["fields"].as_object().unwrap().clone().into_iter().collect(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("pasted-notes".into()),
+            })
+            .unwrap();
+        let on_gateway = gateway_store.message(&message.subject).unwrap().unwrap();
+        assert_eq!(on_gateway.content, message.content);
+        assert_eq!(on_gateway.body_bytes, Some(body.len() as u64));
+
+        // The gateway asks the owner each time, and keeps nothing.
+        let gateway_client = crate::client::Client::unix(&gateway_socket);
+        let read = |subject: String| {
+            let client = gateway_client.clone();
+            async move {
+                client
+                    .get::<Value>(&format!("/v1/messages/body/{subject}"))
+                    .await
+                    .unwrap()
+            }
+        };
+        let started = std::time::Instant::now();
+        let whole = read(message.subject.clone()).await;
+        eprintln!("cost: 256 KiB body read from its owner through the peer route: {:?}", started.elapsed());
+        assert_eq!(whole["text"], body.as_str());
+        assert_eq!(whole["complete"], true);
+        // A 64 KiB body for comparison, over the same route.
+        let mut end = 64 * 1024;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        let smaller = &body[..end];
+        let sent = crate::client::Client::unix(&owner_socket)
+            .send_message(&crate::model::MessageSendRequest {
+                idempotency_key: "pasted-notes-64".into(),
+                from: "person/avery".into(),
+                to: "agent/gateway-node.seat".into(),
+                content: smaller.to_owned(),
+                title: None,
+                in_reply_to: None,
+                tags: Vec::new(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap()
+            .message;
+        if sent.body_ref.is_some() {
+            let claim = owner_store.claims_for(&sent.subject, Some("message.sent")).unwrap().remove(0);
+            gateway_store
+                .append_claim(&crate::model::ClaimInput {
+                    subject: sent.subject.clone(),
+                    kind: "message.sent".into(),
+                    actor: Some("person/avery".into()),
+                    fields: claim.body["fields"].as_object().unwrap().clone().into_iter().collect(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some("pasted-notes-64".into()),
+                })
+                .unwrap();
+            let started = std::time::Instant::now();
+            let small = read(sent.subject.clone()).await;
+            eprintln!(
+                "cost: {} B body read from its owner through the peer route: {:?}",
+                smaller.len(),
+                started.elapsed()
+            );
+            assert_eq!(small["text"], smaller);
+        }
+        assert!(gateway_store.get_blob(&hash).unwrap().is_none());
+        assert!(!crate::message_body::bodies(gateway_root.path()).exists("person/avery", &message.subject));
+        assert!(!crate::blobs::BlobDir::under(gateway_root.path()).path(&hash).exists());
+        // The owner's raw blob routes do not hand a body out as an image or copy it.
+        let (status, _) = {
+            let response = gateway_app
+                .clone()
+                .oneshot(
+                    Request::get(format!("/v1/client/blobs/{hash}?message={}", message.subject))
+                        .header("x-st3-person", "person/avery")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            (response.status(), response.into_body())
+        };
+        assert!(!status.is_success());
+        assert!(!crate::blobs::BlobDir::under(gateway_root.path()).path(&hash).exists());
+        // A message to an agent is readable by the fleet's people; the participant rule is tested
+        // where the message is between two people.
+        let response = gateway_app
+            .clone()
+            .oneshot(
+                Request::get(format!("/v1/client/message-bodies/{}", message.subject))
+                    .header("x-st3-person", "person/avery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        let value: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(value["value"]["text"], body.as_str());
+
+        // The owner's file gone: the preview and a note saying where the text was.
+        crate::message_body::bodies(owner_root.path()).remove("person/avery", &message.subject);
+        let gone = read(message.subject.clone()).await;
+        assert_eq!(gone["complete"], false);
+        assert!(gone["text"].as_str().unwrap().starts_with(&on_gateway.content));
+        assert!(gone["text"].as_str().unwrap().contains("host/owner-node"));
+        // An owner that cannot be reached answers the same, and the client route says so.
+        let mut fields = claim.body["fields"].clone();
+        fields["attachments"][0]["origin"] = "host/offline-node".into();
+        gateway_store
+            .append_claim(&crate::model::ClaimInput {
+                subject: "message/offline-notes".into(),
+                kind: "message.sent".into(),
+                actor: Some("person/avery".into()),
+                fields: fields.as_object().unwrap().clone().into_iter().collect(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("offline-notes".into()),
+            })
+            .unwrap();
+        let offline = read("message/offline-notes".into()).await;
+        assert_eq!(offline["complete"], false);
+        assert!(offline["text"].as_str().unwrap().contains("host/offline-node"));
+        let response = gateway_app
+            .oneshot(
+                Request::get("/v1/client/message-bodies/message/offline-notes")
+                    .header("x-st3-person", "person/avery")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -3483,7 +3842,12 @@ mod tests {
         }
         assert!(socket.exists());
         let auth = FleetAuth::test("fleet-test", &[4; 32]);
-        let peer = PeerState::new(MainBackend::new(socket.to_path_buf()), "owner".into(), auth.clone(), FleetContext::legacy(BTreeSet::from(["source".into()])));
+        let peer = PeerState::new(
+            MainBackend::new(socket.to_path_buf()),
+            "owner".into(),
+            auth.clone(),
+            FleetContext::legacy(BTreeSet::from(["source".into()])),
+        );
         let body = serde_json::to_vec(&ClientReadRequest {
             authority_actor: "person/test".into(),
             relay: None,
@@ -3502,7 +3866,16 @@ mod tests {
         *request.headers_mut() = auth
             .request_headers_for(CLIENT_READ_PATH, "source", &body)
             .unwrap();
-        let response = peer_router(peer.clone(), smalltalk_routes()).oneshot(request).await.unwrap();
+        use tracing::instrument::WithSubscriber as _;
+        let diagnostic = relay_trace::tests::Capture::default();
+        let response = relay_trace::test_peer_selector(
+            FleetAuth::body_digest(&body),
+            "source".into(),
+            peer_router(peer.clone(), smalltalk_routes()).oneshot(request),
+        )
+        .with_subscriber(diagnostic.dispatch())
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), MAX_CLIENT_READ_BYTES)
@@ -3526,6 +3899,28 @@ mod tests {
                 .any(|entry| entry["body"]["text"] == "Relay owner answer")
         );
 
+        let events = diagnostic.events();
+        assert!(events.iter().any(|event| event["phase"] == "Authenticate" && event["state"] == "completed"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event["phase"] == "OwnerCall" && event["state"] == "completed")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event["phase"] == "ResponseBinding"
+                    && event["binding"].starts_with("request/"))
+        );
+        assert_eq!(events.last().unwrap()["phase"], "Terminal");
+        assert_eq!(events.last().unwrap()["state"], "Completed");
+        assert!(!format!("{events:?}").contains("Relay owner answer"));
+        assert!(
+            events
+                .iter()
+                .all(|event| event["correlation_id"] == FleetAuth::body_digest(&body))
+        );
+
         let mut rejected = Request::builder()
             .method("POST")
             .uri(CLIENT_READ_PATH)
@@ -3534,8 +3929,20 @@ mod tests {
         *rejected.headers_mut() = auth
             .request_headers_for(CLIENT_READ_PATH, "unconfigured", &body)
             .unwrap();
-        let response = peer_router(peer, smalltalk_routes()).oneshot(rejected).await.unwrap();
+        let refusal = relay_trace::tests::Capture::default();
+        let response = relay_trace::test_peer_selector(
+            FleetAuth::body_digest(&body),
+            "unconfigured".into(),
+            peer_router(peer, smalltalk_routes()).oneshot(rejected),
+        )
+        .with_subscriber(refusal.dispatch())
+        .await
+        .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            refusal.events().is_empty(),
+            "fleet refusal cannot consume or trace a peer selector"
+        );
         server.abort();
     }
 
@@ -4082,3 +4489,6 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+mod timeline_relay_tests;

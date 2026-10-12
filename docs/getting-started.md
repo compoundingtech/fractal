@@ -122,7 +122,7 @@ Choose a person identity. `ada` is an invented example; use the same identity on
 
 ```sh
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/st3"
-printf 'person = "person/ada"\n' > "${XDG_CONFIG_HOME:-$HOME/.config}/st3/config.toml"
+printf 'person = "person/ada"\naccess_mode = "auto"\n' > "${XDG_CONFIG_HOME:-$HOME/.config}/st3/config.toml"
 st service install
 st service status
 st doctor

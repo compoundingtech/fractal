@@ -82,7 +82,13 @@ fn reject_binding(
                 .code,
             "stale-mailbox-session"
         );
-        assert!(st3::test_support::check_fixture_mailbox(store, &successor).is_ok());
+        // Forced raw owner displacement is foreign to the durable native lease.
+        // Linux custody fences this unqualified token. Other platforms retain legacy admission.
+        if cfg!(target_os = "linux") {
+            assert_eq!(st3::test_support::check_fixture_mailbox(store, &successor).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            st3::test_support::check_fixture_mailbox(store, &successor).unwrap();
+        }
         successor
     } else {
         if rejection == "runtime" {
@@ -185,6 +191,12 @@ if os.environ.get('FIXTURE_EXIT_GATE'):
         time.sleep(0.005)
 sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
 "#).unwrap();
+    // Archives move between runners; choose this consumer's interpreter rather than
+    // resolve a bare name through the producer's captured fixture PATH.
+    let python = std::env::split_paths(&std::env::var_os("PATH").expect("fixture tool PATH"))
+        .map(|directory| directory.join("python3"))
+        .find(|candidate| candidate.is_file())
+        .expect("terminal provider fixture needs python3 on the executing runner");
     let mut command = st3::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
@@ -194,16 +206,17 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .env("FIXTURE_SEAT", SEAT)
         .env("ST3_SUBJECT", TERMINAL)
         .env("ST3_ENDPOINT", root.path().join("api.sock"))
-        .env("ST3_BIN", env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
         .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("FIXTURE_RECEIVED", &received)
         .env("FIXTURE_NATIVE_IDLE", &native_idle)
         .env("FIXTURE_PROVIDER", provider)
+        .env("FIXTURE_PYTHON", python)
         .current_dir(root.path())
         .args(["--noprofile", "--norc", "-c", r#"
 read -r _
-ST_AGENT="$FIXTURE_SEAT" "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- python3 "$FIXTURE_PROVIDER"
+ST_AGENT="$FIXTURE_SEAT" "$ST3_BIN" driver claude --subject "$FIXTURE_SEAT" -- "$FIXTURE_PYTHON" "$FIXTURE_PROVIDER"
 driver_exit=$?
 printf 'driver-exit=%s shell-still-alive\n' "$driver_exit"
 read -r _
@@ -415,7 +428,11 @@ read -r _
             "pending"
         );
         if rejection == Some("token") {
-            assert!(st3::test_support::check_fixture_mailbox(&store, owner).is_ok());
+            if cfg!(target_os = "linux") {
+            assert_eq!(st3::test_support::check_fixture_mailbox(&store, owner).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            st3::test_support::check_fixture_mailbox(&store, owner).unwrap();
+        }
         }
         assert!(!barrier.join("provider-return.json").exists());
         std::fs::write(barrier.join("exit-provider"), b"go").unwrap();
@@ -459,7 +476,11 @@ read -r _
     if let Some(owner) = rejection_fence {
         assert!(shell.try_wait().unwrap().is_none());
         if rejection == Some("token") {
-            assert!(st3::test_support::check_fixture_mailbox(&store, &owner).is_ok());
+            if cfg!(target_os = "linux") {
+            assert_eq!(st3::test_support::check_fixture_mailbox(&store, &owner).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            st3::test_support::check_fixture_mailbox(&store, &owner).unwrap();
+        }
         } else {
             assert_eq!(
                 st3::test_support::check_fixture_mailbox(&store, &owner)

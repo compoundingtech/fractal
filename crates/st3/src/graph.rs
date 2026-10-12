@@ -498,6 +498,8 @@ fn parse_mission_run_declaration(
             "mode",
             "input",
             "after",
+            "report-to",
+            "report-completed",
             "revision",
             "reset",
             "cancellation",
@@ -508,7 +510,14 @@ fn parse_mission_run_declaration(
     let has_creation = body.nodes().iter().any(|child| {
         matches!(
             child.name().value(),
-            "mission" | "workspace" | "requester" | "mode" | "input" | "after"
+            "mission"
+                | "workspace"
+                | "requester"
+                | "mode"
+                | "input"
+                | "after"
+                | "report-to"
+                | "report-completed"
         )
     });
     let creation = if has_creation {
@@ -570,6 +579,26 @@ fn parse_mission_run_declaration(
                 ));
             }
         }
+        let report_to = child_string(body, "report-to")?;
+        if let Some(report_to) = &report_to {
+            crate::mission::validate_report_to(report_to)?;
+        }
+        let report_completed = match child_string(body, "report-completed")?.as_deref() {
+            None => false,
+            Some("true") => true,
+            Some(other) => {
+                return Err(St3Error::new(
+                    "invalid-report-completed",
+                    format!("`report-completed` is `true` when present, not `{other}`"),
+                ));
+            }
+        };
+        if report_completed && report_to.is_none() {
+            return Err(St3Error::new(
+                "report-without-recipient",
+                format!("mission run `{subject}` sets `report-completed` but no `report-to` agent"),
+            ));
+        }
         Some(MissionRunCreation {
             mission,
             revision,
@@ -578,6 +607,8 @@ fn parse_mission_run_declaration(
             inputs,
             mode,
             after,
+            report_to,
+            report_completed,
         })
     } else {
         None
@@ -1147,21 +1178,6 @@ fn parse_planning_session_declaration(
             }
             if let Some(effort) = &creation.planner.effort {
                 harness_body.nodes_mut().push(string_node("effort", effort));
-            }
-            let arguments: &[&str] = match creation.planner.provider.as_str() {
-                "codex" => &[
-                    "--dangerously-bypass-approvals-and-sandbox",
-                    "--dangerously-bypass-hook-trust",
-                ],
-                "claude" => &["--permission-mode", "bypassPermissions"],
-                _ => &[],
-            };
-            if !arguments.is_empty() {
-                let mut args = KdlNode::new("args");
-                for argument in arguments {
-                    args.entries_mut().push(kdl::KdlEntry::new(*argument));
-                }
-                harness_body.nodes_mut().push(args);
             }
             harness.set_children(harness_body);
             agent_body.nodes_mut().push(harness);
@@ -2577,6 +2593,17 @@ fn driver_member(
             property_string(message, "id")?.expect("validated message ID"),
         ]);
     }
+    if let Some(seed) = child_string(children, "seed")? {
+        if name != "omp" || !std::path::Path::new(&seed).is_absolute()
+            || seed.contains('\0') || seed.trim().is_empty()
+            || crate::native_resume::selector_scope(&name, &provider).is_some()
+            || [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV]
+                .iter().any(|key| environment.contains_key(*key))
+        {
+            return Err(St3Error::new("invalid-native-seed", "seed requires an absolute OMP transcript path and cannot accompany session selectors or resume environment"));
+        }
+        wrapper.extend(["--seed".into(), seed]);
+    }
     wrapper.push("--".into());
     wrapper.extend(provider);
     Ok(MemberSpec {
@@ -2794,6 +2821,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "identity",
         "name",
         "description",
+        "lifecycle",
         "host",
         "workspace",
         "checkout",
@@ -2837,6 +2865,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "identity",
         "name",
         "description",
+        "lifecycle",
         "host",
         "workspace",
         "checkout",
@@ -2858,6 +2887,17 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "agent-authority",
     ] {
         unique_child(document, child)?;
+    }
+    if let Some(lifecycle) = unique_child(document, "lifecycle")? {
+        ensure_no_properties(lifecycle)?;
+        ensure_no_children(lifecycle)?;
+        let value = one_string(lifecycle)?;
+        if crate::model::AgentLifecycle::parse(&value).is_none() {
+            return Err(St3Error::new(
+                "invalid-agent-lifecycle",
+                format!("agent lifecycle `{value}` must be standing, owner, or bounded"),
+            ));
+        }
     }
     if let Some(flag) = unique_child(document, "handles-faults")? {
         ensure_bare(flag)?;
@@ -3274,7 +3314,8 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
             "account",
             "account-pool",
         ],
-        "pi" | "omp" => &["model", "effort", "args", "message"],
+        "pi" => &["model", "effort", "args", "message"],
+        "omp" => &["model", "effort", "args", "message", "seed"],
         "opencode" => &["model", "args", "message"],
         _ => return Err(St3Error::new("unknown-driver", "unknown typed driver")),
     };
@@ -4954,9 +4995,13 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
         for child in children.as_array().ok_or_else(invalid)? {
             document.nodes_mut().push(render_desired_node(child)?);
         }
-        if !document.nodes().is_empty() {
+        if !document.nodes().is_empty() || name == "harness" {
             node.set_children(document);
         }
+    } else if name == "harness" {
+        // Older normalized trees omitted empty children. A validated harness
+        // always has a body, so recover that required syntax when rendering it.
+        node.set_children(KdlDocument::new());
     }
     Ok(node)
 }
@@ -5551,7 +5596,7 @@ agent "dotfiles/steward" {
 
     #[test]
     fn every_st3_eval_uses_the_current_graph_grammar() {
-        let evals = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let evals = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("evals/st3");
         let mut parsed = 0;
@@ -5585,7 +5630,7 @@ agent "dotfiles/steward" {
 
     #[test]
     fn work_wake_revision_fixtures_use_the_current_graph_grammar() {
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixtures = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("evals/st3/work-wake-reliability/fixtures");
         for name in ["revisable-v1.kdl", "revisable-v2.kdl", "revisable-v3.kdl"] {
@@ -5900,6 +5945,41 @@ version 2
     }
 
     #[test]
+    fn agent_lifecycle_is_optional_and_closed() {
+        for value in ["standing", "owner", "bounded"] {
+            let intent = parse_intent(
+                &format!("version 2\nagent \"example/purpose\" {{ lifecycle \"{value}\"; command \"true\" }}"),
+                "node",
+            ).unwrap();
+            let desired = &intent.subjects["agent/example/purpose"].desired;
+            assert_eq!(
+                crate::model::declared_agent_lifecycle(Some(desired)),
+                crate::model::AgentLifecycle::parse(value),
+            );
+        }
+        let intent = parse_intent(
+            "version 2\nagent \"example/purpose\" { command \"true\" }", "node",
+        ).unwrap();
+        assert_eq!(crate::model::declared_agent_lifecycle(
+            Some(&intent.subjects["agent/example/purpose"].desired),
+        ), None);
+        let invalid = parse_intent(
+            "version 2\nagent \"example/purpose\" { lifecycle \"unknown\"; command \"true\" }",
+            "node",
+        ).unwrap_err();
+        assert_eq!(invalid.code, "invalid-agent-lifecycle");
+        for invalid in [
+            "lifecycle #true", "lifecycle", "lifecycle \"owner\" extra=\"bounded\"",
+            "lifecycle \"standing\" {}", "lifecycle \"owner\"; lifecycle \"bounded\"",
+        ] {
+            assert!(parse_intent(
+                &format!("version 2\nagent \"example/purpose\" {{ {invalid}; command \"true\" }}"),
+                "node",
+            ).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn a_lane_is_a_mission_declaration_with_a_prefix_and_a_person_approver() {
         let source = |lane: &str| {
             format!(
@@ -6081,6 +6161,53 @@ message "external" {
             canonical_child_value(&intent.subjects["message/external"].desired, "to"),
             Some(&Value::String("agent/other/run/peer".into()))
         );
+    }
+
+    #[test]
+    fn native_seed_parser_is_omp_only_and_rejects_selection_conflicts() {
+        let declaration = |driver: &str, seed: &str, args: &str, env: &str| format!(
+            "version 2\nagent \"worker\" {{ workspace \"/tmp\"; {env} harness {driver:?} {{ seed {seed:?}; {args} }} }}\n"
+        );
+        let intent = parse_test_intent(&declaration("omp", "/transcript.jsonl", "", ""), "node").unwrap();
+        let member = intent.subjects.values().find_map(|subject| subject.member.as_ref()).unwrap();
+        let LaunchSpec::Argv(argv) = &member.launch else { panic!("typed launch expected"); };
+        assert!(argv.windows(2).any(|args| args == ["--seed", "/transcript.jsonl"]));
+        for driver in ["pi", "claude", "codex", "opencode"] {
+            assert!(parse_test_intent(&declaration(driver, "/transcript.jsonl", "", ""), "node").is_err());
+        }
+        assert_eq!(parse_test_intent(&declaration("omp", "relative.jsonl", "", ""), "node").unwrap_err().code, "invalid-native-seed");
+        for args in ["args \"--resume\" \"/other\";", "args \"--continue\";", "args \"--resume=/other\";", "args \"-r\" \"/other\";", "args \"--session\" \"native\";"] {
+            assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", args, ""), "node").unwrap_err().code, "invalid-native-seed");
+        }
+        for key in [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV] {
+            assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", "", &format!("env {{\n {key} \"native\"\n}}\n")), "node").unwrap_err().code, "invalid-native-seed");
+        }
+    }
+
+    #[test]
+    fn plain_harness_bodies_survive_normalization_and_legacy_rendering() {
+        for harness in ["claude", "codex", "pi", "omp", "opencode"] {
+            let source = format!(
+                "version 2\nagent \"worker\" {{ workspace \"/work\"; harness {harness:?} {{}} }}\n"
+            );
+            let intent = parse_test_intent(&source, "node").unwrap();
+            assert!(parse_test_intent(&source.replace("{}", ""), "node").is_err());
+            let desired = &intent.subjects["agent/node.worker"].desired;
+            let body = desired["children"].as_array().unwrap()
+                .iter().find(|child| child["name"] == "harness").unwrap();
+            assert!(body.get("children").is_none());
+            for explicit_empty in [false, true] {
+                let mut tree = desired.clone();
+                if explicit_empty {
+                    let body = tree["children"].as_array_mut().unwrap()
+                        .iter_mut().find(|child| child["name"] == "harness").unwrap();
+                    body.as_object_mut().unwrap().insert("children".into(), json!([]));
+                }
+                let node = render_desired_node(&tree).unwrap();
+                let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
+                assert_eq!(restored.subjects["agent/node.worker"].desired, *desired);
+            }
+        }
     }
 
     #[test]

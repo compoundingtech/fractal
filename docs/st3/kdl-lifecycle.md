@@ -44,6 +44,15 @@ run no commands.
 notice on stderr naming `st apply` as its replacement. Both accept `--dry-run` and `--preview`.
 The agent command keeps its previous behavior of publishing without gate checks.
 
+Migrate mission callers to `st apply FILE` with the same publication options. Migrate seat
+callers to `st apply FILE --no-gate-check` to preserve the implicit gate-check bypass,
+including previews. Keep global options and the explicit `--as ACTOR`. Unified seat
+publication adds `published_missions` (normally an empty array) to the existing JSON receipt;
+mission receipts and preview JSON keep their shape. The legacy stderr notice disappears,
+while successful commands still exit zero and publication failures still exit nonzero.
+The aliases stay available during caller rollout and are removed only after installed
+consumers have independently been observed using the unified command.
+
 ## Definitions do not start work
 
 This publication creates or updates one immutable mission revision. It does not start a run.
@@ -72,6 +81,22 @@ Direct runtime declarations in a mission belong to each run of that mission. Dir
 A native harness starts with no prompt. It takes no turn until a person types or a message is posted. When a step assigned to it becomes ready, st posts it a message that names the step. Mission goals and constraints remain in the graph.
 
 A harness block cannot declare `prompt`. Parsing refuses it with `harness-prompt-removed`; put the instruction in a step goal or send the seat a message.
+
+An agent declaration may include one optional `lifecycle` child:
+
+```kdl
+lifecycle "standing"
+```
+
+Its only accepted values are `"standing"`, `"owner"`, and `"bounded"`. This is declared
+lifecycle metadata, separate from observed runtime state, restart policy, and the `one-shot`
+flag; it does not change process behavior. Omission means unknown, with no default or
+inference from mission ownership or other declaration settings.
+
+Publishing a replacement agent declaration updates this metadata. Omitting `lifecycle` from
+that replacement clears the previous value; omitting the entire agent declaration from an
+upsert still leaves it unchanged. A client sees the selected declaration's value in its
+optional roster row `lifecycle` field, or no field when the declaration has none.
 
 An agent may declare the bare `one-shot` flag. Once its process exits or vanishes, the daemon
 records a stop, removes it from default inventory, and retains its declaration and history.
@@ -164,6 +189,23 @@ mission-run "release/deploy" {
 ```
 
 `st missions start deploy --after release/build` publishes the same declaration.
+
+### Reporting a run
+
+A run can name an agent to tell when it fails, is cancelled or stalls:
+
+```kdl
+mission-run "release/deploy" {
+  mission "mission/deploy@0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  workspace "/work/deploy"
+  requester "person/operator"
+  report-to "agent/ops/watcher"
+  report-completed "true"
+}
+```
+
+`st missions start deploy --report-to agent/ops/watcher --report-completed` publishes the same
+declaration. `report-completed` needs `report-to`. See [Run reports](mission-graph-runtime.md#run-reports).
 
 st gives the run an agentless first step, `after-run`. Every other step of the normal phase depends on it. The step completes when the named run completes. It fails when that run fails or is cancelled, and the waiting run then fails.
 

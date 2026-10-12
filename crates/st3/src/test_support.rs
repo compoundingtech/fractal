@@ -92,7 +92,7 @@ pub fn supervise_test() -> bool {
             return false;
         }
         let script =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3_test_process.py");
+            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3_test_process.py");
         let output = Command::new("python3")
             .arg(script)
             .args(["--owner", &std::process::id().to_string(), "--"])
@@ -195,4 +195,74 @@ pub fn check_fixture_mailbox(store: &crate::store::Store, fence: &crate::mailbox
     -> Result<(), crate::St3Error>
 {
     store.check_mailbox(fence)
+}
+
+/// Drive real roster admission with isolated spans, without exposing a daemon control.
+pub async fn admit_fixture_roster(store: &crate::store::Store, class: &'static str) -> impl Send {
+    store.admit_agent_resources(class).await
+}
+
+/// Try the same labeled admission used by production multi-gate readers.
+pub fn try_admit_fixture_roster(
+    store: &crate::store::Store,
+    class: &'static str,
+) -> Option<impl Send> {
+    store.try_admit_agent_resources(class)
+}
+
+/// Force a synchronous holder handoff at the real waiter's enqueue boundary.
+pub async fn admit_fixture_roster_after_handoff(
+    store: &crate::store::Store,
+    class: &'static str,
+    before_enqueue: impl FnOnce(),
+) -> impl Send {
+    store.admit_agent_resources_before_enqueue(class, before_enqueue).await
+}
+
+/// Only this fixture thread records; production exporter state is not changed.
+pub fn roster_export_scope() -> impl Drop {
+    crate::otel::fixture_export_scope()
+}
+
+#[cfg(feature = "test-support")]
+type MailboxTransportControls = std::sync::Mutex<
+    std::collections::BTreeMap<(usize, String), tokio::sync::watch::Sender<bool>>,
+>;
+
+#[cfg(feature = "test-support")]
+fn mailbox_transports() -> &'static MailboxTransportControls {
+    static CONTROLS: OnceLock<MailboxTransportControls> = OnceLock::new();
+    CONTROLS.get_or_init(Default::default)
+}
+
+/// Process-local transport loss in an invented integration fixture. No API route,
+/// CLI flag or environment variable can select a production seat or activate it.
+#[cfg(feature = "test-support")]
+pub fn hold_fixture_mailbox(store: &std::sync::Arc<crate::store::Store>, subject: &str, held: bool) {
+    assert!(subject.starts_with("agent/eval."), "mailbox loss controls require an invented fixture seat");
+    mailbox_transports().lock().unwrap()
+        .entry((std::sync::Arc::as_ptr(store) as usize, subject.into()))
+        .or_insert_with(|| tokio::sync::watch::channel(false).0).send_replace(held);
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn fixture_mailbox_transport(store: &std::sync::Arc<crate::store::Store>, subject: &str) -> tokio::sync::watch::Receiver<bool> {
+    mailbox_transports().lock().unwrap()
+        .entry((std::sync::Arc::as_ptr(store) as usize, subject.into()))
+        .or_insert_with(|| tokio::sync::watch::channel(false).0).subscribe()
+}
+
+/// Build an explicit already-admitted protocol fixture. Callers own its temporary Store,
+/// socket and synthetic runtime. This adapter preserves kernel peer subject checks and
+/// durable Store fences, but cannot qualify native physical ownership or recovery.
+#[cfg(feature = "test-support")]
+pub fn admitted_mailbox_protocol_router(state: crate::api::AppState) -> axum::Router {
+    crate::api::admitted_mailbox_protocol_router(state)
+}
+
+/// An invented example seat in a caller-owned temporary Store. This supplies only a
+/// synthetic transport identity, not a physical native lease or provider authority.
+#[cfg(feature = "test-support")]
+pub fn synthetic_mailbox_protocol_router(state: crate::api::AppState, subject: &str) -> axum::Router {
+    crate::api::synthetic_mailbox_protocol_router(state, subject)
 }

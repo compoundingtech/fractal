@@ -21,6 +21,9 @@
 //! list that answers ten times more rows may read ten times more, and a request that answers the
 //! same must read about the same. Small differences under [`SLACK`] steps pass.
 //!
+//! Additive work/mission `progress_at` serialization uses timestamps already hydrated by these
+//! routes; lightweight mission cards return null and do not add summary reads.
+//!
 //! It covers every route the daemon serves: each is measured or listed in [`NOT_MEASURED`] with
 //! the reason, and a new route fails the check until it is one or the other. Beyond the routes it
 //! measures replication receive and export as the replication worker calls them, and the deletes
@@ -70,10 +73,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/checkpoint/status", 15.0),
     // Runtimes read every runtime observation (3.8x for the list, 9.0x for one runtime).
     ("GET /v1/client/runtimes", 6.0),
-    ("GET /v1/client/runtimes/{*id}", 14.0),
-    // Usage sums every usage claim of the period (6.1x).
-    ("GET /v1/client/usage", 9.5),
-    ("GET /v1/usage", 9.5),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
@@ -94,6 +93,22 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
+    // A Claude permission hook's or Codex driver's approval poll: one indexed newest-claim read
+    // and one operation lookup.
+    (
+        "GET /v1/harness-prompts/state",
+        "one newest harness.observed read by its subject index and one answer read by its operation index",
+    ),
+    // Aliases: the same handler as a measured route under the name a person reads.
+    (
+        "GET /v1/client/alerts",
+        "the GET /v1/client/attention handler, which is measured",
+    ),
+    (
+        "GET /v1/client/alerts/{*id}",
+        "the GET /v1/client/attention/{*id} handler, which is measured",
+    ),
     // Sekrets: neither reads the claim store beyond one primary-key lookup.
     (
         "POST /v1/sekrets/attest",
@@ -317,6 +332,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "sets a run's outcome",
     ),
     (
+        "POST /v1/mission-runs/{run}/report-to",
+        "sets who a run reports to: one run row, two latest claims and one mission revision by key",
+    ),
+    (
         "POST /v1/revision-proposals/{proposal}/approve",
         "approves a revision",
     ),
@@ -402,6 +421,19 @@ const fn post(
     }
 }
 
+const fn put(
+    route: &'static str,
+    path: &'static str,
+    body: fn(&Fixture, usize) -> Value,
+) -> Probe {
+    Probe {
+        route,
+        path,
+        body: Some(body),
+        direct: None,
+    }
+}
+
 const fn direct(route: &'static str, call: Direct) -> Probe {
     Probe {
         route,
@@ -412,6 +444,11 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
+    put("PUT /v1/notes", "/v1/notes", |_, attempt| json!({
+        "person":"person/bench-operator", "actor":"person/bench-operator",
+        "text":format!("Invented current person context {attempt}"),
+    })),
+    get("GET /v1/client/notes", "/v1/client/notes"),
     get(
         "GET /v1/client/adapter/deliveries",
         "/v1/client/adapter/deliveries?after={adapter_frontier}&wait_ms=0",
@@ -588,6 +625,10 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/messages/{*id}",
         "/v1/client/messages/{message}",
     ),
+    get(
+        "GET /v1/client/message-bodies/{*id}",
+        "/v1/client/message-bodies/{message}",
+    ),
     get("GET /v1/client/launches", "/v1/client/launches"),
     get(
         "GET /v1/client/launches/{id}",
@@ -703,6 +744,7 @@ const PROBES: &[Probe] = &[
     get("GET /v1/claims", "/v1/claims?limit=100"),
     get("GET /v1/claims/by-id/{id}", "/v1/claims/by-id/{claim}"),
     get("GET /v1/usage", "/v1/usage"),
+    get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/reviews", "/v1/reviews"),
     get("GET /v1/attention", "/v1/attention"),
     get(
@@ -717,6 +759,10 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/messages/page",
         "/v1/messages/page?include_closed=false&limit=100&to={seat}",
+    ),
+    get(
+        "GET /v1/messages/body/{*subject}",
+        "/v1/messages/body/{message}",
     ),
     get(
         "GET /v1/messages/read/{*subject}",
@@ -766,6 +812,10 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/mission-runs",
         "/v1/mission-runs?mission={mission_name}",
+    ),
+    get(
+        "GET /v1/mission-runs/tree",
+        "/v1/mission-runs/tree?root={run}&limit=50",
     ),
     get(
         "GET /v1/mission-overview",
@@ -1377,7 +1427,7 @@ async fn no_request_does_work_that_grows_with_the_store() {
     assert_eq!(scales.len(), 2, "ST_COST_SCALES names two scales");
     let keep = std::env::var_os("ST_BENCH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
+        .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
     std::fs::create_dir_all(&keep).unwrap();
 
     let started = Instant::now();
@@ -1542,6 +1592,57 @@ fn the_cost_check_covers_every_route() {
     );
 }
 
+#[test]
+fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
+    let mut samples = Vec::new();
+    for retained in [100, 1000] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let store = Store::open(&path, "cost-node").unwrap();
+        for n in 0..retained {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("message/history-{n}"),
+                    kind: "message.sent".into(),
+                    actor: Some("agent/example/writer".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("sent")),
+                        ("from".into(), json!("agent/example/writer")),
+                        ("to".into(), json!("agent/example/reader")),
+                        ("content".into(), json!("metadata fixture")),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        let setup = rusqlite::Connection::open(&path).unwrap();
+        setup.execute("DELETE FROM coordination_sends", []).unwrap();
+        setup
+            .execute(
+                "UPDATE local_coordination_backfill SET cursor=0,ceiling=?1,complete=0",
+                [store.index().unwrap()],
+            )
+            .unwrap();
+        drop(setup);
+        let before = work::total();
+        assert!(!store.advance_coordination_counts().unwrap());
+        let spent = work::total() - before;
+        let (cursor, ceiling, complete, _) = store.coordination_backfill_status().unwrap();
+        assert!((1..=8).contains(&cursor), "bounded cursor: {cursor}");
+        assert_eq!(ceiling, retained as u64);
+        assert!(!complete);
+        samples.push(spent);
+    }
+    println!(
+        "coordination bootstrap 100 -> 1000 sends: {:?} -> {:?}",
+        samples[0], samples[1]
+    );
+    assert!(samples[1].vm_steps <= samples[0].vm_steps * 2 + SLACK);
+    assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
+}
+
 /// `METHOD /path` for every `.route(...)` in the router's source.
 fn declared_routes(source: &str) -> BTreeSet<String> {
     let mut routes = BTreeSet::new();
@@ -1671,11 +1772,28 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     let store = Arc::new(Store::open(&database, NODE).unwrap());
     store.bind_fleet(FLEET).ok();
     let peer = Arc::new(Store::open(&peer_database, PEER).unwrap());
+    // Notes publish only after the real fleet admission/advertisement barrier.
+    let anchor = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+    let peer_key = Arc::new(st3::fleet::MemberKey::generate().unwrap().0);
+    store.pin_fleet_anchor(anchor.public()).unwrap();
+    store.set_member_key(Some(anchor.clone())).unwrap();
+    store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:format!("host/{PEER}"), kind:"fleet.member-admitted".into(), actor:None,
+        fields:serde_json::from_value(json!({
+            "fleet_id":FLEET, "member_key":peer_key.public(), "via":"invite",
+            "sponsor":format!("host/{NODE}"), "mode":"listening",
+        })).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    peer.pin_fleet_anchor(anchor.public()).unwrap();
+    peer.set_member_key(Some(peer_key)).unwrap();
+    sync(&store, NODE, &peer);
     for (daemon, name) in [(&store, NODE), (&peer, PEER)] {
         let mut started = claim_input("daemon.started", "cost-owned-set-support", 0, "");
         started.subject = format!("daemon/{name}");
         started.fields = serde_json::from_value(json!({
-            "status":"running", "features":{"owned_sets":1},
+            "status":"running", "features":{"owned_sets":1,"person_directive_note":1},
         }))
         .unwrap();
         daemon.append_claim(&started).unwrap();
@@ -1716,6 +1834,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     let client = Client::unix(&socket);
     // Client reads come from a person, as stui and the app make them.
     let person = Client::unix_as(&socket, "person/bench-operator").unwrap();
+    let seeded: Value = person.request("PUT", "/v1/notes", Some(&json!({
+        "person":"person/bench-operator", "actor":"person/bench-operator",
+        "text":"Invented current person context",
+    }))).await.expect("the note write probe must pass the real feature barrier");
+    assert_eq!(seeded["note"]["person"], "person/bench-operator");
+    let notes: Value = person.get("/v1/client/notes").await.unwrap();
+    assert_eq!(notes["notes"], json!([seeded["note"]]));
     let arrangement_person = Client::unix_as(&socket, ARRANGEMENT_OWNER).unwrap();
     let subjects = {
         let store = store.clone();
@@ -1874,7 +1999,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") {
+                } else if path.starts_with("/v1/client/") || path == "/v1/notes" {
                     person.clone()
                 } else {
                     client.clone()
@@ -1882,7 +2007,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
                 counted(|| async move {
                     let answer = match &body {
                         None => client.get::<Value>(&path).await,
-                        Some(body) => client.post::<_, Value>(&path, body).await,
+                        Some(body) => {
+                            let method = probe.route.split_once(' ').unwrap().0;
+                            client.request::<_, Value>(method, &path, Some(body)).await
+                        }
                     };
                     answer.map_err(|error| error.to_string().chars().take(200).collect())
                 })

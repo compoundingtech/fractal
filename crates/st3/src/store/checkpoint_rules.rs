@@ -12,7 +12,6 @@
 use super::*;
 use smallclaims::store::checkpoint::DAY_MS;
 use smallclaims::store::checkpoint::*;
-use smallclaims::store::checkpoint_agreement::*;
 
 /// The rule engine's version. It is part of the rules digest, so nodes agree on a checkpoint only
 /// when they run the same rules. Version 5 leaves repaired originals out of the sealed set and
@@ -27,12 +26,12 @@ use smallclaims::store::checkpoint_agreement::*;
 /// Version 11 includes arrangement tables in the graph proof and rebuilds them during replay.
 /// Version 12 ages out the sekrets claims written before they became local observations.
 /// Version 13 retains status transitions selected by the reader after filtering stamped heartbeats.
-pub const RULES_VERSION: u32 = 13;
-
-/// Kinds that are now local observations are dropped only when they are dated at least five days
-/// before the cut, so they are seven days old when the checkpoint is due. That matches the local
-/// observation log's default retention.
-pub(crate) const LOCAL_KIND_MIN_AGE_MS: u128 = 5 * DAY_MS;
+/// Version 14 retains the predecessor of each incarnation's first visible status transition.
+/// Version 15 drops `harness.limits` readings the account fold can no longer read: those more
+/// than an hour older than their account group's newest, other than each seat's newest. The
+/// proof compares the account fold across every seat. It also keeps only the newest
+/// `runtime.reconcile-decision` of each decision key.
+pub const RULES_VERSION: u32 = 15;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -63,31 +62,8 @@ pub(crate) const REQUEST_CLOSERS: [&str; 3] = [
     "subscription.mission-request-cancelled",
 ];
 
-/// A canonical description of every rule. The rules digest hashes it with `RULES_VERSION`.
-pub(crate) const RULES_DESCRIPTION: &str = "\
-harness.observed slot=subject,incarnation_id keep=first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start
-seat.status-history slot=subject sources=exclude-status_transition-false-or-numeric-zero-heartbeats keep=last-200-transition-including-native-auth-and-runtime-reset-sources-within-7d-before-cut,current-state-run-start
-harness.timeline slot=subject,incarnation_id keep=newest min-age-before-cut=5d
-loop.state slot=subject keep=first-and-last-of-each-run-of-status-and-round,first-with-items
-subscription.mission-deferred slot=subject,request keep=all-while-open,newest
-observer.observed slot=subject keep=newest,newest-carrier-of-each-field
-daemon.diagnostic slot=subject,code keep=newest,newest-carrier-of-each-field
-transport.observed slot=subject,origin keep=newest,newest-carrier-of-each-field
-runtime.action.requested actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
-runtime.action.succeeded actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
-runtime.action.failed actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
-runtime.action.deadline-reached actor=null slot=subject,action,incarnation_id,operation_status keep=newest min-age-before-cut=5d
-harness.usage semantics=response_rollup slot=subject,incarnation_id,model,account,owner_run,owner_step,host keep=newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that
-harness.usage semantics=session_cumulative slot=subject,incarnation_id keep=newest,largest-total_tokens
-harness.usage semantics=context_occupancy slot=subject,incarnation_id keep=newest
-harness.limits keep=all-source-observations
-resource.observed actor=null observer=set slot=subject keep=newest
-render.applied slot=subject keep=newest min-age-before-cut=5d
-runtime.readiness-deadline-reached slot=subject keep=newest min-age-before-cut=5d
-sekret.called slot=subject keep=newest min-age-before-cut=5d
-sekret.exited slot=subject keep=newest min-age-before-cut=5d
-sekret.refused slot=subject keep=newest min-age-before-cut=5d
-sekret.changed slot=subject keep=newest min-age-before-cut=5d
+/// What the rule engine does beyond the policy's rules. The rules digest hashes it after them.
+const ENGINE_DESCRIPTION: &str = "\
 sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
 proof=the-sealed-claims-and-the-blobs-they-reference
 graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
@@ -96,24 +72,36 @@ guards=person-actor,once-cardinality,record-not-valid,repair-replacement,project
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
+/// A canonical description of every rule: one line per rule of the retention policy
+/// (`crates/st3-schema/retention.toml`), then the engine's terms. The rules digest hashes it with
+/// `RULES_VERSION`.
+pub(crate) fn rules_description() -> &'static str {
+    static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DESCRIPTION.get_or_init(|| {
+        format!("{}\n{ENGINE_DESCRIPTION}", st3_schema::retention::policy().rules_description())
+    })
+}
+
 /// The digest of the rules this build applies.
 pub fn rules_digest() -> String {
     let mut digest = Sha256::new();
     digest.update(b"st3-checkpoint-rules-v1\0");
     digest.update(RULES_VERSION.to_be_bytes());
-    digest.update(RULES_DESCRIPTION.as_bytes());
+    digest.update(rules_description().as_bytes());
     hex::encode(digest.finalize())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum Rule {
     Newest,
-    NewestAged,
+    /// The newest, and only claims accepted at least this long before the cut go.
+    NewestAged(u128),
     HarnessObserved,
     LoopState,
     Deferral,
     UsageSeries,
     UsageCumulative,
+    AccountLimits,
 }
 
 pub(crate) fn fields(claim: &ClaimRecord) -> Option<&serde_json::Map<String, Value>> {
@@ -134,87 +122,84 @@ pub(crate) fn field_str<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a st
         .and_then(Value::as_str)
 }
 
-/// The rule and slot of a claim, or `None` when no rule may drop it.
-pub(crate) fn slot_of(claim: &ClaimRecord) -> Option<(Rule, Vec<String>)> {
-    let subject = claim.subject.clone();
-    let kind = claim.kind.clone();
-    let slot = |extra: &[&str]| {
-        let mut slot = vec![subject.clone(), kind.clone()];
-        slot.extend(extra.iter().map(|name| field_text(claim, name)));
-        slot
-    };
-    match claim.kind.as_str() {
-        // A legacy observation without an incarnation falls back to store index comparisons in
-        // `current_harness_at`, so it stays.
-        "harness.observed" => field_str(claim, "incarnation_id")
-            .map(|_| (Rule::HarnessObserved, slot(&["incarnation_id"]))),
-        "harness.timeline" => Some((Rule::NewestAged, slot(&["incarnation_id"]))),
-        "loop.state" => Some((Rule::LoopState, slot(&[]))),
-        "subscription.mission-deferred" => Some((Rule::Deferral, slot(&["request"]))),
-        "observer.observed" => Some((Rule::Newest, slot(&[]))),
-        "daemon.diagnostic" => Some((Rule::Newest, slot(&["code"]))),
-        "transport.observed" => {
-            let mut slot = slot(&[]);
-            slot.push(claim.origin.clone());
-            Some((Rule::Newest, slot))
-        }
-        // A person's signal names its requester and replicates with its result, so only the
-        // reconciler's own records are dropped.
-        "runtime.action.requested"
-        | "runtime.action.succeeded"
-        | "runtime.action.failed"
-        | "runtime.action.deadline-reached"
-            if claim.actor.is_none() =>
-        {
-            Some((
-                Rule::NewestAged,
-                slot(&["action", "incarnation_id", "operation_status"]),
-            ))
-        }
-        "render.applied" | "runtime.readiness-deadline-reached" => {
-            Some((Rule::NewestAged, slot(&[])))
-        }
-        // Sekrets claims are local observations now; the ones written before that go with age.
-        // Nothing projects them, and a subject's history reads only what is kept.
-        "sekret.called" | "sekret.exited" | "sekret.refused" | "sekret.changed" => {
-            Some((Rule::NewestAged, slot(&[])))
-        }
-        // The account fold compares source times and percentages across reset windows. A later
-        // claim does not replace every use of an earlier reading (including a switched account).
-        "harness.limits" => None,
-        "harness.todo.observed" => Some((Rule::Newest, slot(&[]))),
-        // An observer records a resource's complete facts in every observation, so its newest
-        // observation replaces the older ones. A repository observer records each item as its
-        // own resource, so each item keeps its latest state. A version that a subscription request
-        // or a message was made for shares their envelope and stays with them.
-        "resource.observed"
-            if claim.actor.is_none()
-                && fields(claim).is_some_and(|fields| fields.contains_key("observer")) =>
-        {
-            Some((Rule::Newest, slot(&[])))
-        }
-        // A legacy per-response claim is summed by every usage read, so it stays.
-        "harness.usage" => match field_str(claim, "semantics")? {
-            "response_rollup" => Some((
-                Rule::UsageSeries,
-                slot(&[
-                    "incarnation_id",
-                    "model",
-                    "account",
-                    "owner_run",
-                    "owner_step",
-                    "host",
-                ]),
-            )),
-            "session_cumulative" => Some((
-                Rule::UsageCumulative,
-                slot(&["semantics", "incarnation_id"]),
-            )),
-            "context_occupancy" => Some((Rule::Newest, slot(&["semantics", "incarnation_id"]))),
-            _ => None,
+/// The planner function a policy rule's `keep` names, or `None` for a rule that keeps every
+/// claim. `seat.status-history` is planned across kinds in `plan_drops`, not by slot.
+fn planner_rule(rule: &st3_schema::retention::RulePolicy) -> Option<Rule> {
+    let min_age = rule.min_age.as_deref().map(|age| {
+        st3_schema::retention::days_ms(age).unwrap_or_else(|error| panic!("{}: {error}", rule.kind))
+    });
+    let planned = match rule.keep.as_str() {
+        "newest" | "newest,newest-carrier-of-each-field" => match min_age {
+            Some(age) => Rule::NewestAged(age),
+            None => Rule::Newest,
         },
-        _ => None,
+        "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start" => {
+            Rule::HarnessObserved
+        }
+        "first-and-last-of-each-run-of-status-and-round,first-with-items" => Rule::LoopState,
+        "all-while-open,newest" => Rule::Deferral,
+        "newest,last-of-each-utc-hour-by-observed_at-within-7d-before-cut,newest-before-that" => {
+            Rule::UsageSeries
+        }
+        "newest,largest-total_tokens" => Rule::UsageCumulative,
+        "newest,newest-reading,every-reading-within-1h-of-its-account-group-newest-measured_at" => {
+            Rule::AccountLimits
+        }
+        _ if rule.kind == "seat.status-history" => return None,
+        other => panic!("retention.toml: no planner keeps `{other}` for {}", rule.kind),
+    };
+    assert!(
+        min_age.is_none() || matches!(planned, Rule::NewestAged(_)),
+        "retention.toml: only a newest rule takes a minimum age ({})",
+        rule.kind
+    );
+    rule.slot.as_ref().map(|_| planned)
+}
+
+/// The policy's rules by kind, each with its planner function.
+fn policy_rules() -> &'static BTreeMap<&'static str, Vec<(&'static st3_schema::retention::RulePolicy, Rule)>> {
+    static RULES: std::sync::OnceLock<BTreeMap<&'static str, Vec<(&'static st3_schema::retention::RulePolicy, Rule)>>> =
+        std::sync::OnceLock::new();
+    RULES.get_or_init(|| {
+        let mut rules = BTreeMap::<&str, Vec<_>>::new();
+        for rule in &st3_schema::retention::policy().rules {
+            let planned = planner_rule(rule);
+            if let Some(planned) = planned {
+                rules.entry(rule.kind.as_str()).or_default().push((rule, planned));
+            }
+        }
+        rules
+    })
+}
+
+/// Whether one `when` condition of a rule holds for a claim.
+fn condition_holds(claim: &ClaimRecord, condition: &str) -> bool {
+    let (name, value) = condition.split_once('=').unwrap_or((condition, ""));
+    match (name, value) {
+        ("actor", "null") => claim.actor.is_none(),
+        (name, "set") => fields(claim).is_some_and(|fields| fields.contains_key(name)),
+        (name, value) => field_str(claim, name) == Some(value),
     }
+}
+
+/// The rule and slot of a claim, or `None` when no rule may drop it. The first policy rule for
+/// the claim's kind whose conditions hold applies.
+pub(crate) fn slot_of(claim: &ClaimRecord) -> Option<(Rule, Vec<String>)> {
+    let (rule, planned) = policy_rules()
+        .get(claim.kind.as_str())?
+        .iter()
+        .find(|(rule, _)| rule.when.iter().all(|condition| condition_holds(claim, condition)))?;
+    let mut slot = vec![claim.subject.clone(), claim.kind.clone()];
+    for name in rule.slot.iter().flatten() {
+        if name == "claim.origin" {
+            slot.push(claim.origin.clone());
+        } else if rule.require_slot {
+            slot.push(field_str(claim, name)?.to_owned());
+        } else {
+            slot.push(field_text(claim, name));
+        }
+    }
+    Some((*planned, slot))
 }
 
 /// Whether every field `claim` sets is set again by a later kept claim of its slot, whose field
@@ -376,6 +361,52 @@ pub(crate) fn usage_cumulative_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> 
     keep
 }
 
+/// The account group of a `harness.limits` reading, as the account fold groups it, and when it
+/// was measured. `None` for a claim the fold skips.
+pub(crate) fn limits_reading(claim: &ClaimRecord) -> Option<((String, String, String, bool), u64)> {
+    let (limit, _) = super::limits::reading(&claim.origin, &claim.body)?;
+    let group = (
+        limit.driver,
+        limit.account,
+        limit.account_ref.unwrap_or_default(),
+        limit.weekly_percent.is_some(),
+    );
+    Some((group, limit.measured_at_unix_ms))
+}
+
+/// A seat's `harness.limits` claims to keep: its newest; its newest reading the fold accepts, and
+/// any accepted at the same time, since the fold breaks that tie by arrival; and every reading
+/// measured within an hour of the newest in its account group (`newest_measured`, across every
+/// seat). A group's newest only moves forward, so a reading below that floor is never read again.
+pub(crate) fn limits_keep(
+    claims: &[&ClaimRecord],
+    newest_measured: &BTreeMap<(String, String, String, bool), u64>,
+) -> BTreeSet<usize> {
+    let mut keep = BTreeSet::from_iter(claims.len().checked_sub(1));
+    let readings = claims.iter().map(|claim| limits_reading(claim)).collect::<Vec<_>>();
+    if let Some(newest) = claims
+        .iter()
+        .zip(&readings)
+        .filter(|(_, reading)| reading.is_some())
+        .map(|(claim, _)| claim.accepted_at_unix_ms)
+        .max()
+    {
+        keep.extend(
+            claims.iter().zip(&readings).enumerate()
+                .filter(|(_, (claim, reading))| reading.is_some() && claim.accepted_at_unix_ms == newest)
+                .map(|(position, _)| position),
+        );
+    }
+    for (position, reading) in readings.iter().enumerate() {
+        if let Some((group, measured)) = reading
+            && *measured >= newest_measured[group].saturating_sub(super::limits::ACCOUNT_READING_WINDOW_MS)
+        {
+            keep.insert(position);
+        }
+    }
+    keep
+}
+
 pub(crate) fn loop_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     let run_key = |claim: &ClaimRecord| (field_text(claim, "status"), field_text(claim, "round"));
     let mut keep = BTreeSet::new();
@@ -464,9 +495,29 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
     for members in status_seats.values() {
         let sources = members.iter().map(|index| &claims[*index].claim).collect::<Vec<_>>();
         let positions = seat_status::transition_positions(&sources);
-        for position in positions.into_iter().rev()
+        let mut kept_positions = positions.iter().copied().rev()
             .filter(|position| seat_status::observation_time(sources[*position]) >= cut.saturating_sub(seat_status::WINDOW_MS))
-            .take(seat_status::MAX_TRANSITIONS) {
+            .take(seat_status::MAX_TRANSITIONS).collect::<BTreeSet<_>>();
+        // An unstamped boundary row emits only because its preceding effective state differs.
+        // Keeping the row alone can suppress it and expose an older retained transition instead.
+        // Preserve that context separately for each incarnation represented in the bounded read;
+        // the witness may fall outside the seven-day window. The reader still caps its answer.
+        let mut previous = BTreeMap::new();
+        let mut witnessed = BTreeSet::new();
+        for position in positions {
+            let source = sources[position];
+            let source_fields = source.body.get("fields").unwrap_or(&source.body);
+            let Some(incarnation) = source_fields.get("incarnation_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if kept_positions.contains(&position) && witnessed.insert(incarnation)
+                && let Some(predecessor) = previous.get(incarnation)
+            {
+                kept_positions.insert(*predecessor);
+            }
+            previous.insert(incarnation, position);
+        }
+        for position in kept_positions {
             status_keep.insert(members[position]);
             // A restored prompt exposes the most recent underlying harness state. Its source
             // can be hidden while the prompt is active, but still witnesses this transition.
@@ -477,6 +528,17 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
                         && field_str(claim, "incarnation_id") == field_str(source, "incarnation_id")
                         && fields(claim).and_then(|fields| fields.get("status_transition")).and_then(Value::as_bool) != Some(false)
                 }) { status_keep.insert(members[dependency]); }
+        }
+    }
+    // The newest measurement of each account group, across every seat, for the limits rule.
+    let mut limits_newest = BTreeMap::new();
+    for index in first.iter().copied() {
+        let claim = &claims[index].claim;
+        if claim.kind == "harness.limits"
+            && let Some((group, measured)) = limits_reading(claim)
+        {
+            let newest = limits_newest.entry(group).or_insert(measured);
+            *newest = (*newest).max(measured);
         }
     }
     let closed_requests = claims
@@ -494,10 +556,11 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
             .collect::<Vec<_>>();
         let newest = BTreeSet::from([members.len() - 1]);
         let keep = match rule {
-            Rule::Newest | Rule::NewestAged => newest,
+            Rule::Newest | Rule::NewestAged(_) => newest,
             Rule::HarnessObserved => harness_keep(&slot_claims),
             Rule::UsageSeries => usage_series_keep(&slot_claims, cut),
             Rule::UsageCumulative => usage_cumulative_keep(&slot_claims),
+            Rule::AccountLimits => limits_keep(&slot_claims, &limits_newest),
             Rule::LoopState => loop_keep(&slot_claims),
             Rule::Deferral => {
                 let request = slot.last().cloned().unwrap_or_default();
@@ -513,9 +576,12 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
             keep.extend(field_carriers(&slot_claims));
         }
         for (position, index) in members.iter().enumerate() {
-            let old_enough = *rule != Rule::NewestAged
-                || claims[*index].claim.accepted_at_unix_ms
-                    < cut.saturating_sub(LOCAL_KIND_MIN_AGE_MS);
+            let old_enough = match rule {
+                Rule::NewestAged(min_age) => {
+                    claims[*index].claim.accepted_at_unix_ms < cut.saturating_sub(*min_age)
+                }
+                _ => true,
+            };
             if !keep.contains(&position) && !status_keep.contains(index) && old_enough {
                 dropped[*index] = true;
             }
@@ -700,7 +766,7 @@ pub fn plan_drops(sealed: &SealedSet) -> DropPlan {
 }
 
 /// Tables projected from claims, children before the tables their foreign keys name.
-pub(crate) const PROJECTION_TABLES: [&str; 23] = [
+pub(crate) const PROJECTION_TABLES: [&str; 26] = [
     "operations",
     "arrangement_registers",
     "arrangements",
@@ -708,6 +774,9 @@ pub(crate) const PROJECTION_TABLES: [&str; 23] = [
     "glass_heads",
     "local_glass_head_pending",
     "local_glass_head_dirty",
+    "person_directive_notes",
+    "local_directive_note_pending",
+    "local_directive_note_dirty",
     "desired",
     "documents",
     "event_positions",
@@ -753,8 +822,16 @@ pub(crate) fn replay_from_nothing(transaction: &Transaction<'_>) -> Result<()> {
     rebuild_planning_tx(transaction)?;
     resources::rebuild(transaction)?;
     glass_heads::rebuild(transaction)?;
+    directive_notes::rebuild(transaction)?;
     arrangements::rebuild(transaction)?;
     Ok(())
+}
+
+/// The answers no one subject holds: the account limits, which fold every seat's readings. The
+/// proof's copy refolds them from its claims, as a node that never trimmed would.
+pub(crate) fn global_answers(transaction: &Transaction<'_>) -> Result<Value> {
+    super::limits::refold_limits_tx(transaction)?;
+    Ok(json!({"account_limits": super::limits::account_limits_at(transaction)?}))
 }
 
 /// Every answer about `subject` that a checkpoint must leave unchanged, as of the cut.
@@ -859,6 +936,14 @@ fn subject_answers_inner(connection: &Connection, subject: &str, cut: u128, sour
                     );
                 }
                 answers.insert("incarnations".into(), Value::Object(harness));
+            }
+            // The reconciler reads whether each decision key was recorded and its newest.
+            "runtime.reconcile-decision" => {
+                let mut keys = serde_json::Map::new();
+                for claim in &claims {
+                    keys.insert(field_text(claim, "key"), json!(claim.id));
+                }
+                answers.insert("reconcile_decisions".into(), Value::Object(keys));
             }
             // A rollup trim keeps every series' total, so lifetime usage must not change.
             "harness.usage" => {
@@ -998,7 +1083,12 @@ impl Store {
         };
         let checkpoint = checkpoint_name(cut);
         let seals = newest_seals(&claims, &checkpoint);
-        let Some((writer, terms)) = seals.first_key_value() else {
+        let (current, _) = self.checkpoint_participants(&claims, &[])?;
+        let runtime_rules = rules_digest();
+        let reference = seals.iter().find(|(writer, terms)| {
+            current.contains(*writer) && terms.rules_digest == runtime_rules
+        }).or_else(|| seals.iter().find(|(writer, _)| current.contains(*writer)));
+        let Some((writer, terms)) = reference else {
             return Ok(Vec::new());
         };
         let first_waiting = newest_stable.map_or_else(
@@ -1016,8 +1106,6 @@ impl Store {
         if as_of < since + CHECKPOINT_ATTENTION_AFTER_MS {
             return Ok(Vec::new());
         }
-        let left = self.checkpoint_left_writers()?;
-        let current = participants(&BTreeSet::new(), &left, &claims);
         let waiting = terms
             .participants
             .intersection(&current)
@@ -1030,7 +1118,7 @@ impl Store {
         Ok(vec![AttentionItemView {
             episode: format!("{}:{writer}", checkpoint_name(first_waiting)), priority: "normal".into(), kind: "fault".into(),
             review_mode: None, subject: checkpoint.clone(), person: "person/operator".into(), requester_id: None,
-            launch_id: None, variant_id: None, message_id: None, title: format!("Checkpoints are waiting for {}", waiting.join(", ")),
+            launch_id: None, variant_id: None, message_id: None, answers: Vec::new(), conversation: None, title: format!("Checkpoints are waiting for {}", waiting.join(", ")),
             detail: "Bring the waiting machines back, upgrade them, or excuse a machine that stays away.".into(),
             mission: None, mission_run: None, step: None, targets: vec![checkpoint.clone()], requested_at_unix_ms: since,
             actions: vec![attention_action("inspect checkpoint", &["st", "replication", "checkpoint", "status"])],

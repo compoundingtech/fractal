@@ -1,5 +1,9 @@
 {
   "version": 1,
+  "client_commands": [
+    {"command":"resources.list","tests":["crates/stui/src/ui/observed_resources.rs::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix","crates/stui/src/ui/glass.rs::sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing","crates/st3/src/api/client_v0.rs::resources_list_filters_latest_observations_and_fences_pages","crates/st3/src/api/client_v0.rs::resources_list_requires_projection_read_scope"],"behavior":"Existing optional bounded observation read; typed PR/repository/other catalog windows, canonical subjects, filing over Unix, missing rows retained, clicks only navigate, Enter only previews."},
+    {"command":"observations.report","tests":["crates/st3/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/st3/src/api/client_observations.rs::observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance","crates/st3/src/api/client_observations.rs::observation_history_is_bounded_rotates_expires_and_survives_restart"],"behavior":"Paired-only local diagnostics; no graph mutation, snapshot fence, replicated ACK or durable receipt. Memory dedup/overlap survives identical retries only within bounded process retention; JSONL history persists independently."}
+  ],
   "typed_actions": [
     {
       "action": "agent.create",
@@ -73,6 +77,17 @@
         "crates/st3/tests/action_coverage.rs::decision_tree_manifest_cards_fences_retries_damage_and_restarts"
       ],
       "behavior": "stale source/card fences and wrong actor refused; client and CLI answers survive restart; exact replay writes no duplicate answer"
+    },
+    {
+      "action": "prompt.respond",
+      "tests": [
+        "crates/st3/src/store.rs::a_claude_permission_prompt_is_answered_once_by_its_person_while_it_waits",
+        "crates/st3/src/driver_hook.rs::a_permission_hook_returns_the_persons_answer_and_nothing_else",
+        "crates/st3/src/store.rs::a_codex_permission_prompt_is_answered_and_records_its_driver",
+        "crates/st-drivers/src/codex_app_server/tests.rs::an_approval_answered_in_st_is_sent_once_and_only_for_this_thread",
+        "crates/st-drivers/src/codex_app_server/tests.rs::a_persons_answer_takes_each_approval_methods_own_decision_words"
+      ],
+      "behavior": "store, hook and Codex driver tests: only the seat's person answers, only the prompt still waiting (stale or terminal-only prompts refused), once; the answered alert disappears; the waiting hook returns the answer, stops when the prompt is gone and says nothing when time runs out; the Codex driver sends the answer once in the request method's decision words, only for its own thread, and forgets a request resolved in the TUI or left behind"
     },
     {
       "action": "lane.approve",
@@ -416,6 +431,14 @@
       "verification": "real local CLI; environment guard, exact-build record, revoke, and no daemon or producer child"
     },
     {
+      "command": "st agents acknowledge-seed",
+      "description": "Acknowledge an interrupted seed attempt and its warning; never gate launch or rearm seed",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_seed_acknowledgement_survives_restart_without_rearming_seed"
+      ],
+      "verification": "real CLI over private Unix socket; seeded receipt and acknowledgement survive disk-store reopen, replay is idempotent, and fresh launches never restage or rearm seed"
+    },
+    {
       "command": "st agents apply",
       "description": "Preview and apply one KDL file containing durable agent seats",
       "tests": [
@@ -561,7 +584,7 @@
       "verification": "real CLI over isolated disk-backed Unix daemons; mixed-file atomic publication, dry-run side effects, gate checks, source fences, partition/heal and retirement confirmation"
     },
     {
-      "command": "st attention approve",
+      "command": "st alerts approve",
       "description": "Approve one person-owned gate or launch review",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_human_reviews_act_on_the_current_card_after_restart"
@@ -569,7 +592,7 @@
       "verification": "real CLI over private Unix socket; current source review and durable verdict"
     },
     {
-      "command": "st attention discuss",
+      "command": "st alerts discuss",
       "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in stui",
       "tests": [
         "crates/st3/tests/client_v0_cli.rs::attention_discuss_sends_the_message_stui_chat_about_this_sends"
@@ -577,7 +600,7 @@
       "verification": "real CLI over private Unix socket; the agent reads the message with the item named"
     },
     {
-      "command": "st attention ls",
+      "command": "st alerts ls",
       "description": "List all current human attention items",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
@@ -585,7 +608,7 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
-      "command": "st attention reject",
+      "command": "st alerts reject",
       "description": "Reject one person-owned gate or launch review",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_human_reviews_act_on_the_current_card_after_restart"
@@ -593,7 +616,7 @@
       "verification": "real CLI over private Unix socket; current source review and durable verdict"
     },
     {
-      "command": "st attention request",
+      "command": "st alerts request",
       "description": "Legacy mutation: returns attention-migrated. Use work ask or remedy the source",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
@@ -601,7 +624,7 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
-      "command": "st attention request-changes",
+      "command": "st alerts request-changes",
       "description": "Ask a feedback-mode step to change its work and rerun",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_human_reviews_act_on_the_current_card_after_restart"
@@ -609,7 +632,7 @@
       "verification": "real CLI over private Unix socket; current source review and durable verdict"
     },
     {
-      "command": "st attention resolve",
+      "command": "st alerts resolve",
       "description": "Legacy mutation: returns attention-migrated. Complete a person step with work done",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
@@ -617,7 +640,7 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
-      "command": "st attention show",
+      "command": "st alerts show",
       "description": "Explain one attention item and show the exact available actions",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
@@ -625,7 +648,7 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
-      "command": "st attention withdraw",
+      "command": "st alerts withdraw",
       "description": "Legacy mutation: returns attention-migrated. Cancel your ask with work cancel-ask",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
@@ -742,6 +765,7 @@
       "command": "st conversations reply",
       "description": "Reply to one canonical message ID while preserving its thread",
       "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_silent_kinds_and_count_reads_survive_restart",
         "crates/st3/tests/action_coverage.rs::cli_send_reply_read_archive_search_and_attachments_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
@@ -756,8 +780,9 @@
     },
     {
       "command": "st conversations send",
-      "description": "Send one durable normalized message to a person or agent",
+      "description": "Send one durable normalized message to an agent",
       "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_silent_kinds_and_count_reads_survive_restart",
         "crates/st3/tests/action_coverage.rs::cli_send_reply_read_archive_search_and_attachments_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
@@ -875,6 +900,30 @@
         "crates/st3/tests/action_coverage.rs::cli_metadata_documents_blobs_and_rules_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st evidence put",
+      "description": "Import a signed full/test or explicitly unsigned degraded observation as an immutable notes ref",
+      "tests": [
+        "crates/st3/tests/git_evidence.rs::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier"
+      ],
+      "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
+    },
+    {
+      "command": "st evidence show",
+      "description": "Print the in-toto observation without asserting signature trust",
+      "tests": [
+        "crates/st3/tests/git_evidence.rs::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier"
+      ],
+      "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
+    },
+    {
+      "command": "st evidence verify",
+      "description": "Verify signature tier or require accepted-base policy evidence without a daemon",
+      "tests": [
+        "crates/st3/tests/git_evidence.rs::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier"
+      ],
+      "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
     },
     {
       "command": "st fleet create",
@@ -1298,6 +1347,14 @@
       "verification": "shared API restart case"
     },
     {
+      "command": "st missions report-to",
+      "description": "Change who a running run tells when it fails, is cancelled or stalls, or clear it",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st missions requests",
       "description": "Show one subscription's automatic mission request queue",
       "tests": [
@@ -1317,6 +1374,7 @@
       "command": "st missions show",
       "description": "Explain one mission run, its goals, state, work, and usage",
       "tests": [
+        "crates/st3/src/api/client_v0.rs::mission_detail_and_the_tree_read_no_step_history",
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
@@ -1336,6 +1394,33 @@
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st note",
+      "description": "Read current person notes without assigning work or granting authority",
+      "tests": [
+        "crates/st3/tests/client_v0_cli.rs::note_cli_round_trip_uses_configured_person_and_preserves_metadata",
+        "crates/st3/tests/client_v0_cli.rs::note_cli_harness_cannot_write_or_borrow_configured_person"
+      ],
+      "verification": "real CLI over private Unix socket; person-scoped JSON/human reads, clear/expiry, and harness identity refusal"
+    },
+    {
+      "command": "st note clear",
+      "description": "Clear the authenticated person's own current note",
+      "tests": [
+        "crates/st3/tests/client_v0_cli.rs::note_cli_round_trip_uses_configured_person_and_preserves_metadata",
+        "crates/st3/tests/client_v0_cli.rs::note_cli_harness_cannot_write_or_borrow_configured_person"
+      ],
+      "verification": "real CLI over private Unix socket; clear removes reads and harness writes are refused"
+    },
+    {
+      "command": "st note set",
+      "description": "Replace the authenticated person's own bounded note with optional expiry",
+      "tests": [
+        "crates/st3/tests/client_v0_cli.rs::note_cli_round_trip_uses_configured_person_and_preserves_metadata",
+        "crates/st3/tests/client_v0_cli.rs::note_cli_harness_cannot_write_or_borrow_configured_person"
+      ],
+      "verification": "real CLI over private Unix socket; replacement metadata, expiry and invalid inputs, with harness writes refused"
     },
     {
       "command": "st now",
@@ -1960,6 +2045,7 @@
       "command": "st usage",
       "description": "Show token spend over a period, with the largest spenders first",
       "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_silent_kinds_and_count_reads_survive_restart",
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
@@ -2050,6 +2136,7 @@
       "command": "st work ls",
       "description": "List current actionable work; use --as to filter one agent or --all for history",
       "tests": [
+        "crates/st3/src/api/client_v0.rs::mission_detail_and_the_tree_read_no_step_history",
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
@@ -2146,6 +2233,7 @@
       "command": "st work show",
       "description": "Explain one work item, its owner, readiness, lease, and evidence",
       "tests": [
+        "crates/st3/src/api/client_v0.rs::mission_detail_and_the_tree_read_no_step_history",
         "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
@@ -2177,6 +2265,19 @@
     }
   ],
   "stui_effects": [
+    {
+      "effect": "LoadContent",
+      "tests": [
+        "crates/stui/src/ui/mod.rs::content_controls_emit_load_effects_once_and_release_on_collapse_or_hide",
+        "crates/stui/src/ui/mod.rs::expand_all_loads_visible_clipped_blocks_sequentially_and_collapse_releases",
+        "crates/stui/src/ui/mod.rs::automatic_images_use_visible_image_lines_graphics_and_one_read_at_a_time",
+        "crates/stui/src/ui/content.rs::chunks_assemble_the_entire_original_json_from_zero",
+        "crates/stui/src/ui/content.rs::chunks_reject_changed_identity_and_non_progressing_offsets",
+        "crates/st3/src/api/client_v0/conversation_blocks.rs::truncated_tool_output_http_chunks_return_complete_native_body_without_writes",
+        "crates/st3/src/api/client_v0/conversation_blocks.rs::http_owner_chunks_negotiate_bound_bytes_and_visibly_invalidate_without_writes"
+      ],
+      "verification": "content-control reducer and viewport queue; chunk assembly and identity checks; real owner HTTP chunk transport returns complete content without durable writes"
+    },
     {
       "effect": "OpenImage",
       "tests": [
@@ -2273,6 +2374,15 @@
         "crates/st3/tests/action_coverage.rs::messages_survive_stale_fences_and_restarts"
       ],
       "verification": "live UI adapter plus daemon restart"
+    },
+    {
+      "effect": "EditArrangement",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_drag_files_tabs_and_resources_and_reorders_folders_only_after_motion",
+        "crates/stui/src/ui/live.rs::sidebar_register_edits_merge_and_survive_daemon_restart"
+      ],
+      "verification": "UI keyboard and mouse reducers plus real Unix-socket daemon edits, idempotent replay and disk restart"
     },
     {
       "effect": "SaveGlass",
@@ -2390,6 +2500,38 @@
   ],
   "palette_actions": [
     {
+      "action": "SidebarMode",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
+    {
+      "action": "SidebarNew",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
+    {
+      "action": "SidebarRename",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
+    {
+      "action": "SidebarPreview",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::sidebar_palette_selection_never_moves_or_deletes_without_explicit_keys",
+        "crates/stui/src/ui/glass.rs::sidebar_folder_names_and_add_finder_use_the_existing_palette"
+      ],
+      "verification": "sidebar palette reducer; register edits covered by EditArrangement"
+    },
+    {
       "action": "Open",
       "tests": [
         "crates/stui/src/ui/glass.rs::what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that",
@@ -2468,6 +2610,21 @@
         "crates/stui/src/ui/glass.rs::glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
+    },
+    {
+      "action": "ToggleTerminalFirst",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that",
+        "crates/stui/src/ui/glass.rs::glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g"
+      ],
+      "verification": "local palette/reducer; resulting daemon effects are listed separately"
+    },
+    {
+      "action": "ToggleTerminalFallback",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::terminal_fallback_defaults_on_and_the_palette_changes_it_locally"
+      ],
+      "verification": "device-local route preference; no daemon mutation, restart fence not applicable"
     },
     {
       "action": "Name",

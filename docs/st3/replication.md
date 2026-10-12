@@ -140,6 +140,25 @@ uses one registry without document bindings, exchanges unknown claims and later 
 in both directions, then reopens the older store with the current registry. It requires equal
 log digests before upgrade and equal graph and every table digest after canonical replay.
 
+`work.submitted.submitted_incarnation` is an optional registry field recording the validated
+submitting lease incarnation. The actor, subject, attempt and evidence stay on the immutable
+claim; `claimant` and `claim_incarnation` still describe the cleared post-submission lease.
+Legacy submission claims replay without the field. Work detail reads expose the current
+attempt's `submitted_incarnation`, including submissions without a summary. Missing or null
+means unknown, and validators must never accept unknown as a matching incarnation.
+`model::work_submission_matches` compares the claim's subject, attempt, actor, nonempty
+incarnation and evidence references together.
+
+This changes the claim registry digest. An older member rejects the field at schema admission
+with `unknown-claim-field`, retains the original signed submission as a waiting unknown record,
+and continues projecting known claims. Its work projection cannot establish that submission's
+completion or incarnation until upgrade. Upgrade completion validators' members before relying
+on these receipts, and confirm waiting claims have been admitted after restart. No database
+schema migration or claim rewrite is required. The signed two-member regression
+`store::fleet_admission_tests::submitted_incarnation_waits_on_older_members_and_legacy_submissions_replay`
+checks legacy replay, waiting records, continued known-claim exchange, preserved receipt bytes,
+and graph/table convergence after upgrading the older registry.
+
 ## Projection digest coverage and cost
 
 `store/projection_digest.rs::TABLES` lists the shared tables: operations, blobs, documents,
@@ -550,9 +569,24 @@ batch), and then applies local lease renewals again. Replaying over the rows an 
 left behind made the graph depend on how that projection ran: it could apply a run's old terminal
 state over the revision that reopened the run, so two nodes holding the same claims showed
 different graphs. A rule that reads other claims finds them by subject, never by the batch it
-arrived in, since a writer may put related claims in separate batches. The replay reads every
-claim before it projects any, so a claim that fails to project is quarantined without ending the
-replay.
+arrived in, since a writer may put related claims in separate batches. Each replay read statement
+finishes before its claims are projected, so a claim's savepoint rollback cannot abort a read
+statement that is still stepping. A claim that fails to project is quarantined without ending
+the replay.
+
+The base fold selects only `intent.desired`, `doc.bound` and `mission.published`, copying at most
+256 bodies before each fold page. The selected canonical ID order is sorted once in a temporary
+SQLite table; ordinal lookups then fetch body pages without sorting the remaining history
+again. Event positions are inserted separately without
+decoding message, work or observation bodies; repaired originals and the case-sensitive `glass/`
+prefix remain excluded. Base-stage progress counts those selected bodies, not the whole claim
+log. This bounds copied body count, not body bytes, SQLite work or the full replay transaction.
+The full replay still holds the writer through its commit.
+
+Heal request handlers compare a committed claim-index/graph-generation point to decide whether
+to notify readers. This point does not enumerate peers, envelopes or graph rows, and is an
+invalidation hint only. A replay may notify conservatively even when its final legacy digest
+matches. Heal equality, admission and completion continue to use their existing contracts.
 
 A replay from nothing is not the normal path. A projection extends the graph with the claims it
 admits. A claim that reaches part of the graph out of the replay's order rebuilds only that part
@@ -800,7 +834,10 @@ it keeps sets every field a reader takes from the dropped one:
   counts each series from its start, and a series' total never changes. A session's cumulative
   reading keeps its newest and its largest; a context reading keeps its newest. Per-response
   claims from older builds stay;
-- `harness.limits` readings, keeping each seat's newest.
+- `harness.limits` readings, keeping each seat's newest and every reading within an hour of the
+  newest of its account group.
+
+[Retention](retention.md) lists every kind's class and the rules.
 
 Every model response also goes to OpenTelemetry when `[observations.otlp]` is set: an
 `st.usage.response` log with its agent, mission run, step, model, account, tokens and cost, and

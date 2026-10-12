@@ -3,6 +3,8 @@
 use super::*;
 use crate::mailbox::{Fence, Frame, Receipt};
 
+mod authority;
+
 pub(super) async fn subscribe(
     State(state): State<AppState>,
     Query(fence): Query<Fence>,
@@ -10,12 +12,30 @@ pub(super) async fn subscribe(
     websocket: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     authorize(&fence, peer.as_ref().map(|p| &p.0))?;
-    let store = state.store.clone();
+    let checked_state = state.clone();
     let binding = fence.clone();
-    blocking_action(move || store.check_mailbox(&binding)).await?;
+    let peer = peer.expect("authorize checked the native peer").0;
+    let checked_peer = peer.clone();
+    let native = blocking_action(move || {
+        if !cfg!(target_os = "linux") { return checked_state.store.check_mailbox(&binding).map(|_| false); }
+        if authority::with_argv_channel(&checked_state, &binding, &checked_peer, |member, validate| {
+            if binding.epoch == 0 {
+                return Err(St3Error::new("stale-mailbox-session", "an argv subscription must already be bound"));
+            }
+            checked_state.store.bind_argv_mailbox_checked(&binding, member, validate)
+        })?.is_some() { return Ok(false); }
+        authority::with_authority(&checked_state, &binding, &checked_peer, |owner, validate| {
+        if checked_state.store.check_mailbox(&binding).is_ok() {
+            // Upgrade a still-current pre-lease binding without changing its capability.
+            checked_state.store.bind_mailbox_with_lease_checked(&binding, Some(owner), validate).map(|_| ())
+        } else {
+            checked_state.store.repair_mailbox_checked(&binding, owner, validate).map(|_| ())
+        }
+        }).map(|_| true)
+    }).await?;
     // Wake the predecessor immediately, even when no graph content changed.
     signal_local_change(&state);
-    Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket)))
+    Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket, peer, native)))
 }
 
 pub(super) async fn bind(
@@ -24,10 +44,45 @@ pub(super) async fn bind(
     Json(request): Json<Fence>,
 ) -> Result<Json<Fence>, ApiError> {
     authorize(&request, peer.as_ref().map(|p| &p.0))?;
-    let store = state.store.clone();
-    let bound = blocking_action(move || store.bind_mailbox(&request)).await?;
+    let bind_state = state.clone();
+    let peer = peer.expect("authorize checked the native peer").0;
+    let bound = blocking_action(move || {
+        if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
+        if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
+            bind_state.store.bind_argv_mailbox_checked(&request, member, validate)
+        })? { return Ok(bound); }
+        authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
+            bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
+        })
+    }).await?;
     signal_local_change(&state);
     Ok(Json(bound))
+}
+
+// Explicit already-admitted protocol fixtures lack a physical PTY/provider lease.
+// Selected Rust integration fixtures use these routes; the installed API router cannot.
+#[cfg(feature = "test-support")]
+pub(super) async fn bind_admitted_fixture(
+    State(state): State<AppState>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    Json(request): Json<Fence>,
+) -> Result<Json<Value>, ApiError> {
+    authorize(&request, peer.as_ref().map(|peer| &peer.0))?;
+    let bound = blocking_action(move || state.store.bind_mailbox(&request)).await?;
+    Ok(Json(json!({"api_version":"st3.v1","value":bound})))
+}
+
+#[cfg(feature = "test-support")]
+pub(super) async fn subscribe_admitted_fixture(
+    State(state): State<AppState>,
+    Query(fence): Query<Fence>,
+    peer: Option<Extension<NativeDeliveryPeer>>,
+    websocket: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    authorize(&fence, peer.as_ref().map(|peer| &peer.0))?;
+    state.store.check_mailbox(&fence).map_err(ApiError::bad)?;
+    signal_local_change(&state);
+    Ok(websocket.on_upgrade(move |socket| stream_with_reader(state, fence, socket, raw_snapshot)))
 }
 
 pub(super) async fn attachment(
@@ -37,7 +92,18 @@ pub(super) async fn attachment(
 ) -> Result<Json<crate::mailbox::Attachment>, ApiError> {
     authorize(&fence, peer.as_ref().map(|p| &p.0))?;
     let store = state.store.clone();
+    let checked_state = state.clone();
+    let peer = peer.expect("authorize checked the native peer").0;
     let attached = blocking_action(move || {
+        if store.has_mailbox_lease(&fence)? {
+            authority::with_authority(&checked_state, &fence, &peer, |owner, validate| {
+                validate()?;
+                if !store.owns_mailbox_lease(&fence, owner)? {
+                    return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                }
+                store.check_mailbox(&fence)
+            })?;
+        }
         store.check_mailbox(&fence)?;
         Ok(super::claude_channel_attached(
             &store,
@@ -87,7 +153,7 @@ pub(super) async fn receipt(
             BTreeMap::from([
                 ("status".into(), json!(request.lifecycle)),
                 ("recipient".into(), json!(request.fence.subject)),
-                ("transport".into(), json!(peer.unwrap().0.transport)),
+                ("transport".into(), json!(peer.as_ref().unwrap().0.transport)),
             ])
         } else {
             BTreeMap::from([("status".into(), json!(request.lifecycle))])
@@ -104,9 +170,19 @@ pub(super) async fn receipt(
         )),
     };
     let store = state.store.clone();
+    let checked_state = state.clone();
+    let checked_peer = peer.expect("authorize checked the native peer").0;
     let kind = input.kind.clone();
     let (record, appended, work_wake) = blocking_action(move || {
-        let (record, appended) = store.append_mailbox_receipt_outcome(&input, &request.fence)?;
+        let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
+            authority::with_authority(&checked_state, &request.fence, &checked_peer, |owner, validate| {
+                validate()?;
+                if !store.owns_mailbox_lease(&request.fence, owner)? {
+                    return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
+                }
+                store.append_mailbox_receipt_outcome(&input, &request.fence)
+            })?
+        } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
         // A message this store cannot read is treated as a work wake.
         let work_wake = store
             .message(&input.subject)
@@ -127,6 +203,71 @@ type Snapshot = (
     Option<crate::model::DesiredSubject>,
     Vec<crate::model::MessageView>,
 );
+
+type MaintenanceIds = std::collections::BTreeSet<String>;
+/// Canonical order keys of a stream's admitted mail, kept across its updates.
+#[derive(Default)]
+struct MailboxOrder {
+    keys: std::collections::BTreeMap<String, smallclaims::store::canonical::ClaimKey>,
+    remaining: usize,
+}
+impl MailboxOrder {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn clear(&mut self) {
+        self.keys.clear();
+    }
+    fn remove(&mut self, subject: &str) {
+        self.keys.remove(subject);
+    }
+    fn bound_held(&mut self, messages: &mut Vec<MessageView>, refreshed: bool) {
+        if refreshed {
+            self.remaining = messages
+                .iter()
+                .flat_map(|m| &m.tags)
+                .filter_map(|tag| {
+                    tag.strip_prefix(crate::silent::REMAINING_PREFIX)?
+                        .parse::<usize>()
+                        .ok()
+                })
+                .max()
+                .unwrap_or(0);
+        }
+        let mut held = messages
+            .iter()
+            .filter(|m| crate::silent::waits_for_turn(m))
+            .map(|m| (m.created_index, m.subject.clone()))
+            .collect::<Vec<_>>();
+        held.sort();
+        self.remaining = self
+            .remaining
+            .saturating_add(held.len().saturating_sub(crate::silent::BATCH_LIMIT));
+        let selected = held
+            .into_iter()
+            .rev()
+            .take(crate::silent::BATCH_LIMIT)
+            .map(|(_, subject)| subject)
+            .collect::<std::collections::BTreeSet<_>>();
+        messages.retain(|m| !crate::silent::waits_for_turn(m) || selected.contains(&m.subject));
+        for m in messages.iter_mut() {
+            m.tags
+                .retain(|tag| !tag.starts_with(crate::silent::REMAINING_PREFIX));
+        }
+        if self.remaining > 0
+            && let Some(m) = messages.iter_mut().find(|m| m.status == "sent")
+        {
+            m.tags.push(format!(
+                "{}{remaining}",
+                crate::silent::REMAINING_PREFIX,
+                remaining = self.remaining
+            ));
+        }
+    }
+}
+/// The seat's rollout intake hold, read at most once per update; `None` until first needed.
+type IntakeHold = Option<Option<crate::rollout::Operation>>;
+type SnapshotUpdate = (crate::store::MailboxWatermark, Snapshot, bool, MaintenanceIds);
 
 /// Recover only recent mail which has never been offered. A prior staging claim is
 /// already an offer attempt, even when its delivered receipt has not arrived yet.
@@ -158,8 +299,9 @@ fn retain_live_mail(
             && sent.accepted_at_unix_ms >= since;
         if after_connection || recovered.contains(&message.subject) {
             live.push(message);
-        } else if sent.accepted_at_unix_ms
-            > since.saturating_sub(u128::from(super::mail_backlog::THRESHOLD_MS))
+        } else if (crate::silent::is_held(&message)
+            || sent.accepted_at_unix_ms
+                > since.saturating_sub(u128::from(super::mail_backlog::THRESHOLD_MS)))
             && never_offered(store, &message)?
         {
             recovered.insert(message.subject.clone());
@@ -183,13 +325,18 @@ pub(super) fn hold_pre_boot_mail(
     };
     let Some((since, through)) = store.native_mail_boot_floor(&peer.agent)? else {
         for message in messages {
-            message.status = "closed".into();
+            if !crate::silent::waits_for_turn(message) {
+                message.status = "closed".into();
+            }
         }
         return Ok(());
     };
     // A closed projection only removes old native inbox files. Explicit conversation
     // reads still see the original graph status, with no synthetic receipt or close.
     for message in messages {
+        if crate::silent::waits_for_turn(message) {
+            continue;
+        }
         let Some(sent) = store.latest_claim(&message.subject, Some("message.sent"))? else {
             message.status = "closed".into();
             continue;
@@ -220,7 +367,7 @@ fn raw_snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
             .into_iter()
             .next();
         let messages = if binding.component == "delivery" {
-            store.messages_through(Some(&binding.subject), false, through)?
+            store.messages_for_delivery_through(&binding.subject, through)?
         } else {
             Vec::new()
         };
@@ -231,9 +378,7 @@ fn raw_snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
 #[cfg(test)]
 fn snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
     let (seat, mut messages) = raw_snapshot(store, binding)?;
-    if filter_messages(store, binding, &mut messages, &mut Default::default())? {
-        store.close_own_post_wakes(&binding.subject)?;
-    }
+    let _ = filter_messages(store, binding, &mut messages, &mut Default::default(), &mut None)?;
     Ok((seat, messages))
 }
 
@@ -243,9 +388,10 @@ fn filter_messages(
     binding: &Fence,
     messages: &mut Vec<crate::model::MessageView>,
     policy_rechecks: &mut std::collections::BTreeSet<String>,
-) -> anyhow::Result<bool> {
+    hold: &mut IntakeHold,
+) -> anyhow::Result<MaintenanceIds> {
     let mut allowed = Vec::new();
-    let mut close_own = false;
+    let mut close_own = std::collections::BTreeSet::new();
     for message in messages.drain(..) {
         if message.to != binding.subject
             || !matches!(message.status.as_str(), "sent" | "staged" | "delivered")
@@ -267,12 +413,18 @@ fn filter_messages(
             if store.github_post_agent(&locator, &kind, id)?.as_deref()
                 == Some(binding.subject.as_str())
             {
-                close_own = true;
+                close_own.insert(message.subject.clone());
                 policy_rechecks.remove(&message.subject);
                 continue;
             }
         }
-        if store.rollout_message_allowed(&message)? {
+        // Every message here is to this seat, so one hold read serves the whole update.
+        if message.status != "sent" || {
+            if hold.is_none() {
+                *hold = Some(store.rollout_intake_hold(&binding.subject)?);
+            }
+            store.rollout_message_allowed_under(hold.as_ref().and_then(Option::as_ref), &message)?
+        } {
             allowed.push(message);
         } else {
             // A reply's eligibility may depend on a parent's receipt. Recheck only these
@@ -285,6 +437,7 @@ fn filter_messages(
 }
 
 /// Update the connection's admitted mailbox, reading only changed durable identities.
+#[allow(clippy::too_many_arguments)]
 fn update_snapshot<F>(
     store: &Store,
     binding: &Fence,
@@ -293,17 +446,20 @@ fn update_snapshot<F>(
     floor: (u128, u64),
     admitted: &mut std::collections::BTreeSet<String>,
     policy_rechecks: &mut std::collections::BTreeSet<String>,
-) -> anyhow::Result<(crate::store::MailboxWatermark, Snapshot, bool)>
+    order: &mut MailboxOrder,
+) -> anyhow::Result<SnapshotUpdate>
 where
     F: FnOnce(&Store, &Fence) -> anyhow::Result<Snapshot>,
 {
     let (since, through) = floor;
-    let mut close_own = false;
+    let mut close_own = std::collections::BTreeSet::new();
+    let mut hold = None;
     let result = store.read_snapshot(|_| {
         let (mark, seat, mut messages) = if let Some((mark, (mut seat, mut messages))) = previous {
             let changes = store.mailbox_changes(binding, &mark, &messages)?;
             let mut updated = changes.seat || changes.resync || !changes.messages.is_empty();
             if changes.resync {
+                order.clear();
                 let (seat, messages) =
                     crate::profile::task("task mailbox-snapshot", || read(store, binding))?;
                 (changes.mark, seat, messages)
@@ -314,12 +470,17 @@ where
                         .into_iter()
                         .next();
                 }
+                // A key belongs to the subject's own claims; a policy recheck keeps its key.
+                for subject in &changes.messages {
+                    order.remove(subject);
+                }
                 let subjects = changes
                     .messages
                     .into_iter()
                     .chain(policy_rechecks.iter().cloned())
                     .collect::<std::collections::BTreeSet<_>>();
                 let mut reorder = false;
+                let mut waking_added = false;
                 for subject in subjects {
                     policy_rechecks.remove(&subject);
                     let old = messages.iter().find(|message| message.subject == subject);
@@ -332,8 +493,18 @@ where
                         Some(through),
                         &mut admitted.clone(),
                     )?;
-                    close_own |= filter_messages(store, binding, &mut changed, policy_rechecks)?;
+                    close_own.extend(filter_messages(
+                        store,
+                        binding,
+                        &mut changed,
+                        policy_rechecks,
+                        &mut hold,
+                    )?);
                     retain_live_mail(store, &mut changed, since, Some(through), admitted)?;
+                    waking_added |= old.is_none()
+                        && changed
+                            .first()
+                            .is_some_and(|m| m.status == "sent" && !crate::silent::is_held(m));
                     if serde_json::to_value(old)? != serde_json::to_value(changed.first())? {
                         messages.retain(|message| message.subject != subject);
                         messages.extend(changed);
@@ -341,12 +512,30 @@ where
                         updated = true;
                     }
                 }
+                // A waking change refills the bounded held batch from durable metadata.
+                // This is one bulk read per real turn, never an extra seek per delivery.
+                if waking_added && order.remaining > 0 {
+                    let (_, refreshed) = read(store, binding)?;
+                    messages = refreshed;
+                    close_own.extend(filter_messages(
+                        store,
+                        binding,
+                        &mut messages,
+                        policy_rechecks,
+                        &mut hold,
+                    )?);
+                    retain_live_mail(store, &mut messages, since, Some(through), admitted)?;
+                    order.clear();
+                    order.bound_held(&mut messages, true);
+                }
+                order.bound_held(&mut messages, false);
                 if reorder {
-                    store.order_mailbox_messages(&mut messages)?;
+                    store.order_mailbox_messages(&mut messages, &mut order.keys)?;
                 }
                 return Ok((changes.mark, (seat, messages), updated));
             }
         } else {
+            order.clear();
             let mark = store.mailbox_watermark(binding)?;
             let (seat, messages) =
                 crate::profile::task("task mailbox-snapshot", || read(store, binding))?;
@@ -354,7 +543,7 @@ where
         };
         policy_rechecks.clear();
         // Policy rechecks retain only identities eligible for this connection. The full
-        // snapshot still applies its original filtering/close side effects before recovery.
+        // snapshot applies the same filtering and only captures maintenance identities.
         let mut eligible = messages.clone();
         retain_live_mail(
             store,
@@ -367,24 +556,89 @@ where
             .into_iter()
             .map(|message| message.subject)
             .collect::<std::collections::BTreeSet<_>>();
-        close_own |= filter_messages(store, binding, &mut messages, policy_rechecks)?;
+        close_own.extend(filter_messages(
+            store,
+            binding,
+            &mut messages,
+            policy_rechecks,
+            &mut hold,
+        )?);
         policy_rechecks.retain(|subject| eligible.contains(subject));
         retain_live_mail(store, &mut messages, since, Some(through), admitted)?;
+        order.bound_held(&mut messages, true);
         Ok((mark, (seat, messages), true))
     });
-    // Policy reads may request automatic closures, but the writer must never run under the
-    // pinned reader. Those commits remain beyond `mark` and are captured by the next delta.
-    if result.is_ok() && close_own {
-        store.close_own_post_wakes(&binding.subject)?;
-    }
-    result
+    // Reading never commits a closure or builds persistent derived state. The background
+    // reactor revalidates these identities separately; its commits follow this read's cut.
+    result.map(|(mark, snapshot, changed)| (mark, snapshot, changed, close_own))
+}
+
+/// Bounded maintenance for a connection's own-post identities, independent of socket reads.
+/// One claim finishes (including COMMIT) before another starts; no reader spans the writer.
+fn own_post_reactor(state: &AppState, fence: &Fence) -> tokio::sync::mpsc::Sender<String> {
+    let (sender, mut pending) = tokio::sync::mpsc::channel::<String>(64);
+    let state = state.clone();
+    let fence = fence.clone();
+    tokio::spawn(async move {
+        while let Some(subject) = pending.recv().await {
+            let store = state.store.clone();
+            let binding = fence.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                store.close_mailbox_own_post_wake(&binding, &subject)
+            }).await;
+            match result {
+                Ok(Ok(true)) => signal_message_changed(&state, "message.closed", false),
+                Ok(Ok(false)) => {},
+                // A changed message or retired connection cannot authorize maintenance.
+                // Durable notifications/timer rechecks handle later eligible identities.
+                Ok(Err(error)) => eprintln!("st3: mailbox own-post maintenance refused: {error}"),
+                Err(_) => return,
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    sender
 }
 
 /// Maximum gap between durable change checks, including when a notification is missed.
 const MAILBOX_RECHECK: Duration = Duration::from_secs(30);
 
-async fn stream(state: AppState, fence: Fence, socket: WebSocket) {
-    stream_with_reader(state, fence, socket, raw_snapshot).await;
+async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDeliveryPeer, native: bool) {
+    #[cfg(feature = "test-support")]
+    let mut control = crate::test_support::fixture_mailbox_transport(&state.store, &fence.subject);
+    #[cfg(feature = "test-support")]
+    if fence.component == "delivery" {
+        while *control.borrow_and_update() {
+            if control.changed().await.is_err() { return; }
+        }
+    }
+    let safety = futures_util::stream::unfold(safety_timer(&fence), |mut timer| async move {
+        timer.tick().await;
+        Some(((), timer))
+    });
+    let heartbeat = futures_util::stream::unfold(tokio::time::interval(Duration::from_secs(10)), |mut timer| async move {
+        timer.tick().await;
+        Some(((), timer))
+    });
+    let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, StreamControl::new(native.then(|| peer.clone())));
+    #[cfg(not(feature = "test-support"))]
+    stream.await;
+    #[cfg(feature = "test-support")]
+    tokio::select! {
+        _ = stream => {},
+        _ = async {
+            if fence.component != "delivery" { std::future::pending::<()>().await; }
+            while control.changed().await.is_ok() {
+                if *control.borrow_and_update() { return; }
+            }
+            std::future::pending::<()>().await;
+        } => {},
+    }
+    if native {
+        let _ = crate::api::read_deadline::spawn_blocking(move || {
+            authority::loss_if_current(&state, &fence, &peer)
+        }).await;
+    }
 }
 
 fn safety_delay(fence: &Fence) -> Duration {
@@ -408,6 +662,7 @@ fn safety_timer(fence: &Fence) -> tokio::time::Interval {
     timer
 }
 
+#[cfg(any(test, feature = "test-support"))]
 async fn stream_with_reader<F>(state: AppState, fence: Fence, socket: WebSocket, read: F)
 where
     F: Fn(&Store, &Fence) -> anyhow::Result<Snapshot> + Clone + Send + 'static,
@@ -419,6 +674,7 @@ where
     stream_with_rechecks(state, fence, socket, read, safety).await;
 }
 
+#[cfg(any(test, feature = "test-support"))]
 async fn stream_with_rechecks<F, S>(
     state: AppState,
     fence: Fence,
@@ -439,10 +695,11 @@ async fn stream_with_rechecks<F, S>(
     stream_with_timers(state, fence, socket, read, safety, heartbeat).await;
 }
 
+#[cfg(any(test, feature = "test-support"))]
 async fn stream_with_timers<F, S, H>(
     state: AppState,
     fence: Fence,
-    mut socket: WebSocket,
+    socket: WebSocket,
     read: F,
     safety: S,
     heartbeat: H,
@@ -451,6 +708,37 @@ async fn stream_with_timers<F, S, H>(
     S: futures_util::Stream<Item = ()> + Send + 'static,
     H: futures_util::Stream<Item = ()> + Send + 'static,
 {
+    stream_with_timers_inner(state, fence, socket, read, safety, heartbeat, StreamControl::new(None)).await;
+}
+
+struct StreamControl {
+    peer: Option<NativeDeliveryPeer>,
+    #[cfg(test)]
+    dirty_gate: Option<Arc<FixtureDirtyGate>>,
+}
+impl StreamControl {
+    fn new(peer: Option<NativeDeliveryPeer>) -> Self {
+        Self { peer, #[cfg(test)] dirty_gate: None }
+    }
+}
+
+// Unit controls can pause snapshot processing while the real subscription and
+// incoming-report handler remain live. Installed servers never have this gate.
+#[cfg(test)]
+struct FixtureDirtyGate {
+    allowed: std::sync::atomic::AtomicBool,
+    notifications: std::sync::atomic::AtomicUsize,
+}
+
+async fn stream_with_timers_inner<F, S, H>(
+    state: AppState, fence: Fence, mut socket: WebSocket, read: F, safety: S, heartbeat: H,
+    control: StreamControl,
+) where
+    F: Fn(&Store, &Fence) -> anyhow::Result<Snapshot> + Clone + Send + 'static,
+    S: futures_util::Stream<Item = ()> + Send + 'static,
+    H: futures_util::Stream<Item = ()> + Send + 'static,
+{
+    let peer = control.peer;
     futures_util::pin_mut!(safety, heartbeat);
     let since = client_now_ms();
     let through = match state.store.index() {
@@ -463,20 +751,54 @@ async fn stream_with_timers<F, S, H>(
     let mut previous_seat = Vec::new();
     let mut previous_mailbox = Vec::new();
     let mut previous_drain = None;
+    let mut replay_nonce = Fence::new(&fence.subject, &fence.incarnation, "replay").token;
+    let mut replay_challenge_sent = false;
+    let mut replay_supported = false;
+    let mut replay_proven = false;
     let mut recovered = std::collections::BTreeSet::new();
     let mut policy_rechecks = std::collections::BTreeSet::new();
+    let mut order = MailboxOrder::new();
+    let own_posts = own_post_reactor(&state, &fence);
     let mut dirty = true;
     let mut last: Option<(crate::store::MailboxWatermark, Snapshot)> = None;
     loop {
-        if dirty {
+        #[cfg(test)]
+        let process_dirty = control.dirty_gate.as_ref().is_none_or(|gate|
+            gate.allowed.load(std::sync::atomic::Ordering::SeqCst));
+        #[cfg(not(test))]
+        let process_dirty = true;
+        if dirty && process_dirty {
+            // A later close notification may record another loss after this connection's
+            // first proof. Durable wakes (and the bounded safety heartbeat) let its current
+            // consumed nonce repair that episode too, without reoffering native work.
+            replay_proven = false;
+            let admission_store = state.store.clone();
             let store = state.store.clone();
             let binding = fence.clone();
             let read = read.clone();
             subscription.changed.borrow_and_update();
             let mut admitted = recovered.clone();
             let mut policies = policy_rechecks.clone();
-            let previous = last.take();
-            let result = crate::api::read_deadline::spawn_blocking(move || {
+            let mut keys = std::mem::take(&mut order);
+            let mut previous = last.take();
+            // This watch actor owns reconnection control. Finish that explicit command
+            // before entering the read worker; snapshots never perform lease/fault writes.
+            let repaired = if let Some(peer) = peer.clone() {
+                let repair_state = state.clone();
+                let repair_fence = fence.clone();
+                match tokio::task::spawn_blocking(move || {
+                    if repair_state.store.check_mailbox(&repair_fence).is_ok() { return false; }
+                    let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
+                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, |owner, validate| {
+                        repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
+                    }), Ok(true))
+                }).await {
+                    Ok(repaired) => repaired,
+                    Err(_) => return,
+                }
+            } else { false };
+            if repaired { previous = None; }
+            let result = crate::api::read_deadline::store_read(&admission_store, move || {
                 crate::profile::task("task mailbox-update", || {
                     let result = update_snapshot(
                         &store,
@@ -486,18 +808,26 @@ async fn stream_with_timers<F, S, H>(
                         (since, through),
                         &mut admitted,
                         &mut policies,
+                        &mut keys,
                     );
-                    (result, admitted, policies)
+                    (result, admitted, policies, keys)
                 })
             })
             .await;
-            let (mark, (seat, mut messages), updated) = match result {
-                Ok((Ok(snapshot), admitted, policies)) => {
+            let (mark, (seat, mut messages), updated, closures) = match result {
+                Ok((Ok(snapshot), admitted, policies, keys)) => {
+                    if repaired {
+                        previous_mailbox.clear();
+                        replay_nonce = Fence::new(&fence.subject, &fence.incarnation, "replay").token;
+                        replay_challenge_sent = false;
+                        replay_proven = false;
+                    }
                     recovered = admitted;
                     policy_rechecks = policies;
+                    order = keys;
                     snapshot
                 }
-                Ok((Err(error), _, _)) => {
+                Ok((Err(error), _, _, _)) => {
                     if error
                         .downcast_ref::<St3Error>()
                         .is_some_and(|error| error.code == "stale-mailbox-session")
@@ -514,6 +844,13 @@ async fn stream_with_timers<F, S, H>(
                 }
                 Err(_) => return,
             };
+            for subject in closures {
+                if let Err(error) = own_posts.try_send(subject) {
+                    // A full bounded queue never blocks delivery or loses its maintenance
+                    // identity: the normal safety tick will reconsider the held subject.
+                    policy_rechecks.insert(error.into_inner());
+                }
+            }
             if !updated {
                 last = Some((mark, (seat, messages)));
                 dirty = false;
@@ -545,6 +882,9 @@ async fn stream_with_timers<F, S, H>(
                 .map(|message| message.subject.clone())
                 .collect::<Vec<_>>();
             subscription.messages(&subjects);
+            // Held mail stays admitted to this stream, so the next waking message releases it
+            // without another read; until then the seat is offered none of it.
+            crate::silent::release(&mut messages);
             let bytes = serde_json::to_vec(&messages).unwrap_or_default();
             if fence.component == "delivery" && bytes != previous_mailbox {
                 if send(&mut socket, &Frame::Mailbox { messages })
@@ -554,6 +894,10 @@ async fn stream_with_timers<F, S, H>(
                     return;
                 }
                 previous_mailbox = bytes;
+            }
+            if fence.component == "delivery" && replay_supported && !replay_challenge_sent {
+                if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
+                replay_challenge_sent = true;
             }
             if fence.component == "delivery" {
                 let drain = state
@@ -581,12 +925,49 @@ async fn stream_with_timers<F, S, H>(
             dirty = false;
         }
         tokio::select! {
-            event = subscription.changed.changed() => { if event.is_err() { return; } dirty = true; },
+            event = subscription.changed.changed() => {
+                if event.is_err() { return; }
+                #[cfg(test)]
+                if let Some(gate) = &control.dirty_gate {
+                    gate.notifications.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                dirty = true;
+            },
             tick = safety.next() => { if tick.is_none() { return; } dirty = true; },
             incoming = socket.recv() => match incoming {
                 Some(Ok(WsMessage::Text(report))) => {
                     if state.store.check_mailbox(&fence).is_ok() {
-                        delivery_presence::record_fenced(&fence, &report);
+                        let authenticated = if let Some(peer) = peer.clone() {
+                            let checked_state = state.clone();
+                            let binding = fence.clone();
+                            let raw = report.to_string();
+                            matches!(crate::api::read_deadline::spawn_blocking(move || {
+                                authority::admit_report(&checked_state, &binding, &peer, &raw)
+                            }).await, Ok(Ok(())))
+                        } else { true };
+                        // Native refusal discards all report-driven effects, including
+                        // capability negotiation and rollout ACKs. Typed presence failure
+                        // remains separate for an otherwise authenticated control report.
+                        if !authenticated { continue; }
+                        let recorded = record_admitted_report(&fence, &report);
+                        let value = serde_json::from_str::<Value>(&report).unwrap_or(Value::Null);
+                        replay_supported |= peer.is_some() && value["mailbox_replay_ack"] == true;
+                        if fence.component == "delivery" && replay_supported && !previous_mailbox.is_empty() && !replay_challenge_sent {
+                            if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
+                            replay_challenge_sent = true;
+                        }
+                        if recorded && !replay_proven && replay_challenge_sent
+                            && value["mailbox_replay_nonce"].as_str() == Some(&replay_nonce)
+                            && value["ready"] == true
+                            && let Some(peer) = peer.clone()
+                        {
+                            let repair_state = state.clone();
+                            let binding = fence.clone();
+                            let raw = report.to_string();
+                            replay_proven = matches!(crate::api::read_deadline::spawn_blocking(move || {
+                                authority::repair_proven(&repair_state, &binding, &peer, &raw)
+                            }).await, Ok(Ok(())));
+                        }
                         if let Ok(value) = serde_json::from_str::<Value>(&report)
                             && fence.component == "delivery"
                             && let Some(id) = value["drain_operation"].as_str()
@@ -610,6 +991,79 @@ async fn stream_with_timers<F, S, H>(
             },
         }
     }
+}
+
+// The stream checks durable custody and native peer authority before this recorder.
+// Preserve typed recording success separately from ownership admission/drain ACKs.
+fn record_admitted_report(fence: &Fence, report: &str) -> bool {
+    let recorded = delivery_presence::record_fenced(fence, report);
+    #[cfg(feature = "test-support")]
+    if recorded {
+        observe_admitted_report(fence, report);
+    }
+    recorded
+}
+
+#[cfg(test)]
+fn record_checked_report(store: &Store, fence: &Fence, report: &str) -> bool {
+    if store.check_mailbox(fence).is_err() {
+        return false;
+    }
+    record_admitted_report(fence, report);
+    true
+}
+
+/// An isolated fixture can observe daemon acceptance without writing graph state or
+/// sending probe mail. This is deliberately after the durable ownership check.
+#[cfg(feature = "test-support")]
+fn observe_admitted_report(fence: &Fence, raw: &str) {
+    use std::io::Write as _;
+    use std::sync::Mutex;
+
+    let Some(path) = std::env::var_os("ST3_TEST_ADMITTED_REPORTS") else {
+        return;
+    };
+    let Some(mut report) = admitted_report(fence, raw) else {
+        return;
+    };
+    // Sequence and append are ordered together, including reports from other streams.
+    static SEQUENCE: Mutex<u64> = Mutex::new(0);
+    let Ok(mut sequence) = SEQUENCE.lock() else {
+        return;
+    };
+    *sequence += 1;
+    report["sequence"] = json!(*sequence);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{report}");
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn admitted_report(fence: &Fence, raw: &str) -> Option<Value> {
+    use sha2::{Digest as _, Sha256};
+
+    let report: Value = serde_json::from_str(raw).ok()?;
+    if fence.component != "delivery" || report["transport"] != "omp-channel" {
+        return None;
+    }
+    let pid = u32::try_from(report["pid"].as_u64()?).ok()?;
+    let start_ticks = crate::sekrets::identity::process_start(i32::try_from(pid).ok()?)?;
+    Some(json!({
+        "subject": fence.subject,
+        "incarnation": fence.incarnation,
+        "component": fence.component,
+        "epoch": fence.epoch,
+        // Retain binding identity without publishing its credential.
+        "token_sha256": hex::encode(Sha256::digest(fence.token.as_bytes())),
+        "pid": pid,
+        "start_ticks": start_ticks,
+        "transport": report["transport"],
+        "ready": report["ready"],
+    }))
 }
 
 async fn finish_fenced(socket: &mut WebSocket, frame: &Frame) {
@@ -644,6 +1098,83 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    // These snapshot/receipt controls model an already-admitted channel with a synthetic
+    // identity. Their explicit test-only routes do not claim production peer authentication;
+    // isolated native wrapper controls exercise the real kernel/process/provider boundary.
+    fn admitted_fixture_router(state: AppState, peer: NativeDeliveryPeer) -> Router {
+        let bind_state = state.clone();
+        let bind_peer = peer.clone();
+        let stream_state = state.clone();
+        let stream_peer = peer.clone();
+        Router::new()
+            .route("/v1/mailbox/bind", post(move |Json(request): Json<Fence>| {
+                let (state, peer) = (bind_state.clone(), bind_peer.clone());
+                async move {
+                    authorize(&request, Some(&peer))?;
+                    let fence = blocking_action(move || state.store.bind_mailbox(&request)).await?;
+                    Ok::<_, ApiError>(Json(json!({"api_version":"st3.v1","value":fence})))
+                }
+            }))
+            .route("/v1/mailbox", get(move |Query(fence): Query<Fence>, websocket: WebSocketUpgrade| {
+                let (state, peer) = (stream_state.clone(), stream_peer.clone());
+                async move {
+                    authorize(&fence, Some(&peer))?;
+                    state.store.check_mailbox(&fence).map_err(ApiError::bad)?;
+                    signal_local_change(&state);
+                    Ok::<_, ApiError>(websocket.on_upgrade(move |socket| stream_with_reader(state, fence, socket, raw_snapshot)))
+                }
+            }))
+            .fallback_service(router(state).layer(Extension(peer)))
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    #[test]
+    fn admitted_report_requires_the_current_delivery_binding() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        let subject = "agent/report-binding-control";
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"report-binding-control", "incarnation_id":"current"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let old = state
+            .store
+            .bind_mailbox(&Fence::new(subject, "current", "delivery"))
+            .unwrap();
+        let report =
+            json!({"transport":"omp-channel", "pid":std::process::id(), "ready":true}).to_string();
+        assert!(record_checked_report(&state.store, &old, &report));
+        let current = state
+            .store
+            .bind_mailbox(&Fence::new(subject, "current", "delivery"))
+            .unwrap();
+        assert!(!record_checked_report(&state.store, &old, &report));
+        for change in ["token", "epoch", "incarnation", "subject"] {
+            let mut foreign = current.clone();
+            match change {
+                "token" => foreign.token = "foreign".into(),
+                "epoch" => foreign.epoch += 1,
+                "incarnation" => foreign.incarnation = "previous".into(),
+                _ => foreign.subject = "agent/foreign-report-control".into(),
+            }
+            assert!(
+                !record_checked_report(&state.store, &foreign, &report),
+                "{change}"
+            );
+        }
+        assert!(record_checked_report(&state.store, &current, &report));
+        let observation = admitted_report(&current, &report).unwrap();
+        assert_eq!(observation["epoch"], current.epoch);
+        assert_eq!(observation["pid"], std::process::id());
+        assert!(observation["start_ticks"].as_u64().is_some());
+        assert!(observation.get("token").is_none());
+        assert_ne!(observation["token_sha256"], current.token);
+        let mut title = current;
+        title.component = "title".into();
+        assert!(admitted_report(&title, &report).is_none());
+    }
 
     #[tokio::test]
     async fn attachment_checks_both_runtime_and_current_delivery_epoch() {
@@ -775,7 +1306,7 @@ mod tests {
             pid: 37,
             archives_inbox: true,
         };
-        let app = router(state.clone()).layer(Extension(peer));
+        let app = admitted_fixture_router(state.clone(), peer);
         let path = root.path().join("daemon.sock");
         let server_path = path.clone();
         let server = tokio::spawn(async move { serve_unix(&server_path, app).await.unwrap() });
@@ -1051,6 +1582,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn held_mail_older_than_a_day_survives_reconnect_until_the_next_wake() {
+        let store = Store::open_memory("node").unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: "message/old-silent".into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/example/writer".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")),
+                    ("from".into(), json!("agent/example/writer")),
+                    ("to".into(), json!("agent/example/reader")),
+                    ("content".into(), json!("A held update.")),
+                    ("tags".into(), json!([crate::silent::SILENT_TAG])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let since = client_now_ms() + crate::silent::HELD_TOO_LONG_MS + 1;
+        let mut messages = store.messages(Some("agent/example/reader"), false).unwrap();
+        let mut recovered = std::collections::BTreeSet::new();
+        retain_live_mail(
+            &store,
+            &mut messages,
+            since,
+            Some(store.index().unwrap()),
+            &mut recovered,
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        let peer = NativeDeliveryPeer {
+            agent: "agent/example/reader".into(),
+            transport: "codex",
+            pid: 123,
+            archives_inbox: true,
+        };
+        // No boot floor: legacy polling must not synthesize closed for held mail.
+        hold_pre_boot_mail(&store, Some(&peer), Some(&peer.agent), &mut messages).unwrap();
+        assert_eq!(messages[0].status, "sent");
+        store
+            .append_claim(&ClaimInput {
+                subject: peer.agent.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("incarnation_id".into(), json!("current")),
+                    ("runtime_id".into(), json!("fixture-runtime")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        assert!(store.native_mail_boot_floor(&peer.agent).unwrap().is_some());
+        hold_pre_boot_mail(&store, Some(&peer), Some(&peer.agent), &mut messages).unwrap();
+        assert_eq!(
+            messages[0].status, "sent",
+            "a boot floor must also preserve held mail"
+        );
+        let mut offered = messages.clone();
+        crate::silent::release(&mut offered);
+        assert!(offered.is_empty(), "reconnect alone cannot wake the seat");
+        let mut waking = messages[0].clone();
+        waking.subject = "message/question".into();
+        waking.tags.clear();
+        messages.push(waking);
+        crate::silent::release(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            store.message("message/old-silent").unwrap().unwrap().status,
+            "sent"
+        );
+        assert!(
+            store
+                .claims_for("message/old-silent", Some("message.read"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     async fn restart_recovers_recent_unoffered_mail_once(transport: &'static str) {
         let root = tempfile::tempdir().unwrap();
         let mut state = super::super::tests::state(root.path());
@@ -1107,7 +1721,7 @@ mod tests {
             pid: 37,
             archives_inbox: true,
         };
-        let app = router(state.clone()).layer(Extension(peer));
+        let app = admitted_fixture_router(state.clone(), peer);
         let path = root.path().join("daemon.sock");
         let start = || {
             let app = app.clone();
@@ -1344,7 +1958,7 @@ mod tests {
             pid: 37,
             archives_inbox: false,
         };
-        let app = router(state.clone()).layer(Extension(peer));
+        let app = admitted_fixture_router(state.clone(), peer);
         let path = root.path().join("daemon.sock");
         let server_path = path.clone();
         let server = tokio::spawn(async move { serve_unix(&server_path, app).await.unwrap() });
@@ -1374,8 +1988,292 @@ mod tests {
         server.abort();
     }
 
+    /// The next mail frame, skipping seat and control frames.
+    async fn next_mail(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    ) -> Vec<crate::model::MessageView> {
+        loop {
+            if let Frame::Mailbox { messages } = next(socket).await {
+                return messages;
+            }
+        }
+    }
+
+    /// No mail frame arrives for a while: nothing was offered to the seat.
+    async fn no_mail(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>) {
+        let quiet = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Frame::Mailbox { messages } = serde_json::from_str(&text).unwrap() {
+                            return messages;
+                        }
+                    }
+                    Some(Ok(Message::Ping(bytes))) => socket.send(Message::Pong(bytes)).await.unwrap(),
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        })
+        .await;
+        if let Ok(messages) = quiet {
+            panic!("held mail was offered: {messages:?}");
+        }
+    }
+
+    /// Each receipt updates the frame; the mailbox ends empty once the seat has read it all.
+    async fn drained(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>) {
+        while !next_mail(socket).await.is_empty() {}
+    }
+
+    /// The seat reads each message, as its channel does.
+    async fn read_all(client: &Client, fence: &Fence, messages: &[crate::model::MessageView]) {
+        for message in messages {
+            for lifecycle in ["staged", "delivered", "read"] {
+                let _: ClaimRecord = client
+                    .post(
+                        "/v1/mailbox/receipts",
+                        &Receipt {
+                            fence: fence.clone(),
+                            message: message.subject.clone(),
+                            lifecycle: lifecycle.into(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn every_harness_delivers_live_mail_and_receipts_over_a_real_unix_push_stream_without_files()
+    async fn held_mail_wakes_nobody_and_goes_out_with_the_next_waking_message() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = super::super::tests::state(root.path());
+        state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        crate::mailbox::tests::ready(&state.store, "session-1");
+        let kdl =
+            "version 2\nagent \"eval.worker\" { workspace \"/work\"; command \"sleep 60\"; }\n";
+        let intent = crate::graph::parse_test_intent(kdl, "node").unwrap();
+        let planned = state
+            .store
+            .mission(&intent, IntentInput { kdl: kdl.into(), source_name: None })
+            .unwrap();
+        state.store.apply(&intent, &planned.subject_tokens, "seat").unwrap();
+        let peer = NativeDeliveryPeer {
+            agent: "agent/eval.worker".into(),
+            transport: "claude-channel",
+            pid: 37,
+            archives_inbox: false,
+        };
+        let path = root.path().join("daemon.sock");
+        let server_path = path.clone();
+        let app = admitted_fixture_router(state.clone(), peer);
+        let server = tokio::spawn(async move { serve_unix(&server_path, app).await.unwrap() });
+        let client = Client::new(Endpoint::Unix(path.clone()));
+        for _ in 0..100 {
+            if path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let fence: Fence = client
+            .post("/v1/mailbox/bind", &Fence::new("agent/eval.worker", "session-1", "delivery"))
+            .await
+            .unwrap();
+        let mut socket = client.open_mailbox(&fence).await.unwrap();
+        assert!(next_mail(&mut socket).await.is_empty());
+        let send = |key: &str, from: &str, tags: &[&str], in_reply_to: Option<&str>| {
+            super::super::accept_message(
+                &state,
+                MessageSendRequest {
+                    idempotency_key: key.into(),
+                    from: from.into(),
+                    to: fence.subject.clone(),
+                    content: format!("{key} words"),
+                    title: Some(key.into()),
+                    in_reply_to: in_reply_to.map(str::to_owned),
+                    tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+                    attachments: Vec::new(),
+                },
+                None,
+                None,
+            )
+            .unwrap()
+            .0
+        };
+        // Two explicit silent messages wake nobody.
+        let silent = send(
+            "silent",
+            "agent/eval.peer",
+            &[crate::silent::SILENT_TAG],
+            None,
+        );
+        let status = send(
+            "status",
+            "agent/eval.peer",
+            &[crate::silent::SILENT_TAG],
+            None,
+        );
+        signal_changed(&state);
+        no_mail(&mut socket).await;
+        // Nothing is lost: both are unread, in the seat's mailbox.
+        for held in [&silent, &status] {
+            assert_eq!(
+                state.store.message(&held.subject).unwrap().unwrap().status,
+                "sent"
+            );
+        }
+        let listed = state.store.held_mail_before(u128::MAX).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].0.as_str(), listed[0].1), ("agent/eval.worker", 2));
+
+        // An ordinary default-wake question releases the held mail in send order.
+        let question = send("question", "agent/eval.peer", &[], None);
+        signal_changed(&state);
+        let batch = next_mail(&mut socket).await;
+        assert_eq!(
+            batch
+                .iter()
+                .map(|message| message.subject.as_str())
+                .collect::<Vec<_>>(),
+            [
+                silent.subject.as_str(),
+                status.subject.as_str(),
+                question.subject.as_str()
+            ]
+        );
+        read_all(&client, &fence, &batch).await;
+        drained(&mut socket).await;
+
+        // A large backlog is bounded on this connection and refilled on later real turns.
+        for n in 0..20 {
+            send(
+                &format!("backlog-{n}"),
+                "agent/eval.peer",
+                &[crate::silent::SILENT_TAG],
+                None,
+            );
+        }
+        signal_changed(&state);
+        no_mail(&mut socket).await;
+        for (turn, offered, remaining) in [(0, 8, 12), (1, 8, 4), (2, 4, 0)] {
+            send(
+                &format!("wake-backlog-{turn}"),
+                "agent/eval.peer",
+                &[],
+                None,
+            );
+            signal_changed(&state);
+            let batch = next_mail(&mut socket).await;
+            assert_eq!(batch.len(), offered + 1, "turn {turn}");
+            let notices = batch
+                .iter()
+                .flat_map(|m| &m.tags)
+                .filter_map(|tag| tag.strip_prefix(crate::silent::REMAINING_PREFIX))
+                .collect::<Vec<_>>();
+            if remaining > 0 {
+                assert_eq!(notices, vec![remaining.to_string()]);
+            } else {
+                assert!(notices.is_empty());
+            }
+            read_all(&client, &fence, &batch).await;
+            drained(&mut socket).await;
+        }
+
+        // A reply defaults to wake even when its parent was silent.
+        let asked = super::super::accept_message(
+            &state,
+            MessageSendRequest {
+                idempotency_key: "asked".into(),
+                from: fence.subject.clone(),
+                to: "agent/eval.peer".into(),
+                content: "Which branch?".into(),
+                title: None,
+                in_reply_to: None,
+                tags: vec![crate::silent::SILENT_TAG.into()],
+                attachments: Vec::new(),
+            },
+            None,
+            None,
+        )
+        .unwrap()
+        .0;
+        let answer = send("answer", "agent/eval.peer", &[], Some(&asked.subject));
+        assert!(!crate::silent::is_held(&answer), "{:?}", answer.tags);
+        signal_changed(&state);
+        let woken = next_mail(&mut socket).await;
+        assert_eq!(woken.len(), 1);
+        read_all(&client, &fence, &woken).await;
+        drained(&mut socket).await;
+
+        // Each system kind still wakes and releases held mail.
+        let kinds: [(&str, &str, &[&str]); 8] = [
+            ("person", "person/eval", &[]),
+            (
+                "handoff",
+                "daemon/runtime",
+                &["st3-work-handoff:step-run/r/s"],
+            ),
+            ("fault", "daemon/runtime", &["st3-fault:episode"]),
+            ("ready-step", "daemon/runtime", &["st3-work:step-run/r/s@1@1@x"]),
+            ("gh-watch", "daemon/node", &[crate::github_watch::WATCH_TAG]),
+            ("run-report", "daemon/runtime", &["st3-run-report:failed"]),
+            ("retry", "daemon/runtime", &["st3-provider-capacity-retry"]),
+            (
+                "product-wait",
+                "daemon/runtime",
+                &["st3-product-wait:step-run/r/s"],
+            ),
+        ];
+        for (kind, from, tags) in kinds {
+            let held = send(
+                &format!("held-before-{kind}"),
+                "agent/eval.peer",
+                &[crate::silent::SILENT_TAG],
+                None,
+            );
+            signal_changed(&state);
+            no_mail(&mut socket).await;
+            // st's own messages are appended as claims, like the daemon does; the others are sent.
+            let subject = if from.starts_with("daemon/") {
+                let subject = format!("message/{kind}");
+                state
+                    .store
+                    .append_claim(&ClaimInput {
+                        subject: subject.clone(),
+                        kind: "message.sent".into(),
+                        actor: Some(from.into()),
+                        fields: BTreeMap::from([
+                            ("status".into(), json!("sent")),
+                            ("from".into(), json!(from)),
+                            ("to".into(), json!(fence.subject)),
+                            ("content".into(), json!(kind)),
+                            ("tags".into(), json!(tags)),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(kind.into()),
+                    })
+                    .unwrap();
+                subject
+            } else {
+                send(kind, from, tags, None).subject
+            };
+            signal_changed(&state);
+            let batch = next_mail(&mut socket).await;
+            assert_eq!(
+                batch.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
+                [held.subject.as_str(), subject.as_str()],
+                "{kind} wakes the seat and carries its held mail"
+            );
+            read_all(&client, &fence, &batch).await;
+            drained(&mut socket).await;
+        }
+        assert!(state.store.held_mail_before(u128::MAX).unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn admitted_transports_deliver_live_mail_and_receipts_over_a_real_unix_push_stream_without_files()
      {
         for transport in [
             "claude-channel",
@@ -1415,8 +2313,7 @@ mod tests {
             let lose_response = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let injection = lose_response.clone();
             let app =
-                router(state.clone())
-                    .layer(Extension(peer))
+                admitted_fixture_router(state.clone(), peer)
                     .layer(axum::middleware::from_fn(
                         move |request: axum::extract::Request, next: axum::middleware::Next| {
                             let injection = injection.clone();
@@ -1806,6 +2703,7 @@ mod tests {
     }
 
     struct ControlledStream {
+        dirty_gate: Arc<FixtureDirtyGate>,
         socket: tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
         recheck: tokio::sync::mpsc::UnboundedSender<()>,
         heartbeat: tokio::sync::mpsc::UnboundedSender<()>,
@@ -1819,12 +2717,23 @@ mod tests {
     }
 
     async fn controlled_stream(state: AppState, fence: &Fence, path: &Path) -> ControlledStream {
+        controlled_stream_with_peer(state, fence, path, None).await
+    }
+
+    async fn controlled_stream_with_peer(
+        state: AppState, fence: &Fence, path: &Path, peer: Option<NativeDeliveryPeer>,
+    ) -> ControlledStream {
         let (recheck, receiver) = tokio::sync::mpsc::unbounded_channel();
         let receiver = Arc::new(std::sync::Mutex::new(Some(receiver)));
         let (heartbeat, heartbeats) = tokio::sync::mpsc::unbounded_channel();
         let heartbeats = Arc::new(std::sync::Mutex::new(Some(heartbeats)));
         let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = reads.clone();
+        let dirty_gate = Arc::new(FixtureDirtyGate {
+            allowed: std::sync::atomic::AtomicBool::new(true),
+            notifications: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let fixture_gate = dirty_gate.clone();
         let app = Router::new()
             .route(
                 "/v1/mailbox",
@@ -1835,6 +2744,8 @@ mod tests {
                         let receiver = receiver.lock().unwrap().take().unwrap();
                         let heartbeats = heartbeats.lock().unwrap().take().unwrap();
                         let counted = counted.clone();
+                        let fixture_gate = fixture_gate.clone();
+                        let peer = peer.clone();
                         async move {
                             websocket.on_upgrade(move |socket| {
                                 let ticks = futures_util::stream::unfold(
@@ -1843,7 +2754,7 @@ mod tests {
                                         receiver.recv().await.map(|()| ((), receiver))
                                     },
                                 );
-                                stream_with_timers(
+                                stream_with_timers_inner(
                                     state,
                                     fence,
                                     socket,
@@ -1858,6 +2769,7 @@ mod tests {
                                             receiver.recv().await.map(|()| ((), receiver))
                                         },
                                     ),
+                                    StreamControl { peer, dirty_gate: Some(fixture_gate) },
                                 )
                             })
                         }
@@ -1880,16 +2792,238 @@ mod tests {
         }
         let client = Client::new(Endpoint::Unix(path.to_owned()));
         let mut socket = client.open_mailbox(fence).await.unwrap();
-        assert!(
-            matches!(next(&mut socket).await, Frame::Mailbox { messages } if messages.is_empty())
-        );
+        let mut initial = next(&mut socket).await;
+        if matches!(initial, Frame::Seat { .. }) { initial = next(&mut socket).await; }
+        assert!(matches!(initial, Frame::Mailbox { messages } if messages.is_empty()));
         ControlledStream {
+            dirty_gate,
             socket,
             recheck,
             heartbeat,
             reads,
             server,
         }
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    #[tokio::test]
+    async fn native_report_refusal_cannot_ack_drain_or_negotiate_replay() {
+        report_control_effects(true).await;
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    #[tokio::test]
+    async fn legacy_report_keeps_control_admission_separate_from_typed_presence() {
+        report_control_effects(false).await;
+    }
+
+    #[cfg(all(feature = "test-support", target_os = "linux"))]
+    async fn report_control_effects(native: bool) {
+        use crate::store::owned_sets::{Options, Source};
+        use st_drivers::{harness_events, harness_state};
+        use std::sync::atomic::Ordering::SeqCst;
+        let root = tempfile::tempdir().unwrap();
+        let mut state = super::super::tests::state(root.path());
+        state.store = Arc::new(Store::open_memory("node").unwrap());
+        let name = if native { "eval.report-effects-native" } else { "eval.report-effects-legacy" };
+        let subject = format!("agent/{name}");
+        let input = crate::graph::parse_owned_set_intent(&format!(
+            "version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; harness \"omp\" {{}} }}"
+        ), "node").unwrap();
+        let policy = crate::rollout::Policy::when_idle(1_800_000, false);
+        let mut options = Options {
+            set: name.into(), source: Source { repository: "fixture/report".into(),
+                r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
+            expected_set: "absent".into(), rollout: Some(policy.clone()),
+            adopt: Default::default(), allow_empty: false, confirm_retire: None,
+            expected_subjects: Default::default(),
+        };
+        let preview = state.store.owned_set_preview(&input, &options).unwrap();
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+        options.expected_subjects = preview.expected_subjects;
+        state.store.apply_owned_set(&input, &options, "report-publish", "person/test").unwrap();
+        let selected = state.store.rollout_selection(&subject).unwrap().unwrap();
+        let member = selected.desired.member.as_ref().unwrap();
+        state.store.append_claim(&ClaimInput {
+            subject: subject.clone(), kind: "runtime.observed".into(), actor: Some(subject.clone()),
+            fields: serde_json::from_value(json!({"status":"running", "host":"node",
+                "runtime_id":member.runtime_id, "incarnation_id":"current"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let agent_dir = crate::hooks::claude_agent_dir(&state.state_dir.join("drivers"), &subject, "node");
+        harness_events::enable(&agent_dir, "current").unwrap();
+        let sequence = harness_state::claim(&agent_dir, name, "omp", "report-session").unwrap();
+        let raw = harness_events::read_runtime_state(&agent_dir, "current").unwrap().unwrap();
+        let peer = NativeDeliveryPeer { agent: subject.clone(), transport: "omp-channel",
+            pid: std::process::id(), archives_inbox: true };
+        // An explicitly already-admitted fixture lease isolates report consumption.
+        // This is not a physical bind/launch authentication certificate.
+        let owner = crate::mailbox::Authority { provider: "omp".into(), session: "report-session".into(),
+            sequence, pid: peer.pid, process_token: st_runtime::process_start_token(peer.pid).unwrap() };
+        let fence = state.store.bind_mailbox_with_lease(&Fence::new(&subject, "current", "delivery"), Some(&owner)).unwrap();
+        state.store.request_rollout(&subject, &selected.desired_token, member, "current",
+            "person/test", &policy, "report-drain").unwrap();
+        let operation = state.store.rollout(&subject).unwrap().unwrap();
+        let mut stream = controlled_stream_with_peer(state.clone(), &fence, &root.path().join("report.sock"),
+            native.then(|| peer.clone())).await;
+        assert!(matches!(next(&mut stream.socket).await,
+            Frame::Drain { operation: Some(id) } if id == operation.id));
+        stream.dirty_gate.allowed.store(false, SeqCst);
+        let report = |reason: &str| json!({"transport":"omp-channel", "pid":peer.pid,
+            "ready":false, "reason":reason});
+        let baseline = report("baseline");
+        assert!(authority::admit_report(&state, &fence, &peer, &baseline.to_string()).is_ok());
+        stream.socket.send(Message::Text(baseline.to_string().into())).await.unwrap();
+        stream.socket.send(Message::Ping(vec![0].into())).await.unwrap();
+        expect_pong(&mut stream.socket, &[0]).await;
+        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        let tap_count = || std::env::var_os("ST3_TEST_ADMITTED_REPORTS").map(|path| {
+            std::fs::read_to_string(path).unwrap_or_default().lines().filter(|line|
+                serde_json::from_str::<Value>(line).is_ok_and(|value| value["subject"] == subject)).count()
+        });
+        let initial_taps = tap_count();
+        let index = state.store.index().unwrap();
+        if native {
+            for (number, refusal) in ["pid", "transport", "provider"].into_iter().enumerate() {
+                let mut rejected = report("must-not-be-recorded");
+                rejected["mailbox_replay_ack"] = json!(true);
+                rejected["drain_operation"] = json!(operation.id);
+                match refusal {
+                    "pid" => rejected["pid"] = json!(u64::from(peer.pid) + 1),
+                    "transport" => rejected["transport"] = json!("claude-channel"),
+                    _ => {
+                        let mut foreign: Value = serde_json::from_slice(&raw).unwrap();
+                        foreign["harness"] = json!("codex");
+                        harness_events::write_snapshot(&agent_dir, "harness-state", &serde_json::to_vec(&foreign).unwrap()).unwrap();
+                    }
+                }
+                assert!(state.store.check_mailbox(&fence).is_ok(), "Store fence must remain current");
+                assert!(authority::admit_report(&state, &fence, &peer, &rejected.to_string()).is_err(), "{refusal}");
+                stream.socket.send(Message::Text(rejected.to_string().into())).await.unwrap();
+                let barrier = [number as u8 + 1];
+                stream.socket.send(Message::Ping(barrier.to_vec().into())).await.unwrap();
+                expect_pong(&mut stream.socket, &barrier).await;
+                assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_none(), "{refusal}");
+                assert_eq!(state.store.index().unwrap(), index, "no drain/recovery claim: {refusal}");
+                assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+                assert_eq!(tap_count(), initial_taps, "no admitted tap: {refusal}");
+                harness_events::write_snapshot(&agent_dir, "harness-state", &raw).unwrap();
+            }
+        }
+        // Native authority can accept a control even when optional typed presence is invalid.
+        let mut malformed = report("must-not-replace-presence");
+        malformed["image"] = json!(42);
+        malformed["drain_operation"] = json!(operation.id);
+        assert!(authority::admit_report(&state, &fence, &peer, &malformed.to_string()).is_ok());
+        stream.socket.send(Message::Text(malformed.to_string().into())).await.unwrap();
+        stream.socket.send(Message::Ping(vec![4].into())).await.unwrap();
+        expect_pong(&mut stream.socket, &[4]).await;
+        assert!(state.store.rollout(&subject).unwrap().unwrap().drain_ack.is_some());
+        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("baseline"));
+        assert_eq!(tap_count(), initial_taps);
+        let mut accepted = report("later-admissible");
+        accepted["mailbox_replay_ack"] = json!(true);
+        stream.socket.send(Message::Text(accepted.to_string().into())).await.unwrap();
+        stream.socket.send(Message::Ping(vec![5].into())).await.unwrap();
+        if native { assert!(matches!(next(&mut stream.socket).await, Frame::Replay { .. })); }
+        expect_pong(&mut stream.socket, &[5]).await;
+        assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(), Some("later-admissible"));
+        assert_eq!(tap_count(), initial_taps.map(|count| count + 1));
+    }
+
+    #[tokio::test]
+    async fn argv_bound_stream_refuses_changed_declaration_reads_and_reports() {
+        argv_changed_stream_control(true).await;
+    }
+
+    #[tokio::test]
+    async fn argv_desired_change_wakes_and_fences_bound_stream() {
+        argv_changed_stream_control(false).await;
+    }
+
+    async fn argv_changed_stream_control(hold_dirty: bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        for change in ["stop", "host", "native", "argv"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = super::super::tests::state(root.path());
+            state.store = Arc::new(Store::open_memory("node").unwrap());
+            let name = format!("eval.argv-continuation-{change}");
+            let subject = format!("agent/{name}");
+            let initial = format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; argv \"python3\" \"probe\"; }}");
+            let intent = crate::graph::parse_intent(&initial,"node").unwrap();
+            state.store.apply_internal(&intent,"argv-stream-initial").unwrap();
+            let runtime = state.store.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: "runtime.observed".into(), actor: Some("daemon/runtime".into()),
+                fields: BTreeMap::from([("status".into(),json!("running")),("incarnation_id".into(),json!("current")),
+                    ("runtime_id".into(),json!("argv-stream")),("host".into(),json!("node"))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let member = state.store.desired_subjects_named(std::slice::from_ref(&subject)).unwrap().remove(0).member.unwrap();
+            // Synthetic already-authenticated bind isolates continuation fencing;
+            // actual kernel/process admission is covered by production argv fixtures.
+            let fence = state.store.bind_argv_mailbox_checked(&Fence::new(&subject,"current","delivery"),&member,&|| Ok(())).unwrap();
+            assert!(raw_snapshot(&state.store,&fence).is_ok());
+            let mut stream = controlled_stream(state.clone(),&fence,&root.path().join("argv.sock")).await;
+            let original = format!("accepted-{change}");
+            let report = |reason: &str| Message::Text(json!({"transport":"omp-channel","pid":37,"ready":false,"reason":reason}).to_string().into());
+            stream.socket.send(report(&original)).await.unwrap();
+            let deadline = tokio::time::Instant::now()+Duration::from_secs(2);
+            while delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref()!=Some(&original) {
+                assert!(tokio::time::Instant::now()<deadline,"unchanged argv report was not admitted");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            stream.socket.send(Message::Ping(vec![0].into())).await.unwrap();
+            expect_pong(&mut stream.socket, &[0]).await;
+            let notifications = stream.dirty_gate.notifications.load(SeqCst);
+            let reads = stream.reads.load(SeqCst);
+            // Keep every wake route intact, but hold dirty processing so neither
+            // subject/owner notifications nor a resync/timer can rescue this check.
+            stream.dirty_gate.allowed.store(!hold_dirty, SeqCst);
+            let replacement = match change {
+                "stop" => format!("version 2\nstop {subject:?}"),
+                "host" => format!("version 2\nagent {name:?} {{ host \"other\"; workspace \"/tmp\"; argv \"python3\" \"probe\"; }}"),
+                "native" => format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; harness \"omp\" {{}} }}"),
+                "argv" => format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; argv \"python3\" \"different-program\"; }}"),
+                _ => unreachable!(),
+            };
+            let intent = crate::graph::parse_intent(&replacement,"node").unwrap();
+            state.store.apply_internal(&intent,"argv-stream-changed").unwrap();
+            // Direct Store writes do not publish the API post-commit feed. Supply
+            // the same committed-change signal used by production callers.
+            signal_changed(&state);
+            assert_eq!(state.store.latest_claim(&subject,Some("runtime.observed")).unwrap().unwrap().id,runtime.id);
+            assert!(raw_snapshot(&state.store,&fence).is_err());
+            if !hold_dirty {
+                assert!(matches!(next(&mut stream.socket).await, Frame::Fenced { .. }));
+                continue;
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while stream.dirty_gate.notifications.load(SeqCst) == notifications {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("healthy desired-change dispatcher did not reach the stream");
+            assert_eq!(state.store.mailbox_wake_health().status, "pass");
+            stream.recheck.send(()).unwrap();
+            stream.heartbeat.send(()).unwrap();
+            stream.socket.send(report("must-not-be-recorded")).await.unwrap();
+            stream.socket.send(Message::Ping(vec![1].into())).await.unwrap();
+            expect_pong(&mut stream.socket, &[1]).await;
+            assert_eq!(stream.reads.load(SeqCst), reads, "dirty snapshot processing must remain held");
+            assert_eq!(delivery_presence::assess_current(&subject,"omp",Some("current")).reason.as_deref(),Some(original.as_str()));
+            assert!(state.store.mailbox_lease_authority(&fence).unwrap().is_none());
+        }
+    }
+
+    async fn expect_pong(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>, payload: &[u8]) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.next().await.expect("stream closed before report acknowledgement").unwrap() {
+                    Message::Pong(bytes) if bytes.as_ref() == payload => return,
+                    Message::Ping(_) | Message::Pong(_) => {},
+                    other => panic!("expected post-report Pong, received {other:?}"),
+                }
+            }
+        }).await.expect("report processing was not observed");
     }
 
     #[tokio::test]
@@ -2180,7 +3314,8 @@ mod tests {
         );
         let mut admitted = Default::default();
         let mut policies = Default::default();
-        let (mark, view, _) = update_snapshot(
+        let mut order = MailboxOrder::new();
+        let (mark, view, _, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2188,6 +3323,7 @@ mod tests {
             floor,
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert_eq!(
@@ -2218,7 +3354,7 @@ mod tests {
             .unwrap();
         let committed = store.index().unwrap();
         store.committed_index.store(previous_committed, Ordering::Release);
-        let (mark, view, _) = update_snapshot(
+        let (mark, view, _, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2226,6 +3362,7 @@ mod tests {
             floor,
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert_eq!(
@@ -2239,7 +3376,7 @@ mod tests {
             "resync must include commits beyond the atomic"
         );
         store.committed_index.store(committed, Ordering::Release);
-        let (_, view, updated) = update_snapshot(
+        let (_, view, updated, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2247,6 +3384,7 @@ mod tests {
             floor,
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert!(!updated);
@@ -2270,7 +3408,8 @@ mod tests {
         let through = store.index().unwrap();
         let mut admitted = std::collections::BTreeSet::new();
         let mut policies = std::collections::BTreeSet::new();
-        let (mark, view, _) = update_snapshot(
+        let mut order = MailboxOrder::new();
+        let (mark, view, _, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2278,6 +3417,7 @@ mod tests {
             (since, through),
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         let mut previous = Some((mark, view));
@@ -2328,7 +3468,7 @@ mod tests {
                     "",
                 );
             }
-            let (mark, view, updated) = update_snapshot(
+            let (mark, view, updated, _) = update_snapshot(
                 &store,
                 &fence,
                 read,
@@ -2336,6 +3476,7 @@ mod tests {
                 (since, through),
                 &mut admitted,
                 &mut policies,
+                &mut order,
             )
             .unwrap();
             let mut oracle = snapshot(&store, &fence).unwrap();
@@ -2349,7 +3490,7 @@ mod tests {
         }
         // An idle cursor check performs no full read and produces no mailbox frame.
         for _ in 0..4 {
-            let (mark, view, updated) = update_snapshot(
+            let (mark, view, updated, _) = update_snapshot(
                 &store,
                 &fence,
                 read,
@@ -2357,6 +3498,7 @@ mod tests {
                 (since, through),
                 &mut admitted,
                 &mut policies,
+                &mut order,
             )
             .unwrap();
             assert!(!updated);
@@ -2364,7 +3506,7 @@ mod tests {
         }
         // Unrelated graph traffic advances the cursor without reconstructing this mailbox.
         append("message/unrelated", "sent", "agent/other");
-        let (mark, view, updated) = update_snapshot(
+        let (mark, view, updated, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2372,6 +3514,7 @@ mod tests {
             (since, through),
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert!(!updated);
@@ -2392,7 +3535,7 @@ mod tests {
                 idempotency_key: Some("seat-refresh".into()),
             })
             .unwrap();
-        let (_, view, updated) = update_snapshot(
+        let (_, view, updated, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2400,6 +3543,7 @@ mod tests {
             (since, through),
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert!(updated);
@@ -2456,7 +3600,8 @@ mod tests {
         };
         let mut admitted = Default::default();
         let mut policies = Default::default();
-        let (mark, view, _) = update_snapshot(
+        let mut order = MailboxOrder::new();
+        let (mark, view, _, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2464,6 +3609,7 @@ mod tests {
             (since, through),
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert!(view.1.is_empty());
@@ -2471,7 +3617,7 @@ mod tests {
         let index = store.index().unwrap();
         drop(post);
         assert_eq!(store.index().unwrap(), index);
-        let (mark, view, updated) = update_snapshot(
+        let (mark, view, updated, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2479,11 +3625,12 @@ mod tests {
             (since, through),
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert!(updated);
         assert_eq!(view.1.len(), 1);
-        let (_, view, updated) = update_snapshot(
+        let (_, view, updated, _) = update_snapshot(
             &store,
             &fence,
             read,
@@ -2491,6 +3638,7 @@ mod tests {
             (since, through),
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert!(!updated);
@@ -2502,10 +3650,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_own_post_wake_closes_after_the_pinned_read_without_a_receipt() {
-        let store = Store::open_memory("node").unwrap();
-        crate::mailbox::tests::ready(&store, "session-1");
+    #[tokio::test]
+    async fn an_own_post_read_is_pure_and_background_closure_has_no_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = super::super::tests::state(root.path());
+        state.store = Arc::new(Store::open_memory("node").unwrap());
+        let store = &state.store;
+        crate::mailbox::tests::ready(store, "session-1");
         let fence = store
             .bind_mailbox(&Fence::new("agent/eval.worker", "session-1", "delivery"))
             .unwrap();
@@ -2520,8 +3671,7 @@ mod tests {
                 "fixture",
             )
             .unwrap();
-        store
-            .append_claim(&ClaimInput {
+        let mut wake = ClaimInput {
                 subject: "message/own-post".into(),
                 kind: "message.sent".into(),
                 actor: Some("daemon/runtime".into()),
@@ -2541,26 +3691,30 @@ mod tests {
                 evidence: vec![],
                 expected_subject: None,
                 idempotency_key: None,
-            })
-            .unwrap();
+            };
+        store.append_claim(&wake).unwrap();
         let floor = (client_now_ms(), store.index().unwrap());
         let mut admitted = Default::default();
         let mut policies = Default::default();
-        let (_, view, _) = update_snapshot(
-            &store,
+        let mut order = MailboxOrder::new();
+        let before = store.index().unwrap();
+        let (_, view, _, closures) = update_snapshot(
+            store,
             &fence,
             raw_snapshot,
             None,
             floor,
             &mut admitted,
             &mut policies,
+            &mut order,
         )
         .unwrap();
         assert!(view.1.is_empty());
-        assert_eq!(
-            store.message("message/own-post").unwrap().unwrap().status,
-            "closed"
-        );
+        assert_eq!(store.index().unwrap(), before, "a mailbox read must not write");
+        assert_eq!(store.message("message/own-post").unwrap().unwrap().status, "sent");
+        assert_eq!(closures, std::collections::BTreeSet::from(["message/own-post".into()]));
+        assert!(store.close_mailbox_own_post_wake(&fence, "message/own-post").unwrap());
+        assert_eq!(store.message("message/own-post").unwrap().unwrap().status, "closed");
         assert_eq!(
             store
                 .claims_for("message/own-post", Some("message.closed"))
@@ -2574,6 +3728,34 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // A queued identity cannot let a superseded channel close a successor's mailbox.
+        wake.subject = "message/own-post-after-takeover".into();
+        store.append_claim(&wake).unwrap();
+        let successor = store.bind_mailbox(&Fence::new(
+            &fence.subject, &fence.incarnation, "delivery",
+        )).unwrap();
+        let before = store.index().unwrap();
+        assert_eq!(store.close_mailbox_own_post_wake(&fence, &wake.subject).unwrap_err().code,
+            "stale-mailbox-session");
+        assert_eq!(store.index().unwrap(), before);
+        assert_eq!(store.message(&wake.subject).unwrap().unwrap().status, "sent");
+        assert!(store.close_mailbox_own_post_wake(&successor, &wake.subject).unwrap());
+
+        // The actual bounded actor must wake clients and replication after COMMIT,
+        // without making a housekeeping closure schedule a reconcile pass.
+        wake.subject = "message/own-post-actor".into();
+        store.append_claim(&wake).unwrap();
+        let wake_file = state.state_dir.join("replication.wake");
+        let _ = std::fs::remove_file(&wake_file);
+        let mut feed = state.event_notify.subscribe();
+        let actor = own_post_reactor(&state, &successor);
+        actor.try_send(wake.subject.clone()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), feed.changed()).await.unwrap().unwrap();
+        assert_eq!(store.message(&wake.subject).unwrap().unwrap().status, "closed");
+        assert!(wake_file.exists(), "a canonical closure must wake replication dialers");
+        assert!(tokio::time::timeout(Duration::from_millis(20), state.notify.notified()).await.is_err());
+        drop(actor);
+
     }
 
     #[tokio::test]
@@ -2732,3 +3914,6 @@ mod tests {
 #[cfg(test)]
 #[path = "mailbox_profile.rs"]
 mod profile;
+
+#[cfg(test)]
+mod update_cost_tests;

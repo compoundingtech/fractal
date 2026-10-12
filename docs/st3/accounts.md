@@ -102,6 +102,18 @@ Their spend and limits use a stable label derived from the declared name; unboun
 provider's label. Queued observations capture the account at their source, so replay after a
 switch still charges the account that produced them.
 
+A seat that binds nothing but sets its harness's login variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) to
+a declared account's login directory on its host runs on that account: it is launched with
+`ST3_ACCOUNT`, and its readings carry the declared name, whatever identity the provider shows. A
+re-login in that directory changes the provider's identity but not the account. When one seat has
+reported both under a provider identity and under a declared account, that identity's readings are
+the declared account's, so `st usage` and the pool show the account once, with the live reading.
+Identity readings that share no seat with a declared account are never assigned to one.
+
+A limits reading older than the limits cadence (`[limits] fresh`, one hour unless configured) is the
+last known reading, not the current one. `st --json usage` marks it `stale: true`, and `st usage`
+ends its row with `stale`. The pool chooses by the account's freshest reading.
+
 Limits include `identified`: true when the source names a provider identity or a declared account,
 false when it names neither. Older servers omit this additive metadata. Identity and quota
 freshness are separate: a missing identity does not make a reading stale. Once a driver has
@@ -214,6 +226,21 @@ structured request only when a decision is needed. Enabled policies require `not
 an agent; the legacy `ask` setting is accepted but never sends raw events to a person.
 Each seat is stopped once per weekly window: start it again and it stays up until the reset. Give
 every node that hosts seats the same `[limits]`.
+
+An account that should never be stopped is exempt, by the name `st usage` shows (the declared
+account or the provider's label), and so is a whole harness:
+
+```toml
+[limits]
+exempt_accounts = ["ada/codex"]
+exempt_harnesses = ["codex"]
+```
+
+Exemption belongs to the account, not to the seat, so a seat started later on it is covered
+without listing it; `keep` still names single seats. The daemon reads `[limits]` again on every
+two-minute pass, so an edit (including enabling the policy) applies without a restart. A file that
+does not parse or validate leaves the last good policy running and is logged. `st usage` marks
+exempt accounts and prints an `EXEMPT` line for the policy.
 
 A person who owns more than one Claude or Codex account declares them and binds a seat to one or to
 a pool; a pooled seat at its limit restarts on another account instead of stopping, and `st usage`

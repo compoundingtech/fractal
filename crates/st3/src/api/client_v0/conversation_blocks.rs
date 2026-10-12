@@ -8,12 +8,43 @@ use std::io::Read as _;
 use std::sync::LazyLock;
 
 // Bound expensive reads without a queued backlog or a second content cache.
+#[cfg(not(test))]
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// The read budget serving `transcript`: the process-wide one, or under test the budget of
+/// the test's own scope, so parallel tests never take each other's slots.
+#[cfg(not(test))]
+fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore {
+    &READ_SLOTS
+}
+
+#[cfg(test)]
+fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<tokio::sync::Semaphore> =
+        LazyLock::new(Default::default);
+    crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
+        tokio::sync::Semaphore::new(4)
+    })
+}
+
+#[cfg(test)]
+fn read_slot(
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    slots.try_acquire_owned().map_err(|_| ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "rate-limited".into(),
+        message: "owner conversation reads are busy; retry this read".into(),
+        details: Box::default(),
+    })
+}
+
 static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let mut key = [0; 32];
     getrandom::fill(&mut key).expect("owner reference key entropy");
     key
 });
+#[cfg(not(test))]
 fn read_slot(slots: &tokio::sync::Semaphore) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
     slots.try_acquire().map_err(|_| ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
@@ -68,7 +99,12 @@ pub(super) fn source(state: &AppState, session_id: &str) -> Result<ExternalSessi
         Some(ExternalConversation::Unavailable(_)) => Err(transcript_unavailable(
             "the native session could not be identified",
         )),
-        None => Err(ApiError::not_found("the session does not exist")),
+        None => crate::subagent_sessions::resolve_child(
+            state.native_session_home.as_deref(),
+            session_id,
+        )
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("the session does not exist")),
     }
 }
 
@@ -95,7 +131,7 @@ fn transcript_unavailable(reason: &str) -> ApiError {
     }
 }
 
-fn basis(source: &ExternalSession) -> Result<String, ApiError> {
+pub(super) fn basis(source: &ExternalSession) -> Result<String, ApiError> {
     let metadata = std::fs::metadata(&source.transcript)
         .map_err(|_| transcript_unavailable("the owner cannot inspect its transcript"))?;
     #[cfg(unix)]
@@ -159,6 +195,25 @@ struct ContentLocator {
     pointer: String,
     image: bool,
     native: Value,
+    shape: String,
+}
+
+/// A digest of an entry's structure: its kind and its blocks. A timeline entry may be a bounded
+/// preview of an oversized native record; a ref minted against the preview applies to the
+/// owner's complete record only while both agree on it, so a pointer never lands elsewhere.
+fn shape(item: &Value) -> String {
+    let shape = json!({
+        "type": item["type"],
+        "role": item["role"],
+        "blocks": item["body"]["blocks"].as_array().map(|blocks| {
+            blocks
+                .iter()
+                .map(|block| json!([block["id"], block["kind"], block["source_type"]]))
+                .collect::<Vec<_>>()
+        }),
+    });
+    let encoded = serde_json::to_vec(&shape).expect("JSON value encodes");
+    URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &encoded))
 }
 
 fn reference(
@@ -179,6 +234,7 @@ fn reference(
             .pointer(pointer)
             .is_some_and(|value| image(value) && !external_image(value)),
         native: item["_source"].clone(),
+        shape: shape(item),
     };
     let key = aead::LessSafeKey::new(
         aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &*REF_KEY).expect("owner reference key"),
@@ -237,7 +293,11 @@ fn located_value(source: &ExternalSession, locator: &ContentLocator) -> Result<V
     crate::external_sessions::normalized_record(source, &native)
         .map_err(|_| invalidated())?
         .into_iter()
-        .find(|item| item["id"] == locator.entry && item["revision"] == locator.revision)
+        .find(|item| {
+            item["id"] == locator.entry
+                && item["revision"] == locator.revision
+                && shape(item) == locator.shape
+        })
         .and_then(|item| item.pointer(&locator.pointer).cloned())
         .ok_or_else(invalidated)
 }
@@ -304,6 +364,18 @@ pub(crate) fn bound_open_value(value: &mut Value) -> bool {
     }
 }
 
+/// Preview parsing already clips long strings before wire preparation sees them.
+fn has_preview_marker(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            text.contains("[st truncated this native timeline value: size limit;")
+        }
+        Value::Array(values) => values.iter().any(has_preview_marker),
+        Value::Object(values) => values.values().any(has_preview_marker),
+        _ => false,
+    }
+}
+
 fn image(value: &Value) -> bool {
     (value.get("type").and_then(Value::as_str) == Some("file")
         && value
@@ -352,18 +424,19 @@ fn image_refs(
     basis: &str,
     session: &str,
     item: &Value,
-) {
+) -> bool {
     if image(value) {
         if external_image(value) {
-            return;
+            return false;
         }
         *value = json!({"type":"image","content":continuation(reference(source,basis,session,item,pointer),image_media(value),None,"on-demand")});
-        return;
+        return true;
     }
+    let mut changed = false;
     match value {
         Value::Array(values) => {
             for (index, value) in values.iter_mut().enumerate() {
-                image_refs(
+                changed |= image_refs(
                     value,
                     &format!("{pointer}/{index}"),
                     source,
@@ -375,7 +448,7 @@ fn image_refs(
         }
         Value::Object(values) => {
             for (key, value) in values.iter_mut() {
-                image_refs(
+                changed |= image_refs(
                     value,
                     &format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1")),
                     source,
@@ -387,6 +460,7 @@ fn image_refs(
         }
         _ => {}
     }
+    changed
 }
 
 /// Called before pagination: its held vectors contain only bounded display values and refs.
@@ -395,10 +469,14 @@ pub(super) fn read(
     session: &ClientSession,
     session_id: &str,
 ) -> Result<Vec<Value>, ApiError> {
-    let _slot = read_slot(&READ_SLOTS)?;
+    let timeline = crate::external_sessions::LineTimeline::acquire(source);
+    let mut held = timeline.hold();
+    // The fold is held before the slot is taken: waiting viewers of this conversation hold
+    // no global read slot, so they never crowd an unrelated conversation out of the budget.
+    let slots = read_slots(&source.transcript);
+    let _slot = read_slot(slots)?;
     let before = basis(source)?;
-    let items =
-        crate::external_sessions::normalized_timeline(source).map_err(ApiError::internal)?;
+    let items = held.read(source).map_err(ApiError::internal)?;
     if before != basis(source)? {
         return Err(invalidated());
     }
@@ -407,6 +485,45 @@ pub(super) fn read(
         return Err(invalidated());
     }
     Ok(items)
+}
+
+pub(super) struct PreparedSlice {
+    pub(super) items: Vec<Value>,
+    pub(super) has_more: bool,
+    pub(super) basis: String,
+    /// Source content generation at this slice; moves on any non-append transcript change.
+    pub(super) generation: u64,
+}
+
+pub(super) fn read_slice(
+    source: &ExternalSession,
+    session: &ClientSession,
+    session_id: &str,
+    order: crate::external_sessions::TimelineOrder,
+    before: Option<&crate::external_sessions::TimelineKey>,
+    limit: usize,
+) -> Result<PreparedSlice, ApiError> {
+    let timeline = crate::external_sessions::LineTimeline::acquire(source);
+    let mut held = timeline.hold();
+    // Same ordering as `read`: park on the shared fold first, then take the global slot.
+    let slots = read_slots(&source.transcript);
+    let _slot = read_slot(slots)?;
+    let basis = basis(source)?;
+    let mut slice = held
+        .slice(source, order, before, limit)
+        .map_err(ApiError::internal)?;
+    for item in &mut slice.items {
+        prepare_one(source, session, session_id, &basis, item)?;
+    }
+    if basis != self::basis(source)? {
+        return Err(invalidated());
+    }
+    Ok(PreparedSlice {
+        items: slice.items,
+        has_more: slice.has_more,
+        basis,
+        generation: slice.generation,
+    })
 }
 
 /// Called before pagination: its held vectors contain only bounded display values and refs.
@@ -418,202 +535,307 @@ pub(super) fn prepare(
 ) -> Result<Vec<Value>, ApiError> {
     let basis = basis(source)?;
     for item in &mut items {
-        let original = item.clone();
-        let body = item["body"]
-            .as_object_mut()
-            .ok_or_else(|| ApiError::internal("native body is not an object"))?;
-        if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
-            for (index, block) in blocks.iter_mut().enumerate() {
-                let body_ref = block["payload"] == json!({"body_ref":true});
-                let pointer = if body_ref {
-                    "/body".to_owned()
-                } else {
-                    format!("/body/blocks/{index}/payload")
-                };
-                if body_ref {
-                    block["payload"] = original["body"].clone();
-                    block["payload"]
-                        .as_object_mut()
-                        .expect("native body")
-                        .remove("blocks");
-                }
-                if block["kind"] == "image" && external_image(&block["payload"]) {
-                    block["kind"] = json!("image_link");
-                } else if block["kind"] == "image" {
-                    block["continuation"] = continuation(
-                        reference(source, &basis, session_id, &original, &pointer),
-                        image_media(&block["payload"]),
-                        None,
-                        "on-demand",
-                    );
-                    block["payload"] = json!({});
-                } else {
-                    image_refs(
-                        &mut block["payload"],
-                        &pointer,
-                        source,
-                        &basis,
-                        session_id,
-                        &original,
-                    );
-                    let encoded =
-                        serde_json::to_vec(&block["payload"]).map_err(ApiError::internal)?;
-                    if encoded.len() > VALUE_BYTES || original["_oversized_bytes"].is_number() {
-                        block["continuation"] = continuation(
-                            reference(source, &basis, session_id, &original, &pointer),
-                            "application/json",
-                            Some(
-                                original["_oversized_payload_bytes"][index]
-                                    .as_u64()
-                                    .map_or(encoded.len(), |size| size as usize),
-                            ),
-                            "size-limit",
-                        );
-                        bound(&mut block["payload"]);
-                    }
-                }
-                if let Some(metadata) = block.get_mut("metadata")
-                    && bound_open_value(metadata)
-                    && block.get("continuation").is_none()
-                {
-                    let pointer = format!("/body/blocks/{index}/metadata");
-                    block["continuation"] = continuation(
-                        reference(source, &basis, session_id, &original, &pointer),
-                        "application/json",
-                        Some(
-                            serde_json::to_vec(
-                                original.pointer(&pointer).expect("native metadata"),
-                            )
-                            .map_err(ApiError::internal)?
-                            .len(),
-                        ),
-                        "size-limit",
-                    );
-                }
-            }
-        }
-        if let Some(block) = body
-            .get("blocks")
-            .and_then(Value::as_array)
-            .and_then(|blocks| blocks.first())
-            && block["kind"] == "unknown"
-        {
-            let label = body
-                .get("text")
-                .and_then(Value::as_str)
-                .and_then(|text| text.lines().next())
-                .unwrap_or("[unknown]");
-            body["text"] = json!(format!("{label}\n{}", block["payload"]));
-        }
-        if let Some(block) = body
-            .get("blocks")
-            .and_then(Value::as_array)
-            .and_then(|blocks| blocks.first())
-            && block["kind"] == "image_link"
-        {
-            body["text"] = json!(format!(
-                "[external image link · open explicitly]\n{}",
-                block["payload"]
-            ));
-        }
-        // Fallback bodies use known v0 types and also move native pixels to owner fetch refs.
-        for key in ["text", "arguments", "content"] {
-            if let Some(value) = body.get_mut(key) {
-                image_refs(
-                    value,
-                    &format!("/body/{key}"),
-                    source,
-                    &basis,
-                    session_id,
-                    &original,
-                );
-                if let Value::String(text) = value {
-                    *text = clipped(text);
-                } else {
-                    bound(value);
-                }
-            }
-        }
-        // Error/status fallback fields use the same clipped display convention as
-        // text/arguments/content. A negotiated body_ref continuation fetches the
-        // complete original body; legacy clients receive the visible marker only.
-        for key in ["message", "details", "detail"] {
-            if let Some(value) = body.get_mut(key) {
-                bound_open_value(value);
-            }
-        }
-        let mut fallback = original["body"].clone();
-        fallback
-            .as_object_mut()
-            .expect("native body")
-            .remove("blocks");
-        if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
-            for (index, block) in blocks.iter_mut().enumerate() {
-                if original["body"]["blocks"][index]["payload"] == fallback
-                    || original["body"]["blocks"][index]["payload"] == json!({"body_ref":true})
-                {
-                    block["payload"] = json!({"body_ref": true});
-                }
-            }
-        }
-        item.as_object_mut().expect("native item").remove("_source");
-        item.as_object_mut()
-            .expect("native item")
-            .remove("_oversized_bytes");
-        item.as_object_mut()
-            .expect("native item")
-            .remove("_oversized_payload_bytes");
-        if serde_json::to_vec(item).map_err(ApiError::internal)?.len()
-            > CLIENT_MAX_RESPONSE_BYTES - 128_000
-        {
-            let body = item["body"].as_object_mut().expect("native body");
-            for (key, value) in body.iter_mut() {
-                if key != "blocks" {
-                    bound_open_value(value);
-                    if !value.is_string() {
-                        bound(value);
-                    }
-                }
-            }
-            // Retained open-object keys can still exceed the transport budget.
-            // Replace only this entry, preserving its identity and ordering.
-            let size = serde_json::to_vec(item).map_err(ApiError::internal)?.len();
-            if size > CLIENT_MAX_RESPONSE_BYTES - 128_000 {
-                if item["type"] != "error" {
-                    item["type"] = json!("error");
-                    item["role"] = json!("system");
-                }
-                item["body"] = json!({
-                    "code":"native-entry-too-large",
-                    "message":format!("[st truncated this native timeline value: size limit; {size} bytes]"),
-                    "retryable":false,
-                    "details":{"size":size},
-                    "blocks":[{
-                        "id":"native-entry-too-large",
-                        "kind":"error",
-                        "source_type":"native-entry-too-large",
-                        "payload":{"body_ref":true},
-                        "continuation":continuation(
-                            reference(source, &basis, session_id, &original, "/body"),
-                            "application/json",
-                            Some(serde_json::to_vec(&original["body"]).map_err(ApiError::internal)?.len()),
-                            "size-limit",
-                        )
-                    }]
-                });
-            }
-        }
-        if !session.conversation_blocks {
-            item["body"]
-                .as_object_mut()
-                .expect("native body")
-                .remove("blocks");
-        }
+        prepare_one(source, session, session_id, &basis, item)?;
     }
     if basis != self::basis(source)? {
         return Err(invalidated());
     }
     Ok(items)
+}
+
+pub(super) fn prepare_one(
+    source: &ExternalSession,
+    session: &ClientSession,
+    session_id: &str,
+    basis: &str,
+    item: &mut Value,
+) -> Result<(), ApiError> {
+    let original = item.clone();
+    // The fold holds oversized native records as bounded previews; their long values reach
+    // the client only through continuations, read from the owner's complete record.
+    let preview = original["_preview_of_bytes"].is_number();
+    let body = item["body"]
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("native body is not an object"))?;
+    if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
+        for (index, block) in blocks.iter_mut().enumerate() {
+            // A fold may sit the full native record beside the marker (`raw`); the marker
+            // key decides, so that sibling survives the expansion below.
+            let body_ref = block["payload"].get("body_ref") == Some(&Value::Bool(true));
+            let pointer = if body_ref {
+                "/body".to_owned()
+            } else {
+                format!("/body/blocks/{index}/payload")
+            };
+            if body_ref {
+                // Keep the native record beside the expanded display body within the same
+                // size bound; exact-marker payloads can still collapse back to body_ref.
+                let raw = block["payload"].get("raw").cloned();
+                block["payload"] = original["body"].clone();
+                let payload = block["payload"].as_object_mut().expect("native body");
+                payload.remove("blocks");
+                if let Some(raw) = raw {
+                    payload.insert("raw".into(), raw);
+                }
+            }
+            if block["kind"] == "image" && external_image(&block["payload"]) {
+                block["kind"] = json!("image_link");
+            } else if block["kind"] == "image" {
+                block["continuation"] = continuation(
+                    reference(source, basis, session_id, &original, &pointer),
+                    image_media(&block["payload"]),
+                    None,
+                    "on-demand",
+                );
+                block["payload"] = json!({});
+            } else {
+                let images_replaced = image_refs(
+                    &mut block["payload"],
+                    &pointer,
+                    source,
+                    basis,
+                    session_id,
+                    &original,
+                );
+                let encoded = serde_json::to_vec(&block["payload"]).map_err(ApiError::internal)?;
+                // A preview may have clipped a value to within the display window, so every
+                // block of one keeps a way back to the complete native value.
+                if encoded.len() > VALUE_BYTES
+                    || original["_oversized_bytes"].is_number()
+                    || preview
+                {
+                    block["continuation"] = continuation(
+                        reference(source, basis, session_id, &original, &pointer),
+                        "application/json",
+                        if let Some(size) = original["_oversized_payload_bytes"][index].as_u64() {
+                            Some(size as usize)
+                        } else if preview {
+                            // A preview never held the complete value, so it cannot size it.
+                            None
+                        } else if body_ref || images_replaced {
+                            // body_ref previews omit the blocks array, and image refs
+                            // replace native bytes. Size describes the owner value,
+                            // not either of those display-only transformations.
+                            Some(
+                                serde_json::to_vec(
+                                    original.pointer(&pointer).expect("native block payload"),
+                                )
+                                .map_err(ApiError::internal)?
+                                .len(),
+                            )
+                        } else {
+                            Some(encoded.len())
+                        },
+                        "size-limit",
+                    );
+                    bound(&mut block["payload"]);
+                }
+            }
+        }
+    }
+    // A task's agents link to their own conversations when those transcripts exist
+    // (contract §1b q2); prepare_one applies this to first and keyset continuation pages.
+    if session.conversation_blocks
+        && let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut)
+    {
+        for block in blocks
+            .iter_mut()
+            .filter(|block| block["kind"] == "tool_output" && block["view"]["type"] == "task")
+        {
+            let Some(agents) = block
+                .get_mut("view")
+                .and_then(|view| view.get_mut("agents"))
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            for agent in agents {
+                let Some(task_id) = agent.get("id").and_then(Value::as_str).map(str::to_owned)
+                else {
+                    continue;
+                };
+                let Some(agent) = agent.as_object_mut() else {
+                    continue;
+                };
+                match crate::subagent_sessions::child_transcript(source, &task_id) {
+                    Some(_) => {
+                        agent.insert(
+                            "conversation".into(),
+                            json!({"session_id": crate::subagent_sessions::child_session_id(
+                                source,
+                                &task_id,
+                            )}),
+                        );
+                    }
+                    None => {
+                        agent.remove("conversation");
+                    }
+                }
+            }
+        }
+    }
+    // Keep open display objects (including assistant text/reasoning metadata) bounded.
+    // JSON continuations can cover the whole body, but an image's continuation must keep
+    // pointing to its pixels. Its clipped display objects get their own references.
+    if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
+        for (index, block) in blocks.iter_mut().enumerate() {
+            let pixels = block["kind"] == "image" && block.get("continuation").is_some();
+            for key in ["metadata", "view"] {
+                if let Some(value) = block.get_mut(key)
+                    && (bound_open_value(value)
+                        || (preview && (!pixels || has_preview_marker(value))))
+                {
+                    let pointer = if !pixels && block.get("continuation").is_some() {
+                        "/body".to_owned()
+                    } else {
+                        format!("/body/blocks/{index}/{key}")
+                    };
+                    let more = continuation(
+                        reference(source, basis, session_id, &original, &pointer),
+                        "application/json",
+                        if preview {
+                            None
+                        } else {
+                            Some(
+                                serde_json::to_vec(
+                                    original.pointer(&pointer).expect("native open value"),
+                                )
+                                .map_err(ApiError::internal)?
+                                .len(),
+                            )
+                        },
+                        "size-limit",
+                    );
+                    if pixels {
+                        block[key]["continuation"] = more;
+                    } else {
+                        block["continuation"] = more;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(block) = body
+        .get("blocks")
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.first())
+        && block["kind"] == "unknown"
+    {
+        let label = body
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(|text| text.lines().next())
+            .unwrap_or("[unknown]");
+        body["text"] = json!(format!("{label}\n{}", block["payload"]));
+    }
+    if let Some(block) = body
+        .get("blocks")
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.first())
+        && block["kind"] == "image_link"
+    {
+        body["text"] = json!(format!(
+            "[external image link · open explicitly]\n{}",
+            block["payload"]
+        ));
+    }
+    // Fallback bodies use known v0 types and also move native pixels to owner fetch refs.
+    for key in ["text", "arguments", "content"] {
+        if let Some(value) = body.get_mut(key) {
+            image_refs(
+                value,
+                &format!("/body/{key}"),
+                source,
+                basis,
+                session_id,
+                &original,
+            );
+            if let Value::String(text) = value {
+                *text = clipped(text);
+            } else {
+                bound(value);
+            }
+        }
+    }
+    // Error/status fallback fields use the same clipped display convention as
+    // text/arguments/content. A negotiated body_ref continuation fetches the
+    // complete original body; legacy clients receive the visible marker only.
+    for key in ["message", "details", "detail"] {
+        if let Some(value) = body.get_mut(key) {
+            bound_open_value(value);
+        }
+    }
+    let mut fallback = original["body"].clone();
+    fallback
+        .as_object_mut()
+        .expect("native body")
+        .remove("blocks");
+    if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
+        for (index, block) in blocks.iter_mut().enumerate() {
+            if original["body"]["blocks"][index]["payload"] == fallback
+                || original["body"]["blocks"][index]["payload"] == json!({"body_ref":true})
+            {
+                block["payload"] = json!({"body_ref": true});
+            }
+        }
+    }
+    item.as_object_mut().expect("native item").remove("_source");
+    item.as_object_mut()
+        .expect("native item")
+        .remove("_oversized_bytes");
+    item.as_object_mut()
+        .expect("native item")
+        .remove("_oversized_payload_bytes");
+    item.as_object_mut()
+        .expect("native item")
+        .remove("_preview_of_bytes");
+    if serde_json::to_vec(item).map_err(ApiError::internal)?.len()
+        > CLIENT_MAX_RESPONSE_BYTES - 128_000
+    {
+        let body = item["body"].as_object_mut().expect("native body");
+        for (key, value) in body.iter_mut() {
+            if key != "blocks" {
+                bound_open_value(value);
+                if !value.is_string() {
+                    bound(value);
+                }
+            }
+        }
+        // Retained open-object keys can still exceed the transport budget.
+        // Replace only this entry, preserving its identity and ordering.
+        let size = serde_json::to_vec(item).map_err(ApiError::internal)?.len();
+        if size > CLIENT_MAX_RESPONSE_BYTES - 128_000 {
+            if item["type"] != "error" {
+                item["type"] = json!("error");
+                item["role"] = json!("system");
+            }
+            item["body"] = json!({
+                "code":"native-entry-too-large",
+                "message":format!("[st truncated this native timeline value: size limit; {size} bytes]"),
+                "retryable":false,
+                "details":{"size":size},
+                "blocks":[{
+                    "id":"native-entry-too-large",
+                    "kind":"error",
+                    "source_type":"native-entry-too-large",
+                    "payload":{"body_ref":true},
+                    "continuation":continuation(
+                        reference(source, basis, session_id, &original, "/body"),
+                        "application/json",
+                        Some(serde_json::to_vec(&original["body"]).map_err(ApiError::internal)?.len()),
+                        "size-limit",
+                    )
+                }]
+            });
+        }
+    }
+    if !session.conversation_blocks {
+        item["body"]
+            .as_object_mut()
+            .expect("native body")
+            .remove("blocks");
+    }
+    Ok(())
 }
 
 /// Keep negotiated data out of legacy relayed clients without changing their known enum.
@@ -627,6 +849,9 @@ pub(in crate::api) fn legacy(value: &mut Value, session: &ClientSession) {
                 body.remove("blocks");
             }
         }
+    }
+    if let Some(value) = value.as_object_mut() {
+        value.remove("header");
     }
 }
 
@@ -643,7 +868,9 @@ pub(in crate::api) async fn chunk(
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let session_id = conversation_session_id(&state, &id)?;
-    if let Some(owner) = conversation_owner_host(&state, &session, &session_id)? {
+    if let Some(owner) = conversation_owner_host(
+        &state, &session, &session_id, id.starts_with("agent/").then_some(id.as_str()),
+    )? {
         let value = state
             .client_relay
             .as_ref()
@@ -684,7 +911,8 @@ pub(super) async fn chunk_local(
 ) -> Result<Value, ApiError> {
     require_scope(session, "read.projections")?;
     let locator = locator(wanted, session_id)?;
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&locator.source.transcript);
+    let _slot = read_slot(slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
     let (bytes, media) = crate::api::read_deadline::spawn_blocking(move || -> Result<_, ApiError> {
@@ -959,7 +1187,407 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_tool_metadata_fits_pages_and_socket_frames_and_fetches_exact_native_values() {
+    async fn write_and_compaction_views_are_bounded_and_fetch_complete_content() {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let text = format!(
+            "first synthetic line\n{}\nlast synthetic line",
+            "é".repeat(64 * 1024)
+        );
+        let native = fixture(
+            root.path(),
+            json!([{
+                "type":"toolCall","id":"large-write","name":"write",
+                "arguments":{"path":"synthetic.txt","content":text}
+            }]),
+        );
+        writeln!(std::fs::OpenOptions::new().append(true).open(&native.transcript).unwrap(),
+            "{}", json!({"type":"compaction","id":"large-compaction","timestamp":"2026-10-06T12:00:02Z","summary":text,"tokensBefore":100,"tokensAfter":20})).unwrap();
+        let originals = crate::external_sessions::normalized_timeline(&native).unwrap();
+        let mut state = super::super::tests::test_state_named(root.path(), "view-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let prepared = read(&native, &session, &native.id).unwrap();
+        assert_native_keyset_pages_match_full_read(&state, &native, &session, &prepared);
+        for (kind, field) in [("write", "content"), ("compaction", "summary")] {
+            let item = prepared
+                .iter()
+                .find(|item| item["body"]["blocks"][0]["view"]["type"] == kind)
+                .unwrap();
+            let block = &item["body"]["blocks"][0];
+            assert!(
+                block["view"][field]
+                    .as_str()
+                    .unwrap()
+                    .contains("[st truncated this native timeline value:")
+            );
+            let token = block["continuation"]["ref"].as_str().unwrap();
+            let pointer = locator(token, &native.id).unwrap().pointer;
+            let original = originals
+                .iter()
+                .find(|original| original["id"] == item["id"])
+                .unwrap();
+            let fetched = fetch_json_chunks(&state, &native, token).await;
+            assert_eq!(fetched, *original.pointer(&pointer).unwrap());
+            let view = if pointer == "/body" {
+                &fetched["blocks"][0]["view"]
+            } else {
+                &fetched
+            };
+            assert_eq!(view[field], text);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_task_call_keeps_named_tasks_and_owner_fetches_full_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let task = "Review the synthetic change.\n".repeat(420);
+        let arguments = json!({
+            "context":"Review the change using the supplied contract.",
+            "tasks":[{"name":"reviewer","agent":"scout","task":task}]
+        });
+        let bytes = serde_json::to_vec(&arguments).unwrap().len();
+        assert!((11 * 1024..13 * 1024).contains(&bytes));
+        let native = fixture(
+            root.path(),
+            json!([{"type":"toolCall","id":"large-task","name":"task","arguments":arguments}]),
+        );
+        let originals = crate::external_sessions::normalized_timeline(&native).unwrap();
+        let mut state = super::super::tests::test_state_named(root.path(), "operator");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let prepared = prepare(&native, &session, &native.id, originals.clone()).unwrap();
+        let item = prepared
+            .iter()
+            .find(|item| item["body"]["blocks"][0]["view"]["type"] == "task")
+            .unwrap();
+        let block = &item["body"]["blocks"][0];
+        let tasks = block["view"]["tasks"].as_array().expect("task view survives preparation");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["name"], "reviewer");
+        assert_eq!(tasks[0]["agent"], "scout");
+        assert!(tasks[0]["task"].as_str().unwrap().contains("[st truncated this native timeline value:"));
+        assert_eq!(block["continuation"]["reason"], "size-limit");
+        let token = block["continuation"]["ref"].as_str().unwrap();
+        let pointer = locator(token, &native.id).unwrap().pointer;
+        assert_eq!(pointer, "/body");
+        let original = originals.iter().find(|entry| entry["id"] == item["id"]).unwrap();
+        let fetched = fetch_json_chunks(&state, &native, token).await;
+        assert_eq!(fetched, *original.pointer(&pointer).unwrap());
+        assert_eq!(fetched["arguments"], arguments);
+        assert_eq!(fetched["blocks"][0]["view"]["tasks"][0]["task"], task);
+    }
+
+    #[tokio::test]
+    async fn truncated_tool_output_http_chunks_return_complete_native_body_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        // More than two owner chunks, including UTF-8 split across byte boundaries.
+        let output = format!("{}\nlast native output line", "é".repeat(CHUNK_BYTES + 37));
+        let native = fixture(
+            root.path(),
+            json!([{
+                "type":"toolResult", "call_id":"large-output", "toolName":"shell",
+                "content":output, "details":{"exitCode":0}
+            }]),
+        );
+        let mut state = super::super::tests::test_state_named(root.path(), "tool-output-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let index = state.store.index().unwrap();
+        let local = state
+            .store
+            .changes_since(i64::MAX as u64, i64::MAX)
+            .unwrap()
+            .local;
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let page = read(&native, &session, &native.id).unwrap();
+        let item = page
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
+        let block = &item["body"]["blocks"][0];
+        assert_eq!(block["kind"], "tool_output");
+        assert_eq!(block["continuation"]["reason"], "size-limit");
+        assert_eq!(block["continuation"]["media_type"], "application/json");
+        assert!(
+            item["body"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("truncated")
+        );
+        let token = block["continuation"]["ref"].as_str().unwrap();
+        let location = locator(token, &native.id).unwrap();
+        let original = located_value(&native, &location).unwrap();
+        let encoded = serde_json::to_vec(&original).unwrap();
+        assert!(encoded.len() > CHUNK_BYTES * 2);
+        // The timeline only ever held a bounded preview of this record, so it does not
+        // claim a size it never measured; the chunk stream reports the exact one.
+        assert!(block["continuation"].get("size").is_none());
+        let fetched = fetch_json_chunks(&state, &native, token).await;
+        assert_eq!(fetched, original);
+        // tool_output's body_ref covers the complete native tool body, not the
+        // clipped preview plus a suffix that a client would need to splice.
+        assert_eq!(location.pointer, "/body");
+        assert_eq!(fetched["content"], output);
+        assert_eq!(state.store.index().unwrap(), index);
+        assert_eq!(
+            state
+                .store
+                .changes_since(i64::MAX as u64, i64::MAX)
+                .unwrap()
+                .local,
+            local
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_tool_output_paints_its_first_window_from_a_bounded_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let output = format!(
+            "first synthetic output line\n{}\nlast synthetic output line",
+            "x".repeat(1024 * 1024)
+        );
+        let native = fixture(
+            root.path(),
+            json!([{
+                "type":"toolResult", "call_id":"huge-output", "toolName":"shell",
+                "content":output, "details":{"exitCode":0}
+            }]),
+        );
+        // The fold keeps a bounded preview: neither the complete body nor a raw copy of it.
+        let folded = crate::external_sessions::normalized_timeline(&native).unwrap();
+        let entry = folded
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
+        assert!(entry["_preview_of_bytes"].as_u64().unwrap() > 1024 * 1024);
+        assert!(serde_json::to_vec(entry).unwrap().len() < 128 * 1024);
+        let mut state = super::super::tests::test_state_named(root.path(), "preview-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let page = read_slice(
+            &native,
+            &session,
+            &native.id,
+            crate::external_sessions::TimelineOrder::Sequence,
+            None,
+            10,
+        )
+        .unwrap();
+        let item = page
+            .items
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
+        assert!(item.get("_preview_of_bytes").is_none());
+        assert!(serde_json::to_vec(item).unwrap().len() < 64 * 1024);
+        let shown = item["body"]["content"].as_str().unwrap();
+        assert!(shown.starts_with("first synthetic output line\nxxx"));
+        assert!(shown.contains("[st truncated this native timeline value:"));
+        let block = &item["body"]["blocks"][0];
+        assert_eq!(block["kind"], "tool_output");
+        assert_eq!(block["continuation"]["reason"], "size-limit");
+        // Expanding reads the complete record from the owner, not from the preview.
+        let token = block["continuation"]["ref"].as_str().unwrap();
+        let fetched = fetch_json_chunks(&state, &native, token).await;
+        assert_eq!(fetched["content"], output);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_assistant_image_keeps_its_pixel_continuation_with_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let pixels = b"\x89PNG\r\n\x1a\nsynthetic pixels";
+        let native = fixture(root.path(), json!([]));
+        let mut state = super::super::tests::test_state_named(root.path(), "image-preview-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        for model in ["synthetic-model".to_owned(), "m".repeat(300 * 1024)] {
+            let header = json!({"type":"session","id":"native-test","cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"});
+            let message = json!({
+                "type":"message","id":"image-metadata","timestamp":"2026-10-06T12:00:01Z",
+                "message":{
+                    "role":"assistant","model":model,
+                    "usage":{"input":10,"output":20},
+                    "content":[
+                        {"type":"text","text":"x".repeat(300 * 1024)},
+                        {"type":"image","mimeType":"image/png","data":STANDARD.encode(pixels)}
+                    ]
+                }
+            });
+            std::fs::write(&native.transcript, format!("{header}\n{message}\n")).unwrap();
+            let page = read(&native, &session, &native.id).unwrap();
+            let image = page
+                .iter()
+                .filter_map(|item| item["body"]["blocks"].as_array())
+                .flatten()
+                .find(|block| block["kind"] == "image")
+                .unwrap();
+            let reference = &image["continuation"];
+            // Inline data is not decoded until fetch; the chunk reports the detected MIME.
+            assert_eq!(reference["media_type"], "application/octet-stream");
+            assert_eq!(reference["reason"], "on-demand");
+            let token = reference["ref"].as_str().unwrap();
+            assert!(locator(token, &native.id).unwrap().image);
+            let chunk = chunk_local(&state, &session, &native.id, token, 0)
+                .await
+                .unwrap();
+            assert_eq!(chunk["media_type"], "image/png");
+            assert_eq!(
+                STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap(),
+                pixels
+            );
+            assert!(chunk["next_offset"].is_null());
+            if model.len() > VALUE_BYTES {
+                let metadata = &image["metadata"];
+                assert!(metadata["model"].as_str().unwrap().contains("size limit"));
+                let reference = &metadata["continuation"];
+                assert_eq!(reference["media_type"], "application/json");
+                let location = locator(reference["ref"].as_str().unwrap(), &native.id).unwrap();
+                assert!(location.pointer.ends_with("/metadata"));
+                assert!(!location.image);
+                assert_eq!(located_value(&native, &location).unwrap()["model"], model);
+            } else {
+                assert_eq!(image["metadata"]["model"], model);
+                assert!(image["metadata"].get("continuation").is_none());
+            }
+        }
+    }
+
+    fn assert_native_keyset_pages_match_full_read(
+        state: &AppState,
+        native: &ExternalSession,
+        session: &ClientSession,
+        full: &[Value],
+    ) {
+        let snapshot = super::super::new_client_snapshot(state);
+        let mut query = super::super::ClientListQuery {
+            limit: Some(1),
+            ..Default::default()
+        };
+        let mut walked = Vec::new();
+        loop {
+            let page = super::super::native_slice_page(
+                state, &snapshot, session, &native.id, &query, native,
+            )
+            .unwrap()
+            .0;
+            assert!(serde_json::to_vec(&page).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
+            walked.extend(page["items"].as_array().unwrap().iter().cloned());
+            query.cursor = page["page"]["next_cursor"].as_str().map(str::to_owned);
+            let Some(cursor) = &query.cursor else {
+                break;
+            };
+            assert!(cursor.starts_with(super::super::NATIVE_PAGE_CURSOR_PREFIX));
+            assert!(walked.len() < full.len());
+        }
+        assert_eq!(walked.len(), full.len());
+        for mut item in walked {
+            let mut expected = full
+                .iter()
+                .find(|expected| expected["id"] == item["id"])
+                .unwrap()
+                .clone();
+            // Owner refs use fresh nonces; compare authenticated locations, not ciphertext.
+            for entry in [&mut item, &mut expected] {
+                if let Some(blocks) = entry["body"]["blocks"].as_array_mut() {
+                    for block in blocks {
+                        if let Some(token) = block["continuation"]["ref"].as_str() {
+                            block["continuation"]["ref"] =
+                                serde_json::to_value(locator(token, &native.id).unwrap()).unwrap();
+                        }
+                    }
+                }
+            }
+            assert_eq!(item, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_edit_view_and_assistant_metadata_fit_full_and_keyset_pages_and_fetch_exact_values()
+     {
+        use std::io::Write as _;
+        let root = tempfile::tempdir().unwrap();
+        let diff = format!(
+            "@@ -1 +1 @@\n-{}\n+new\n",
+            "é".repeat(CLIENT_MAX_RESPONSE_BYTES)
+        );
+        let native = fixture(
+            root.path(),
+            json!([{
+                "type":"toolResult", "call_id":"large-edit", "toolName":"edit",
+                "content":"patched", "details":{"path":"example.rs", "diff":diff}
+            }]),
+        );
+        let model = "m".repeat(CLIENT_MAX_RESPONSE_BYTES + 1);
+        let assistant = json!({
+            "type":"message", "id":"metadata-test", "timestamp":"2026-10-06T12:00:02Z",
+            "message":{"role":"assistant", "model":model, "provider":"example",
+                "content":[{"type":"text","text":"done"}]}
+        });
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&native.transcript)
+                .unwrap(),
+            "{assistant}"
+        )
+        .unwrap();
+        let mut state = super::super::tests::test_state_named(root.path(), "view-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        for negotiated in [true, false] {
+            let mut session = ClientSession::local(None).unwrap();
+            session.conversation_blocks = negotiated;
+            let full = read(&native, &session, &native.id).unwrap();
+            assert!(serde_json::to_vec(&full).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
+            assert_native_keyset_pages_match_full_read(&state, &native, &session, &full);
+            let _: Vec<st3_client::TimelineEntry> = serde_json::from_value(json!(full)).unwrap();
+            if !negotiated {
+                assert!(full.iter().all(|item| item["body"].get("blocks").is_none()));
+                continue;
+            }
+            for (key, field, exact) in [("view", "diff", &diff), ("metadata", "model", &model)] {
+                let item = full
+                    .iter()
+                    .find(|item| item["body"]["blocks"][0][key][field].is_string())
+                    .unwrap();
+                let block = &item["body"]["blocks"][0];
+                assert!(
+                    block[key][field]
+                        .as_str()
+                        .unwrap()
+                        .contains("[st truncated this native timeline value: size limit;")
+                );
+                if key == "view" {
+                    assert_eq!(block[key]["type"], "edit");
+                    assert_eq!(block[key]["path"], "example.rs");
+                } else {
+                    assert_eq!(block[key]["provider"], "example");
+                }
+                let token = block["continuation"]["ref"].as_str().unwrap();
+                let location = locator(token, &native.id).unwrap();
+                let pointer = location.pointer.clone();
+                // Both records exceed the preview bound: the timeline holds previews, and
+                // the owner's complete record is the reference for a fetched value.
+                let fetched = fetch_json_chunks(&state, &native, token).await;
+                assert_eq!(fetched, located_value(&native, &location).unwrap());
+                let fetched_value = if pointer == "/body" {
+                    &fetched["blocks"][0][key]
+                } else {
+                    assert_eq!(pointer, format!("/body/blocks/0/{key}"));
+                    &fetched
+                };
+                assert_eq!(fetched_value[field].as_str().unwrap(), exact);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn open_tool_metadata_fits_full_and_keyset_pages_and_socket_frames_and_fetches_exact_native_values()
+     {
         use futures_util::{SinkExt as _, StreamExt as _};
         let root = tempfile::tempdir().unwrap();
         let details = json!({
@@ -978,6 +1606,7 @@ mod tests {
             session.conversation_blocks = negotiated;
             let page = read(&native, &session, &native.id).unwrap();
             assert!(serde_json::to_vec(&page).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
+            assert_native_keyset_pages_match_full_read(&state, &native, &session, &page);
             let item = page
                 .iter()
                 .find(|item| item["type"] == "tool_result")
@@ -996,11 +1625,9 @@ mod tests {
                         )
                 );
                 let token = block["continuation"]["ref"].as_str().unwrap();
-                assert_eq!(
-                    locator(token, &native.id).unwrap().pointer,
-                    "/body/blocks/0/metadata"
-                );
-                assert_eq!(fetch_json_chunks(&state, &native, token).await, details);
+                assert_eq!(locator(token, &native.id).unwrap().pointer, "/body");
+                let fetched = fetch_json_chunks(&state, &native, token).await;
+                assert_eq!(fetched["blocks"][0]["metadata"], details);
             } else {
                 assert!(item["body"].get("blocks").is_none());
                 let _: Vec<st3_client::TimelineEntry> =
@@ -1172,8 +1799,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pathological_metadata_replaces_only_its_entry_and_preserves_http_page_and_owner_fetch()
-    {
+    async fn pathological_metadata_replaces_only_its_entry_on_full_and_keyset_pages_and_preserves_owner_fetch()
+     {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -1200,6 +1827,10 @@ mod tests {
         state.native_session_home = Some(root.path().to_path_buf());
         let app = super::super::super::router(state.clone());
         for negotiated in [true, false] {
+            let mut session = ClientSession::local(None).unwrap();
+            session.conversation_blocks = negotiated;
+            let full = read(&native, &session, &native.id).unwrap();
+            assert_native_keyset_pages_match_full_read(&state, &native, &session, &full);
             let mut request = Request::builder().uri(format!(
                 "/v1/client/sessions/{}/timeline",
                 native.id.trim_start_matches("session/")
@@ -1328,7 +1959,6 @@ mod tests {
                 .contains(&STANDARD.encode(&pixels))
         );
         assert!(serde_json::to_vec(&items).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
-        let original = crate::external_sessions::normalized_timeline(&source).unwrap();
         let location = locator(
             blocks[2]["continuation"]["ref"].as_str().unwrap(),
             &source.id,
@@ -1338,13 +1968,36 @@ mod tests {
             located_value(&source, &location).unwrap(),
             json!({"raw":raw})
         );
-        let (decoded, mime) = image_bytes(
-            &source,
-            &original.last().unwrap()["body"]["blocks"][0]["payload"],
-        )
-        .unwrap();
+        // The timeline holds a bounded preview, not fetchable image bytes. Follow the
+        // image's own locator back to the complete native record before decoding.
+        let token = blocks[3]["continuation"]["ref"].as_str().unwrap();
+        let location = locator(token, &source.id).unwrap();
+        assert!(location.image);
+        assert_eq!(location.pointer, "/body/blocks/0/payload");
+        let value = located_value(&source, &location).unwrap();
+        assert_eq!(value["data"], STANDARD.encode(&pixels));
+        let (decoded, mime) = image_bytes(&source, &value).unwrap();
         assert_eq!(decoded, pixels);
         assert_eq!(mime, "image/png");
+        let first = chunk_local(&state, &session, &source.id, token, 0)
+            .await
+            .unwrap();
+        assert_eq!(first["media_type"], "image/png");
+        assert_eq!(first["size"], pixels.len());
+        let mut fetched = STANDARD.decode(first["data"].as_str().unwrap()).unwrap();
+        assert_eq!(fetched.len(), CHUNK_BYTES);
+        let last = chunk_local(
+            &state,
+            &session,
+            &source.id,
+            token,
+            first["next_offset"].as_u64().unwrap(),
+        )
+        .await
+        .unwrap();
+        fetched.extend(STANDARD.decode(last["data"].as_str().unwrap()).unwrap());
+        assert!(last["next_offset"].is_null());
+        assert_eq!(fetched, pixels);
         assert_eq!(
             state.store.index().unwrap(),
             index,
@@ -1894,11 +2547,14 @@ mod tests {
 
     #[test]
     fn concurrent_read_limit_has_no_waiting_backlog() {
-        let slots = tokio::sync::Semaphore::new(4);
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
         let held: Vec<_> = (0..4).map(|_| slots.try_acquire().unwrap()).collect();
-        assert_eq!(read_slot(&slots).unwrap_err().code, "rate-limited");
+        assert_eq!(
+            read_slot(std::sync::Arc::clone(&slots)).unwrap_err().code,
+            "rate-limited"
+        );
         drop(held);
-        assert!(read_slot(&slots).is_ok());
+        assert!(read_slot(std::sync::Arc::clone(&slots)).is_ok());
     }
     #[test]
     fn sqlite_ref_fences_native_message_and_part_identity_not_only_rowid() {
@@ -1936,6 +2592,77 @@ mod tests {
         db.execute("UPDATE part SET message_id='renamed-message'", [])
             .unwrap();
         assert!(located_value(&native, &location).is_err());
+    }
+
+    fn fold_fixture(root: &std::path::Path, name: &str) -> ExternalSession {
+        let path = root.join(format!(".omp/agent/sessions/{name}/{name}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let header = json!({"type":"session","id":name,"cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"});
+        let message = json!({"type":"message","id":format!("message-{name}"),"timestamp":"2026-10-06T12:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":format!("content of {name}")}]}});
+        std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+        ExternalSession {
+            id: format!("session/external-{name}"),
+            revision: "revision-test".into(),
+            driver: ExternalDriver::Omp,
+            native_id: name.into(),
+            transcript: path,
+            codex_home: None,
+            cwd: None,
+            title: None,
+            started_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+            process: None,
+        }
+    }
+
+    #[test]
+    fn same_fold_viewers_wait_without_holding_global_read_slots() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().to_owned();
+        let shared = fold_fixture(&home, "shared").transcript;
+        crate::external_sessions::timeline_test_support::arm_refresh(&shared);
+        let identities = |items: &[Value]| {
+            items
+                .iter()
+                .map(|item| (item["id"].clone(), item["sequence"].clone()))
+                .collect::<Vec<_>>()
+        };
+        let viewer = |name: &'static str| {
+            let source = fold_fixture(&home, name);
+            let session = ClientSession::local(Some("person/example")).unwrap();
+            std::thread::spawn(move || {
+                read_slice(
+                    &source,
+                    &session,
+                    &source.id,
+                    crate::external_sessions::TimelineOrder::Sequence,
+                    None,
+                    10,
+                )
+            })
+        };
+        let first = viewer("shared");
+        crate::external_sessions::timeline_test_support::wait_refresh_arrived(&shared);
+        let parked: Vec<_> = (0..4).map(|_| viewer("shared")).collect();
+        // Every viewer of the shared transcript is queued on its fold, none on a read slot.
+        crate::external_sessions::timeline_test_support::wait_fold_waiters(4);
+        let unrelated = viewer("other");
+        let unrelated = unrelated.join().unwrap().unwrap();
+        assert!(
+            serde_json::to_string(&unrelated.items)
+                .unwrap()
+                .contains("content of other"),
+            "another conversation is admitted while the shared fold is contended"
+        );
+        crate::external_sessions::timeline_test_support::release_refresh(&shared);
+        let first = first.join().unwrap().unwrap();
+        assert!(!first.items.is_empty());
+        for viewer in parked {
+            assert_eq!(
+                identities(&viewer.join().unwrap().unwrap().items),
+                identities(&first.items)
+            );
+        }
     }
 
     #[test]
@@ -2043,5 +2770,159 @@ mod tests {
             located_value(&native, &location).unwrap()["source_role"],
             "future-role-token"
         );
+    }
+
+    #[test]
+    fn task_views_link_agents_only_to_existing_child_transcripts() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = fixture(root.path(), json!([{"type":"text","text":"parent"}]));
+        let child_directory = parent.transcript.with_extension("");
+        std::fs::create_dir_all(&child_directory).unwrap();
+        std::fs::write(
+            child_directory.join("sub-lived.jsonl"),
+            "{\"type\":\"session\",\"id\":\"child\",\"cwd\":\"/work/example\",\"timestamp\":\"2026-10-06T12:01:00Z\"}\n",
+        )
+        .unwrap();
+        let items = vec![json!({
+            "id": "timeline-entry/native-9",
+            "sequence": 9,
+            "revision": 1,
+            "timestamp": "2026-10-06T12:00:09Z",
+            "role": "tool",
+            "type": "tool_result",
+            "final": true,
+            "body": {
+                "call_id": "call-task",
+                "status": "success",
+                "media_type": "application/json",
+                "content": {},
+                "blocks": [{
+                    "id": "native-9/0",
+                    "kind": "tool_output",
+                    "source_type": "tool_result",
+                    "payload": {"body_ref": true},
+                    "view": {"type": "task", "async": true, "agents": [
+                        {"id": "sub-lived", "agent": "scout", "status": "running"},
+                        {"id": "sub-vanished", "agent": "task", "status": "running"},
+                    ]},
+                }],
+            },
+        })];
+        let mut session = ClientSession::local(Some("person/example")).unwrap();
+        session.conversation_blocks = true;
+        let prepared = prepare(&parent, &session, &parent.id, items).unwrap();
+        let agents = prepared[0]["body"]["blocks"][0]["view"]["agents"]
+            .as_array()
+            .unwrap();
+        let linked = agents[0]["conversation"]["session_id"].as_str().unwrap();
+        assert_eq!(
+            linked,
+            crate::subagent_sessions::child_session_id(&parent, "sub-lived")
+        );
+        assert!(linked.starts_with("session/external-child-"));
+        assert!(agents[1].get("conversation").is_none());
+    }
+
+    #[tokio::test]
+    async fn child_session_ids_open_their_own_timeline_and_header_follows_negotiation() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let parent = fixture(root.path(), json!([{"type":"text","text":"parent only"}]));
+        let child_directory = parent.transcript.with_extension("");
+        std::fs::create_dir_all(&child_directory).unwrap();
+        // Enough entries to page: the continuation must carry the same window's header.
+        let mut child = String::from(
+            "{\"type\":\"session\",\"id\":\"child\",\"cwd\":\"/work/example\",\"timestamp\":\"2026-10-06T12:01:00Z\"}\n",
+        );
+        for index in 0..12 {
+            child.push_str(&format!(
+                "{{\"type\":\"message\",\"id\":\"child-{index}\",\"timestamp\":\"2026-10-06T12:01:{index:02}Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"child line {index}\"}}]}}}}\n",
+            ));
+        }
+        child.push_str(
+            "{\"type\":\"message\",\"id\":\"child-model\",\"timestamp\":\"2026-10-06T12:01:12Z\",\"message\":{\"role\":\"assistant\",\"model\":\"anthropic/claude-opus-5-5\",\"usage\":{\"cost\":{\"total\":0.25}},\"contextSnapshot\":{\"promptTokens\":179053},\"content\":[{\"type\":\"text\",\"text\":\"child line with model\"}]}}\n",
+        );
+        std::fs::write(child_directory.join("sub-1.jsonl"), child).unwrap();
+        let mut state = super::super::tests::test_state_named(root.path(), "child-owner-test");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let app = super::super::super::router(state.clone());
+        let request = |uri: String, blocks: bool| {
+            let app = app.clone();
+            async move {
+                let mut request = Request::builder().uri(uri);
+                if blocks {
+                    request = request.header("x-st3-features", "conversation-blocks.v1");
+                }
+                let response = app
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
+                    .await
+                    .unwrap();
+                (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+            }
+        };
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "sub-1");
+        let leaf = child_id.trim_start_matches("session/");
+        // Negotiated: the child's own window, with a header describing it.
+        let (status, page) =
+            request(format!("/v1/client/sessions/{leaf}/timeline?limit=5"), true).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let items = page["value"]["items"].as_array().unwrap();
+        assert!(items.iter().any(|item| {
+            item["body"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("child line")
+        }));
+        assert!(
+            items
+                .iter()
+                .all(|item| item["body"]["text"] != "parent only")
+        );
+        let header = page["value"]["header"].clone();
+        assert!(header.is_object(), "{page}");
+        assert_eq!(header["model"]["value"], "anthropic/claude-opus-5-5");
+        assert_eq!(page["value"]["page"]["has_more"], json!(true));
+        // Keyset continuations derive the same bounded newest head while the source is unchanged.
+        let cursor = page["value"]["page"]["next_cursor"].as_str().unwrap();
+        let (status, older) = request(
+            // The cursor is `page/native/` plus base64url, so it needs no percent-encoding.
+            format!("/v1/client/sessions/{leaf}/timeline?limit=5&cursor={cursor}"),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{older}");
+        assert_eq!(older["value"]["header"], header);
+        // Without negotiation: the same conversation, but no header and no blocks.
+        let (status, legacy) = request(
+            format!("/v1/client/sessions/{leaf}/timeline?limit=5"),
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert!(legacy["value"].get("header").is_none());
+        assert!(
+            legacy["value"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["body"].get("blocks").is_none())
+        );
+        // A child id whose transcript never existed names no conversation.
+        let missing = crate::subagent_sessions::child_session_id(&parent, "never-ran");
+        let (status, absent) = request(
+            format!(
+                "/v1/client/sessions/{}/timeline",
+                missing.trim_start_matches("session/")
+            ),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{absent}");
     }
 }

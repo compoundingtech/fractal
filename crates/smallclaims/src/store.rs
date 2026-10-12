@@ -32,20 +32,31 @@ use crate::hash::{
 };
 use crate::replication::*;
 use crate::sqlite::{
-    CommitObserver, PINNED_READER, PinnedRead, ReadPool, SQLITE_COMMIT_NANOS, SQLITE_COMMITS,
-    SQLITE_NANOS, STATEMENT_CACHE_CAPACITY, WriterConnection,
+    CommitObserver, PinnedRead, ReadPool, SQLITE_COMMIT_NANOS, SQLITE_COMMITS, SQLITE_NANOS,
+    STATEMENT_CACHE_CAPACITY, WriterConnection,
 };
 
+mod operation_metadata;
+pub use operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod projection_busy_tests;
+#[cfg(test)]
+mod receive_writer_tests;
+#[cfg(test)]
+mod membership_query_tests;
+#[cfg(test)]
+mod repair_operation_tests;
 mod binary_payloads;
 pub mod events;
 pub mod idempotency;
 mod inventory_generation;
+mod checkpoint_capture_epoch;
 pub use binary_payloads::PayloadConversion;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
+mod checkpoint_completion;
+pub use checkpoint_completion::{AllocatorReclaimStats, allocator_reclaim_stats};
 pub mod checkpoint_trim;
 pub mod document_index;
 pub mod heal;
@@ -60,7 +71,7 @@ pub use checkpoint::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
     CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView,
     CheckpointProof, ClaimTombstone, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone,
-    SealedSet, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
+    SealedSet, StoreCopy, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
     verify_checkpoint_manifest,
 };
 pub use checkpoint_agreement::write_time;
@@ -453,6 +464,9 @@ CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, st
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
+-- Heal compares claim identities, not bodies. Keep both join keys in a compact index so a
+-- range digest does not visit every body-bearing claim page.
+CREATE INDEX IF NOT EXISTS claims_batch_claim_id ON claims(batch_id, id);
 CREATE INDEX IF NOT EXISTS claims_accepted_order_index
 ON claims(length(accepted_at_unix_ms), accepted_at_unix_ms, store_index);
 CREATE INDEX IF NOT EXISTS claims_operation_index
@@ -563,6 +577,10 @@ CREATE INDEX IF NOT EXISTS replica_records_state
 ON replica_records(state, writer, sequence);
 CREATE INDEX IF NOT EXISTS replica_records_claim
 ON replica_records(claim_id, position);
+-- Any repaired copy excludes the original claim. This partial identity index answers that
+-- existence check without fetching the retained raw record of every admitted claim.
+CREATE INDEX IF NOT EXISTS replica_records_repaired_claim
+ON replica_records(claim_id) WHERE state='repaired';
 
 CREATE TABLE IF NOT EXISTS projection_health (
     aggregate TEXT PRIMARY KEY,
@@ -596,6 +614,18 @@ CREATE TABLE IF NOT EXISTS graph_generation (
     value INTEGER NOT NULL
 );
 INSERT OR IGNORE INTO graph_generation(id, value) VALUES (1, 0);
+
+-- A checkpoint capture fences relevant mutations across independently released read pages.
+-- The registered envelope frontier and accepted-time cut only grow, including across reopens.
+-- Trigger versions migrate atomically with an epoch bump; no history rewrite is needed.
+CREATE TABLE IF NOT EXISTS checkpoint_capture_epoch (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL,
+    envelope_frontier INTEGER NOT NULL DEFAULT 0,
+    cut_unix_ms INTEGER NOT NULL DEFAULT 0,
+    trigger_version INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO checkpoint_capture_epoch(id, value, envelope_frontier) VALUES (1, 0, 0);
 
 CREATE TABLE IF NOT EXISTS replica_envelope_signatures (
     writer TEXT NOT NULL,
@@ -680,10 +710,17 @@ CREATE INDEX IF NOT EXISTS checkpoint_claims_envelope
 ON checkpoint_claims(writer, sequence, envelope_hash);
 CREATE INDEX IF NOT EXISTS checkpoint_claims_operation
 ON checkpoint_claims(operation_id) WHERE operation_id IS NOT NULL;
+-- Cover typed checkpoint metadata for one operation without fetching checkpoint table rows.
+CREATE INDEX IF NOT EXISTS checkpoint_claims_operation_digest
+ON checkpoint_claims(operation_id, request_digest, id)
+WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL;
 "#;
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
-pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 17;";
+pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 18;";
+
+/// `(host/NAME, key)` for every member incarnation fleet membership admits.
+pub type MemberRoots = BTreeSet<(String, String)>;
 
 /// The graph half of a store. A runtime's store wraps it and derefs to it, so the runtime's
 /// projections read and write through the same connections.
@@ -702,6 +739,8 @@ pub struct Store {
     pub admission: Mutex<()>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// The member part of the trust roots, folded at the `fleet_generation` shown.
+    pub roots_cache: Mutex<Option<(i64, MemberRoots)>>,
     /// Serializes projection passes while they lend the writer back between chunks.
     pub projection: Mutex<()>,
     pub replication_timers: ReplicationTimers,
@@ -760,6 +799,27 @@ impl Store {
         callback: impl Fn(&Connection) + Send + Sync + 'static,
     ) -> CommitObserver {
         self.connection.observe_commits(callback)
+    }
+
+    /// Explicitly attach one bounded transaction-owned source adapter. This covers queued
+    /// batches and managed lent-writer transactions before commit; it neither installs views
+    /// nor certifies source coverage. See WriterConnection::install_transaction_finalizer.
+    pub fn install_transaction_finalizer(
+        &self,
+        callback: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.connection.install_transaction_finalizer(callback)
+    }
+
+    /// Attach one paired source adapter. Prepare runs inside the new outer transaction before
+    /// any managed source write; finalize runs before commit. Raw bypass coverage remains the
+    /// adapter's responsibility. See WriterConnection::install_transaction_hooks.
+    pub fn install_transaction_hooks(
+        &self,
+        prepare: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
+        finalize: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.connection.install_transaction_hooks(prepare, finalize)
     }
 
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
@@ -858,13 +918,14 @@ impl Store {
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 17 {
+        if version != 18 {
             connection.execute_batch(SCHEMA_VERSION)?;
         }
         document_index::initialize(connection)?;
         connection.execute_batch(WRITE_CLOCK)?;
         create_graph_generation_triggers(connection, runtime.legacy_digest_tables())?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
+        checkpoint_capture_epoch::initialize(connection)?;
         Ok(())
     }
 
@@ -936,6 +997,7 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             admission: Mutex::new(()),
             membership_cache: Mutex::new(None),
+            roots_cache: Mutex::new(None),
             projection: Mutex::new(()),
             replication_timers: ReplicationTimers::default(),
             replication_projection_state: AtomicU64::new(0),
@@ -1455,11 +1517,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     anyhow::ensure!(
-        table_count == 0 || matches!(version, 10..=17),
+        table_count == 0 || matches!(version, 10..=18),
         "this database uses an unsupported st schema; start with a new state directory"
     );
     anyhow::ensure!(
-        matches!(version, 0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17),
+        matches!(version, 0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18),
         "this database uses unsupported st schema version {version}"
     );
     Ok(())
@@ -1525,24 +1587,22 @@ pub fn insert_claim(
 /// writer floor this store took when it joined under a name the fleet had used before.
 pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Result<u64> {
     transaction
-        .query_row(
+        .prepare_cached(
             "SELECT MAX(
                  COALESCE((SELECT MAX(replica_sequence) FROM batches WHERE origin=?1), 0),
                  COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0)
              ) + 1",
-            [origin],
-            |row| row.get(0),
-        )
+        )?
+        .query_row([origin], |row| row.get(0))
         .map_err(Into::into)
 }
 
 pub fn previous_batch_hash(transaction: &Transaction<'_>, origin: &str) -> Result<Option<String>> {
     transaction
-        .query_row(
+        .prepare_cached(
             "SELECT hash FROM batches WHERE origin=?1 ORDER BY replica_sequence DESC LIMIT 1",
-            [origin],
-            |row| row.get(0),
-        )
+        )?
+        .query_row([origin], |row| row.get(0))
         .optional()
         .map_err(Into::into)
 }
@@ -1604,12 +1664,19 @@ pub fn selected_index(current: u64, requested: Option<u64>) -> Result<u64, St3Er
 }
 
 pub fn claim_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClaimRecord> {
+    let accepted = row.get::<_, String>(9)?;
+    claim_from_row_with_accepted_time(row, accepted.parse().unwrap_or_default())
+}
+
+pub(crate) fn claim_from_row_with_accepted_time(
+    row: &rusqlite::Row<'_>,
+    accepted_at_unix_ms: u128,
+) -> rusqlite::Result<ClaimRecord> {
     if crate::read_budget::check().is_err() {
         return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT), None));
     }
     let body = row.get::<_, String>(7)?;
     let predecessors = row.get::<_, String>(8)?;
-    let accepted = row.get::<_, String>(9)?;
     let body = serde_json::from_str(&body).unwrap_or(Value::Null);
     Ok(ClaimRecord {
         id: row.get(0)?,
@@ -1623,7 +1690,7 @@ pub fn claim_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClaimRecord> 
         request_digest: operation_parts(&body).map(|(_, digest)| digest.to_owned()),
         body,
         predecessors: serde_json::from_str(&predecessors).unwrap_or_default(),
-        accepted_at_unix_ms: accepted.parse().unwrap_or_default(),
+        accepted_at_unix_ms,
     })
 }
 
@@ -2215,8 +2282,47 @@ fn fleet_generation_schema() -> String {
     )
 }
 
+fn fleet_generation(connection: &Connection) -> Result<i64> {
+    Ok(connection
+        .prepare_cached("SELECT value FROM fleet_generation WHERE id=1")?
+        .query_row([], |row| row.get(0))?)
+}
+
+// Payload bytes are immutable at this exact hash except the lossless TEXT-to-BLOB
+// conversion. Recheck the retained header and checkpoint exclusion without decoding or
+// copying a potentially large payload on the writer. Ordinary validation still hashes it.
+fn admission_envelope_present(connection: &Connection, envelope: &ReplicaEnvelope) -> Result<bool> {
+    Ok(connection.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM replica_envelopes
+         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+           AND previous_hash IS ?4 AND accepted_at_unix_ms=?5
+           AND NOT EXISTS(SELECT 1 FROM checkpoint_envelopes
+                          WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3))"
+    )?.query_row(params![envelope.writer, envelope.sequence, envelope.hash,
+                        envelope.previous_hash, envelope.accepted_at_unix_ms.to_string()],
+                 |row| row.get(0))?)
+}
+
 pub fn fleet_membership_tx(connection: &Connection) -> Result<crate::fleet::Membership> {
     fleet_membership_tx_with_local_signer(connection, None)
+}
+
+// Keep signer aggregation correlated to the exact indexed envelope identity. Joining raw
+// signature rows into the outer query would multiply claim bodies for envelopes with many keys.
+fn fleet_claims_with_signers_query() -> String {
+    format!(
+        "SELECT claims.id, claims.kind, claims.subject, claims.body,
+                batches.origin, batches.replica_sequence, envelopes.envelope_hash,
+                (SELECT json_group_array(signatures.member_key)
+                 FROM replica_envelope_signatures AS signatures
+                 WHERE signatures.writer=batches.origin
+                   AND signatures.sequence=batches.replica_sequence
+                   AND signatures.envelope_hash=envelopes.envelope_hash)
+         FROM claims JOIN batches ON batches.id=claims.batch_id
+         LEFT JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+         WHERE claims.kind IN ({FLEET_CLAIM_KINDS})
+         ORDER BY claims.id"
+    )
 }
 
 pub fn fleet_membership_tx_with_local_signer(
@@ -2226,14 +2332,7 @@ pub fn fleet_membership_tx_with_local_signer(
     let Some(anchor) = fleet_meta(connection, "fleet_anchor_key")? else {
         return Ok(crate::fleet::Membership::default());
     };
-    let mut statement = connection.prepare(&format!(
-        "SELECT claims.id, claims.kind, claims.subject, claims.body,
-                batches.origin, batches.replica_sequence, envelopes.envelope_hash
-         FROM claims JOIN batches ON batches.id=claims.batch_id
-         LEFT JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
-         WHERE claims.kind IN ({FLEET_CLAIM_KINDS})
-         ORDER BY claims.id"
-    ))?;
+    let mut statement = connection.prepare(&fleet_claims_with_signers_query())?;
     let rows = statement
         .query_map([], |row| {
             Ok((
@@ -2244,24 +2343,15 @@ pub fn fleet_membership_tx_with_local_signer(
                 row.get::<_, String>(4)?,
                 row.get::<_, u64>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
             ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    let mut signers_statement = connection.prepare(
-        "SELECT member_key FROM replica_envelope_signatures
-         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-    )?;
-    let mut claims: Vec<crate::fleet::FleetClaim> = Vec::with_capacity(rows.len());
-    for (id, kind, subject, body, writer, sequence, envelope_hash) in rows {
-        let mut signers = match &envelope_hash {
-            Some(hash) => signers_statement
-                .query_map(params![writer, sequence, hash], |row| {
-                    row.get::<_, String>(0)
-                })?
-                .collect::<Result<BTreeSet<_>, _>>()?,
-            None => BTreeSet::new(),
-        };
+        })?;
+    // The indexed signer aggregate keeps one row per claim/envelope, including unsigned
+    // envelopes. Judging calls this on its writer transaction; avoid per-row SQL round trips.
+    let mut claims: Vec<crate::fleet::FleetClaim> = Vec::new();
+    for row in rows {
+        let (id, kind, subject, body, writer, sequence, envelope_hash, signers_json) = row?;
+        let mut signers = serde_json::from_str::<BTreeSet<String>>(&signers_json)?;
         // A locally appended batch has not been seeded into an envelope yet.
         // Its eventual signature uses this node's key; include it in the client
         // view without doing that write while a request is being served.
@@ -2386,25 +2476,61 @@ pub fn store_envelope_signature_tx(
     signature: &str,
     now: &str,
 ) -> Result<usize> {
-    let message =
-        crate::fleet::envelope_signature_message(fleet_id, writer, sequence, envelope_hash);
-    if !crate::fleet::verify_signature(member_key, &message, signature) {
+    let Some(verified) = VerifiedEnvelopeSignature::verify(
+        fleet_id, writer, sequence, envelope_hash, member_key, signature,
+    ) else {
         return Ok(0);
-    }
-    Ok(transaction
-        .prepare_cached(
-            "INSERT OR IGNORE INTO replica_envelope_signatures(
-             writer, sequence, envelope_hash, member_key, signature, stored_at_unix_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?
-        .execute(params![
+    };
+    verified.store(transaction, now)
+}
+
+/// Verification depends only on the signed bytes, not on store state. Keep the verified
+/// identity and signature together so receipt can do the cryptography before taking the
+/// writer, while tombstone and membership decisions still happen on the store.
+struct VerifiedEnvelopeSignature<'a> {
+    writer: &'a str,
+    sequence: u64,
+    envelope_hash: &'a str,
+    member_key: &'a str,
+    signature: &'a str,
+}
+
+impl<'a> VerifiedEnvelopeSignature<'a> {
+    fn verify(
+        fleet_id: &str,
+        writer: &'a str,
+        sequence: u64,
+        envelope_hash: &'a str,
+        member_key: &'a str,
+        signature: &'a str,
+    ) -> Option<Self> {
+        let message =
+            crate::fleet::envelope_signature_message(fleet_id, writer, sequence, envelope_hash);
+        crate::fleet::verify_signature(member_key, &message, signature).then_some(Self {
             writer,
             sequence,
             envelope_hash,
             member_key,
             signature,
-            now
-        ])?)
+        })
+    }
+
+    fn store(&self, transaction: &Transaction<'_>, now: &str) -> Result<usize> {
+        Ok(transaction
+            .prepare_cached(
+                "INSERT OR IGNORE INTO replica_envelope_signatures(
+             writer, sequence, envelope_hash, member_key, signature, stored_at_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?
+            .execute(params![
+                self.writer,
+                self.sequence,
+                self.envelope_hash,
+                self.member_key,
+                self.signature,
+                now
+            ])?)
+    }
 }
 
 /// What `st fleet remove` did.
@@ -3431,9 +3557,13 @@ fn load_compact_replication_inventory(
 /// the most identities one divergent exchange lists beyond its first differing range.
 pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 
-/// Envelopes admitted per writer transaction. Admission takes 2-3 ms per envelope on a populated
-/// store, so a chunk holds the writer for well under a second.
-pub const ADMISSION_CHUNK_ENVELOPES: usize = 256;
+/// Maximum envelopes admitted per writer transaction. Admission can take several milliseconds
+/// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
+pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
+
+/// Stop a chunk before starting another envelope once its writer work reaches this budget.
+/// An envelope and the commit are indivisible; this does not preempt either one.
+const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Newly admitted claims projected per writer transaction. A catch-up page must not keep
 /// queued lease renewals and messages behind its entire incremental projection.
@@ -4717,9 +4847,17 @@ impl Store {
         Ok(self.committed_index.load(Ordering::Acquire))
     }
 
+    /// A cheap committed point for a mutation caller deciding whether to wake its readers.
+    /// This is an invalidation hint, never a graph-equality or admission certificate. Replay
+    /// may conservatively change the generation even when its final graph bytes agree.
+    pub fn replication_change_point(&self) -> Result<(u64, i64)> {
+        self.read_snapshot(|index| Ok((index, graph_generation(&self.readers.get())?)))
+    }
+
     /// Run `read` with every read this thread makes through the store seeing one SQLite
     /// snapshot, and give it that snapshot's store index. Rows read inside always match the
-    /// index, however many commits land meanwhile. A nested call joins the outer snapshot.
+    /// index, however many commits land meanwhile. A nested call joins the outer snapshot,
+    /// even below another store's snapshot.
     /// The latest claim of a subject, or of one kind of it, in canonical order.
     pub fn latest_claim(&self, subject: &str, kind: Option<&str>) -> Result<Option<ClaimRecord>> {
         crate::touched::note_read(|| subject.to_owned());
@@ -4778,32 +4916,42 @@ impl Store {
     #[track_caller]
     pub fn read_snapshot<T>(&self, read: impl FnOnce(u64) -> Result<T>) -> Result<T> {
         let key = self.readers.key();
-        if PINNED_READER.with(|slot| slot.borrow().as_ref().is_some_and(|(pool, _)| *pool == key)) {
-            let index = current_index(&self.readers.get())?;
+        // Reentry joins this thread's existing snapshot of this store, even when another
+        // store's pin is newer: that connection is already inside its read transaction, so
+        // BEGINning it again is both wrong and refused by SQLite.
+        if let Some(connection) = crate::sqlite::pinned_reader_for(key) {
+            let index = current_index(&connection)?;
             return read(index);
         }
         // The snapshot's own entry: the guard below is lent out and dropped at once.
-        let _live = crate::sqlite::register_live_read(true);
+        let live = self.readers.register_snapshot();
         let mut guard = self.readers.get();
         // Declared first so it drops last: on every exit it ends the transaction, releases the
         // pin, and returns the connection to the pool.
-        let pinned = PinnedRead {
+        let mut pinned = PinnedRead {
             pool: &self.readers,
-            previous: PINNED_READER.with(|slot| slot.borrow_mut().take()),
+            registered: false,
             connection: Some(match guard.connection.take() {
                 Some(connection) => Rc::new(connection),
                 None => guard.pinned.take().expect("a request loan holds its connection"),
             }),
+            transaction: Some(crate::windows::Timer::start(
+                crate::windows::StoreWork::ReadTransaction,
+            )),
         };
         drop(guard);
         let connection = pinned
             .connection
             .clone()
             .expect("the pin holds its connection");
+        let timing = crate::sqlite::ReaderTiming::start();
         connection.execute_batch("BEGIN")?;
         // The first read starts the snapshot; every later read in `read` sees the same one.
         let index = current_index(&connection)?;
-        PINNED_READER.with(|slot| *slot.borrow_mut() = Some((key, connection)));
+        drop(timing);
+        live.snapshot_started(&connection);
+        crate::sqlite::push_pinned_reader(key, connection);
+        pinned.registered = true;
         read(index)
     }
 
@@ -5771,16 +5919,52 @@ impl Store {
             ));
         }
         let timing = time_stage(&self.replication_timers.receipt);
-        // The envelopes wait as pending in a savepoint of the writer's next batch; admission and
-        // projection take them from there.
-        let (received, duplicate, signatures) = self
-            .connection
-            .batched(|transaction| -> Result<(usize, usize, usize), St3Error> {
+        let envelope_signatures = input
+            .envelopes
+            .iter()
+            .map(|envelope| {
+                let (Some(key), Some(signature)) = (&envelope.member_key, &envelope.signature) else {
+                    return None;
+                };
+                VerifiedEnvelopeSignature::verify(
+                    fleet_id,
+                    &envelope.writer,
+                    envelope.sequence,
+                    &envelope.hash,
+                    key,
+                    signature,
+                )
+            })
+            .collect::<Vec<_>>();
+        let follow_up_signatures = input
+            .signatures
+            .iter()
+            .filter_map(|signature| {
+                VerifiedEnvelopeSignature::verify(
+                    fleet_id,
+                    &signature.writer,
+                    signature.sequence,
+                    &signature.hash,
+                    &signature.member_key,
+                    &signature.signature,
+                )
+            })
+            .collect::<Vec<_>>();
+        // One authenticated page becomes pending atomically. It uses the same managed
+        // prepare/finalize/commit boundary, but lets queued foreground requests go first.
+        // Immutable signature verification stays outside the writer. The guard returns before
+        // any receipt counters, snapshot work or acknowledgement can observe success.
+        let (received, duplicate, signatures) = {
+            let mut connection = self.connection.write_background();
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(internal)?;
+            let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize), St3Error> {
                 let mut received = 0;
                 let mut duplicate = 0;
                 let mut signatures = 0;
                 let now = now_ms().to_string();
-                for envelope in &input.envelopes {
+                for (envelope, verified) in input.envelopes.iter().zip(&envelope_signatures) {
                     // A checkpoint dropped this envelope here. Its tombstone already stands for it.
                     if checkpoint::envelope_tombstoned(
                         transaction,
@@ -5793,19 +5977,8 @@ impl Store {
                         duplicate += 1;
                         continue;
                     }
-                    if let (Some(member_key), Some(signature)) = (&envelope.member_key, &envelope.signature)
-                    {
-                        signatures += store_envelope_signature_tx(
-                            transaction,
-                            fleet_id,
-                            &envelope.writer,
-                            envelope.sequence,
-                            &envelope.hash,
-                            member_key,
-                            signature,
-                            &now,
-                        )
-                        .map_err(internal)?;
+                    if let Some(verified) = verified {
+                        signatures += verified.store(transaction, &now).map_err(internal)?;
                     }
                     let inserted = transaction
                         .prepare_cached(
@@ -5834,28 +6007,18 @@ impl Store {
                         received += 1;
                     }
                 }
-                for signature in &input.signatures {
+                for signature in &follow_up_signatures {
                     if checkpoint::envelope_tombstoned(
                         transaction,
-                        &signature.writer,
+                        signature.writer,
                         signature.sequence,
-                        &signature.hash,
+                        signature.envelope_hash,
                     )
                     .map_err(internal)?
                     {
                         continue;
                     }
-                    signatures += store_envelope_signature_tx(
-                        transaction,
-                        fleet_id,
-                        &signature.writer,
-                        signature.sequence,
-                        &signature.hash,
-                        &signature.member_key,
-                        &signature.signature,
-                        &now,
-                    )
-                    .map_err(internal)?;
+                    signatures += signature.store(transaction, &now).map_err(internal)?;
                 }
                 transaction
                     .execute(
@@ -5884,8 +6047,10 @@ impl Store {
                     transaction.execute("DELETE FROM replication_refusals WHERE peer=?1", [relay]).map_err(internal)?;
                 }
                 Ok((received, duplicate, signatures))
-            })
-            .map_err(|error| St3Error::new("internal", error))??;
+            })(&transaction)?;
+            transaction.commit().map_err(internal)?;
+            counts
+        };
         drop(timing);
         self.replication_timers
             .exchanges
@@ -5932,7 +6097,7 @@ impl Store {
             && !waiting
             && !input.inventory.digest.is_empty()
             && input.inventory.digest == snapshot.inventory.digest
-            && !input.graph_digest.is_empty()
+            && (!input.projection_digests.is_empty() || !input.graph_digest.is_empty())
             && received == 0
             && signatures == 0
             && !self.replication_projection_deferred())
@@ -6016,6 +6181,17 @@ impl Store {
         })
     }
 
+    fn prepare_admission_membership(&self) -> Result<(i64, crate::fleet::Membership)> {
+        #[cfg(test)]
+        ADMISSION_MEMBERSHIP_FOLDS.with(|count| count.set(count.get() + 1));
+        let reader = self.readers.get();
+        let snapshot = reader.unchecked_transaction()?;
+        let generation = fleet_generation(&snapshot)?;
+        let membership = fleet_membership_tx(&snapshot)?;
+        // Drop the read transaction and lease before requesting a writer loan.
+        Ok((generation, membership))
+    }
+
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
         self.replication_snapshot()?;
@@ -6027,7 +6203,9 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner);
         let _timing = time_stage(&self.replication_timers.admission);
         let (retry_hash_mismatches, envelopes) = {
-            let connection = self.connection.write();
+            // This query does not mutate source or authority. Fetch the pending payloads on a
+            // reader and release its lease before queueing any admission writer transaction.
+            let connection = self.readers.get();
             // Builds before the insertion-order hash fallback rejected genuine claims from
             // 2026-09-16 as hash mismatches. Check those records once more, once.
             let retry_hash_mismatches = connection
@@ -6056,30 +6234,58 @@ impl Store {
             (retry_hash_mismatches, envelopes)
         };
         let mut outcome = ReplicationAdmission::default();
-        // Membership is a few hundred statements on the writer; with nothing to admit, skip it.
-        let mut membership = if envelopes.is_empty() {
-            Default::default()
-        } else {
-            fleet_membership_tx(&self.connection.write())?
-        };
+        // Prepare the authority fold off the writer in one reader snapshot. A generation
+        // comparison inside each acquired transaction proves that fold still applies there.
+        let mut membership: Option<(i64, crate::fleet::Membership)> = None;
         let mut pending = envelopes;
         // Admitting one envelope can admit a membership claim that decides another envelope,
         // so held envelopes get another pass whenever membership changes.
         loop {
             let mut held = Vec::new();
             let mut membership_changed = false;
-            // One transaction, and so one disk flush, per chunk. A catch-up page holds thousands
-            // of envelopes, and admitting them in one transaction held the only writer for
-            // seconds, so every write behind it waited. Between chunks the writer serves what
-            // queued meanwhile. Each envelope is admitted in its own savepoint, so an invalid
-            // one is rolled back and recorded alone.
-            for chunk in pending.chunks(ADMISSION_CHUNK_ENVELOPES) {
-                let mut connection = self.connection.write();
+            // One managed transaction per bounded chunk. Foreground requests can overtake
+            // queued chunks; active envelopes and commit/finalization remain indivisible.
+            // Each envelope is admitted in its own savepoint, so an invalid one is rolled back
+            // and recorded alone. Refresh authority off the writer whenever its generation moved.
+            let mut next = 0;
+            while next < pending.len() {
+                if membership.is_none() {
+                    membership = Some(self.prepare_admission_membership()?);
+                }
+                #[cfg(test)]
+                BEFORE_ADMISSION_LOAN.with(|hook| {
+                    if let Some(mut hook) = hook.borrow_mut().take() {
+                        hook();
+                    }
+                });
+                let mut connection = self.connection.write_background();
                 let mut pass = connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                for envelope in chunk {
+                let (prepared_generation, prepared_membership) = membership.as_ref().unwrap();
+                if fleet_generation(&pass)? != *prepared_generation {
+                    // Foreground authority changes can overtake this loan. Release it and
+                    // prepare again without folding history on the writer or using stale roots.
+                    drop(pass);
+                    drop(connection);
+                    membership = None;
+                    continue;
+                }
+                let started = std::time::Instant::now();
+                let end = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
+                let first = next;
+                while next < end {
+                    if next != first && started.elapsed() >= ADMISSION_WRITER_BUDGET {
+                        break;
+                    }
+                    let envelope = &pending[next];
+                    next += 1;
+                    // A checkpoint/repair may have removed the captured source while this
+                    // background loan waited. Never restore records from that stale payload.
+                    if !admission_envelope_present(&pass, envelope)? {
+                        continue;
+                    }
                     let started = std::time::Instant::now();
-                    let hold = fleet_admission_hold(&pass, &membership, envelope)?;
+                    let hold = fleet_admission_hold(&pass, prepared_membership, envelope)?;
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
@@ -6105,9 +6311,15 @@ impl Store {
                                     envelope.sequence,
                                     envelope.hash
                                 ])?;
-                            membership_changed |=
+                            let changes_membership =
                                 envelope_carries_fleet_claims(&savepoint, envelope)?;
+                            membership_changed |= changes_membership;
                             savepoint.commit()?;
+                            if changes_membership {
+                                // Re-fold off the writer before any later envelope uses the
+                                // authority introduced or removed by this admitted claim.
+                                break;
+                            }
                         }
                         Err(error) => {
                             savepoint.rollback()?;
@@ -6133,17 +6345,20 @@ impl Store {
                 outcome.held = held.len();
                 break;
             }
-            membership = fleet_membership_tx(&self.connection.write())?;
+            membership = None;
             pending = held;
         }
         self.replication_timers
             .verify
             .fetch_add(outcome.verify.as_nanos() as u64, Ordering::Relaxed);
         if retry_hash_mismatches {
-            self.connection.write().execute(
+            let mut connection = self.connection.write_background();
+            let transaction = connection.transaction()?;
+            transaction.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('legacy_claim_hash_retried', ?1)",
                 [now_ms().to_string()],
             )?;
+            transaction.commit()?;
         }
         // Admitted claims, and any change to membership's trust roots, get their verdicts once
         // they are projected: judging here would hold the writer between admission and
@@ -6176,6 +6391,15 @@ impl Store {
     /// Whether admitted replicated claims wait for a deferred projection.
     pub fn replication_projection_deferred(&self) -> bool {
         self.replication_projection_state.load(Ordering::Acquire) & 1 != 0
+    }
+
+    /// An opaque process/Store-lifetime observation token plus its deferred flag, sampled
+    /// together. A changed token can invalidate cached consumers even if they missed the
+    /// pending interval. This is not a persisted cut or a certificate for replay/heal,
+    /// physical removal, OLD images or every projection path. Its existing generation wraps.
+    pub fn replication_projection_observation(&self) -> (u64, bool) {
+        let state = self.replication_projection_state.load(Ordering::Acquire);
+        (state, state & 1 != 0)
     }
 
     pub fn projection_contention_generation(&self) -> u64 {
@@ -6360,6 +6584,7 @@ impl Store {
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
         let mut chunked = false;
+        let mut processed = 0_u64;
         loop {
             let mut connection = self.connection.write();
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
@@ -6389,15 +6614,15 @@ impl Store {
                 .optional()?
                 .flatten()
                 .unwrap_or(0);
-            let through = transaction
+            let (through, count) = transaction
                 .query_row(
-                    "SELECT MAX(store_index) FROM (
+                    "SELECT MAX(store_index), COUNT(*) FROM (
                 SELECT store_index FROM claims WHERE store_index>?1 AND store_index<=?2
                 ORDER BY store_index LIMIT ?3)",
                     params![frontier, target, PROJECTION_CHUNK_CLAIMS as i64],
-                    |row| row.get::<_, Option<u64>>(0),
-                )?
-                .unwrap_or(target.max(frontier));
+                    |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, u64>(1)?)),
+                )?;
+            let through = through.unwrap_or(target.max(frontier));
             progress(ProjectionProgress {
                 phase: "project-incremental",
                 frontier,
@@ -6512,11 +6737,14 @@ impl Store {
                     params![through, now_ms().to_string()],
                 )?;
                     transaction.commit()?;
+                    if !replayed {
+                        processed += count;
+                    }
                     progress(ProjectionProgress {
                         phase: "projection-committed",
                         frontier: through,
                         target,
-                        processed: None,
+                        processed: (!replayed).then_some(processed),
                         total: None,
                     });
                     // Snapshot while admission is excluded by the writer. Admission marks
@@ -6614,14 +6842,20 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         let mut changed = 0;
+        let mut operation_ids = BTreeSet::new();
         for (repair_claim, body) in repairs {
             transaction.execute_batch("SAVEPOINT apply_repair")?;
-            let result =
-                apply_replication_repair_tx(&*self.runtime, &transaction, &repair_claim, &body);
+            let result = apply_replication_repair_with_operations_tx(
+                &*self.runtime,
+                &transaction,
+                &repair_claim,
+                &body,
+            );
             match result {
-                Ok(applied) => {
+                Ok((applied, affected_operations)) => {
                     transaction.execute_batch("RELEASE apply_repair")?;
                     changed += applied;
+                    operation_ids.extend(affected_operations);
                 }
                 Err(error) => {
                     transaction.execute_batch("ROLLBACK TO apply_repair; RELEASE apply_repair")?;
@@ -6640,7 +6874,7 @@ impl Store {
             }
         }
         if changed != 0 {
-            rebuild_operations_tx(&transaction)?;
+            repair_operations_tx(&transaction, &operation_ids.into_iter().collect::<Vec<_>>())?;
         }
         transaction.commit()?;
         drop(connection);
@@ -7672,111 +7906,90 @@ pub fn checkpointed_operation_outcome(
     .with_detail("claim_id", claim_id.clone()))
 }
 
-/// The claims every stored operation row must come from, in canonical order. The partial
-/// operation index names exactly the claims this scan keeps, so the audit walks it instead of
-/// evaluating json_extract over every claim in the store.
+/// The narrow metadata every stored operation row must come from. The partial operation
+/// index names exactly the claims this scan keeps. Canonical reduction is order-independent;
+/// neither bodies nor a temporary sort of the claim table are needed.
 pub const EXPECTED_OPERATIONS_QUERY: &str =
-    "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
+    "SELECT json_extract(body, '$._operation.id'),
+            json_extract(body, '$._operation.request_digest'), id
      FROM claims INDEXED BY claims_operation_index
      WHERE json_extract(body, '$._operation.id') IS NOT NULL
-       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
-     ORDER BY id";
+       AND json_type(body, '$._operation.id')='text'
+       AND json_type(body, '$._operation.request_digest')='text'
+       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)";
 
 pub fn expected_operations(
     connection: &Connection,
 ) -> Result<BTreeMap<String, (String, String, String)>> {
     let mut statement = connection.prepare(EXPECTED_OPERATIONS_QUERY)?;
-    let claims = statement
-        .query_map([], claim_from_row)?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut grouped = BTreeMap::<String, Vec<(String, String)>>::new();
-    let mut stored = BTreeSet::new();
-    for claim in claims {
-        if let Some((operation_id, request_digest)) = operation_parts(&claim.body) {
-            grouped
-                .entry(operation_id.to_owned())
-                .or_default()
-                .push((request_digest.to_owned(), claim.id.clone()));
-            stored.insert(claim.id);
-        }
+    let mut grouped = BTreeMap::<String, OperationMetadata>::new();
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let operation_id: String = row.get(0)?;
+        let request_digest: String = row.get(1)?;
+        let claim_id: String = row.get(2)?;
+        grouped.entry(operation_id).or_default().include(request_digest, claim_id, true);
     }
     // Claims a checkpoint dropped still decide an operation's digest and state. An operation
     // left with no stored claim has no row, since the row must name a stored claim; a retry
     // finds its tombstones instead.
-    let mut dropped = BTreeMap::<String, Vec<(String, String)>>::new();
-    for (operation_id, request_digest, claim_id) in checkpoint::checkpointed_operations(connection)?
-    {
-        if !stored.contains(&claim_id) {
-            dropped
-                .entry(operation_id)
-                .or_default()
-                .push((request_digest, claim_id));
+    let mut statement = connection.prepare(CHECKPOINT_OPERATION_METADATA_QUERY)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let operation_id: String = row.get(0)?;
+        if let Some(operation) = grouped.get_mut(&operation_id) {
+            operation.include(row.get(1)?, row.get(2)?, false);
         }
     }
-    Ok(grouped
-        .into_iter()
-        .map(|(operation_id, stored_claims)| {
-            let dropped = dropped.remove(&operation_id).unwrap_or_default();
-            (operation_id, operation_row(&stored_claims, dropped))
-        })
-        .collect())
+    Ok(grouped.into_iter().filter_map(|(id, value)| value.row().map(|row| (id, row))).collect())
 }
 
-/// One operation's row from its stored claims and the claims a checkpoint dropped, each as
-/// `(request digest, claim)`: `(request digest, canonical claim, state)`.
-fn operation_row(
-    stored_claims: &[(String, String)],
-    dropped: Vec<(String, String)>,
-) -> (String, String, String) {
-    let mut claims = stored_claims.to_vec();
-    claims.extend(dropped);
-    claims.sort();
-    let request_digest = claims[0].0.clone();
-    let state = if claims.iter().all(|(digest, _)| digest == &request_digest) {
-        "active"
-    } else {
-        "conflict"
-    };
-    let canonical_claim_id = stored_claims
-        .iter()
-        .filter(|(digest, _)| digest == &request_digest)
-        .map(|(_, claim)| claim)
-        .min()
-        .or_else(|| stored_claims.iter().map(|(_, claim)| claim).min())
-        .expect("an operation has at least one stored claim")
-        .clone();
-    (request_digest, canonical_claim_id, state.into())
-}
+const CHECKPOINT_OPERATION_METADATA_QUERY: &str =
+    "SELECT operation_id,request_digest,id FROM checkpoint_claims
+     WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL
+       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
+       AND NOT EXISTS(SELECT 1 FROM claims WHERE id=checkpoint_claims.id
+         AND json_type(body,'$._operation.id')='text'
+         AND json_type(body,'$._operation.request_digest')='text'
+         AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))";
 
-/// What `expected_operations` holds for one operation, read through the operation index.
+// The reducer and typed decoding are unchanged; only the affected-key covering access changes.
+const CHECKPOINT_OPERATION_KEYED_QUERY: &str =
+    "SELECT request_digest,id FROM checkpoint_claims INDEXED BY checkpoint_claims_operation_digest
+     WHERE operation_id=?1 AND operation_id IS NOT NULL AND request_digest IS NOT NULL
+       AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=checkpoint_claims.id)
+       AND NOT EXISTS(SELECT 1 FROM claims WHERE id=checkpoint_claims.id
+         AND json_type(body,'$._operation.id')='text'
+         AND json_type(body,'$._operation.request_digest')='text'
+         AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))";
+
+/// What `expected_operations` holds for one operation, read through the operation indexes.
+/// Requires the current schema installed by Store::open/open_memory before readers are exposed.
+/// Read-only/immutable copies must retain that schema; an older raw connection fails closed.
 pub fn expected_operation(
     connection: &Connection,
     operation_id: &str,
 ) -> Result<Option<(String, String, String)>> {
     let mut statement = connection.prepare_cached(
-        "SELECT id, body FROM claims
+        "SELECT id, json_extract(body, '$._operation.request_digest') FROM claims INDEXED BY claims_operation_index
          WHERE json_extract(body, '$._operation.id')=?1
-           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
-         ORDER BY id",
+           AND json_type(body, '$._operation.id')='text'
+           AND json_type(body, '$._operation.request_digest')='text'
+           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)",
     )?;
-    let mut stored = Vec::new();
+    let mut operation = OperationMetadata::default();
     for row in statement.query_map([operation_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })? {
-        let (claim_id, body) = row?;
-        let body: Value = serde_json::from_str(&body)?;
-        if let Some((_, request_digest)) = operation_parts(&body) {
-            stored.push((request_digest.to_owned(), claim_id));
-        }
+        let (claim_id, request_digest) = row?;
+        operation.include(request_digest, claim_id, true);
     }
-    if stored.is_empty() {
-        return Ok(None);
+    let mut statement = connection.prepare_cached(CHECKPOINT_OPERATION_KEYED_QUERY)?;
+    for row in statement.query_map([operation_id], |row| Ok((row.get(0)?, row.get(1)?)))? {
+        let (request_digest, claim_id) = row?;
+        operation.include(request_digest, claim_id, false);
     }
-    let dropped = checkpoint::checkpointed_operation(connection, operation_id)?
-        .into_iter()
-        .filter(|(_, claim_id)| !stored.iter().any(|(_, stored)| stored == claim_id))
-        .collect();
-    Ok(Some(operation_row(&stored, dropped)))
+    Ok(operation.row())
 }
 
 /// Bring the rows of `operation_ids` to what their claims say, and leave every other row alone.
@@ -7804,9 +8017,56 @@ pub fn repair_operations_tx(
     Ok(changed)
 }
 
+/// Reconcile every receipt with the complete canonical fold at this writer cut.
+/// Exact rows with a matching known-key logical cache receive no attempted DML.
+/// Damaged, stale or inconsistently cached rows are removed by rowid.
+/// This still scans complete input/receipt inventories and can rewrite every row.
 pub fn rebuild_operations_tx(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute("DELETE FROM operations", [])?;
-    for (id, (request_digest, canonical_claim_id, state)) in expected_operations(transaction)? {
+    let mut expected = expected_operations(transaction)?;
+    // `operations` is an ordinary rowid table. Inspect raw values: damaged NULL/BLOB or
+    // invalid UTF-8 identities must not make a typed reader overlook a stale receipt.
+    // Finish discovery and drop the statement before applying any mutations.
+    let obsolete = {
+        let mut statement = transaction.prepare(
+            "SELECT o.rowid, o.id, o.request_digest, o.canonical_claim_id, o.state,
+                    CASE WHEN typeof(o.id)='text' AND typeof(o.request_digest)='text'
+                           AND typeof(o.canonical_claim_id)='text' AND typeof(o.state)='text'
+                         THEN cached.row_json IS json_array(o.canonical_claim_id,o.id,o.request_digest,o.state)
+                         ELSE 0 END
+             FROM operations AS o
+             LEFT JOIN projection_digest_operation_rows AS cached ON cached.operation_id=o.id",
+        )?;
+        let mut rows = statement.query([])?;
+        // The joined comparison uses exactly refresh_operation's SQLite JSON encoding.
+        // CASE keeps NULL/BLOB storage out of json_array; raw byte comparisons below
+        // still reject invalid UTF-8 TEXT rather than granting it canonical authority.
+        let mut obsolete = Vec::new();
+        while let Some(row) = rows.next()? {
+            let id = match row.get_ref(1)? {
+                rusqlite::types::ValueRef::Text(bytes) => std::str::from_utf8(bytes).ok(),
+                _ => None,
+            };
+            let canonical = id.and_then(|id| expected.get(id));
+            let correct = if let Some((digest, claim, state)) = canonical {
+                let exact_row = matches!(row.get_ref(2)?, rusqlite::types::ValueRef::Text(bytes) if bytes == digest.as_bytes())
+                    && matches!(row.get_ref(3)?, rusqlite::types::ValueRef::Text(bytes) if bytes == claim.as_bytes())
+                    && matches!(row.get_ref(4)?, rusqlite::types::ValueRef::Text(bytes) if bytes == state.as_bytes());
+                exact_row && row.get::<_, bool>(5)?
+            } else {
+                false
+            };
+            if correct {
+                expected.remove(id.expect("a matching receipt has a valid text identity"));
+            } else {
+                obsolete.push(row.get::<_, i64>(0)?);
+            }
+        }
+        obsolete
+    };
+    for rowid in obsolete {
+        transaction.execute("DELETE FROM operations WHERE rowid=?1", [rowid])?;
+    }
+    for (id, (request_digest, canonical_claim_id, state)) in expected {
         transaction.execute(
             "INSERT INTO operations(id, request_digest, canonical_claim_id, state) VALUES (?1, ?2, ?3, ?4)",
             params![id, request_digest, canonical_claim_id, state],
@@ -7924,6 +8184,13 @@ pub fn graph_generation(connection: &Connection) -> Result<i64> {
         .query_row([], |row| row.get(0))?)
 }
 
+/// The persistent mutation fence used by checkpoint pages on any SQLite connection.
+pub fn checkpoint_capture_epoch(connection: &Connection) -> Result<i64> {
+    Ok(connection
+        .prepare_cached("SELECT value FROM checkpoint_capture_epoch WHERE id=1")?
+        .query_row([], |row| row.get(0))?)
+}
+
 pub fn digest_queries(connection: &Connection, queries: &[(&str, &str)]) -> Result<String> {
     let mut digest = Sha256::new();
     digest.update(b"st3-logical-digest-v1\0");
@@ -8014,19 +8281,63 @@ thread_local! {
     pub static ADMISSION_TRANSACTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static ADMISSION_MEMBERSHIP_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // One-shot deterministic control between preparing authority and acquiring its writer.
+    static BEFORE_ADMISSION_LOAN: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn apply_replication_repair_tx(
     runtime: &dyn Runtime,
     transaction: &Transaction<'_>,
     repair_claim: &str,
     body: &str,
 ) -> Result<usize> {
+    apply_replication_repair_with_operations_tx(runtime, transaction, repair_claim, body)
+        .map(|(changed, _)| changed)
+}
+
+/// Keep dependencies inside the repair savepoint, including the original claim when it is
+/// checkpointed. The caller merges these IDs only after the savepoint succeeds. Replacements
+/// can move between operations; the preceding replacement and rows naming any of these claims
+/// must not retain an obsolete canonical receipt.
+fn repaired_operation_ids_tx(
+    transaction: &Transaction<'_>,
+    claim_ids: BTreeSet<&str>,
+) -> Result<BTreeSet<String>> {
+    let mut ids = BTreeSet::new();
+    let mut statement = transaction.prepare_cached(
+        "SELECT json_extract(body, '$._operation.id') FROM claims WHERE id=?1
+           AND json_type(body, '$._operation.id')='text'
+           AND json_type(body, '$._operation.request_digest')='text'
+         UNION SELECT operation_id FROM checkpoint_claims WHERE id=?1
+           AND operation_id IS NOT NULL AND request_digest IS NOT NULL
+         UNION SELECT id FROM operations WHERE canonical_claim_id=?1",
+    )?;
+    for claim_id in claim_ids {
+        ids.extend(
+            statement
+                .query_map([claim_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
+    Ok(ids)
+}
+
+fn apply_replication_repair_with_operations_tx(
+    runtime: &dyn Runtime,
+    transaction: &Transaction<'_>,
+    repair_claim: &str,
+    body: &str,
+) -> Result<(usize, BTreeSet<String>)> {
     let body: Value = serde_json::from_str(body)?;
     let fields = body.get("fields").unwrap_or(&body);
     let Some(record_ref) = fields.get("record").and_then(Value::as_str) else {
-        return Ok(0);
+        return Ok((0, BTreeSet::new()));
     };
     let Some(replacement) = fields.get("replacement").and_then(Value::as_str) else {
-        return Ok(0);
+        return Ok((0, BTreeSet::new()));
     };
     let replacement_exists = transaction
         .query_row(
@@ -8037,16 +8348,16 @@ pub fn apply_replication_repair_tx(
         .optional()?
         .is_some();
     if !replacement_exists {
-        return Ok(0);
+        return Ok((0, BTreeSet::new()));
     }
-    let repaired_claim = transaction
+    let (repaired_claim, previous_replacement) = transaction
         .query_row(
-            "SELECT claim_id FROM replica_records WHERE record_ref=?1",
+            "SELECT claim_id, replacement_claim_id FROM replica_records WHERE record_ref=?1",
             [record_ref],
-            |row| row.get::<_, Option<String>>(0),
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?
-        .flatten();
+        .unwrap_or_default();
     let changed = transaction.execute(
         "UPDATE replica_records SET state='repaired', replacement_claim_id=?2,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=?3
@@ -8054,6 +8365,17 @@ pub fn apply_replication_repair_tx(
                AND (replacement_claim_id IS NULL OR replacement_claim_id<>?2)",
         params![record_ref, replacement, now_ms().to_string()],
     )?;
+    let operation_ids = if changed != 0 {
+        repaired_operation_ids_tx(
+            transaction,
+            repaired_claim.as_deref().into_iter()
+                .chain(previous_replacement.as_deref())
+                .chain([replacement])
+                .collect(),
+        )?
+    } else {
+        BTreeSet::new()
+    };
     if let Some(repaired_claim) = repaired_claim {
         runtime.apply_repair_tx(transaction, &repaired_claim, replacement)?;
     }
@@ -8070,7 +8392,7 @@ pub fn apply_replication_repair_tx(
         "DELETE FROM projection_health WHERE aggregate=?1",
         [format!("repair:{repair_claim}")],
     )?;
-    Ok(changed)
+    Ok((changed, operation_ids))
 }
 
 /// Verify a replicated claim against its batch and its content hash, then ask the runtime

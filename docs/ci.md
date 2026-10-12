@@ -5,7 +5,8 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches on Namespace. macOS CI is currently
+(which the queue skips), and fills missing main-scope caches. Rust stages stay on Namespace;
+Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
 public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
 older pushes must not keep consuming runners after their source is superseded. Manual dispatch,
@@ -44,18 +45,44 @@ or compile. Manual dispatch runs the safety tests without inventing a PR delta.
 The Linux gate runs two test partitions plus Clippy and fleet compatibility on separate runners.
 `linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, the four stage jobs and the named mail redelivery
 check, and passes only when every one succeeded (a skipped or cancelled stage fails it). The stage jobs use the shape label
-`nscloud-ubuntu-24.04-amd64-8x16-with-features`; `genie-freshness`, `isolation-vm` and `typescript-client`
-use `namespace-profile-linux-x86-64` when they overflow. The `linux-gate` aggregate uses GitHub-hosted
+`nscloud-ubuntu-24.04-amd64-8x16-with-features`; `isolation-vm` uses
+`namespace-profile-linux-x86-64` when it overflows. `genie-freshness` and `typescript-client`
+use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build capacity. The `linux-gate` aggregate uses GitHub-hosted
 `ubuntu-latest`, so it cannot queue behind build or benchmark jobs. The stages ran on `nscloud-ubuntu-24.04-amd64-16x32`
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
 
-All Linux Namespace jobs use run affinity and the same inline `job.priority=1`: required
-Workspace jobs, optional benchmarks, manual Performance controls, main upkeep and releases.
-Using one class prevents a continuous stream of required jobs from overtaking older performance
-requests. Run affinity ensures that a runner started for a request is assigned to that run,
-so GitHub cannot hand it to a newer run with the same shape. Local `ci1-priority` and `ci1-merge`
-reservations continue to select only the primary test shard.
+Required Workspace checks for PRs and merge groups use Namespace `job.priority=1`.
+Optional Performance and `perf-cost`, manual controls, main upkeep and releases retain
+priority 2. Required PR checks must finish before a PR can enter the merge queue; merge-first
+ordering previously allowed new merge jobs to overtake these prerequisites. This policy orders
+waiting jobs and neither preempts running work nor reserves capacity. The picker, local pools,
+runner shapes, run affinity and required checks are unchanged.
+
+Performance runs on every main push, nightly schedule and manual dispatch; it does not
+start a load test for merge groups.
+PR runs start for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load
+workload and its workflow, or an explicit `ci-perf` label. The metadata-only admission job
+checks the PR head before and after its bounded changed-file inventory, including rename
+sources. Only an explicit successful `run=false` skips the optional workload; malformed
+metadata, head drift or failed admission retain coverage. Unrelated label events cannot
+cancel a running load test. The existing load test and its budgets are unchanged.
+Its Namespace priority is always 2. A busy queue can delay optional
+loads and main baseline reports until required work drains; priority does not reserve a slot.
+
+The complete 2026-10-11 UTC day contained 201 PR and 50 merge-group Workspace runs.
+Among runs with all five required checks green (80 PR, 44 merge), required-check completion
+from workflow creation had median/p90 28m57s/35m53s for PRs and 26m25s/33m44s for merge groups.
+Successful workflow duration (40 PR, 44 merge) was 29m41s/40m48s and 26m36s/33m52s.
+These populations differ because optional failures do not change the required-check cohort.
+Median assigned-job waits were about ten seconds; compilation and test execution dominated.
+The mixed revisions and suites do not establish an improvement or meet the 20-minute SLO.
+
+The 2026-10-09 investigation retained a PR build waiting 55.1 minutes at priority 2 before
+15.7 minutes of execution; two sampled merge builds at priority 1 waited 0.3 and 1.7 minutes.
+One 116.6-minute PR had 41.0 minutes of producer wait and 28.8 minutes of shard wait.
+This motivates queue ordering; it does not establish a cache or compiler defect, nor promise
+that the 20-minute run SLO is met under overload.
 
 Profile labels carry affinity inline, for example
 `namespace-profile-linux-x86-64;job.priority=1;github.run-id=${{ github.run_id }}`.
@@ -64,12 +91,10 @@ Shape labels retain `-with-features` and a separate
 separate `namespace-features:` label with profiles; see the
 [Runner Controls syntax](https://namespace.so/docs/solutions/github-actions/runner-controls).
 
-The queue still shares the existing Linux limit of 320 vCPUs / 640 GiB and must drain its older
-backlog. Queue time is measured separately from execution time; the shared class removes
-indefinite overtaking, rather than promising a fixed start time under arbitrary overload.
-An already queued job retains the labels from its immutable workflow revision. Recover old
-unprioritized controls with label-only revisions and new dispatches, preserving their source,
-fixtures and budgets; retain completed failures as evidence. See Namespace's
+The documented Linux limit is 320 vCPUs / 640 GiB; this change does not increase it.
+Queue time is measured separately from execution time. Already queued jobs retain the labels
+from their immutable workflow revision and finish naturally; this change does not rerun them.
+Optional jobs remain subject to capacity after required checks. See Namespace's
 [job ordering and priority controls](https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering).
 
 `scripts/ci-linux STAGE` runs one stage:
@@ -94,12 +119,38 @@ failure, cancellation or skipping either shard fails the gate. Each shard retain
 durations in its logs, and the primary saves `ci-logs/test-partitions.json` with the tested SHA
 and all three inventories.
 
-Both shards keep their own checkouts and builds because many tests embed build-time source and
-executable paths. Namespace's second shard restores the same main-seeded Cargo and Nix cache
-keys as the primary. Moving portable archives between runners remains a follow-up after those
-tests support relocation. Building selected targets before installing hooks removes the earlier
-standalone `cargo run -p st2` build. Local and macOS runs use the complete selection unless
-`CI_TEST_PARTITION` is explicitly set to `hash:1/2` or `hash:2/2`.
+The Linux `linux-test-build` job compiles the existing two selected Cargo groups once and
+publishes nextest archives. Both shards, the zero-retry mail job and isolation VM require that
+successful producer and download its exact artifact ID. They check the manifest SHA, source/tree,
+run, the successful producer attempt, architecture, nextest/rustc versions and each archive digest before extracting.
+A failed-jobs-only rerun can inherit the earlier successful producer output; its attempt and
+manifest remain explicitly pinned, with the same run/source/tree/tool identities required. Cargo
+target caches remain on the producer; consumers restore only runtime/Nix fixtures. The producer also runs the unchanged standalone conversation-model tests (including doctests)
+and dependency boundary, and builds the gateway binary with its standalone production features.
+Its Cargo JSON and binary hash are retained alongside the archives; the VM does not substitute
+the workspace-unified test binary. A failed producer explicitly fails consumer checks and the gate.
+
+Tests resolve archived executables through nextest's runtime binary paths. A source guard rejects raw compiled binary, manifest and temporary-directory lookups in test code.
+Manifest/fixture paths
+map each compiled package beneath the recorded producer root to the consumer checkout, including
+library fixtures launched by another package. Outside archives the original compiled path remains
+the fallback. Archive mode rejects missing or mismatched roots/binaries. Tests, assertions,
+partitions, retries, eight test threads, real VM checks and required contexts are unchanged.
+Local and macOS runs still use the existing build selection unless `CI_TEST_PARTITION` is set.
+
+New test files and paths are checked automatically by `genie-freshness` on each PR and
+merge group. A guard failure names each file and line and points its author to `test_env!`
+and these repair instructions; it does not allow the raw path through.
+If `genie-freshness` reports `unrelocated test paths: FILE:LINE`, replace the raw test path
+at that location with `test_env!("CARGO_BIN_EXE_st3-fixture")`,
+`test_env!("CARGO_MANIFEST_DIR")` or `test_env!("CARGO_TARGET_TMPDIR")`, as appropriate.
+Use `test_env!("CARGO_MANIFEST_DIR", "/relative/fixture")` instead of a `concat!` fixture
+path, and `test_bin!("st3-fixture")` instead of `cargo_bin!`. The integration test root and
+test-enabled libraries already import `scripts/ci-test-paths.rs`; a separate test target
+must import that helper with `#[macro_use]` and a `#[path = "..."]` relative to its source
+file. Keep the original fixture, executable, arguments and assertions. Run
+`python3 scripts/check-ci-test-paths` and the affected test before pushing. Apply the same
+fix if a merge group finds a raw path introduced by another PR; do not bypass the guard.
 
 Main upkeep probes the exact Cargo and Nix cache keys for each stage before provisioning Nix
 or restoring build archives. When both entries exist it stops after the probes. A miss is flagged
@@ -326,21 +377,90 @@ records the KVM probe and each phase's elapsed time.
 ### TypeScript client
 
 `typescript-client` runs on every PR and merge-group entry. Main retains the queue check;
-Main upkeep preserves the dependency cache. It installs Node 24.18.0
-(the workspace uses Node 24), the client's pinned TypeScript 6.0.3 and
-`effect@4.0.0-rc.118` development dependencies from its own lockfile. Both `node_modules`
-directories are cached together, keyed by both lockfiles and the Node version; a miss runs `npm ci --ignore-scripts` in each package.
-The lockfile fingerprint uses `sha256sum` in Bash so ci1's Nix runner needs no Node 20
+Main upkeep's `warm-typescript` fills the pnpm store with `pnpm fetch`. The job installs
+Node 24.18.0 through `actions/setup-node`, runs `corepack enable`, then installs the root
+workspace with `pnpm install --frozen-lockfile`. The client, shared views and iOS app share
+one root `pnpm-lock.yaml`; install scripts are disabled by the workspace configuration.
+The store cache key is
+`typescript-client-<os>-node24.18.0-pnpm12.7.0-<sha256 of pnpm-lock.yaml>`.
+The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
 
-The client package's `npm test` runs the contract and schema tests with `node --test`;
-`npm run typecheck` runs its strict compiler checks. CI installs and checks the client before
-installing the iOS dependencies for the separate project typecheck.
-`bash scripts/ci-typescript-client` runs the client commands and `tsc --noEmit -p apps/ios` locally
-when both packages' dependencies are installed.
-The iOS project allows explicit TypeScript import extensions for generated-client consumers.
-The main ruleset requires `typescript-client`. It was enabled after the new job passed on main
-in [#1256](https://github.com/compoundingtech/smalltalk/pull/1256).
+After the root frozen install, `bash scripts/ci-typescript-client` runs the client's
+contract/schema tests and both compiler projects, the views' tests and typecheck,
+`tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
+6.0.3 and Effect 4.0.0-rc.118. The iOS project allows explicit TypeScript import extensions
+for generated-client consumers. The main ruleset requires `typescript-client`.
+
+### Fractal web
+
+The non-required Fractal web jobs run on GitHub-hosted `ubuntu-latest` without
+workflow-level path filters. `linux-gate` does not depend on them.
+
+- `fractal-web-changes` always runs, with a one-minute timeout and no checkout. Its
+  embedded `scripts/ci-fractal-web-changes` fetches both commits explicitly without
+  blobs and diffs PR base/head SHAs from their merge base, or a merge group's
+  `base_sha..head_sha`. `--no-renames` counts both sides of a rename. Missing or malformed
+  SHAs, failed fetches and failed diffs fail closed; `workflow_dispatch` forces execution.
+  Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
+  `clients/typescript/st3-views/**`, `clients/typescript/st3-scenarios/**` and `fixtures/**`.
+  Within `clients/typescript/st3-client`, only the consumed export graph (`index.ts`,
+  `Models.generated.ts`, `Client.generated.ts`, `Schema.generated.ts`, `errors.ts`),
+  `package.json`, `tsconfig.json`, `tsconfig.schema.json`, `types.test.ts` and `BUCK*`
+  trigger web execution. Rust generators and their schema/docs inputs do not trigger it
+  without a changed generated client file; root flake-only changes also do not trigger it.
+  Other relevant paths are
+  root `package.json*`, `pnpm-workspace.yaml*`, `pnpm-lock.yaml`,
+  `pnpm-install-contract.json*`, `.npmrc`, root `tsconfig*.json*`, `.buckroot*`,
+  `.buckconfig*`, root `BUCK*`, `buck2/**`, `genie/**`, `nix/web/**`,
+  `nix/fractal-web*.nix`, `scripts/ci-fractal-web*`,
+  `scripts/ci-typescript-client*`,
+  `.github/workflows/{fleet.yml*,workspace-ci.ts,main-upkeep.yml*,cache-audit.ts}`,
+  and `.github/repo-settings.json*`.
+- `fractal-web-execution` runs only for relevant changes after successful detection
+  and `genie-freshness`, with a 25-minute timeout and no retries. It runs
+  `nix develop .#web -c bash scripts/ci-fractal-web`. Timed lanes check toolchain/Buck-root
+  identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
+  It restores the pnpm store with key
+  `fractal-web-pnpm-<os>-pnpm12.7.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  only Main upkeep's `warm-fractal-web` saves this cache. The app production build
+  lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
+  into a fresh temporary output directory, removed on exit. Build errors fail the
+  execution job; build output is not cached. App, UI kit, Storybook, browser and
+  performance lanes join the script with the packages that add them.
+- `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
+  embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
+  either no relevant paths changed and execution was skipped, or execution succeeded.
+  Failure, timeout, cancellation and unexpected skips fail the gate. It is not a required
+  check; the ruleset adds it only after successful PR and merge-group emissions.
+
+`scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
+paths, the gate truth table and generated job shape.
+
+Run SDK tests with their own `vitest.config.ts`, not the parent app's narrower test patterns.
+The rejected-mission diagnostic proof checks its fixture against the generated decoder:
+negative step attempts are rejected, while person assignees are valid actor references.
+
+The SDK unit lane uses an injected clock to guard task yielding and bounded decode/order
+work deterministically, including the >150KB roster burst. `SDK frame CPU budgets`
+runs separately with `apps/fractal-web/packages/st3-sdk/vitest.perf.config.ts`: after
+warming, seven fixed observations guard the median worst task below 16ms of calling-thread
+CPU, total burst CPU below 50ms, and a one-row delta below 16ms. These are not retries.
+Calling-thread CPU excludes host descheduling and unrelated Node worker-thread CPU.
+Each report includes all samples and host load averages; load never skips the lane or
+changes its thresholds.
+
+The web shell supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
+root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
+mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `smalltalk`. Remote caching
+and uploads are disabled, with no remote endpoints. The shell links `rules` and
+`capabilities` cells into ignored `.buck2/`; CI fails if checked-in root files drift
+from the Nix rendering. `buck2/dependencies/BUCK` and its SHA-256 sidecar project the
+client and views importers from `pnpm-lock.yaml`; package `BUCK` files come from
+`buck2/typescript-package.ts`. The root typecheck runs tsgo over the client's two
+tsconfig projects and the views. Dependency archives are fetched from
+`registry.npmjs.org` at build time; nothing is uploaded.
 
 ### macOS
 
@@ -419,9 +539,54 @@ with its own `/tmp`, and nothing the job started outlives it. The runner names a
 cache, use that Cargo home, and Cargo keeps its intermediate build files in a per-runner build
 directory, while sccache shares compiled crates between all runners and the Nix store is the
 machine's own. The machine's configuration lives in the private network repository.
+In GitHub Actions, both Rust dev shells use `scripts/ci-rustc-wrapper`: sccache's response-I/O
+fallback is enabled. A separate read-only `sccache --dist-status` preflight is bounded
+to 15 seconds (five seconds to finish terminating it). A recognized preflight startup
+error or timeout disables caching for the rest of that job with a warning, before any
+compiler request is submitted. Signal statuses are preserved. Once compilation starts,
+the wrapper executes sccache directly and never retries based on its stderr; the actual
+cache/compiler result is authoritative, and cache statistics are optional.
+The boundary guard's dependency-free synthetic workspace uses
+a fresh Cargo home and no compiler wrappers, stays offline, and prints Cargo stderr on failure.
 Cargo builds use the host's four-job limit. Workspace test shards explicitly use eight test
 threads, with the host's 14 GiB per-job memory limit. The repository variable `CI1_MIN_IDLE`
 can override admission; keep it at four when preserving CPU capacity for reserved lanes.
+
+### Compiler-cache measurement
+
+`python3 scripts/sccache-evidence capture` reads an already-running Linux sccache
+0.16.0 server. The runner owner supplies `--runner`, `--pid`, `--start-ticks`,
+`--port`, `--config-id`, `--job`, `--source`, `--storage`, `--sccache`, and `--output`.
+Use the process's field 22 in `/proc/PID/stat` as its start ticks, and an
+owner-qualified configuration revision or digest as its configuration identity.
+Storage is explicitly `local-disk`, `shared-webdav`, or `remote-webdav`; the
+collector verifies that the observed backend agrees. It checks the executable,
+process start, and ownership of the listening socket before and after collection.
+Missing identity, denied access, incompatible versions, or synthetic empty stats
+abort collection. It never starts, stops, or resets a daemon. Socket inspection
+needs the existing process owner's authority; it grants no host or cache access.
+
+Capture before and after one job, using an identical job/source/daemon/configuration
+identity, then run:
+
+```sh
+python3 scripts/sccache-evidence report --before before.json --after after.json --output interval.json
+```
+
+Omit `--before` only to report explicitly labelled server-lifetime counters.
+Each report separates compile requests, non-cacheable requests, errors, all-language
+hits/misses, and Rust hits/misses. Hit rates use completed hits divided by hits plus
+misses; non-cacheable calls and errors stay visible outside that denominator.
+No lookups means a null rate. Identity changes and counter resets invalidate a delta.
+Use exclusive job ownership to attribute an interval to a job: concurrent users of
+one daemon make it an aggregate interval, and same-process counter resets cannot
+always be detected from two samples alone. Keep snapshots and reports together.
+No cache URLs, paths, or credentials are copied into the evidence.
+
+The source opt-in described in [development](development.md) is off by default.
+This repository provisions no remote route or credential for Namespace or builders.
+Network, method permissions, writer provenance, and access policy remain the cache
+owner's responsibility. Cache hits establish compiler reuse, not fresh test results.
 
 The local test stage sets `TMPDIR`, `TMP` and `TEMP` to the short `RUNNER_TEMP/t` path on
 the runner's memory filesystem. Otherwise `nix develop` chooses disk-backed `/tmp`, making
@@ -472,18 +637,29 @@ second: harness events, mailbox pages, claims, desired state, delivery holds, re
 renewals, status and work reads, and a person's reads), with the reconciler running and 30
 concurrent seat event long-polls. Quiet polls have a 31-second budget for their intentional
 30-second wait; mailbox WebSockets require authenticated native drivers and are excluded.
+The client usage endpoint has a dedicated 0.5-request/second scenario with a 300 ms p99 budget.
+Generated usage history contains cumulative response rollups for long-lived standing sessions
+with stable attribution, so this scenario exercises many observations per series and period
+baselines and totals rather than an empty report or one series per observation.
 It fails when
-a request's p99 or the daemon's CPU passes its budget, or is more than 20% worse than the worst of
-main's last five reports: one run's p99 on a shared runner can be twice the next run's, so a
-regression is what passes several. Each run downloads the newest five real reports from successful
+a request's p99 or the daemon's CPU passes its absolute budget, or exceeds twice the worst of
+main's last five reports and the corresponding slack below. The relative factor is 2x for both
+route p99 and average daemon CPU; every absolute budget still applies independently, including
+the 300 ms roster budgets and 2-core CPU ceiling. The wider relative tolerance accommodates
+variation on shared runners; a passing historical comparison does not establish a paired effect
+or attribute a difference to runner noise. Each run downloads the newest five real reports from successful
 main runs' `perf-load-logs` artifacts. PR runs never supply baselines. Relative latency comparisons start once five
 main reports exist; until then every path still checks its absolute p99 budget and every request
 error fails. CPU compares as soon as one main report exists, because it averages the whole run.
 Relative latency tolerates 5 ms of noise, or 50 ms when either path has fewer than 50 samples:
 those sparse p99s are effectively observed maxima. This bounded tolerance still catches large
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
-a main bootstrap may check only absolute budgets and errors. The workload and its budgets are
-unchanged.
+a main bootstrap may check only absolute budgets and errors.
+
+The CPU budget (2 cores) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in:
+a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
+path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
+stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.
 
 Performance uses the small `.#perf` Nix shell and the opt-in `perf_load` test target (feature
 `perf-load`), which imports the same `daemon_load` and `daemon_bench` modules without compiling
@@ -534,6 +710,34 @@ Run either locally with `TMPDIR=/var/tmp`; `ST_BENCH_DIR` keeps the generated st
 cargo test -p st3 --test integration daemon_cost:: -- --nocapture --test-threads 1
 ST_LOAD_GATE=1 nix develop .#perf -c cargo test --release -p st3 --features perf-load --test perf_load daemon_load:: -- --nocapture
 ```
+
+#### Measuring a change on hetz2: the perf slot
+
+A builder measures a change with `nix develop .#perf -c bash scripts/ci-perf load`. Outside CI on
+hetz2 that takes the perf slot first (`scripts/ci-perf-slot`; its `--help` repeats this page's
+flow), so nobody has to remember to. One run holds the slot at a time. Others wait in line, oldest
+first, and are told who holds it, since when, and for which branch; `scripts/ci-perf-slot --status`
+shows the same. Outside CI the report summary goes to `$RUNNER_TEMP/perf-summary.md`
+(`/var/tmp/st-perf-UID` by default, where generated stores also stay between runs); `cost` is not slotted, since its counts do not depend on
+the machine.
+
+- The slot is the kernel's `flock` on `/var/tmp/perf-slot/slot.lock`, held by a watchdog that
+  lives as long as the run. A run killed at any point, even with SIGKILL, has its process
+  group killed and the slot freed at once. Cargo's test runner on hetz2 starts the test binary
+  with `systemd-run --user --scope`, which moves the process into a transient unit but keeps it in
+  the group; `scripts/ci-perf-slot-test` proves that case.
+- A run past its timeout is stopped (SIGTERM, then SIGKILL after 10 s) and frees the slot. The
+  timeout is two hours unless the run asks for less with `--timeout`; time in line does not
+  count. A run stopped by it exits 124.
+- Only `load` is slotted, and only on hetz2. Anywhere else nothing shares the machine.
+  `scripts/ci-perf-slot-test` proves turns, order, kill, signals and timeout.
+
+The budgets that apply to a local run are the absolute ones: every request's p99 budget and the
+2-core ceiling for the daemon, with no baseline to compare. Main's relative gate (twice the worst
+of its last five reports) runs on the PR in Performance. Put on the PR the report table the run
+printed, the branch and commit, and one line saying it ran alone in the slot. For a change meant to
+make a path cheaper, put main's table beside it. Intake reviews that evidence and the merge queue
+checks the change; the slot gates nothing.
 
 ### Cache coverage across workflows
 
@@ -664,7 +868,7 @@ queue it again. The merge train (`st lanes join smalltalk`) is retired.
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
 by an administrator and never by CI) requires the five checks from GitHub Actions with an empty
 bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
-merge method MERGE, up to five entries build at once (see [Measured concurrency](#measured-concurrency)),
+merge method MERGE, a proposed three entries build at once (see [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes)),
 up to five merge together, and a check that
 never reports fails its entry after 60 minutes. Repository settings enable native auto-merge and
 branch deletion after merge. Check the live settings against the file with `gh-check-settings`:
@@ -697,7 +901,7 @@ The TypeScript client job follows generator freshness and reuses its runner slot
 PR runs also start `perf-cost`, taking their initial peak to 56 vCPUs and 112 GiB. Main upkeep
 runs that check separately; its cache-fill jobs normally finish after their lookup-only probes.
 Five complete merge-queue groups need 240 vCPUs and 480 GiB, within the Linux pool limit;
-`max_entries_to_build` remains 5 in both the generated and live main rulesets.
+`max_entries_to_build` was 5 at this historical measurement; current capacity policy appears in [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes).
 PRs, main pushes and other workloads share that capacity; Namespace queues jobs until resources
 are available. The `linux-gate` aggregate starts after the four stage jobs finish, so it does
 not add to the initial peak. macOS uses its own pool.
@@ -768,3 +972,125 @@ Use the PR Checks tab or `gh run view RUN_ID --log-failed`. The Linux job upload
 even on failure. Inspect each stage's log and timing, the selected suite and checked merge SHA.
 A passing retry is a flaky outcome in the nextest log. A queued Namespace job with no runner
 is infrastructure readiness, not a successful check; the merge queue keeps the entry waiting.
+
+During an outage, `CI_OUTAGE_FAST_QUEUE=on` skips optional Nix-cache saves and same-source build-snapshot publication on merge-group runs. Required checks, cache restores, the producer test archive, logs, cache coverage and PR/main cache publication continue. Set the variable back to `off` when Speed ends the outage; an unset variable also preserves normal publication. The earlier six-build incident guidance and automatic restore-to-two instruction are superseded by CI-speed-owned capacity tuning. The current source proposes three with Namespace overflow; the initial live trial returned to two after a measured PR wait exceeded five minutes. Preserve all other live ruleset fields when changing admission.
+
+## Merge overflow and daily Namespace minutes
+
+CI-speed owns live CI variables and queue capacity. Start with `max_entries_to_build=3`,
+merge sizes 1–5 and a five-minute batch wait; live HEADGREEN remains the incident's
+existing strategy. The generated ruleset's normal ALLGREEN strategy is unchanged.
+Change only the build-count field when tuning the live ruleset. This is capacity
+configuration, not proof of CI p90 <20 minutes, runner wait <5 minutes or queue-to-merge
+p90 <45 minutes.
+
+With `CI_MERGE_CI1` unset/off, the picker admits an entire group to `ci1-merge`
+only when five distinct online idle merge workers are available and, after borrowing
+mixed workers, two general workers remain for PRs. Priority-only workers are excluded.
+If the whole group does not fit, the primary test consumer and then mail canaries
+may use at most two idle merge slots. This smaller allocation charges *every* selected
+job against general headroom (`min(2, idle_merge, max(0, idle_general - 2))`), even if
+dedicated workers are idle, because a `ci1-merge` job may select a mixed worker. Only
+those two consumers use the partial outputs; the producer, second shard, VM and other
+supporting jobs retain Namespace routing. With two idle dedicated workers and three
+idle general workers, one consumer fits, rather than stranding every local slot.
+Admission is still an early snapshot, not an atomic reservation across simultaneous
+pickers or a guarantee that those workers remain idle until the producer finishes.
+Missing/invalid status overflows to Namespace. This does not change either queue class,
+run affinity, live build count, job budgets, test selection, retry policy or guarded
+runner state. Measure actual new-group consumer wait and PR wait after rollout; a
+slow local test or loss of PR headroom must remain visible.
+`CI_MERGE_CI1=on` retains the explicit forced-local switch for supported incidents.
+PR/fork/priority routing is unchanged. No job is migrated after it starts.
+If a selected local consumer waits for more than five minutes, the CI capacity owner
+checks that named runner registration and job. Preserve running work; restore an
+intentionally admitted healthy local worker or repair its supported registration.
+A queued job cannot acquire new runs-on labels. If no compatible worker can be
+restored, retain the failure and use the ordinary curator requeue path after a
+reviewed routing correction; do not blind-retry or reopen an isolated runner.
+
+`CI_MERGE_NAMESPACE_PROFILE` may name an existing, verified Linux profile; unset
+uses the existing 8x16 stage labels and Linux profile for supporting jobs, including
+KVM. Profile controls and run affinity remain inline. The initial live choice is
+unset: the shared `linux-x86-64` profile historically limited parallel runners, so
+funnelling all large stages into it can queue them despite workspace headroom.
+Three groups can request roughly 144–168 vCPU / 288–336 GiB during overlap on
+Namespace, below the held 320-vCPU / 640-GiB workspace limit, with capacity shared
+by PRs and other work. Actual starts/waits decide later tuning, not those upper
+bounds alone. A dedicated capped profile requires an actual administrator receipt;
+this PR does not claim one was provisioned.
+
+`Namespace usage` runs at 03:05 UTC on GitHub-hosted capacity and reports the previous
+UTC day's observed Namespace job execution minutes, split by event (merge_group,
+pull_request and other events). Cos can read the job summary and its 30-day JSON
+artifact for the morning cost check. The report has a 120-minute timeout, but request
+count is bounded separately: at most 4,000 GitHub API requests. It reuses the existing
+`CI1_RUNNERS_READ_TOKEN` from the main-only picker, without a new secret. Standard
+PAT/installation tokens have a 5,000-request hourly primary limit; the 1,000/hour
+job-token fallback cannot cover this repository's measured volume. The reporter
+checks actual response rate-limit headers, refuses a limit below its budget, and
+records the observed limit, lowest remaining count and actual requests in JSON.
+The collector stops at 500 remaining requests to reserve shared quota for runner
+admission. Shared credential use can still exhaust available quota and must remain visible.
+`python3 scripts/ci-namespace-usage --date YYYY-MM-DD --output usage.json` also
+provides an on-demand report. It queries eight UTC creation days: the reporting
+day and seven prior days, so reruns of older runs are outside coverage. Each day
+is queried separately, recursively splitting saturated time ranges until each
+query is below GitHub's 1,000-result cap. A saturated one-second interval or
+changing search that reaches the cap while paging refuses completeness. Within this window it queries all attempts, includes
+failed/cancelled execution, deduplicates job IDs and clips executions across midnight.
+Every day total is explicitly a **daily lower bound**, never a complete-day or
+invoice total. “Complete window evidence” means only that this creation window
+was collected without known evidence gaps; it does not cover older-run reruns.
+The job identity must be an actual `nsc-runner-*`, rather than just a planned
+Namespace label. Queued/skipped jobs and queue cancellations with no runner or
+started step add no execution minutes. A started step with missing/ambiguous
+Namespace runner identity, or an actual Namespace runner with missing timestamps,
+makes summary/JSON totals explicitly partial and fails the report. Known local
+and GitHub-hosted execution stays excluded. API errors, exhausted request budgets
+or pagination limits retain collected JSON as partial lower-bound evidence before
+failing, rather than declaring zero usage. Pagination is not an atomic history snapshot.
+Totals are operational execution minutes, not invoice dollars or billable unit
+minutes: provisioning before the first job step and deleted GitHub history are
+outside this method. Use Namespace's billing view for an invoice; the report
+preserves raw job IDs/timestamps for reconciliation.
+
+Intake's read-only day counts for October 2–8 were 949, 1,222, 1,227, 1,437,
+1,126, 1,761 and 1,699 runs. The last day alone requires at least 1,699 jobs
+requests plus run-list pages; this invalidated the earlier 800-request/job-token
+design. The bounded 4,000-call design and earlier schedule allow this scale, but
+actual call count, credential capability and natural completion remain execution
+evidence, not a guaranteed bound on future repository volume.
+The initial historical collector ended naturally after 37m05s, scanning 14,135
+retained run records and 1,761 relevant runs. That requires at least 1,903 API
+calls (142 run-list pages plus at least one jobs page per relevant run); its exact
+request count was not instrumented. Its older identity gap makes its 38,979.28
+observed job minutes a lower bound, not current collector qualification. The new
+collector records exact request/rate evidence for its own natural outcome.
+
+The reporter makes only read-only GET requests to Actions run/job endpoints. The
+existing secret must permit those reads in addition to the picker's organization
+runner-list access; workflow job-token permissions do not restrict a PAT's actual
+scopes. Source alone cannot confirm the installed secret's scope or capability.
+A missing permission returns partial evidence rather than a complete total.
+See GitHub's [workflow-run search limits](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-repository)
+and [REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+Each response must have fresh valid limit and remaining headers; earlier values
+never substitute for missing current quota evidence.
+
+One pinned corrected local-auth report ended naturally with exit 1 after 207.77s:
+234 attempted API calls, observed limit 5,000, minimum remaining 499, and the
+explicit reserve-reached error. It retained 4,836.67 observed minutes as partial
+window evidence. This confirms the quota-reserve behavior with local authentication,
+not the scheduled credential, full window, or a successful daily total. No automatic
+retry follows quota exhaustion.
+
+Test archive transfer verifies the complete ZIP before exposing consumer inputs. The four
+archive consumers download only the successful producer artifact ID, verify its API size
+and SHA256, verify the producer-output manifest hash and all five ZIP members, then
+publish a fresh private directory atomically. A failed or incomplete transfer gets at most
+one repeat download of that same ID (each ZIP request has a 10-minute limit); interrupted
+requests retain their signal status. No compiler or test is retried. Source, run, successful
+producer attempt, toolchain and individual file hashes are still checked before extraction.
+The job logs the ZIP size/digest and transfer attempt. This protects the transfer boundary;
+it does not establish the cause of earlier digest mismatches or a measured speedup.
