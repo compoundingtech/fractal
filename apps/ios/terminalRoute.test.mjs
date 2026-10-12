@@ -93,3 +93,12 @@ test('a local listener failure is visible and never remembered as owner unreacha
   h.follow(); await settle(); assert.match(h.routes.at(-1), /loopback listener could not bind/);
   h.follow(); await settle(); assert.equal(h.state.opens, 2); h.feed.close();
 });
+
+test('a gateway local failure remains a named error rather than a reconnect loop', async () => {
+  for (const code of ['internal', 'terminal-unavailable']) {
+    const h = harness({ refused: failure('owner refused this terminal', 'forbidden') });
+    let reads = 0; h.gateway.client.terminalScreen = async () => { reads++; throw failure('gateway PTY path is broken', code); };
+    h.follow(); await settle(40); assert.equal(reads, 1); assert.equal(h.gateway.calls.attaches.length, 0);
+    assert.match(h.issues.at(-1), /gateway PTY path is broken/); h.feed.close();
+  }
+});

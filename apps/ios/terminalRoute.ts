@@ -170,7 +170,7 @@ export class RoutedTerminalFollow {
     } catch (error) {
       if (!valid()) return;
       if (restarted(error)) this.stop(TERMINAL_RESTARTED);
-      else if (code(error) && !['stale-fence', 'remote-unavailable', 'terminal-unavailable', 'internal'].includes(code(error)!)) this.stop(`${this.routeReason}: ${plainError(error)}`);
+      else if (code(error) && !['stale-fence', 'remote-unavailable'].includes(code(error)!)) this.stop(`${this.routeReason}: ${plainError(error)}`);
       else this.retry(`${this.routeReason}: ${plainError(error)}`);
     }
   }
@@ -187,7 +187,7 @@ export class RoutedTerminalFollow {
 
   failed(code: string | undefined, message: string): void {
     if (this.closed || this.direct) return;
-    if (code && !['stale-fence', 'remote-unavailable', 'terminal-unavailable', 'internal'].includes(code)) this.stop(`${this.routeReason}: ${message}`);
+    if (code && !['stale-fence', 'remote-unavailable'].includes(code)) this.stop(`${this.routeReason}: ${message}`);
     else this.retry(message);
   }
 
