@@ -6228,6 +6228,25 @@ impl Store {
         Ok(false)
     }
 
+    /// Linked runs with their effective current steps, without presentation or work history.
+    /// Read the parent link even when empty, so a new round invalidates its parent's evaluation.
+    pub(crate) fn mission_run_children_for_step(&self, step: &str) -> Result<Vec<MissionRunView>> {
+        let step = normalize_step_run(step);
+        smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
+        let connection = self.readers.get();
+        let ids = connection
+            .prepare_cached("SELECT id FROM mission_runs WHERE parent_step_run=?1")?
+            .query_map([step], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| {
+                let view = mission_run_view_for_projection_tx(&connection, &id)?;
+                note_run_view_reads(&view);
+                Ok(view)
+            })
+            .collect()
+    }
+
     pub fn adopt_mission_revision(
         &self,
         run: &str,
