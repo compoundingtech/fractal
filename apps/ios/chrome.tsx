@@ -18,9 +18,9 @@ function ageOf(ms: number): string | null {
 }
 
 export function StatusLine() {
-  const { status, hasSynced, gatewayHost, caps, snapshot, data } = useStore();
+  const { status, hasSynced, gatewayHost, caps, snapshot, data, cachedAt } = useStore();
   // Not live, what is shown is st's last snapshot: say how old it is.
-  const age = snapshot ? ageOf(Date.now() - Date.parse(snapshot.created_at)) : null;
+  const age = snapshot ? ageOf(Date.now() - Date.parse(snapshot.created_at)) : cachedAt ? ageOf(Date.now() - cachedAt) : null;
   const shown = age ? `showing data from ${age} ago` : 'showing last data';
   const [glyph, color, word] = status === 'online' ? ['●', theme.idle, 'live']
     : status === 'connecting' ? ['◌', theme.waiting, hasSynced ? `updating · ${shown}` : 'connecting']
@@ -52,13 +52,15 @@ export function Banners() {
   </View>;
 }
 
-/** Load a screen's on-demand lists when it gains focus while connected. */
+/** Hold screen inventory windows through the existing leave grace; older daemons read on focus. */
 export function useListsOnFocus(keys: readonly OnDemand[]) {
-  const { status, loadLists } = useStore();
+  const { status, loadLists, watchLists, inventoryGranted } = useStore();
   const joined = keys.join(',');
   useFocusEffect(useCallback(() => {
-    if (status === 'online') void loadLists(joined ? joined.split(',') as OnDemand[] : []);
-  }, [status, loadLists, joined]));
+    const keys = joined ? joined.split(',') as OnDemand[] : [];
+    if (status === 'online') void loadLists(keys);
+    return watchLists(keys);
+  }, [status, loadLists, watchLists, inventoryGranted, joined]));
 }
 
 /** A screen that shows missions (a list, a card, or names of missions) asks for their window while it
@@ -69,17 +71,18 @@ export function useMissionsOnFocus() {
 }
 
 /**
- * Native pull to refresh (UIRefreshControl). The windows are live already, so a pull reads the
- * screen's on-demand lists again, or opens a fresh socket when offline.
+ * Native pull to refresh requests fresh snapshots, or opens a fresh socket when offline.
+ * Only launches and an older daemon's inventories need HTTP reads.
  */
-export function useRefresh(keys: readonly OnDemand[] = []) {
-  const { status, loadLists, actions } = useStore();
+export function useRefresh(keys: readonly OnDemand[] = [], readExtra?: () => Promise<void>) {
+  const { status, loadLists, actions, feed, inventoryGranted } = useStore();
   const [refreshing, setRefreshing] = useState(false);
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     if (status !== 'online') actions.reconnect();
-    void loadLists(keys).finally(() => setRefreshing(false));
-  }, [status, loadLists, actions, keys.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+    else if (inventoryGranted) feed?.refresh();
+    void Promise.all([loadLists(keys), readExtra?.()]).finally(() => setRefreshing(false));
+  }, [status, loadLists, actions, feed, inventoryGranted, readExtra, keys.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
   return <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.overlay1} />;
 }
 

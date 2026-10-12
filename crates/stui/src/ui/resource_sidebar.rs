@@ -85,6 +85,9 @@ pub(crate) struct Sidebar {
     pub arrangements: Vec<st3_client::Arrangement>,
     pub terminals: Vec<ResourceRow>,
     pub terminals_has_more: bool,
+    pub observations: Vec<st3_client::ResourceObservation>,
+    pub observations_has_more: bool,
+    pub observations_issue: Option<String>,
     pub writable: bool,
     pub writing: bool,
     draft: Option<(String, bool)>,
@@ -342,6 +345,13 @@ impl Sidebar {
             missing: false,
         }));
         rows.extend(self.terminals.clone());
+        rows.extend(self.observations.iter().map(|row| ResourceRow {
+            id: row.id.clone(),
+            kind: super::observed_resources::kind(row).into(),
+            title: super::observed_resources::title(row),
+            open: row.id.clone(),
+            missing: false,
+        }));
         for row in rows {
             self.seen.insert(row.id.clone(), row);
         }
@@ -396,6 +406,14 @@ impl Sidebar {
             })
         };
         let mut rows = Vec::new();
+        if let Some(issue) = &self.observations_issue {
+            rows.push(Row::Notice(format!("Resources: {issue}")));
+        }
+        if self.observations_has_more {
+            rows.push(Row::Notice(
+                "More graph resources exist beyond this window.".into(),
+            ));
+        }
         if self.terminals_has_more {
             rows.push(Row::Notice(
                 "More terminals exist beyond this 200-item window.".into(),
@@ -479,7 +497,16 @@ impl Sidebar {
             closed,
         });
         if !closed {
-            for kind in ["Agents", "Missions", "Terminals", "Machines", "Unavailable"] {
+            for kind in [
+                "Agents",
+                "Missions",
+                "Terminals",
+                "Machines",
+                "Pull requests",
+                "Repositories",
+                "Resources",
+                "Unavailable",
+            ] {
                 let resources = unfiled
                     .iter()
                     .filter(|row| {
@@ -579,6 +606,10 @@ impl Ui {
         folder: Option<&str>,
         before: Option<&str>,
     ) {
+        if subject.starts_with("session/") || subject.starts_with("pty/") {
+            self.flash("Sessions only navigate; file a stable graph subject instead.");
+            return;
+        }
         match self.resource_sidebar.placement(subject, folder, before) {
             Ok(operations) => self.sidebar_edit(operations),
             Err(error) => self.flash(error),

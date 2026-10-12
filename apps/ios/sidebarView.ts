@@ -1,10 +1,10 @@
 import type { Arrangement } from '../../clients/typescript/st3-client';
 
-export type SidebarKind = 'Agents' | 'Missions' | 'Terminals' | 'Machines' | 'Unavailable';
+export type SidebarKind = 'Agents' | 'Missions' | 'Terminals' | 'Machines' | 'Pull requests' | 'Repositories' | 'Resources' | 'Unavailable';
 export type SidebarResource = { id: string; title: string; kind: SidebarKind; target: string; missing?: boolean };
 export type SidebarGroup = { id: string; title: string; resources: SidebarResource[]; collapsed: boolean; folder: boolean };
 export type SidebarChoices = Record<string, boolean>;
-const kinds: SidebarKind[] = ['Agents', 'Missions', 'Terminals', 'Machines', 'Unavailable'];
+const kinds: SidebarKind[] = ['Agents', 'Missions', 'Terminals', 'Machines', 'Pull requests', 'Repositories', 'Resources', 'Unavailable'];
 
 /** A subject leaving a current window remains visible, marked unavailable. */
 export function rememberResources(previous: Map<string, SidebarResource>, current: SidebarResource[]): Map<string, SidebarResource> {

@@ -583,6 +583,7 @@ enum Action {
     ToggleSimple,
     /// Agents open on their terminal, or on their conversation.
     ToggleTerminalFirst,
+    ToggleTerminalFallback,
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -769,13 +770,18 @@ impl Ui {
             }
             Mode::Add { folder } => {
                 let mut seen = BTreeSet::new();
-                self.choices(query).into_iter().filter_map(|mut choice| {
+                let mut rows = self.choices(query).into_iter().filter_map(|mut choice| {
                     let Action::Open(pane) = &choice.action else { return None; };
                     let subject = self.sidebar_subject(pane)?;
-                    if self.resource_sidebar.location(&subject) == Some(folder.as_str()) || !seen.insert(subject.clone()) { return None; }
+                    if subject.starts_with("session/") || subject.starts_with("pty/") || self.resource_sidebar.location(&subject) == Some(folder.as_str()) || !seen.insert(subject.clone()) { return None; }
                     choice.action = Action::SidebarMode(Mode::ConfirmPlace { subject, folder: Some(folder.clone()) });
                     choice.detail = "choose".into(); Some(choice)
-                }).collect()
+                }).collect::<Vec<_>>();
+                let subject = query.trim();
+                if subject.contains('/') && !subject.chars().any(|c| c.is_whitespace() || c.is_control()) && !subject.starts_with("session/") && !subject.starts_with("pty/") && self.resource_sidebar.location(subject) != Some(folder.as_str()) && !seen.contains(subject) {
+                    rows.push(choice(format!("File {subject}"), "choose", Action::SidebarMode(Mode::ConfirmPlace { subject: subject.into(), folder: Some(folder.clone()) })));
+                }
+                rows
             }
             Mode::ConfirmPlace { subject, folder } => vec![choice(format!("{} → {}", subject, folder.as_ref().and_then(|id| self.resource_sidebar.folders().into_iter().find(|(folder, _)| folder == id).map(|(_, name)| name)).unwrap_or_else(|| "Everything else".into())), "m: move", Action::SidebarPreview)],
             Mode::ConfirmCreate { subject, name } => vec![choice(format!("{subject} → new folder “{name}”"), "m: move", Action::SidebarPreview)],
@@ -786,7 +792,7 @@ impl Ui {
     }
     fn sidebar_subject(&self, pane: &Pane) -> Option<String> {
         match pane {
-            Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id)) => Some(id.clone()),
+            Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id)) | Pane::Resource(id) => Some(id.clone()),
             Pane::Terminal(id) => self.resource_sidebar.resources().into_iter().find(|row| row.kind == "Terminals" && row.open == *id).map(|row| row.id).or_else(|| id.starts_with("agent/").then(|| id.clone())),
             _ => None,
         }
@@ -877,6 +883,12 @@ impl Ui {
         for row in self.resource_sidebar.resources().into_iter().filter(|row| row.kind == "Terminals" && !row.missing) {
             open(1, ("⌨", theme::OVERLAY1), row.title, "terminal".into(), Pane::Terminal(row.open));
         }
+        for row in &self.resource_sidebar.observations {
+            open(1, ("◇", theme::OVERLAY1), super::observed_resources::title(row), super::observed_resources::kind(row).into(), Pane::Resource(row.id.clone()));
+        }
+        if id.starts_with("resource/") && !self.resource_sidebar.observations.iter().any(|row| row.id == id) {
+            open(1, ("◇", theme::OVERLAY1), id.into(), "graph resource".into(), Pane::Resource(id.into()));
+        }
         for mission in screens::mission_order(&self.world, true) {
             open(
                 2,
@@ -948,6 +960,16 @@ impl Ui {
             "this device; the conversation is the default",
             "terminal conversation default view open agents attach tui".into(),
             Action::ToggleTerminalFirst,
+        ));
+        choices.push(start(
+            if self.terminal_fallback {
+                "Fabric only, no fallback".into()
+            } else {
+                "Fall back through the daemon".into()
+            },
+            "terminal routes on this device; daemon fallback is the default",
+            "terminal fabric direct daemon gateway fallback setting".into(),
+            Action::ToggleTerminalFallback,
         ));
         choices.extend(self.said_choices(name));
         let Some(glasses) = &self.glasses else {
@@ -2108,7 +2130,11 @@ impl Ui {
             })
             .count();
         // A fresh workspace names its host and where to start instead of counting nothing.
-        let fresh = self.world.attention.ready().is_some()
+        // Until st has sent the first real state, the bar says only how it is connected: a
+        // placeholder that turns into the counts a moment later reads as flicker (Nathan, 2026-10-11).
+        let settled = self.world.settled;
+        let fresh = settled
+            && self.world.attention.ready().is_some()
             && alerts == 0
             && self.world.agents.ready().is_some_and(|agents| {
                 !agents
@@ -2125,7 +2151,7 @@ impl Ui {
             ));
         }
         let mut machines_shown = false;
-        if !fresh {
+        if settled && !fresh {
             let mut x;
             if alerts > 0 {
                 spans.push(Span::styled(" · ", bar(theme::dim())));
@@ -2167,22 +2193,17 @@ impl Ui {
             // Missions with work open: running, waiting their turn, or waiting on someone.
             // The count comes from the mission rows: with the window not followed there is no count to
             // show, and the bar says so rather than a stale number.
-            let active = (self.world.missions_followed && self.world.missions.ready().is_some()).then(|| {
-                screens::mission_order(&self.world, false)
-                    .iter()
-                    .filter(|mission| {
-                        matches!(
-                            mission.word,
-                            Word::Working
-                                | Word::Queued
-                                | Word::Decision
-                                | Word::Stalled
-                                | Word::Unstaffed
-                                | Word::Unclaimed
-                        )
-                    })
-                    .count()
-            });
+            let followed = self.world.missions_followed && self.world.missions.ready().is_some();
+            let counted = |keep: fn(Word) -> bool| {
+                followed.then(|| {
+                    screens::mission_order(&self.world, false)
+                        .iter()
+                        .filter(|mission| keep(mission.word))
+                        .count()
+                })
+            };
+            let active = counted(Word::is_active);
+            let stuck = counted(Word::is_stuck).filter(|stuck| *stuck > 0);
             spans.push(Span::styled(" · ", bar(theme::dim())));
             x = area.x + Line::from(spans.clone()).width() as u16;
             let active_text = match active.or(self.world.active_missions) {
@@ -2198,6 +2219,21 @@ impl Ui {
                 Hit::PaletteSection(2),
             );
             spans.push(Span::styled(active_text, bar(theme::fg(theme::SAPPHIRE))));
+            // Stuck runs are not active, and not hidden: they are named beside the count.
+            if let Some(stuck) = stuck {
+                spans.push(Span::styled(" · ", bar(theme::dim())));
+                x = area.x + Line::from(spans.clone()).width() as u16;
+                let stuck_text = format!("▲ {stuck} stuck");
+                self.hit(
+                    Rect {
+                        x,
+                        width: text::width(&stuck_text) as u16,
+                        ..area
+                    },
+                    Hit::PaletteSection(2),
+                );
+                spans.push(Span::styled(stuck_text, bar(theme::fg(theme::FAULT))));
+            }
             let machines = self.world.machines.items();
             machines_shown = !machines.is_empty();
             if machines_shown {
@@ -2376,6 +2412,7 @@ impl Ui {
                     .unwrap_or(id)
             }
             Pane::Machine(id) => find(id).trim_start_matches("machine/").to_owned(),
+            Pane::Resource(id) => self.resource_sidebar.observations.iter().find(|row| &row.id == id).map(super::observed_resources::title).unwrap_or_else(|| id.clone()),
             Pane::Usage(None) => "Usage".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
@@ -2987,6 +3024,7 @@ impl Ui {
             Action::NewMission => self.open_new_mission(),
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleTerminalFirst => self.toggle_terminal_first(),
+            Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -4083,6 +4121,8 @@ pub(crate) fn pane_for(id: &str) -> Option<Pane> {
         Some(Pane::Mission(Some(id)))
     } else if id.starts_with("agent/") || id.starts_with("session/") {
         Some(Pane::Agent(Some(id)))
+    } else if id.starts_with("resource/") {
+        Some(Pane::Resource(id))
     } else if id.starts_with("machine/") {
         Some(Pane::Machine(Some(id)))
     } else {
@@ -4207,6 +4247,37 @@ mod tests {
         assert!(ui.effects.is_empty(), "finder selection only previews filing");
         press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
         assert!(ui.effects.iter().any(|effect| matches!(effect, Effect::EditArrangement(_))));
+    }
+
+    #[test]
+    fn sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing() {
+        use resource_sidebar::PaletteMode as Mode;
+        let mut ui = glass();
+        ui.sidebar_place("session/temporary", None, None);
+        assert!(ui.effects.is_empty(), "ephemeral sessions only navigate");
+        let subject = "resource/github/acme/garden/issue/9";
+        ui.resource_sidebar.observations.push(serde_json::from_value(serde_json::json!({
+            "id":subject,"kind":"vcs.pull-request","facts":{"title":"Build garden","number":9},
+            "observed_at":"2026-10-11T00:00:00Z","opened_by":null,"opened_by_run":null
+        })).unwrap());
+        ui.resource_sidebar.observe(&ui.world);
+        let index = ui.resource_sidebar.rows().iter().position(|row| matches!(row, resource_sidebar::Row::Resource(row) if row.id == subject)).unwrap();
+        ui.open_resource_row(index);
+        assert_eq!(ui.focused_pane(), Some(Pane::Resource(subject.into())));
+        assert!(ui.effects.is_empty(), "opening a resource only navigates");
+        assert!(screen(&ui).contains("Build garden"));
+        ui.open_sidebar_palette(Mode::Add { folder: "folder-demo".into() }); typed(&mut ui, subject);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty(), "Enter cannot commit filing");
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject: id, .. } if id == subject))));
+        ui.effects.clear(); ui.resource_sidebar.writing = false;
+        ui.open_sidebar_palette(Mode::Add { folder: "folder-demo".into() }); typed(&mut ui, "doc/garden-notes");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty());
+        press(&mut ui, KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if write.operations.iter().any(|op| matches!(op, st3_client::ArrangementOperation::SubjectPlace { subject, .. } if subject == "doc/garden-notes"))));
     }
 
     fn glass() -> Ui {
@@ -4384,6 +4455,44 @@ mod tests {
     }
 
     #[test]
+    fn a_long_draft_renders_at_every_size_beside_alerts() {
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", agent)]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        let paragraph = "A long thought, 日本語の文章 👩‍👩‍👧‍👦 e\u{301} with a tail. ";
+        for round in 0..40 {
+            typed(&mut ui, paragraph);
+            if round % 3 == 0 {
+                press(&mut ui, KeyCode::Enter, KeyModifiers::ALT);
+            }
+            if round % 10 == 0 {
+                ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+            }
+            for (width, height) in [(20, 6), (24, 8), (40, 12), (80, 24), (120, 32), (200, 60), (33, 7)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+        assert!(ui.conversation_state.drafts[agent].len() > 1000);
+        // Every size a window or a split pane can have, with the box full of text.
+        for width in (20..=150).step_by(7) {
+            for height in 6..=40 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+        ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Right);
+        for width in (20..=150).step_by(11) {
+            for height in 6..=40 {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn the_palette_opens_subjects_in_tabs_and_home_opens_over_them() {
         let mut ui = glass();
         ctrl(&mut ui, 'k');
@@ -4491,6 +4600,16 @@ mod tests {
             draft_before,
             "nothing is typed into the draft of a tab that is not shown"
         );
+    }
+
+    #[test]
+    fn terminal_fallback_defaults_on_and_the_palette_changes_it_locally() {
+        let mut ui = glass();
+        assert!(ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(!ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(ui.terminal_fallback);
     }
 
     #[test]
@@ -6525,6 +6644,119 @@ mod tests {
         // st's own count stands in for the rows it does not send.
         ui.world.active_missions = Some(57);
         assert!(top(&ui).contains("◇ 57 active"), "{}", top(&ui));
+    }
+
+    #[test]
+    fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![
+            alert_prompt("attention/one", agent),
+            alert_prompt("attention/two", agent),
+        ]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        let shown = screen(&ui);
+        let lines: Vec<&str> = shown.lines().collect();
+        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ hide")).expect(&shown);
+        let rule = lines.iter().position(|line| line.contains("┄┄┄┄")).expect(&shown);
+        let input = lines.iter().position(|line| line.contains("Message Atlas Builder")).expect(&shown);
+        assert!(title < rule && rule < input, "{shown}");
+        // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
+        let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
+        assert!(barred >= 6, "{shown}");
+        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
+        assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
+    }
+
+    #[test]
+    fn the_top_bar_prints_only_the_connection_until_st_has_sent_the_first_state() {
+        let mut ui = glass();
+        let top = |ui: &Ui| screen(ui).lines().next().unwrap().to_owned();
+        // A cached copy is not st's answer: no placeholder, no counts to flip a moment later.
+        ui.world.settled = false;
+        ui.world.attention = Load::Ready(vec![]);
+        let bar = top(&ui);
+        for word in ["working", "active", "nothing running", "alert", "Ctrl+K"] {
+            assert!(!bar.contains(word), "{word}: {bar}");
+        }
+        assert!(bar.contains("live"), "{bar}");
+        ui.world.settled = true;
+        assert!(top(&ui).contains("working"), "{}", top(&ui));
+    }
+
+    #[test]
+    fn the_top_bar_counts_only_missions_that_are_running_and_names_the_stuck_ones() {
+        let mut ui = glass();
+        let words = [
+            Word::Working,
+            Word::Queued,
+            Word::Decision,
+            Word::Stalled,
+            Word::Unstaffed,
+            Word::Unclaimed,
+            Word::Watching,
+            Word::Held,
+            Word::Idle,
+            Word::Done,
+            Word::Failed,
+            Word::Cancelled,
+        ];
+        if let Load::Ready(missions) = &mut ui.world.missions {
+            let template = missions[0].clone();
+            *missions = words
+                .iter()
+                .enumerate()
+                .map(|(index, word)| Mission {
+                    id: format!("mission/example/m{index}"),
+                    title: format!("Mission {index}"),
+                    word: *word,
+                    system: false,
+                    updated_at: chrono::Local::now().to_rfc3339(),
+                    ..template.clone()
+                })
+                .collect();
+        }
+        let bar = screen(&ui).lines().next().unwrap().to_owned();
+        assert!(bar.contains("◇ 2 active"), "{bar}");
+        assert!(bar.contains("▲ 3 stuck"), "{bar}");
+    }
+
+    #[test]
+    fn the_missions_list_reads_running_first_and_ages_finished_runs_out() {
+        let mut world = demo::world();
+        let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).to_rfc3339();
+        if let Load::Ready(missions) = &mut world.missions {
+            let template = missions[0].clone();
+            *missions = [
+                (Word::Done, "Done yesterday", yesterday.clone()),
+                (Word::Stalled, "Stuck", chrono::Local::now().to_rfc3339()),
+                (Word::Working, "Running", chrono::Local::now().to_rfc3339()),
+                (Word::Decision, "Asks you", chrono::Local::now().to_rfc3339()),
+                (Word::Cancelled, "Stopped yesterday", yesterday),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (word, title, at))| Mission {
+                id: format!("mission/example/m{index}"),
+                title: title.into(),
+                word,
+                system: false,
+                updated_at: at,
+                ..template.clone()
+            })
+            .collect();
+        }
+        let list = screens::missions_list(&world, 60, "⠋", false);
+        let titles: Vec<String> = list
+            .ids
+            .iter()
+            .filter_map(|id| world.missions.items().iter().find(|m| &m.id == id))
+            .map(|m| m.title.clone())
+            .collect();
+        assert_eq!(titles, ["Running", "Asks you", "Stuck"]);
+        let all = screens::missions_list(&world, 60, "⠋", true);
+        assert_eq!(all.ids.len(), 5);
     }
 
     #[test]

@@ -27,6 +27,11 @@ export const linuxStageRunner = [
   `${linuxStageShape};job.priority=${linuxJobPriority}`,
   'namespace-features:github.run-id=${{ github.run_id }}',
 ] as const
+// Optional load benchmarks stay below required PR and merge checks.
+export const performanceRunner = [
+  `${linuxStageShape};job.priority=2`,
+  'namespace-features:github.run-id=${{ github.run_id }}',
+] as const
 export const macosRunner = [`${macosRunnerProfile};github.run-id=\${{ github.run_id }}`] as const
 export const linuxActionlintConfig = {
   ...defaultActionlintConfig,
