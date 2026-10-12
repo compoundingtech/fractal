@@ -34,10 +34,14 @@ fn repeated_empty_managed_projection_keeps_cached_stop_clean() {
         let writes = store.connection.write().total_changes();
         assert!(store.project_replication_backlog().unwrap());
         let writes_after = store.connection.write().total_changes();
+        incremental.observe(&store).unwrap();
+        eprintln!("empty projection: token_before={before:?}, token_after={:?}, row_changes={}, cached_stop_selected={}",
+            store.replication_projection_observation(), writes_after - writes,
+            incremental.needs("stop:agent/invented-settled", 0));
+        assert!(!incremental.needs("stop:agent/invented-settled", 0),
+            "an unchanged managed projection must not reselect the cached stop");
         assert_eq!(writes_after - writes, 1, "only projection_health bookkeeping may write");
         assert_eq!(store.replication_projection_observation(), before);
-        incremental.observe(&store).unwrap();
-        assert!(!incremental.needs("stop:agent/invented-settled", 0));
         assert_eq!(serde_json::to_value(store.desired_subjects().unwrap()).unwrap(), desired);
         store.owned_member_guard("agent/garden/orchard").unwrap();
     }
