@@ -12,6 +12,8 @@ import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { darkTheme as embraceDarkTheme } from './assistant-ui/embrace-theme'
 import { surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+/** A served local image decodes in milliseconds when idle; under a saturated strict gate it can exceed waitFor's 1s default, so readiness waits longer without weakening the decode assertion. */
+const imageReadyTimeout = 10_000
 
 const pixel = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
 const attachment = '/attachments/allowed.svg'
@@ -74,7 +76,7 @@ const deferredStory = (boundary: Boundary, source: string): Story => ({
     await expect(canvasElement.querySelector('img')).toHaveAttribute('referrerpolicy', 'no-referrer')
     await expect(canvas.getAllByTestId('deferred-image')).toHaveLength(1)
     const image = canvasElement.querySelector('img')!
-    await waitFor(async () => { await expect(image.complete).toBe(true); await expect(image.naturalWidth).toBeGreaterThan(0) })
+    await waitFor(async () => { await expect(image.complete).toBe(true); await expect(image.naturalWidth).toBeGreaterThan(0) }, { timeout: imageReadyTimeout })
     await expect(performance.getEntriesByType('resource').filter(entry => contentUrl.test(entry.name))).toHaveLength(0)
     await expect(performance.getEntriesByType('resource').filter(entry => entry.name === fixtureUrl)).toHaveLength(fixtureRequestsBefore + (source === sources.Data ? 0 : 1))
   },
@@ -102,7 +104,7 @@ const allowedStory = (boundary: Boundary): Story => ({ args: { boundary, source:
   const image = canvasElement.querySelector('img')!
   await expect(image).toHaveAttribute('src', attachment)
   await expect(image).toHaveAttribute('referrerpolicy', 'no-referrer')
-  await waitFor(async () => { await expect(image.complete).toBe(true); await expect(image.naturalWidth).toBeGreaterThan(0) })
+  await waitFor(async () => { await expect(image.complete).toBe(true); await expect(image.naturalWidth).toBeGreaterThan(0) }, { timeout: imageReadyTimeout })
   await expect(within(canvasElement).getAllByTestId('deferred-image')).toHaveLength(1)
   const contentUrl = /^(?:https:\/\/example\.invalid\/|http:\/\/127\.0\.0\.1\/|http:\/\/169\.254\.169\.254\/)/
   await expect(performance.getEntriesByType('resource').filter(entry => contentUrl.test(entry.name))).toHaveLength(0)
