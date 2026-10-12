@@ -279,14 +279,15 @@ function useAppStore(proof?: FabricProfile) {
   async function clearCachedProjection() { cacheGeneration.current++; clearCaches(); if (!proof) await AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
 
   // Capabilities once per connection: limits, the session's actor, and what it may control.
-  const loadCapabilities = useCallback(async () => {
+  const loadCapabilities = useCallback(async (current: () => boolean) => {
     if (!client) return;
     try {
       const capability = await client.capabilities();
+      if (!current()) return;
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
       setCaps(capability.value);
-    } catch (e) { if (e instanceof ClientError && e.status >= 400 && e.status < 500) setError(errorText(e)); }
+    } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
@@ -294,7 +295,9 @@ function useAppStore(proof?: FabricProfile) {
   useEffect(() => {
     if (!client || !credential) { if (!credential) setStatus('setup'); return; }
     const generation = cacheGeneration.current;
-    const current = () => generation === cacheGeneration.current;
+    let active = true;
+    let connection = 0;
+    const current = () => active && generation === cacheGeneration.current;
     attentionLive.current = false;
     if (!proofRef.current && timers.current.connect === null) timers.current.connect = observations.begin('ios-connect');
     const opened = new Feed(client, {
@@ -332,8 +335,12 @@ function useAppStore(proof?: FabricProfile) {
             if (state === 'reconnecting' && held.everLive && held.recover === null) held.recover = observations.begin('ios-recover');
           }
         }
-        if (state !== 'live') setCaps(null);
-        if (state === 'live') { setError(''); void loadCapabilities(); carrier.feedLive(); feedMisses.current = 0; }
+        if (state !== 'live') { connection++; setCaps(null); }
+        if (state === 'live') {
+          const epoch = connection;
+          setError(''); void loadCapabilities(() => current() && epoch === connection);
+          carrier.feedLive(); feedMisses.current = 0;
+        }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):
         // a refusal ends the trial, anything else is redialed.
         else if (state === 'reconnecting' && routeRef.current.kind === 'fabric' && ++feedMisses.current >= 2) void carrier.feedFailed();
@@ -347,7 +354,7 @@ function useAppStore(proof?: FabricProfile) {
     // Paired: connecting from here on, even while the app waits to be active before it dials.
     setStatus(previous => previous === 'setup' ? 'connecting' : previous);
     setFeed(opened);
-    return () => { opened.close(); setFeed(held => held === opened ? null : held); };
+    return () => { active = false; opened.close(); setFeed(held => held === opened ? null : held); };
   }, [client, credential, loadCapabilities, observations, carrier]);
   // No client yet: either nothing is paired, fabric is opening, or neither route can be used.
   useEffect(() => {
