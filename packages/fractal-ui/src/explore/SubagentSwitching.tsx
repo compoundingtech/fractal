@@ -20,8 +20,6 @@ export const switcherNames: Record<SwitcherVariant, string> = { S1: 'Bottom swit
 /** `focusRequest` counts count-chip presses; `focusLane` names the lane whose switcher takes focus, so compare mode moves focus once. */
 export interface SwitchingArgs { switcher: SwitcherVariant; placement: CountPlacement; sidebarWidth: 240 | 320; state: Scenario; compare: boolean; allLanes: boolean; scheme: 'dark' | 'light'; width: 1440 | 900; focusRequest: number; focusLane: string }
 export const laneId = ({ switcher, scheme, width }: Pick<SwitchingArgs, 'switcher' | 'scheme' | 'width'>) => `${switcher}/${scheme}/${width}`
-/** Where a count press lands: the selected switch button (S1), the selected tab (S2) or the drawer trigger (S3); the next arrow key or Enter acts at once. */
-const focusTarget: Record<SwitcherVariant, string> = { S1: '[data-rail] [data-thread-current]', S2: '[role="tab"][aria-selected="true"]', S3: '[data-thread-drawer-toggle]' }
 
 const now = Date.parse('2026-01-15T12:05:00Z')
 const statusGlyph = { Running: 'spinner', Finished: 'check', Failed: 'x', 'Needs you': 'alert' } as const
@@ -74,20 +72,22 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
   const [drawer, setDrawer] = React.useState(false)
   const [messages, setMessages] = React.useState<Record<string, readonly string[]>>({})
   const [read, setRead] = React.useState<ReadonlySet<string>>(new Set())
-  // Every count press, including one for the seat already open, returns to the root thread and focuses the switcher's entry point.
-  React.useLayoutEffect(() => { if (focused) setSelected('root') }, [focusRequest])
-  // React Aria mounts collection items (tabs) after the first commit, so the handoff waits up to a few frames for the root thread's target to exist.
-  React.useEffect(() => {
-    if (!focused) return
-    let frame = 0
-    const attempt = (frames: number) => {
-      const target = lane.current?.getAttribute('data-active') === 'root' ? lane.current.querySelector<HTMLElement>(focusTarget[variant]) : null
-      if (target) target.focus()
-      else if (frames > 0) frame = requestAnimationFrame(() => attempt(frames - 1))
-    }
-    attempt(30)
-    return () => cancelAnimationFrame(frame)
-  }, [focusRequest])
+  // Every count press, including one for the seat already open, returns to the root thread in the same render (React's adjust-state-during-render pattern).
+  const [seenRequest, setSeenRequest] = React.useState(focusRequest)
+  if (seenRequest !== focusRequest) {
+    setSeenRequest(focusRequest)
+    if (focused) setSelected('root')
+  }
+  /**
+   * The count press's focus target — S1's open-thread chip, S2's selected tab, S3's drawer trigger — takes focus from the commit that attaches it.
+   * The callback's identity changes per request, so React re-attaches it to the already mounted element for a repeat press, and React Aria's later tab mount consumes it on arrival.
+   */
+  const consumed = React.useRef(0)
+  const focusTarget = React.useCallback((node: HTMLElement | null) => {
+    if (node === null || !focused || consumed.current === focusRequest) return
+    consumed.current = focusRequest
+    node.focus()
+  }, [focused, focusRequest])
   const active = agents.find(agent => agent.id === selected) ?? agents[0]!
   const root = agents[0]!
   const turns = React.useMemo(() => threadFor(active, agents, messages[active.id] ?? []), [active, agents, messages])
@@ -108,7 +108,7 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
     return [agent.name, ...(alert ? [agent.status] : []), ...(unreadOf(agent) > 0 ? [`${unreadOf(agent)} unread`] : []), ...(alert ? [] : [agent.status.toLowerCase()])].join(', ')
   }
   // Named from content: the visible count, then the spoken alert words; the aria-hidden glyph cues stay out of the name.
-  const drawerToggle = (text: string, beyond: readonly Agent[]) => <Button data-thread-drawer-toggle aria-expanded={drawer} aria-controls={drawer ? drawerId : undefined} onPress={() => setDrawer(open => !open)} {...stylex.props(styles.chip, styles.quiet)}><Icon name="drawer" />{text}<AlertCues agents={beyond} /></Button>
+  const drawerToggle = (text: string, beyond: readonly Agent[], target?: React.RefCallback<HTMLElement>) => <Button ref={target} data-thread-drawer-toggle aria-expanded={drawer} aria-controls={drawer ? drawerId : undefined} onPress={() => setDrawer(open => !open)} {...stylex.props(styles.chip, styles.quiet)}><Icon name="drawer" />{text}<AlertCues agents={beyond} /></Button>
   const beyondStrip = agents.filter(agent => !shown.includes(agent))
   const more = beyondStrip.length > 0 ? drawerToggle(`+${beyondStrip.length} more`, beyondStrip) : null
   // OMP and other unreported harnesses: say what is unknown instead of an empty child list or a spinner.
@@ -138,7 +138,7 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
     {unreported === null ? null : <div {...stylex.props(styles.drawerNote)}>{unreported}</div>}
   </aside> : null
   const rail = <nav aria-label={context('Agent threads')} data-switcher data-rail {...stylex.props(styles.strip, styles.bottomStrip)}>
-    {shown.map(agent => <Button key={agent.id} data-thread-current={agent.id === active.id ? true : undefined} aria-label={threadLabel(agent)} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.chip, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button>)}
+    {shown.map(agent => <Button key={agent.id} ref={agent.id === active.id ? focusTarget : undefined} data-thread-current={agent.id === active.id ? true : undefined} aria-label={threadLabel(agent)} aria-current={agent.id === active.id ? 'true' : undefined} onPress={() => choose(agent.id)} {...stylex.props(styles.chip, agent.id === active.id && styles.current)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Button>)}
     {more}
     {unreported}
   </nav>
@@ -149,7 +149,7 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
     </li>)}</ol>
     {unreported}
     <span {...stylex.props(styles.fill)} />
-    {drawerToggle(`All ${agents.length} ${agents.length === 1 ? 'thread' : 'threads'}`, agents.filter(agent => !path.includes(agent)))}
+    {drawerToggle(`All ${agents.length} ${agents.length === 1 ? 'thread' : 'threads'}`, agents.filter(agent => !path.includes(agent)), focusTarget)}
   </nav>
   const frame = <div {...stylex.props(styles.workspace)}>
     {variant === 'S3' ? crumbs : null}
@@ -161,7 +161,7 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
     <div data-lane-frame {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.frame, width === 1440 ? styles.wide : styles.narrow, sidebarWidth === 240 ? styles.sidebar240 : styles.sidebar320)}>
       <div {...stylex.props(styles.sidebar)}><SwitchingSidebar placement={placement} selected={state} context={landmarkContext} onOpen={onOpenWorkspace} /></div>
       {variant === 'S2' ? <Tabs selectedKey={active.id} onSelectionChange={key => choose(String(key))} {...stylex.props(styles.tabsRoot)}>
-        <div data-switcher {...stylex.props(styles.strip)}><TabList aria-label={context('Agent thread tabs')} {...stylex.props(styles.tabs)}>{shown.map(agent => <Tab id={agent.id} key={agent.id} aria-label={threadLabel(agent)} data-thread-current={agent.id === active.id ? true : undefined} {...stylex.props(styles.tab, agent.id === active.id && styles.tabSelected)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Tab>)}</TabList>{more}{unreported}</div>
+        <div data-switcher {...stylex.props(styles.strip)}><TabList aria-label={context('Agent thread tabs')} {...stylex.props(styles.tabs)}>{shown.map(agent => <Tab id={agent.id} key={agent.id} ref={agent.id === active.id ? focusTarget : undefined} aria-label={threadLabel(agent)} data-thread-current={agent.id === active.id ? true : undefined} {...stylex.props(styles.tab, agent.id === active.id && styles.tabSelected)}><ThreadLabel agent={agent} unread={unreadOf(agent)} /></Tab>)}</TabList>{more}{unreported}</div>
         {frame}
       </Tabs> : frame}
     </div>
