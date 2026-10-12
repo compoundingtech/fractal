@@ -204,6 +204,9 @@ line within the shared tolerance, even when the row's height is forcibly fixed.
 Priority stories mount the production drawer at 200, 240 and 320 widths; wrapped
 account text and a displaced exhaustion SVG must fail the same proof, then pass
 after restoration and real controlled refresh rerenders.
+The proof stays self-contained for the standalone runner's `page.evaluate`;
+its tolerance reference comes from the production drawer's StyleX token.
+Standalone navigation uses React Aria options and stable account-row identity.
 
 Every quota story also disables the real refresh action and proves that the
 controlled snapshot cannot change, restores the action, then asserts both

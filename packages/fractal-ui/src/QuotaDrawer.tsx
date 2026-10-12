@@ -111,7 +111,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
     event.preventDefault()
     event.stopPropagation()
   }
-  return <section aria-label={props.landmarkContext === undefined ? 'Quota drawer' : `${props.landmarkContext} quota drawer`} tabIndex={0} onKeyDownCapture={onKeyDown} data-quota-drawer data-quota-variant={props.variant} data-quota-unit={props.unit} data-quota-collapsed={props.collapsed} {...stylex.props(styles.root)}>
+  return <section aria-label={props.landmarkContext === undefined ? 'Quota drawer' : `${props.landmarkContext} quota drawer`} tabIndex={0} onKeyDownCapture={onKeyDown} data-quota-drawer data-quota-variant={props.variant} data-quota-unit={props.unit} data-quota-collapsed={props.collapsed} data-quota-line-tolerance={quotaGeometry.lineCentreTolerance} {...stylex.props(styles.root)}>
     <header {...stylex.props(styles.toolbar)}>
       <h2 {...stylex.props(styles.title)}>Quota <span {...stylex.props(styles.count)}>{accounts.length}/{props.accounts.length}</span></h2>
       <Button aria-label={`Toggle unit: ${props.unit === 'usd' ? '$ / tok' : 'tok / $'}`} aria-keyshortcuts="u" onPress={toggleUnit} {...stylex.props(styles.button)}>{props.unit === 'usd' ? '$ / tok' : 'tok / $'}</Button>
