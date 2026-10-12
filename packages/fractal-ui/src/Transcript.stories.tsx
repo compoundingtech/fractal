@@ -458,9 +458,9 @@ function FailedRetryStory({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [state, setState] = React.useState<State>('failed-send')
   const data = React.useMemo(() => fixture(state, 'retry'), [state])
   const retry = (itemId: string) => { retrySend(itemId); setState('pending-send') }
-  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><h2>Failed → Retry</h2><button type="button" onClick={() => setState('settled')}>Deliver echo</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} onRetrySend={retry} /></div></main>
+  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><h2>Failed retry</h2><button type="button" onClick={() => setState('settled')}>Deliver echo</button><div {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onOpenTool={() => {}} onRetry={() => {}} onRetrySend={retry} /></div></main>
 }
-export const FailedRetry: Story = { name: 'Failed → Retry', render: args => <FailedRetryStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+export const FailedRetry: Story = { name: 'Failed Retry', render: args => <FailedRetryStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   retrySend.mockClear()
   const canvas = within(canvasElement)
   const selector = '[data-testid="user-message"][data-item-id="retry/prompt"]'
