@@ -360,8 +360,9 @@ export class ScrollController {
       return
     }
     const mounted = (target: string) => {
-      for (const candidate of element.querySelectorAll<HTMLElement>(`[data-embrace-entry-id="${CSS.escape(target)}"]`)) {
-        if (candidate.isConnected && candidate.getBoundingClientRect().height > 0) return candidate
+      // Compare ids directly: no selector escaping, so any source id is safe.
+      for (const candidate of element.querySelectorAll<HTMLElement>('[data-embrace-entry-id]')) {
+        if (candidate.dataset['embraceEntryId'] === target && candidate.isConnected && candidate.getBoundingClientRect().height > 0) return candidate
       }
       return undefined
     }
