@@ -107,6 +107,15 @@ async function assertSingleHoverDisclosure(canvasElement: HTMLElement) {
   await waitFor(() => expect(document.querySelectorAll('[role="tooltip"] [data-testid="agent-hover-card"]')).toHaveLength(0))
 }
 
+/** Card text a sighted user sees: the clone drops every hidden description carrier that an aria-describedby references. */
+async function paintedText(card: HTMLElement): Promise<string> {
+  const painted = card.cloneNode(true) as HTMLElement
+  const carriers = [...card.querySelectorAll('[aria-describedby]')].flatMap(described => described.getAttribute('aria-describedby')!.split(' '))
+  await expect(carriers.length).toBeGreaterThan(0)
+  for (const id of carriers) painted.querySelector(`#${CSS.escape(id)}`)!.parentElement!.remove()
+  return painted.textContent!
+}
+
 async function assertCompactCard(canvasElement: HTMLElement) {
   await assertRowNames(canvasElement)
   const cards = within(canvasElement).getAllByTestId('agent-hover-card')
@@ -118,11 +127,8 @@ async function assertCompactCard(canvasElement: HTMLElement) {
   for (const label of ['Name', 'ID', 'Description', 'Last activity', 'Worktree', 'Lease expires']) await expect(labels).not.toContain(label)
   await expect(card.querySelectorAll('li').length).toBeLessThanOrEqual(3)
   // Exact instants stay in the hidden description carriers only; the painted card text never shows ISO timestamps.
-  const painted = card.cloneNode(true) as HTMLElement
-  const carriers = [...card.querySelectorAll('[aria-describedby]')].flatMap(described => described.getAttribute('aria-describedby')!.split(' '))
-  await expect(carriers.length).toBeGreaterThan(0)
-  for (const id of carriers) painted.querySelector(`#${CSS.escape(id)}`)!.parentElement!.remove()
-  await expect(painted.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/)
+  const painted = await paintedText(card)
+  await expect(painted).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/)
 }
 function CohortList() {
   return <div data-frame-rows {...stylex.props(styles.list)}>{cohortRows.map((row, index) => <SidebarAgentRow key={row.ref} item={row} now={storyNow} active={index === 0} />)}</div>
@@ -158,7 +164,7 @@ export const HoverCardKnown: Story = { name: 'Hover card · fully reported', ren
 export const HoverCardUnknown: Story = { name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {
   const card = within(canvasElement).getByTestId('hover-facts')
   await assertCompactCard(canvasElement)
-  await expect(card.textContent).not.toMatch(/unknown|unavailable|—/i)
+  await expect(await paintedText(card)).not.toMatch(/unknown|unavailable|—/i)
   for (const label of ['Spend', 'Duration', 'Last turn', 'Model', 'PR', 'Branch']) await expect(within(card).queryByText(label)).toBeNull()
 } }
 export const TimeCohort: Story = { name: 'Time cohort · known vs none', render: () => <main {...stylex.props(styles.root)}><CohortList /></main>, play: async ({ canvasElement }) => {
