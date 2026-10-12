@@ -1,91 +1,18 @@
-//! Alerts in the conversation of the agent they belong to: what waits on the person, above the
-//! message box, with the answers that one tap can send and a way into the whole card in Now.
+//! Alerts beside the conversation or the terminal of the agent they belong to: one line above the
+//! message box and a badge over a terminal, either of which opens the alerts box, which is Home
+//! floated over the glass with the agent's first alert selected.
 //!
 //! An alert is anything that blocks or waits on an answer: an ask, a human gate, a launch or
 //! revision approval, a native harness prompt or a harness login. It clears itself when it is
-//! answered anywhere, so the band shows exactly what st lists and nothing it remembers.
+//! answered anywhere, so what shows is exactly what st lists and nothing it remembers.
 
 use super::doc::AlertTap;
 use super::*;
-use ratatui::style::Color;
 
-/// The most alerts the band lists before it says how many more wait in Now.
-const SHOWN: usize = 2;
-/// The lines of a pending call the band shows. A call that is longer is cut with an ellipsis, and
-/// then `allow` is withheld: a person allows only what they can read in full.
-const CALL_LINES: usize = 4;
-
-/// One row of the band: its line, and the buttons on it by column.
+/// One row above the box: its line, and the buttons on it by column.
 pub(super) struct BandRow {
     pub(super) line: Line<'static>,
     pub(super) hits: Vec<(u16, u16, Hit)>,
-}
-
-impl BandRow {
-    fn text(spans: Vec<Span<'static>>) -> Self {
-        Self {
-            line: Line::from(spans),
-            hits: Vec::new(),
-        }
-    }
-
-    /// The buttons in as few rows as fit `width`.
-    fn button_rows(buttons: Vec<(String, Color, Hit)>, width: usize) -> Vec<Self> {
-        let mut rows = Vec::new();
-        let mut row: Vec<(String, Color, Hit)> = Vec::new();
-        let mut used = 1;
-        for button in buttons {
-            let needed = text::width(&button.0) + 4;
-            if !row.is_empty() && used + needed > width {
-                rows.push(Self::buttons(std::mem::take(&mut row)));
-                used = 1;
-            }
-            used += needed;
-            row.push(button);
-        }
-        if !row.is_empty() {
-            rows.push(Self::buttons(row));
-        }
-        rows
-    }
-
-    fn buttons(buttons: Vec<(String, Color, Hit)>) -> Self {
-        let mut spans = vec![Span::raw(" ")];
-        let mut hits = Vec::new();
-        let mut column = 1u16;
-        for (label, color, hit) in buttons {
-            let shown = format!(" {label} ");
-            let width = text::width(&shown) as u16;
-            hits.push((column, width, hit));
-            spans.push(Span::styled(
-                shown,
-                Style::default().fg(theme::CRUST).bg(color),
-            ));
-            spans.push(Span::raw("  "));
-            column += width + 2;
-        }
-        Self {
-            line: Line::from(spans),
-            hits,
-        }
-    }
-}
-
-/// A dim note under an alert's title, wrapped to the pane instead of cut at its edge.
-fn note_rows(note: &str, width: usize) -> Vec<BandRow> {
-    text::wrap(
-        &[text::run(note.to_owned(), theme::dim())],
-        width,
-        &[text::run("   ", theme::dim())],
-        &[text::run("   ", theme::dim())],
-        None,
-    )
-    .into_iter()
-    .map(|line| BandRow {
-        line,
-        hits: Vec::new(),
-    })
-    .collect()
 }
 
 impl Ui {
@@ -104,41 +31,30 @@ impl Ui {
             .collect()
     }
 
-    /// The tool calls the conversation shows as unanswered, oldest first, as the seat's harness
-    /// recorded them. A permission prompt is for one of them, but `prompt.respond` names no
-    /// call: only when exactly one is unanswered is it certain which one an allow lets through.
-    fn unanswered_calls(&self, agent: &str) -> Vec<String> {
-        let Some(Load::Ready(entries)) = self.world.conversations.get(agent) else {
-            return Vec::new();
-        };
-        entries
+    /// How many alerts wait on the person, whichever agent they are about.
+    pub(super) fn open_alert_count(&self) -> usize {
+        self.world
+            .attention
+            .items()
             .iter()
-            .filter_map(|entry| match &entry.body {
-                Body::Tool {
-                    title,
-                    state: ToolState::Running,
-                    ..
-                } => Some(title.clone()),
-                _ => None,
+            .filter(|item| {
+                item.is_alert() && !self.snoozed.contains(&item.id) && !self.closed.contains(&item.id)
             })
-            .collect()
+            .count()
     }
 
-    /// The band for `agent` at `width` columns: empty when nothing waits on the person there,
-    /// one line that says what waits until the person expands it, then the cards. It is only a
-    /// click away from either: no key reaches it, so typing is never taken by an alert.
+    /// The line for `agent` at `width` columns: empty when nothing waits on the person there,
+    /// otherwise what waits and that a click opens it. It holds no answer: answering happens in
+    /// the box it opens, where a form has the room it needs.
     pub(super) fn alert_band(&self, agent: &str, width: usize) -> Vec<BandRow> {
         let alerts = self.alerts_in(agent);
         let Some(first) = alerts.first() else {
             return Vec::new();
         };
-        if self.alerts_open.contains(agent) {
-            return self.alert_card(agent, width);
-        }
         let count = alerts.len();
         let (glyph, color) = screens::attention_style(&first.kind);
         let lead = format!(" ◆ {count} alert{} · ", if count == 1 { "" } else { "s" });
-        let tail = " ▸ show ";
+        let tail = " ▸ open ";
         let room = width
             .saturating_sub(text::width(&lead) + text::width(tail) + 4)
             .max(8);
@@ -156,247 +72,65 @@ impl Ui {
             hits: vec![(
                 0,
                 width as u16,
-                Hit::Alert(agent.to_owned(), AlertTap::Toggle),
+                Hit::Alert(agent.to_owned(), AlertTap::Box),
             )],
         }]
     }
 
-    /// Show or hide the cards of `agent`'s alerts.
-    pub(super) fn toggle_alerts(&mut self, agent: &str) {
-        if !self.alerts_open.remove(agent) {
-            self.alerts_open.insert(agent.to_owned());
+    /// A small badge, bottom right of `body`, saying how many alerts wait; a click opens the box.
+    /// Nothing is drawn when none wait. It sits over a few cells of a terminal's own output, and
+    /// a click on it is the box's, never the program's.
+    pub(super) fn draw_alert_badge(&self, buf: &mut Buffer, body: Rect, agent: &str) {
+        let count = self.open_alert_count();
+        if count == 0 || body.width < 12 || body.height < 3 {
+            return;
         }
+        let label = format!(" ◆ {count} ");
+        let width = text::width(&label) as u16;
+        let rect = Rect {
+            x: body.x + body.width - width - 1,
+            y: body.y + body.height - 1,
+            width,
+            height: 1,
+        };
+        buf.set_stringn(
+            rect.x,
+            rect.y,
+            &label,
+            width as usize,
+            Style::default()
+                .fg(theme::CRUST)
+                .bg(theme::PERSON)
+                .add_modifier(Modifier::BOLD),
+        );
+        self.alert_badge.set(Some(rect));
+        self.hit(rect, Hit::Alert(agent.to_owned(), AlertTap::Box));
     }
 
-    /// The cards of `agent`'s alerts at `width` columns, under a line that hides them again.
-    fn alert_card(&self, agent: &str, width: usize) -> Vec<BandRow> {
-        let alerts = self.alerts_in(agent);
-        if alerts.is_empty() {
-            return Vec::new();
-        }
-        let full = width;
-        let width = width.saturating_sub(2).max(10);
-        let count = alerts.len();
-        // The pane's title bar, filled across the width so the cards below read as one block
-        // that belongs to the box under it; the whole bar hides it again.
-        let left = format!(" ◆ {count} alert{} ", if count == 1 { "" } else { "s" });
-        let right = " ▾ hide ";
-        let gap = full.saturating_sub(text::width(&left) + text::width(right));
-        let bar = |style: Style| style.bg(theme::SURFACE0);
-        let mut rows = vec![BandRow {
-            line: Line::from(vec![
-                Span::styled(left, bar(theme::strong(theme::PERSON))),
-                Span::styled(" ".repeat(gap), bar(Style::default())),
-                Span::styled(right, bar(theme::dim())),
-            ]),
-            hits: vec![(
-                0,
-                full as u16,
-                Hit::Alert(agent.to_owned(), AlertTap::Toggle),
-            )],
-        }];
-        for (index, item) in alerts.iter().take(SHOWN).enumerate() {
-            // A thin rule between alerts, so where one ends and the next begins is plain.
-            if index > 0 {
-                rows.push(BandRow::text(vec![Span::styled(
-                    format!(" {}", "┄".repeat(full.saturating_sub(2))),
-                    theme::fg(theme::SURFACE1),
-                )]));
-            }
-            let first_row = rows.len();
-            let (glyph, color) = screens::attention_style(&item.kind);
-            let mut head = vec![
-                text::run(format!(" {glyph} "), theme::fg(color)),
-                text::run(item.title.clone(), theme::bold()),
-            ];
-            head.push(text::run(format!("  {} ago", item.age), theme::dim()));
-            rows.extend(
-                text::wrap(&head, width, &[], &[text::run("   ", theme::dim())], None)
-                    .into_iter()
-                    .take(2)
-                    .map(|line| BandRow {
-                        line,
-                        hits: Vec::new(),
-                    }),
-            );
-            let mut buttons: Vec<(String, Color, Hit)> = Vec::new();
-            match &item.kind {
-                AttentionKind::Prompt {
-                    seat_id,
-                    answers,
-                    text: prompt,
-                    ..
-                } => {
-                    let calls = if answers.is_empty() {
-                        Vec::new()
-                    } else {
-                        self.unanswered_calls(seat_id)
-                    };
-                    match calls.as_slice() {
-                        // Several calls are unanswered and the prompt names none: show them all
-                        // and offer only deny. Allowing the wrong one is not undoable.
-                        [_, _, ..] => {
-                            rows.extend(note_rows(
-                                &format!(
-                                    "{} calls are unanswered and st cannot tell which one Claude asks about; allow it in the terminal (Ctrl+]):",
-                                    calls.len()
-                                ),
-                                width,
-                            ));
-                            for call in calls.iter().take(CALL_LINES) {
-                                rows.push(BandRow::text(vec![
-                                    Span::styled("   · ", theme::dim()),
-                                    Span::styled(
-                                        text::truncate(first_line(call), width.saturating_sub(8)),
-                                        theme::text(),
-                                    ),
-                                ]));
-                            }
-                            if calls.len() > CALL_LINES {
-                                rows.push(BandRow::text(vec![Span::styled(
-                                    format!("   … and {} more", calls.len() - CALL_LINES),
-                                    theme::dim(),
-                                )]));
-                            }
-                        }
-                        [call] => {
-                            let lines = text::wrap(
-                                &[text::run(call.clone(), theme::text())],
-                                width.saturating_sub(4),
-                                &[text::run("   ", theme::dim())],
-                                &[text::run("   ", theme::dim())],
-                                None,
-                            );
-                            let cut = lines.len() > CALL_LINES;
-                            let last = lines.len().min(CALL_LINES);
-                            for (index, line) in lines.into_iter().take(CALL_LINES).enumerate() {
-                                let mut line = line;
-                                if cut && index + 1 == last {
-                                    line.spans.push(Span::styled(" …", theme::dim()));
-                                }
-                                rows.push(BandRow { line, hits: Vec::new() });
-                            }
-                            // The whole call must be in view to allow it.
-                            if !cut && answers.iter().any(|answer| answer == "allow") {
-                                buttons.push((
-                                    "allow".into(),
-                                    theme::GREEN,
-                                    Hit::Alert(item.id.clone(), AlertTap::Answer("allow".into())),
-                                ));
-                            }
-                        }
-                        [] if answers.is_empty() => {
-                            // Another harness's prompt: it is answered where it is shown.
-                            rows.extend(
-                                text::wrap(
-                                    &[text::run(
-                                        format!("{} · answer it in the terminal (Ctrl+])", first_line(prompt)),
-                                        theme::dim(),
-                                    )],
-                                    width,
-                                    &[text::run("   ", theme::dim())],
-                                    &[text::run("   ", theme::dim())],
-                                    None,
-                                )
-                                .into_iter()
-                                .take(2)
-                                .map(|line| BandRow { line, hits: Vec::new() }),
-                            );
-                        }
-                        [] => rows.extend(note_rows(
-                            "the call it would make is not in the conversation yet: answer it in the terminal (Ctrl+]) or open it in Now",
-                            width,
-                        )),
-                    }
-                    if answers.iter().any(|answer| answer == "deny") {
-                        buttons.push((
-                            "deny".into(),
-                            theme::RED,
-                            Hit::Alert(item.id.clone(), AlertTap::Answer("deny".into())),
-                        ));
-                    }
-                }
-                AttentionKind::Request {
-                    structured: Some(request),
-                    ..
-                } => {
-                    // A named answer is one tap, unless it needs the person's words: that one
-                    // is written in Now.
-                    for answer in request
-                        .answers
-                        .iter()
-                        .filter(|answer| answer.outcome.as_deref() != Some("request_changes"))
-                        .take(3)
-                    {
-                        buttons.push((
-                            text::truncate(&answer.label, 28),
-                            theme::ACCENT,
-                            Hit::Alert(item.id.clone(), AlertTap::Answer(answer.id.clone())),
-                        ));
-                    }
-                }
-                AttentionKind::Request { question, .. } => {
-                    rows.push(BandRow::text(vec![
-                        Span::styled("   ", theme::dim()),
-                        Span::styled(
-                            text::truncate(first_line(question), width.saturating_sub(4)),
-                            theme::soft(),
-                        ),
-                    ]));
-                    if item.title.trim_end().ends_with('?')
-                        && !item.actions.iter().any(|action| action == "custom.reply")
-                    {
-                        buttons.push((
-                            "yes".into(),
-                            theme::GREEN,
-                            Hit::Alert(item.id.clone(), AlertTap::Answer("Yes".into())),
-                        ));
-                        buttons.push((
-                            "no".into(),
-                            theme::RED,
-                            Hit::Alert(item.id.clone(), AlertTap::Answer("No".into())),
-                        ));
-                    }
-                }
-                AttentionKind::Login { text: login, seats } => {
-                    rows.push(BandRow::text(vec![Span::styled(
-                        format!(
-                            "   {} · {} seat{} share this sign-in",
-                            text::truncate(first_line(login), width.saturating_sub(30)),
-                            seats.len().max(1),
-                            if seats.len() > 1 { "s" } else { "" }
-                        ),
-                        theme::dim(),
-                    )]));
-                }
-                _ => {}
-            }
-            buttons.push((
-                "open in Now".into(),
-                theme::SURFACE2,
-                Hit::Alert(item.id.clone(), AlertTap::Open),
-            ));
-            rows.extend(BandRow::button_rows(buttons, width));
-            // Each alert carries a bar down its left side in its own colour.
-            for row in &mut rows[first_row..] {
-                row.line
-                    .spans
-                    .insert(0, Span::styled("▌", theme::fg(color)));
-                for hit in &mut row.hits {
-                    hit.0 += 1;
-                }
-            }
-        }
-        if count > SHOWN {
-            rows.push(BandRow {
-                line: Line::from(Span::styled(
-                    format!("   +{} more in Now", count - SHOWN),
-                    theme::dim(),
-                )),
-                hits: Vec::new(),
+    /// Open the alerts box: Home over the glass, with `agent`'s first alert selected (or the
+    /// first of all when none is about it). One alert is the card at once; several are the list,
+    /// and a click or the arrow keys and Enter go into one.
+    pub(super) fn open_alerts(&mut self, agent: &str) {
+        let first = self
+            .alerts_in(agent)
+            .first()
+            .map(|item| item.id.clone())
+            .or_else(|| {
+                self.world
+                    .attention
+                    .items()
+                    .iter()
+                    .find(|item| {
+                        item.is_alert()
+                            && !self.snoozed.contains(&item.id)
+                            && !self.closed.contains(&item.id)
+                    })
+                    .map(|item| item.id.clone())
             });
+        match first {
+            Some(id) => self.open_alert(&id),
+            None => self.flash("Nothing waits on you"),
         }
-        rows
     }
 
     /// Open an alert's whole card in Now, selected.
@@ -413,76 +147,6 @@ impl Ui {
             .position(|item| item == id)
         {
             self.select(index);
-        }
-    }
-
-    /// Send a typed answer to an alert from its band: a prompt's `allow` or `deny`, a structured
-    /// request's named answer, or the yes or no of a question.
-    pub(super) fn answer_alert(&mut self, id: &str, answer: &str) {
-        let Some(item) = self
-            .world
-            .attention
-            .items()
-            .iter()
-            .find(|item| item.id == id)
-        else {
-            self.flash("That alert is gone");
-            return;
-        };
-        let effect = match &item.kind {
-            AttentionKind::Prompt { .. } if item.actions.iter().any(|a| a == "prompt.respond") => {
-                Some((
-                    Effect::Attention {
-                        id: id.to_owned(),
-                        action: "prompt.respond".into(),
-                        reason: None,
-                        answer: Some(answer.to_owned()),
-                    },
-                    format!("Answering {answer}…"),
-                ))
-            }
-            AttentionKind::Request {
-                structured: Some(request),
-                ..
-            } => request
-                .answers
-                .iter()
-                .find(|option| option.id == answer)
-                .map(|option| {
-                    (
-                        Effect::Attention {
-                            id: id.to_owned(),
-                            action: "work.done".into(),
-                            reason: Some(option.label.clone()),
-                            answer: Some(option.id.clone()),
-                        },
-                        format!("Answering “{}”…", option.label),
-                    )
-                }),
-            AttentionKind::Request {
-                structured: None, ..
-            } if matches!(answer, "Yes" | "No")
-                && item.actions.iter().any(|a| a == "work.done") =>
-            {
-                Some((
-                    Effect::Attention {
-                        id: id.to_owned(),
-                        action: "work.done".into(),
-                        reason: Some(answer.to_owned()),
-                        answer: None,
-                    },
-                    format!("Answering “{answer}”…"),
-                ))
-            }
-            _ => None,
-        };
-        match effect {
-            Some((effect, notice)) if self.live => {
-                self.effects.push(effect);
-                self.flash(notice);
-            }
-            Some((_, notice)) => self.flash(format!("{notice} demo: nothing was sent")),
-            None => self.flash("st does not offer that answer here: open it in Now"),
         }
     }
 }
@@ -533,25 +197,6 @@ mod tests {
         Ui::new(world)
     }
 
-    fn running_call(title: &str) -> Entry {
-        Entry {
-            id: "tool-1".into(),
-            at: "10:00".into(),
-            body: Body::Tool {
-                title: title.into(),
-                state: ToolState::Running,
-                output: vec![],
-            },
-        }
-    }
-
-    /// The cards, as a person sees them after expanding the band.
-    impl Ui {
-        fn expanded_band(&self, agent: &str, width: usize) -> Vec<BandRow> {
-            self.alert_card(agent, width)
-        }
-    }
-
     fn texts(rows: &[BandRow]) -> String {
         rows.iter()
             .map(|row| {
@@ -565,118 +210,37 @@ mod tests {
             .join("\n")
     }
 
-    fn taps(rows: &[BandRow]) -> Vec<Hit> {
-        rows.iter()
-            .flat_map(|row| row.hits.iter().map(|(_, _, hit)| hit.clone()))
-            .collect()
-    }
-
     #[test]
-    fn nothing_waiting_shows_no_band() {
+    fn nothing_waiting_shows_no_line() {
         let ui = with_alerts(vec![]);
-        assert!(ui.expanded_band("agent/example/atlas", 80).is_empty());
+        assert!(ui.alert_band("agent/example/atlas", 80).is_empty());
     }
 
     #[test]
-    fn an_alert_shows_only_in_the_conversation_it_belongs_to() {
+    fn an_alert_shows_only_beside_the_agent_it_belongs_to() {
         let ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
-        assert!(!ui.expanded_band("agent/example/atlas", 80).is_empty());
-        assert!(ui.expanded_band("agent/example/other", 80).is_empty());
+        assert!(!ui.alert_band("agent/example/atlas", 80).is_empty());
+        assert!(ui.alert_band("agent/example/other", 80).is_empty());
     }
 
     #[test]
-    fn a_pending_claude_call_is_shown_in_full_beside_allow_and_deny() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
-        ui.world.conversations.insert(
-            "agent/example/atlas".into(),
-            Load::Ready(vec![running_call("Bash · rm -rf build/cache")]),
-        );
-        let rows = ui.expanded_band("agent/example/atlas", 80);
+    fn the_line_says_what_waits_and_has_one_target_that_opens_the_box() {
+        let ui = with_alerts(vec![
+            prompt("attention/a", &["allow", "deny"]),
+            prompt("attention/b", &[]),
+        ]);
+        let rows = ui.alert_band("agent/example/atlas", 80);
+        assert_eq!(rows.len(), 1);
         let shown = texts(&rows);
-        assert!(shown.contains("1 alert"), "{shown}");
-        assert!(shown.contains("rm -rf build/cache"), "{shown}");
-        let taps = taps(&rows);
-        assert!(taps.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("allow".into())
-        )));
-        assert!(taps.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("deny".into())
-        )));
-    }
-
-    #[test]
-    fn with_several_calls_unanswered_every_one_is_listed_and_only_deny_is_offered() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
-        ui.world.conversations.insert(
-            "agent/example/atlas".into(),
-            Load::Ready(vec![
-                running_call("Bash · rm -rf build/cache"),
-                Entry {
-                    id: "tool-2".into(),
-                    ..running_call("Write · notes.md")
-                },
-            ]),
-        );
-        let rows = ui.expanded_band("agent/example/atlas", 80);
-        let shown = texts(&rows);
-        assert!(shown.contains("2 calls are unanswered"), "{shown}");
-        assert!(
-            shown.contains("rm -rf build/cache") && shown.contains("notes.md"),
-            "{shown}"
-        );
-        let taps = taps(&rows);
-        assert!(!taps.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("allow".into())
-        )));
-        assert!(taps.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("deny".into())
-        )));
-    }
-
-    #[test]
-    fn allow_is_withheld_when_the_call_cannot_be_shown() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
-        // No call in the conversation yet.
-        let taps_without = taps(&ui.expanded_band("agent/example/atlas", 80));
-        assert!(!taps_without.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("allow".into())
-        )));
-        assert!(taps_without.contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("deny".into())
-        )));
-        // A call too long to read in full is not allowed from here either.
-        let long = format!("Bash · {}", "word ".repeat(200));
-        ui.world.conversations.insert(
-            "agent/example/atlas".into(),
-            Load::Ready(vec![running_call(&long)]),
-        );
-        let rows = ui.expanded_band("agent/example/atlas", 60);
-        assert!(!taps(&rows).contains(&Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("allow".into())
-        )));
-        assert!(texts(&rows).contains('…'));
-    }
-
-    #[test]
-    fn another_harnesss_prompt_is_answered_in_the_terminal() {
-        let ui = with_alerts(vec![prompt("attention/one", &[])]);
-        let rows = ui.expanded_band("agent/example/atlas", 80);
-        let shown = texts(&rows);
-        assert!(shown.contains("answer it in the terminal"), "{shown}");
+        assert!(shown.contains("2 alerts") && shown.contains("is waiting for a permission"), "{shown}");
+        assert!(shown.contains("▸ open"), "{shown}");
         assert_eq!(
-            taps(&rows),
-            vec![
-                Hit::Alert("agent/example/atlas".into(), AlertTap::Toggle),
-                Hit::Alert("attention/one".into(), AlertTap::Open)
-            ]
+            rows[0].hits.iter().map(|(_, _, hit)| hit.clone()).collect::<Vec<_>>(),
+            vec![Hit::Alert("agent/example/atlas".into(), AlertTap::Box)]
         );
+        for width in [12usize, 24, 40] {
+            assert_eq!(ui.alert_band("agent/example/atlas", width).len(), 1);
+        }
     }
 
     #[test]
@@ -694,45 +258,27 @@ mod tests {
             body: "hi".into(),
         };
         let ui = with_alerts(vec![update, message]);
-        assert!(ui.expanded_band("agent/example/atlas", 80).is_empty());
+        assert!(ui.alert_band("agent/example/atlas", 80).is_empty());
+        assert_eq!(ui.open_alert_count(), 0);
     }
 
     #[test]
-    fn more_than_two_alerts_say_how_many_wait_in_now() {
-        let ui = with_alerts(vec![
-            prompt("attention/a", &[]),
-            prompt("attention/b", &[]),
-            prompt("attention/c", &[]),
-        ]);
-        let shown = texts(&ui.expanded_band("agent/example/atlas", 80));
-        assert!(shown.contains("3 alerts"), "{shown}");
-        assert!(shown.contains("+1 more in Now"), "{shown}");
-    }
-
-    #[test]
-    fn tapping_allow_sends_prompt_respond_for_that_alert() {
-        let mut ui = with_alerts(vec![prompt("attention/one", &["allow", "deny"])]);
-        ui.live = true;
-        ui.click(Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("deny".into()),
-        ));
-        assert!(matches!(
-            ui.effects.as_slice(),
-            [Effect::Attention { id, action, answer: Some(answer), .. }]
-                if id == "attention/one" && action == "prompt.respond" && answer == "deny"
-        ));
-    }
-
-    #[test]
-    fn a_tap_on_a_gone_alert_sends_nothing() {
+    fn opening_the_box_selects_the_agents_first_alert_in_now() {
+        let mut other = prompt("attention/other", &[]);
+        other.agent = Some("agent/example/docs".into());
+        other.conversations = vec!["agent/example/docs".into()];
+        let mut ui = with_alerts(vec![other, prompt("attention/mine", &[])]);
+        ui.click(Hit::Alert("agent/example/atlas".into(), AlertTap::Box));
+        assert_eq!(ui.tab, 0);
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/mine"));
+        // With none about the agent, the first alert of all.
+        let mut ui = with_alerts(vec![prompt("attention/mine", &[])]);
+        ui.open_alerts("agent/example/nobody");
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/mine"));
+        // With none at all, it says so and opens nothing.
         let mut ui = with_alerts(vec![]);
-        ui.live = true;
-        ui.click(Hit::Alert(
-            "attention/gone".into(),
-            AlertTap::Answer("allow".into()),
-        ));
-        assert!(ui.effects.is_empty());
+        ui.open_alerts("agent/example/atlas");
+        assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("Nothing waits")));
     }
 
     #[test]
@@ -741,41 +287,5 @@ mod tests {
         ui.click(Hit::Alert("attention/b".into(), AlertTap::Open));
         assert_eq!(ui.tab, 0);
         assert_eq!(ui.attention_focus().as_deref(), Some("attention/b"));
-    }
-
-    #[test]
-    fn the_band_is_one_line_until_it_is_expanded() {
-        let mut ui = with_alerts(vec![
-            prompt("attention/a", &["allow", "deny"]),
-            prompt("attention/b", &[]),
-        ]);
-        let rows = ui.alert_band("agent/example/atlas", 80);
-        assert_eq!(rows.len(), 1, "{}", texts(&rows));
-        let shown = texts(&rows);
-        assert!(shown.contains("2 alerts"), "{shown}");
-        assert!(shown.contains("is waiting for a permission"), "{shown}");
-        // Nothing on the line answers an alert by accident.
-        assert_eq!(
-            taps(&rows),
-            vec![Hit::Alert("agent/example/atlas".into(), AlertTap::Toggle)]
-        );
-        ui.click(Hit::Alert("agent/example/atlas".into(), AlertTap::Toggle));
-        let open = ui.alert_band("agent/example/atlas", 80);
-        assert!(open.len() > 1);
-        assert!(taps(&open).contains(&Hit::Alert(
-            "attention/a".into(),
-            AlertTap::Answer("deny".into())
-        )));
-        ui.click(Hit::Alert("agent/example/atlas".into(), AlertTap::Toggle));
-        assert_eq!(ui.alert_band("agent/example/atlas", 80).len(), 1);
-    }
-
-    #[test]
-    fn the_collapsed_line_fits_a_narrow_pane() {
-        let ui = with_alerts(vec![prompt("attention/a", &[])]);
-        for width in [12usize, 24, 40] {
-            let rows = ui.alert_band("agent/example/atlas", width);
-            assert_eq!(rows.len(), 1);
-        }
     }
 }

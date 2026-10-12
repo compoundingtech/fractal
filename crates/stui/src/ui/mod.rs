@@ -444,8 +444,6 @@ pub struct Ui {
     /// When they were last written, and until when to leave a failing write alone.
     drafts_wrote: Instant,
     drafts_backoff: Option<Instant>,
-    /// The conversations whose alert band the person expanded; every other one is a single line.
-    alerts_open: HashSet<String>,
     /// `stui --glasses`: named glasses of tabs and split panes, and a palette, in place of the
     /// sidebar layout.
     pub(crate) glasses: Option<glass::Glasses>,
@@ -469,6 +467,8 @@ pub struct Ui {
     pub(crate) terminal_size: Cell<(u16, u16)>,
     /// Where the attached terminal's screen was last drawn, for its mouse.
     terminal_body: Cell<Option<Rect>>,
+    /// Where the alerts badge was drawn over a terminal this frame: a click there is the box's.
+    alert_badge: Cell<Option<Rect>>,
     /// Where the attached terminal's cursor is on screen and its shape, when the terminal has
     /// the keys: the person's own cursor shows it.
     terminal_cursor: Cell<Option<pty::Cursor>>,
@@ -707,7 +707,6 @@ impl Ui {
             drafts_saved: HashMap::new(),
             drafts_wrote: Instant::now(),
             drafts_backoff: None,
-            alerts_open: HashSet::new(),
             glasses: None,
             session_focus: None,
             build: false,
@@ -717,6 +716,7 @@ impl Ui {
             cursor: edit::Cursor::default(),
             terminal_size: Cell::new((24, 80)),
             terminal_body: Cell::new(None),
+            alert_badge: Cell::new(None),
             terminal_cursor: Cell::new(None),
             terminal_selecting: false,
             terminal_selection_mode: false,
@@ -1520,6 +1520,7 @@ impl Ui {
             ..FrameInfo::default()
         };
         self.terminal_cursor.set(None);
+        self.alert_badge.set(None);
         buf.set_style(area, Style::default().bg(theme::BASE).fg(theme::TEXT));
         if area.width < 20 || area.height < 6 {
             buf.set_stringn(
@@ -3216,6 +3217,8 @@ impl Ui {
             if let Some(picker) = &self.picker {
                 native.draw_graphics(buf, body, picker);
             }
+            // What waits on the person, over a corner of the program's screen: a click opens it.
+            self.draw_alert_badge(buf, body, agent);
             return;
         }
         let header = format!(" ← Return · Ctrl+\\   {}", view.title);
@@ -3257,6 +3260,7 @@ impl Ui {
                 cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
             }
         }
+        self.draw_alert_badge(buf, area, agent);
     }
 
     /// Whether the attached terminal is a shell rather than an agent's.
@@ -5789,6 +5793,15 @@ impl Ui {
         let (Some(native), Some(body)) = (self.native_terminal(), self.terminal_body.get()) else {
             return false;
         };
+        // The alerts badge is drawn over the program's screen, and a click on it opens the box
+        // instead of reaching the program.
+        if self
+            .alert_badge
+            .get()
+            .is_some_and(|badge| contains(badge, mouse.column, mouse.row))
+        {
+            return false;
+        }
         let inside = contains(body, mouse.column, mouse.row);
         let (column, row) = (
             i32::from(mouse.column) - i32::from(body.x),
@@ -6066,8 +6079,7 @@ impl Ui {
             Hit::Help => self.help = !self.help,
             Hit::Answer(index) => self.answering = Some(index),
             Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
-            Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
-            Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
+            Hit::Alert(agent, AlertTap::Box) => self.open_alerts(&agent),
             Hit::Voice => {
                 self.editing = true;
                 self.start_voice();

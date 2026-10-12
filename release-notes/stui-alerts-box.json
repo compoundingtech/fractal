@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "In stui the alerts line above a conversation and a new badge over an attached terminal open the alerts box, Home floated over the glass with the agent's first alert selected (the card at once for one alert, the list for several); Ctrl+N opens it from a conversation; the in-place expanded alert cards are gone",
+  "replay": {"status": "none", "detail": "No replay, backfill, stored data or transcript change."},
+  "schema": {"status": "none", "detail": "No schema, operation or contract digest change. stui only."},
+  "rules": {"status": "none", "detail": "No claim, checkpoint, retention or authority rule change."},
+  "compatibility": {"status": "none", "detail": "stui-only change against any member."},
+  "downtime": {"status": "none", "detail": "Client-only change; no deployment ordering."},
+  "manual": {"status": "none", "detail": "No manual action."},
+  "recovery": {"status": "none", "detail": "No recovery, durable payload or initialization changes."}
+}

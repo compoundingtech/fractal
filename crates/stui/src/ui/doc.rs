@@ -9,15 +9,14 @@ use super::theme;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// What a button on an alert does.
+/// What a click on an alert's line or badge does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlertTap {
-    /// Send one of its typed answers: `allow`, `deny`, or a structured answer's id.
-    Answer(String),
     /// Open the alert's whole card in Now, where every kind is answered.
     Open,
-    /// Expand or collapse the band: the `Hit` names the agent's conversation, not an alert.
-    Toggle,
+    /// Open the alerts box: Home over the glass, on the agent's first alert. The `Hit` names the
+    /// agent, not an alert.
+    Box,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
