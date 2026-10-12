@@ -375,12 +375,14 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   const state = stateKey === undefined ? undefined : store?.get(stateKey)
   const [layout] = React.useState(() => new ListLayout())
   const [unread, setUnread] = React.useState(state?.unread ?? false)
+  const unreadRef = React.useRef(unread)
+  unreadRef.current = unread
   const [controller] = React.useState(() => new ScrollController({
     layout,
     initial: state?.anchor ?? (state !== undefined && !state.following
       ? { _tag: 'Reading', entry: null, offset: 0, scrollTop: state.top }
       : { _tag: 'Following' }),
-    setUnread,
+    setUnread: value => { unreadRef.current = value; setUnread(value) },
     save: anchor => {
       if (stateKey !== undefined) store?.save(stateKey, {
         anchor, top: anchor._tag === 'Reading' ? anchor.scrollTop : 0,
@@ -388,25 +390,30 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
       })
     },
   }))
-  const unreadRef = React.useRef(unread)
-  unreadRef.current = unread
   const element = React.useRef<HTMLDivElement | null>(null)
   const current = React.useRef(history)
   current.current = history
-  const request = React.useRef<{ tag: VirtualViewportHistory['_tag']; first: string | undefined; called: boolean }>({
-    tag: history._tag, first: items[0]?.id, called: false,
+  const request = React.useRef({
+    tag: history._tag, first: items[0]?.id, moreCalled: false, retryCalled: false,
   })
-  if (request.current.tag !== history._tag || request.current.first !== items[0]?.id) {
-    request.current = { tag: history._tag, first: items[0]?.id, called: false }
+  if (request.current.first !== items[0]?.id) {
+    request.current = { tag: history._tag, first: items[0]?.id, moreCalled: false, retryCalled: false }
+  } else if (request.current.tag !== history._tag) {
+    // Loading -> More with an empty page does not authorize another fetch.
+    // A fresh failed state does authorize one reader-driven retry.
+    if (history._tag === 'Failed') request.current.retryCalled = false
+    request.current.tag = history._tag
   }
   const prefetch = React.useCallback((scrollUp = false) => {
     const viewport = element.current
-    if (viewport === null || viewport.scrollTop > viewport.clientHeight * 1.5 || request.current.called) return
+    if (viewport === null || viewport.scrollTop > viewport.clientHeight * 1.5) return
     const source = current.current
-    if (source._tag === 'More' || source._tag === 'Failed' && scrollUp) {
-      request.current.called = true
-      if (source._tag === 'More') source.loadOlder()
-      else source.retry()
+    if (source._tag === 'More' && !request.current.moreCalled) {
+      request.current.moreCalled = true
+      source.loadOlder()
+    } else if (source._tag === 'Failed' && scrollUp && !request.current.retryCalled) {
+      request.current.retryCalled = true
+      source.retry()
     }
   }, [])
   const attach = React.useCallback((viewport: HTMLDivElement | null) => {
@@ -414,6 +421,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     if (viewport === null) return
     const cleanup = controller.attach(viewport)
     let top = viewport.scrollTop
+    let keyboardFrame: number | undefined
     const onScroll = () => {
       const up = viewport.scrollTop < top
       top = viewport.scrollTop
@@ -423,19 +431,23 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     const onKey = (event: KeyboardEvent) => {
       if (!(event.target instanceof HTMLElement) || event.target.closest('input,textarea,[contenteditable="true"]')) return
       if (event.key !== 'PageUp' && event.key !== 'Home' && event.key !== 'ArrowUp') return
-      // RAC's collection navigation would move focus instead of scrolling history.
-      event.preventDefault()
-      viewport.scrollTop = event.key === 'Home' ? 0 : viewport.scrollTop - (event.key === 'PageUp' ? viewport.clientHeight : geometryNumbers.scrollEndTolerance * 16)
-      prefetch(true)
+      // Let the platform/RAC perform navigation. Observe its resulting position,
+      // without writing scrollTop or competing with the collection's focus.
+      if (keyboardFrame !== undefined) cancelAnimationFrame(keyboardFrame)
+      keyboardFrame = requestAnimationFrame(() => {
+        keyboardFrame = undefined
+        prefetch(true)
+      })
     }
     viewport.addEventListener('scroll', onScroll, { passive: true })
     viewport.addEventListener('wheel', onWheel, { passive: true })
-    viewport.addEventListener('keydown', onKey, true)
+    viewport.addEventListener('keydown', onKey)
     return () => {
       cleanup?.()
       viewport.removeEventListener('scroll', onScroll)
       viewport.removeEventListener('wheel', onWheel)
-      viewport.removeEventListener('keydown', onKey, true)
+      viewport.removeEventListener('keydown', onKey)
+      if (keyboardFrame !== undefined) cancelAnimationFrame(keyboardFrame)
       element.current = null
     }
   }, [controller, prefetch])

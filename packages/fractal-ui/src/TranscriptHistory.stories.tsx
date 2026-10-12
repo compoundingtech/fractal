@@ -28,7 +28,7 @@ function makeTurn(index: number): TranscriptTurn {
 }
 // Shared immutable fixtures, matching Transcript.stories' runtime-source/work-log pattern.
 const turns = Array.from({ length: total + 2 }, (_, index) => makeTurn(index))
-const failures = ['none', 'dom-bound', 'prepend', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
+const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
 type Failure = typeof failures[number]
 type Page = { readonly _tag: 'Ready' } | { readonly _tag: 'Loading' } | { readonly _tag: 'Failed' }
 const styles = stylex.create({
@@ -46,7 +46,12 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
   const [failNext, setFailNext] = React.useState(false)
   const [revision, setRevision] = React.useState(0)
   const [action, setAction] = React.useState('')
-  const loadOlder = () => { setPage({ _tag: 'Loading' }); setAction('request'); setRevision(value => value + 1) }
+  const [requests, setRequests] = React.useState(0)
+  const [resized, setResized] = React.useState(false)
+  const [switchedTheme, setSwitchedTheme] = React.useState(false)
+  const [followKey, setFollowKey] = React.useState<string | undefined>(undefined)
+  const effectiveScheme = switchedTheme ? scheme === 'dark' ? 'light' : 'dark' : scheme
+  const loadOlder = () => { setRequests(value => value + 1); setPage({ _tag: 'Loading' }); setAction('request'); setRevision(value => value + 1) }
   const deliver = () => {
     if (failNext) { setFailNext(false); setPage({ _tag: 'Failed' }); setAction('error') }
     else { setStart(value => Math.max(0, value - pageSize)); setPage({ _tag: 'Ready' }); setAction('prepend') }
@@ -62,6 +67,15 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
     if (lane === null || lane === undefined) return
     const frame = requestAnimationFrame(() => {
       if (failure === 'prepend' && action === 'prepend') lane.scrollTop = 0
+      if (failure === 'prepend-focus' && action === 'prepend') lane.focus()
+      if (failure === 'resize' && action === 'resize') lane.scrollTop = 0
+      if (failure === 'theme' && action === 'theme') lane.scrollTop = 0
+      if (failure === 'empty-page' && action === 'empty') loadOlder()
+      if (failure === 'unread' && action === 'append') {
+        const unread = [...root.current!.querySelectorAll('button')].find(button => button.textContent?.includes('New messages'))
+        if (unread !== undefined) unread.hidden = true
+      }
+      if (failure === 'stale-jump' && action === 'prepend' && followKey !== undefined) handle.current?.jumpTo('history/50')
       if (failure === 'append-reading' && action === 'append') lane.scrollTop = lane.scrollHeight
       if (failure === 'append-following' && action === 'append') lane.scrollTop = 0
       if (failure === 'start' && start === 0) lane.querySelector('[data-testid="history-start"]')?.remove()
@@ -72,18 +86,22 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
     })
     return () => cancelAnimationFrame(frame)
   }, [failure, revision, action, start])
-  return <main ref={root} data-scheme={scheme} data-loaded={loaded.length} data-start={start} data-page={page._tag} data-end={end} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
+  return <main ref={root} data-scheme={effectiveScheme} data-requests={requests} data-loaded={loaded.length} data-start={start} data-page={page._tag} data-end={end} {...stylex.props(styles.root, (narrow !== resized) && styles.narrow, ...baselineTheme, effectiveScheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}>
       <button type="button" onClick={() => { setAction('control'); setRevision(value => value + 1) }}>Apply selected regression</button>
       <button type="button" disabled={page._tag !== 'Ready' || start === 0} onClick={loadOlder}>Request older page</button>
-      <button type="button" disabled={page._tag !== 'Loading'} onClick={deliver}>Deliver older page</button>
+      <button type="button" disabled={page._tag !== 'Loading'} onMouseDown={event => event.preventDefault()} onClick={deliver}>Deliver older page</button>
+      <button type="button" disabled={page._tag !== 'Loading'} onClick={() => { setPage({ _tag: 'Ready' }); setAction('empty'); setRevision(value => value + 1) }}>Deliver empty page</button>
+      <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => { setResized(value => !value); setAction('resize'); setRevision(value => value + 1) }}>Resize reading lane</button>
+      <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => { setSwitchedTheme(value => !value); setAction('theme'); setRevision(value => value + 1) }}>Switch reading theme</button>
+      <button type="button" onClick={() => setFollowKey(value => value === undefined ? 'latest/1' : `${value}/next`)}>Follow latest</button>
       <button type="button" onClick={() => setFailNext(true)}>Fail next page</button>
-      <button type="button" disabled={end === total + 2} onClick={() => { setEnd(value => value + 1); setAction('append'); setRevision(value => value + 1) }}>Append turn</button>
+      <button type="button" disabled={end === total + 2} onMouseDown={event => event.preventDefault()} onClick={() => { setEnd(value => value + 1); setAction('append'); setRevision(value => value + 1) }}>Append turn</button>
       <button type="button" onClick={() => { if (failure !== 'jump') handle.current?.jumpTo('history/50') }}>Jump to unloaded checkpoint 50</button>
       <button type="button" onClick={() => handle.current?.jumpTo('history/1300')}>Jump to loaded checkpoint 1300</button>
     </div>
     <section aria-label="Paged conversation" {...stylex.props(styles.frame)} onKeyDownCapture={event => { if (failure === 'keyboard' && (event.key === 'Home' || event.key === 'PageUp')) { event.preventDefault(); event.stopPropagation() } }} onClickCapture={event => { if (failure === 'fold' && (event.target as Element).closest('[data-testid="work-log"]')) { event.preventDefault(); event.stopPropagation() } }}>
-      <EmbraceRuntimeProvider options={{ messages, onNew: async () => {} }}><Transcript ref={handle} title="Checkpoint review" turns={loaded} history={history} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} /></EmbraceRuntimeProvider>
+      <EmbraceRuntimeProvider options={{ messages, onNew: async () => {} }}><Transcript ref={handle} scrollToBottomKey={followKey} title="Checkpoint review" turns={loaded} history={history} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} /></EmbraceRuntimeProvider>
     </section>
   </main>
 }
@@ -123,16 +141,31 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   const anchor = row(1300)!
   const readingTop = anchor.getBoundingClientRect().top
+  const heldReader = within(anchor).getByRole('button', { name: /Worked/ })
+  heldReader.focus({ preventScroll: true })
   await userEvent.click(canvas.getByRole('button', { name: 'Append turn' }))
   await waitFor(() => expect(root).toHaveAttribute('data-end', '2402'))
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   await expect(anchor.getBoundingClientRect().top - readingTop).toBe(0)
   await expect(bottomGap()).toBeGreaterThan(lane.clientHeight)
+  await expect(document.activeElement).toBe(heldReader)
+  await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
+
+  // Remeasure wrapping and theme without moving the current reading anchor.
+  for (const name of ['Resize reading lane', 'Switch reading theme', 'Resize reading lane', 'Switch reading theme']) {
+    const top = row(1300)!.getBoundingClientRect().top
+    await userEvent.click(canvas.getByRole('button', { name }))
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    await expect(row(1300)!.getBoundingClientRect().top - top).toBe(0)
+  }
 
   // A manually completed asynchronous prepend must move the reading anchor by 0px.
   await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
+  const focusedBeforePrepend = within(row(1300)!).getByRole('button', { name: /Worked/ })
+  focusedBeforePrepend.focus()
   await deliver(200)
   await waitFor(() => expect(row(1300)?.getBoundingClientRect().top - readingTop).toBe(0))
+  await expect(document.activeElement).toBe(focusedBeforePrepend)
   await mountedBound()
 
   // Expand and fold a measured mid-list work log, retaining its turn and reading position.
@@ -154,10 +187,18 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
   const beforePageUp = lane.scrollTop
   await userEvent.keyboard('{PageUp}')
   await waitFor(() => expect(lane.scrollTop).toBeLessThan(beforePageUp))
-  await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
+  // Empty success retains the oldest ID and must not trigger a request loop.
   lane.focus()
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+  const requestsBeforeEmpty = root.getAttribute('data-requests')
+  await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await expect(root).toHaveAttribute('data-page', 'Ready')
+  await expect(root).toHaveAttribute('data-start', '200')
+  await expect(root).toHaveAttribute('data-requests', requestsBeforeEmpty!)
+  await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
   await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Failed'))
   await expect(await canvas.findByTestId('history-error')).toHaveTextContent('Earlier messages could not be loaded')
@@ -187,6 +228,29 @@ export const Dark1440: Story = { play: exerciseHistory }
 export const Light1440: Story = { args: { scheme: 'light' }, play: exerciseHistory }
 export const Dark440: Story = { args: { narrow: true }, play: exerciseHistory }
 export const Light440: Story = { args: { scheme: 'light', narrow: true }, play: exerciseHistory }
+
+async function exerciseNewerFollow({ canvasElement }: { canvasElement: HTMLElement }) {
+  const canvas = within(canvasElement)
+  const root = canvasElement.querySelector('main')!
+  const lane = await canvas.findByTestId('transcript-scroll')
+  await waitFor(() => expect(lane.querySelector('[data-testid="transcript-turn"]')).not.toBeNull())
+  await userEvent.click(canvas.getByRole('button', { name: 'Jump to unloaded checkpoint 50' }))
+  await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+  await userEvent.click(canvas.getByRole('button', { name: 'Follow latest' }))
+  await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight).toBeLessThanOrEqual(1))
+  for (const start of [200, 100, 0]) {
+    if (start !== 200) await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+    await waitFor(() => expect(root).toHaveAttribute('data-start', String(start)))
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    await expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight).toBeLessThanOrEqual(1)
+  }
+  await expect(lane.querySelector('[data-embrace-entry-id="history/50"]')).toBeNull()
+}
+export const NewerFollowDark1440: Story = { play: exerciseNewerFollow }
+export const NewerFollowLight1440: Story = { args: { scheme: 'light' }, play: exerciseNewerFollow }
+export const NewerFollowDark440: Story = { args: { narrow: true }, play: exerciseNewerFollow }
+export const NewerFollowLight440: Story = { args: { scheme: 'light', narrow: true }, play: exerciseNewerFollow }
 function HistoryStates({ scheme = 'dark', narrow = false }: { scheme?: Scheme; narrow?: boolean }) {
   const [requested, setRequested] = React.useState(false)
   const [retried, setRetried] = React.useState(false)
