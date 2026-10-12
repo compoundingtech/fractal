@@ -361,28 +361,35 @@ async function keyboardPlay({ canvasElement: canvas }: Play) {
 }
 
 type GlyphSample = { t: number; visible: boolean; word: boolean; animation: string | null }
-/** Samples are timed from the Loading commit; `settled` is the second sample after a 300ms reference timer armed at that commit fired. */
-type GlyphTiming = { samples: readonly GlyphSample[]; settled: number }
+/**
+ * Samples are timed from the click; the first shares the Loading commit's task. `committed` is when the story observes that commit,
+ * and `settled` is the second sample after a 300ms reference timer armed then fired.
+ */
+type GlyphTiming = { samples: readonly GlyphSample[]; committed: number; settled: number }
 function assertTiming({ samples, settled }: GlyphTiming) {
-  const first = samples.find(sample => sample.visible)?.t
-  requireContract(first !== undefined && first >= 290 && first <= settled, 'Loading glyph does not first appear around 300ms')
+  // The glyph's timer is armed in the commit's passive effects: after the click, and before the story observes the commit, because the
+  // rest of that flush (the pending body's effects and forced layout) still runs first. So the earliest bounds are the click in wall time
+  // and the commit's own task in event order (no timer runs inside it); the latest bound is the reference, armed after the glyph's timer.
+  const index = samples.findIndex(sample => sample.visible), first = samples[index]?.t
+  requireContract(index > 0 && first !== undefined && first >= 290 && first <= settled, 'Loading glyph does not first appear around 300ms')
   requireContract(!samples.some(sample => sample.word), 'Loading shows a status word')
   requireContract(!samples.some(sample => sample.animation !== null && sample.animation !== 'none'), 'Loading glyph animates')
   requireContract(!samples.some((sample, index) => index > 0 && samples[index - 1]!.visible && !sample.visible), 'Loading glyph flickers')
 }
 async function sampleGlyph(canvas: HTMLElement, mutate?: (glyph: HTMLElement) => void): Promise<GlyphTiming> {
   const head = headFor(paneFor(canvas)), samples: GlyphSample[] = []
+  const clicked = performance.now()
   click(canvas, '[data-recovery-action="loading"]')
   // React commits the click's discrete update in a microtask, after rendering the whole pending Details body; the glyph's delay
-  // starts at that commit. Timing from before the click charged that body render to the glyph.
+  // starts in that commit. Timing the upper bound from before the click charged that body render to the glyph.
   await Promise.resolve()
   requireContract(element(head, '[data-pane-sync-status]').dataset.paneSyncPhase === 'loading', 'Loading did not commit with its click')
-  const started = performance.now()
+  const committed = performance.now() - clicked
   // The upper bound is event-loop order, not wall time: a starved main thread delays this reference and the glyph's own timer alike.
   const reference = { due: Infinity }
-  setTimeout(() => { reference.due = performance.now() - started }, 300)
+  setTimeout(() => { reference.due = performance.now() - clicked }, 300)
   const sample = () => {
-    const glyph = head.querySelector<HTMLElement>('[data-pane-sync-glyph]'), t = performance.now() - started
+    const glyph = head.querySelector<HTMLElement>('[data-pane-sync-glyph]'), t = performance.now() - clicked
     if (glyph && mutate) mutate(glyph)
     samples.push({ t, visible: shown(glyph), word: [...head.querySelectorAll('[data-pane-sync-word],[data-pane-sync-word-trigger]')].some(shown), animation: glyph ? getComputedStyle(glyph.firstElementChild!).animationName : null })
     return t
@@ -394,8 +401,8 @@ async function sampleGlyph(canvas: HTMLElement, mutate?: (glyph: HTMLElement) =>
     await frames(1)
     const t = sample()
     if (t >= reference.due && ++afterDue === 2) settled = t
-  } while (performance.now() - started < 700 || afterDue < 2)
-  return { samples, settled }
+  } while (performance.now() - clicked < committed + 700 || afterDue < 2)
+  return { samples, committed, settled }
 }
 function assertAnnouncer(head: HTMLElement) { const regions = head.querySelectorAll('[aria-live]'); requireContract(regions.length === 1 && regions[0]!.getAttribute('aria-live') === 'polite', 'Header does not have exactly one polite live region') }
 function assertSpoken(spoken: readonly string[], phase: string, expected: number) {
@@ -428,7 +435,7 @@ async function feedbackPlay({ canvasElement: canvas }: Play) {
         requireContract(Math.abs(element(head, '[role="tab"]').getBoundingClientRect().left - initialTabLeft) <= 0.5, 'Header title moves during observation transitions')
         edges.push({ edge, spoken: [...spoken] })
       }
-      assertShifts(shifts.stop()); measurements.push({ width, firstVisible: timing.samples.find(sample => sample.visible)!.t, settled: timing.settled, edges })
+      assertShifts(shifts.stop()); measurements.push({ width, firstVisible: timing.samples.find(sample => sample.visible)!.t, committed: timing.committed, settled: timing.settled, edges })
       const polite = region.getAttribute('aria-live')!; region.setAttribute('aria-live', 'assertive')
       try { await rejectsControl('Header does not have exactly one polite live region', () => assertAnnouncer(head)) } finally { region.setAttribute('aria-live', polite) }
       // Mutate the real region and let its observer report duplicate speech: no fabricated entry.
