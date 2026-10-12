@@ -583,6 +583,7 @@ enum Action {
     ToggleSimple,
     /// Agents open on their terminal, or on their conversation.
     ToggleTerminalFirst,
+    ToggleTerminalFallback,
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -959,6 +960,16 @@ impl Ui {
             "this device; the conversation is the default",
             "terminal conversation default view open agents attach tui".into(),
             Action::ToggleTerminalFirst,
+        ));
+        choices.push(start(
+            if self.terminal_fallback {
+                "Fabric only, no fallback".into()
+            } else {
+                "Fall back through the daemon".into()
+            },
+            "terminal routes on this device; daemon fallback is the default",
+            "terminal fabric direct daemon gateway fallback setting".into(),
+            Action::ToggleTerminalFallback,
         ));
         choices.extend(self.said_choices(name));
         let Some(glasses) = &self.glasses else {
@@ -3013,6 +3024,7 @@ impl Ui {
             Action::NewMission => self.open_new_mission(),
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleTerminalFirst => self.toggle_terminal_first(),
+            Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -4588,6 +4600,16 @@ mod tests {
             draft_before,
             "nothing is typed into the draft of a tab that is not shown"
         );
+    }
+
+    #[test]
+    fn terminal_fallback_defaults_on_and_the_palette_changes_it_locally() {
+        let mut ui = glass();
+        assert!(ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(!ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(ui.terminal_fallback);
     }
 
     #[test]

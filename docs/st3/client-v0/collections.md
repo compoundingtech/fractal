@@ -184,3 +184,55 @@ Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
 retain their prior row timestamp so an unchanged count emits no delta.
+
+## Screen inventories
+
+Optional capability `inventory-collections` version 1 advertises six additional
+collections: `clients`, `usage`, `machines`, `devices`, `sessions`, and `terminals`.
+Older daemons omit it; clients keep their existing HTTP reads for that member and
+say that the member is read, not followed. These subscriptions use the existing
+v0 `snapshot` then `changes` frames, including removals, complete order and fences.
+The row-delta transport is not yet merged. Each subscription consumes one of the
+sixteen slots, including the terminals **list**, which is separate from a selected
+`terminal` screen.
+
+All six require `read.projections`, as their HTTP reads do. Devices select the
+session's authenticated person, or an explicitly authorized `person`, using the
+same rules as `GET /v1/client/devices`. Only active devices are included. Sessions
+contain native sessions (`native_only=true`), with managed sessions excluded.
+Machines and terminals contain the same current rows as their HTTP lists. These
+inventories accept a `limit` of 1–200 (default 50). History remains on HTTP. Devices
+accept `person`; the other five accept no person, actor, subject or status filter.
+
+Clients use `kind: "connected-client"` resources with the HTTP connection fields
+and a stable ID derived from member, actor, reported client name and route.
+Connect, disconnect, followed-window changes and requests wake the collection;
+recent request-only rows leave at their five-minute expiry. Opening a stream does
+not require a graph write. Reconnect always returns a fresh snapshot of presence.
+
+Usage has one `usage/current` resource with `kind: "usage"` and `value: UsagePeriod`:
+rows, account limits and agent-message estimates come from the same read as
+`usage.period`, inside the frame's SQLite snapshot. `limit` bounds its nested
+usage rows, ranked as on HTTP; `has_more` means more usage rows exist. Limits and
+message estimates describe the whole period. Send millisecond boundaries:
+
+```json
+{"kind":"subscribe","id":"usage-tab","collection":"usage","since_ms":1791763200000,"until_ms":1791849600000,"limit":200}
+```
+
+An omitted `until_ms` follows new usage through the current read time; an omitted
+`since_ms` starts 24 hours before that end. An explicit end remains fixed across
+changes and reconnects. New usage, limit readings and message sends wake this
+collection; an idle report has no periodic reread. Paired inventory authority expires at its grant deadline, without periodic list
+reads. Native sessions also follow
+transcript filesystem events and, on Linux, observed process exits. Device expiry
+and recent-client expiry schedule their actual deadlines rather than polling.
+
+Keep `clients` open only in Fleet, `usage` only in Usage, `devices` and `sessions`
+only where their lists show, and `terminals` only where the terminal chooser/list
+shows. `machines` stays open while the sidebar is visible (including Fleet).
+Existing always-held attention, missions, agents, work, glasses, arrangements and
+summary windows retain their client policy. Conversation and terminal-screen slots
+are reserved before optional list windows. Leaving a screen unsubscribes its
+inventory after the client's existing grace period. Pull to refresh replaces the
+subscription with the same ID to obtain a fresh authoritative snapshot.
