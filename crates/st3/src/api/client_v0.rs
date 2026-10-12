@@ -12736,7 +12736,7 @@ mission "queue-parity" state="ready" {
         );
 
         // A healthy attempt is already in flight; a fresh read must wait for its result.
-        let _admission = state.store.admit_agent_resources().await;
+        let _admission = state.store.admit_agent_resources("other").await;
         let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one",
             "observed_at_ms":2}));
         let store = state.store.clone();
@@ -12959,7 +12959,7 @@ mission "queue-parity" state="ready" {
 
         // A claim about the agent changes its card. Start a healthy attempt and hold it:
         // the fresh read must wait for this attempt's publication, not answer early.
-        let _admission = state.store.admit_agent_resources().await;
+        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
