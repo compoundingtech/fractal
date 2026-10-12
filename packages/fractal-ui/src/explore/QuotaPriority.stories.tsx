@@ -135,9 +135,13 @@ export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({
   })
   await step('Single policy, persistent reset and secondary-only disclosure', async () => {
     await userEvent.click(canvas.getByRole('button', { name: 'Compare policies' }))
-    await userEvent.click(canvas.getByRole('button', { name: 'D D3' }))
     await userEvent.click(canvas.getByRole('button', { name: 'W 200' }))
     await waitFor(() => expect(canvasElement.querySelectorAll('[data-sidebar]').length).toBe(1)); assertTables(canvasElement)
+    for (const drop of drops) {
+      await userEvent.click(canvas.getByRole('button', { name: `D ${drop.id}` }))
+      await waitFor(() => expect(canvasElement.querySelector('[data-sidebar]')?.getAttribute('data-drop')).toBe(drop.id))
+      assertTables(canvasElement)
+    }
     await userEvent.click(canvas.getByRole('button', { name: 'Show 2 secondary windows for North studio' }))
     const dialog = await within(document.body).findByRole('dialog', { name: 'Secondary windows for North studio' })
     expect(within(dialog).getByText('41%')).toBeVisible(); expect(within(dialog).getByText('18%')).toBeVisible()
@@ -149,6 +153,10 @@ export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({
     primary.remove(); expect(() => assertTables(canvasElement)).toThrow(); parent.insertBefore(primary, next)
     const reset = canvasElement.querySelector<HTMLElement>('[data-reset]')!
     reset.style.whiteSpace = 'normal'; expect(() => assertTables(canvasElement)).toThrow(); reset.style.removeProperty('white-space'); assertTables(canvasElement)
+    const overflow = canvasElement.querySelector<HTMLElement>('[data-overflow-count]')!
+    overflow.setAttribute('data-overflow-count', '3'); expect(() => assertTables(canvasElement)).toThrow(); overflow.setAttribute('data-overflow-count', '2')
+    const table = canvasElement.querySelector<HTMLElement>('[data-quota-table]')!
+    table.style.columnGap = '0'; expect(() => assertTables(canvasElement)).toThrow(); table.style.removeProperty('column-gap'); assertTables(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: /Account Meadow research/ }))
     expect(await canvas.findByRole('region', { name: 'Meadow research usage details' })).toBeVisible()
     expect(canvas.getAllByText('Unreported').length).toBeGreaterThan(0)
