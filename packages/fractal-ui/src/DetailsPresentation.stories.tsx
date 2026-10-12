@@ -166,8 +166,10 @@ export const NarrowValueColumns:Story={
         // Current work paints beside the button; the hidden description legitimately repeats facts, so only painted fields count.
         const assertOneTitle=()=>requireContract(button.innerText.split(title).length===2&&!row.querySelector('[data-row-field="current-work"]')?.textContent?.includes(title),'Subagent current work repeats its painted title')
         assertRowName();assertOneTitle()
-        button.setAttribute('aria-label',`${title}, 0 unread`)
-        try{await rejectsControl('Subagent row name differs from its visible title or its description omits the location',assertRowName)}finally{button.removeAttribute('aria-label')}
+        // aria-labelledby overrides aria-label, so the control widens the real name source with the hidden description's facts.
+        const labelledBy=button.getAttribute('aria-labelledby');requireContract(labelledBy,'Subagent row button is not named by its painted title')
+        button.setAttribute('aria-labelledby',`${labelledBy} ${button.getAttribute('aria-describedby')}`)
+        try{await rejectsControl('Subagent row name differs from its visible title or its description omits the location',assertRowName)}finally{button.setAttribute('aria-labelledby',labelledBy)}
         assertRowName()
         const duplicate=button.ownerDocument.createElement('span');duplicate.textContent=title;button.append(duplicate)
         try{await rejectsControl('Subagent current work repeats its painted title',assertOneTitle)}finally{duplicate.remove()}
