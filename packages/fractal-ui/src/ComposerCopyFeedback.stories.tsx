@@ -67,7 +67,8 @@ const play: Story['play'] = async ({ canvasElement, args }) => {
     const glyph = (testId: string) => canvas.getByTestId(testId).querySelector('svg')!.innerHTML
     const tooltip = () => within(document.body).queryByRole('tooltip')
     for (const name of ['Copy code', 'Copy answer']) {
-      const button = canvas.getByRole('button', { name, exact: true })
+      // A string name matches the whole accessible name, so "Copy code" never matches "Copy code: Copied".
+      const button = canvas.getByRole('button', { name })
       const status = name === 'Copy code' ? button.closest('[data-testid="markdown-code-block"]')!.querySelector('[role="status"]')! : canvas.getByRole('region', { name: 'Answer action' }).querySelector('[role="status"]')!
       await expect(status).toHaveAttribute('aria-live', 'polite')
       await expect(button.querySelector('svg')!.innerHTML).toBe(glyph('copy-glyph'))
