@@ -338,12 +338,15 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       for (const row of rows) if (!row.isConnected) { observer.unobserve(row); rows.delete(row) }
       for (const row of viewport.querySelectorAll('[data-sidebar-tree-key]')) if (!rows.has(row)) { observer.observe(row); rows.add(row) }
     }
-    const mutations = new MutationObserver(() => {
+    const mutations = new MutationObserver(records => {
       applyMeasuredAnchor()
       track()
+      // RAC rebinds a reused row element to another key without remounting it. Observing it
+      // again resets its last reported size, so the rebound row reports its size once.
+      for (const record of records) if (record.attributeName === 'data-sidebar-tree-key' && record.target instanceof Element && record.target.isConnected) observer.observe(record.target)
       schedule()
     })
-    mutations.observe(viewport, { childList: true, attributes: true, attributeFilter: ['style'], subtree: true })
+    mutations.observe(viewport, { childList: true, attributes: true, attributeFilter: ['style', 'data-sidebar-tree-key'], subtree: true })
     track()
     return () => { observer.disconnect(); mutations.disconnect(); if (frame.current !== undefined) cancelAnimationFrame(frame.current); frame.current = undefined }
   }, [schedule])
