@@ -1,4 +1,4 @@
-import type { TerminalRoute } from '../st3-client/Models.generated.ts';
+import type { TerminalRoute } from '@smalltalk/st3-client';
 
 const subject = (id: string) => id.replace(/^terminal\//, '');
 
