@@ -404,10 +404,18 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     if (history._tag === 'Failed') request.current.retryCalled = false
     request.current.tag = history._tag
   }
-  const prefetch = React.useCallback((scrollUp = false) => {
+  const insideBoundary = React.useRef(false)
+  const prefetch = React.useCallback((scrollUp = false, freshGesture = false, scrolled = false) => {
     const viewport = element.current
-    if (viewport === null || viewport.scrollTop > viewport.clientHeight * 1.5) return
+    if (viewport === null) return
+    const inside = viewport.scrollTop <= viewport.clientHeight * 1.5
+    const entered = inside && !insideBoundary.current
+    insideBoundary.current = inside
+    if (!inside) return
     const source = current.current
+    // Suppress automatic Loading -> More repeats, but never strand an empty
+    // page: a new upward gesture or leaving/re-entering the boundary can retry.
+    if (source._tag === 'More' && (entered && scrolled || scrollUp && freshGesture)) request.current.moreCalled = false
     if (source._tag === 'More' && !request.current.moreCalled) {
       request.current.moreCalled = true
       source.loadOlder()
@@ -421,13 +429,21 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     if (viewport === null) return
     const cleanup = controller.attach(viewport)
     let top = viewport.scrollTop
+    let contentHeight = viewport.scrollHeight
+    let viewportHeight = viewport.clientHeight
     let keyboardFrame: number | undefined
+    let draggingScrollbar = false
+    const onPointerDown = (event: PointerEvent) => { draggingScrollbar = event.target === viewport }
+    const onPointerUp = () => { draggingScrollbar = false }
     const onScroll = () => {
       const up = viewport.scrollTop < top
       top = viewport.scrollTop
-      prefetch(up)
+      const geometryChanged = contentHeight !== viewport.scrollHeight || viewportHeight !== viewport.clientHeight
+      contentHeight = viewport.scrollHeight
+      viewportHeight = viewport.clientHeight
+      prefetch(up, up && draggingScrollbar, !geometryChanged)
     }
-    const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) prefetch(true) }
+    const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) prefetch(true, true) }
     const onKey = (event: KeyboardEvent) => {
       if (!(event.target instanceof HTMLElement) || event.target.closest('input,textarea,[contenteditable="true"]')) return
       if (event.key !== 'PageUp' && event.key !== 'Home' && event.key !== 'ArrowUp') return
@@ -436,17 +452,23 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
       if (keyboardFrame !== undefined) cancelAnimationFrame(keyboardFrame)
       keyboardFrame = requestAnimationFrame(() => {
         keyboardFrame = undefined
-        prefetch(true)
+        prefetch(true, true)
       })
     }
     viewport.addEventListener('scroll', onScroll, { passive: true })
     viewport.addEventListener('wheel', onWheel, { passive: true })
     viewport.addEventListener('keydown', onKey)
+    viewport.addEventListener('pointerdown', onPointerDown)
+    viewport.ownerDocument.addEventListener('pointerup', onPointerUp)
+    viewport.ownerDocument.addEventListener('pointercancel', onPointerUp)
     return () => {
       cleanup?.()
       viewport.removeEventListener('scroll', onScroll)
       viewport.removeEventListener('wheel', onWheel)
       viewport.removeEventListener('keydown', onKey)
+      viewport.removeEventListener('pointerdown', onPointerDown)
+      viewport.ownerDocument.removeEventListener('pointerup', onPointerUp)
+      viewport.ownerDocument.removeEventListener('pointercancel', onPointerUp)
       if (keyboardFrame !== undefined) cancelAnimationFrame(keyboardFrame)
       element.current = null
     }
