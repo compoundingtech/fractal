@@ -112,6 +112,68 @@ impl Suspension {
     }
 }
 
+/// Describe a publication using the same declared-launch boundary as suspension lineage.
+/// Manual deferral is available only to owned-set publication; this introduces no guard.
+pub(crate) fn publication_action(
+    store: &Store,
+    previous: Option<&crate::model::MemberSpec>,
+    next: &crate::model::DesiredSubject,
+    owned: bool,
+) -> Result<Option<crate::model::PlannedAction>> {
+    if !matches!(next.kind.as_str(), "agent" | "stop") {
+        return Ok(None);
+    }
+    let Some(hold) = current(store, &next.subject)?.filter(Suspension::holds_seat) else {
+        return Ok(None);
+    };
+    let pending = crate::rollout::pending_manual_launch(store, &next.subject)?;
+    let previous_member = pending.as_ref().map(|(_, member)| member).or(previous);
+    let same_launch = next.kind == "agent"
+        && previous_member
+            .zip(next.member.as_ref())
+            .is_some_and(|(previous, next)| next.launch_changes(previous).is_empty());
+    let manual = owned
+        && next.kind == "agent"
+        && crate::rollout::manual(next)
+        && store
+            .rollout(&next.subject)?
+            .is_none_or(|operation| operation.phase == "superseded");
+    let suspension = hold
+        .suspend_operation_id
+        .as_deref()
+        .unwrap_or(&hold.operation_id);
+    let (action, reason) = if same_launch || manual {
+        (
+            "hold-kept",
+            format!(
+                "suspension {suspension}: hold kept; {}",
+                if manual && !same_launch {
+                    "launch change stays pending until explicit rollout after resume"
+                } else {
+                    "declared launch unchanged; environment edits take effect only on explicit resume"
+                }
+            ),
+        )
+    } else if next.kind == "stop" {
+        (
+            "stop",
+            format!("suspension {suspension}: the explicit stop would discard the hold"),
+        )
+    } else {
+        (
+            "start-suspended",
+            format!(
+                "suspension {suspension}: would start a suspended agent; the declared launch changed"
+            ),
+        )
+    };
+    Ok(Some(crate::model::PlannedAction {
+        subject: next.subject.clone(),
+        action: action.into(),
+        reason,
+    }))
+}
+
 fn field<'a>(claim: &'a ClaimRecord, name: &str) -> Option<&'a str> {
     claim
         .body
@@ -205,7 +267,7 @@ pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
     if store.selected_desired_kind(subject)?.as_deref() != Some("agent") {
         return Ok(None);
     }
-    let lineage = store.launch_lineage(subject)?;
+    let lineage = store.suspension_lineage(subject)?;
     let mut moved = false;
     if action(request) == Some("resume") && field(request, "host").is_some() {
         for token in &lineage {
@@ -221,8 +283,8 @@ pub fn current(store: &Store, subject: &str) -> Result<Option<Suspension>> {
         && let Some(token) = evidence(request, 0)
         && let Some((incumbent, _)) = crate::rollout::pending_manual_launch(store, subject)?
     {
-        let incumbent_lineage = store.launch_lineage_from(&incumbent)?;
-        let request_lineage = store.launch_lineage_from(token)?;
+        let incumbent_lineage = store.suspension_lineage_from(&incumbent)?;
+        let request_lineage = store.suspension_lineage_from(token)?;
         applies = request_lineage.iter().any(|token| incumbent_lineage.contains(token));
     }
     if !moved && !applies {
