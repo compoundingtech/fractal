@@ -1029,4 +1029,31 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn publication_facts_pending_loan_drains_only_one_page() {
+        let store = Store::open_memory("node").unwrap();
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for i in 0..192 {
+            let claim = input("runtime.observed", &format!("pending-{i}"));
+            append_claim_tx(
+                &tx, "node", &claim.subject, &claim.kind, claim.actor.as_deref(),
+                &json!({"fields": claim.fields}), &[], None,
+            ).unwrap();
+        }
+        tx.commit().unwrap();
+        drop(connection);
+        let pending = || store.readers.get().query_row(
+            "SELECT COUNT(*) FROM local_publication_pending", [], |row| row.get::<_, usize>(0),
+        ).unwrap();
+        let before = pending();
+        assert!(before >= 128);
+        assert!(!store.advance_publication_evidence().unwrap());
+        let after = pending();
+        assert!(after < before);
+        assert!(before - after <= PAGE);
+        finish(&store);
+        oracle(&store);
+    }
 }
