@@ -1808,6 +1808,9 @@ enum MissionViewCommand {
 struct MissionShowArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionOrRun)))]
     mission_or_run: String,
+    /// This read needs no actor. Accepted for scripts and ignored with one notice.
+    #[arg(long = "as", value_name = "ACTOR")]
+    ignored_actor: Option<String>,
     /// Follow until finished or stopped; retry timeouts and wait up to 5min for an unreachable daemon.
     #[arg(long)]
     follow: bool,
@@ -3926,6 +3929,9 @@ enum WorkCommand {
     Show {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Any))))]
         subject: String,
+        /// This read needs no actor. Accepted for scripts and ignored with one notice.
+        #[arg(long = "as", value_name = "ACTOR")]
+        ignored_actor: Option<String>,
     },
     /// Acquire one ready work item with the current harness incarnation.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Ready))))))]
@@ -6918,6 +6924,12 @@ async fn run_launch(
     Ok(())
 }
 
+fn notice_ignored_read_actor(actor: Option<&str>) {
+    if actor.is_some() {
+        eprintln!("st: --as is ignored for this read; no actor is required");
+    }
+}
+
 async fn run_mission_view(
     client: &Client,
     endpoint: &Endpoint,
@@ -6992,6 +7004,7 @@ async fn run_mission_view(
             )
         }
         MissionViewCommand::Show(args) => {
+            notice_ignored_read_actor(args.ignored_actor.as_deref());
             anyhow::ensure!((1..=50).contains(&args.limit), "mission tree limit must be 1 through 50");
             anyhow::ensure!(
                 !json_output || args.cursor.is_none(),
@@ -16070,7 +16083,8 @@ async fn run_work(
             }
             print_product_page("WORK", &response, json_output, &command)
         }
-        WorkCommand::Show { subject } => {
+        WorkCommand::Show { subject, ignored_actor } => {
+            notice_ignored_read_actor(ignored_actor.as_deref());
             let normalized = if subject.starts_with("step-run/") {
                 subject
             } else {

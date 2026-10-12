@@ -4596,3 +4596,95 @@ async fn note_cli_harness_cannot_write_or_borrow_configured_person() {
         assert!(!refusal.contains("daemon"), "{refusal}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mission_and_work_detail_reads_ignore_script_actor_with_one_notice() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    let intent = st3::graph::parse_intent(
+        r#"version 2
+mission "orchid-actor" state="ready" {
+  goal "Check read actor compatibility."
+  step "build" { assigned-to "person/avery" }
+}
+"#,
+        store.origin(),
+    )
+    .unwrap();
+    store.apply_internal(&intent, "cli-read-actor").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "orchid-actor".into(),
+            revision: None,
+            workspace: root.path().to_str().unwrap().into(),
+            requester: Some("person/avery".into()),
+            mode: Some("run".into()),
+            inputs: Default::default(),
+            idempotency_key: "cli-read-actor".into(),
+        })
+        .unwrap();
+    let socket = root.path().join("st3.sock");
+    let served = socket.clone();
+    let (ready, started) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        st3::api::serve_unix_with_ready(&served, st3::api::router(state), || {
+            ready.send(()).unwrap();
+        })
+        .await
+    });
+    started.await.unwrap();
+    for (command, subject) in [
+        ("missions", run.subject.as_str()),
+        ("work", run.steps[0].subject.as_str()),
+    ] {
+        let plain_human = run_cli_human(&socket, &[command, "show", subject]).await;
+        assert!(
+            plain_human.status.success(),
+            "{}",
+            String::from_utf8_lossy(&plain_human.stderr)
+        );
+        let plain_json = value(&run_cli(&socket, &[command, "show", subject]).await);
+        for actor in ["agent/example/operator", "person/avery"] {
+            for json in [false, true] {
+                let args = [command, "show", subject, "--as", actor];
+                let output = if json {
+                    run_cli(&socket, &args).await
+                } else {
+                    run_cli_human(&socket, &args).await
+                };
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .lines()
+                        .collect::<Vec<_>>(),
+                    ["st: --as is ignored for this read; no actor is required"]
+                );
+                if json {
+                    let returned = value(&output);
+                    // Work detail includes a per-request envelope; compare its resource.
+                    if command == "work" {
+                        assert_eq!(returned["value"], plain_json["value"]);
+                    } else {
+                        assert_eq!(returned, plain_json);
+                    }
+                } else {
+                    assert_eq!(output.stdout, plain_human.stdout);
+                }
+            }
+        }
+        let help = run_cli_human(&socket, &[command, "show", "--help"]).await;
+        assert!(help.status.success());
+        let help = String::from_utf8_lossy(&help.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(help.contains("--as <ACTOR>"), "{help}");
+        assert!(help.contains("ignored with one notice"), "{help}");
+    }
+    server.abort();
+}
