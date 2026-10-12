@@ -5,7 +5,8 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches on Namespace. macOS CI is currently
+(which the queue skips), and fills missing main-scope caches. Rust stages stay on Namespace;
+Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
 public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
 older pushes must not keep consuming runners after their source is superseded. Manual dispatch,
@@ -44,8 +45,9 @@ or compile. Manual dispatch runs the safety tests without inventing a PR delta.
 The Linux gate runs two test partitions plus Clippy and fleet compatibility on separate runners.
 `linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, the four stage jobs and the named mail redelivery
 check, and passes only when every one succeeded (a skipped or cancelled stage fails it). The stage jobs use the shape label
-`nscloud-ubuntu-24.04-amd64-8x16-with-features`; `genie-freshness`, `isolation-vm` and `typescript-client`
-use `namespace-profile-linux-x86-64` when they overflow. The `linux-gate` aggregate uses GitHub-hosted
+`nscloud-ubuntu-24.04-amd64-8x16-with-features`; `isolation-vm` uses
+`namespace-profile-linux-x86-64` when it overflows. `genie-freshness` and `typescript-client`
+use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build capacity. The `linux-gate` aggregate uses GitHub-hosted
 `ubuntu-latest`, so it cannot queue behind build or benchmark jobs. The stages ran on `nscloud-ubuntu-24.04-amd64-16x32`
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
@@ -56,6 +58,25 @@ priority 2. Required PR checks must finish before a PR can enter the merge queue
 ordering previously allowed new merge jobs to overtake these prerequisites. This policy orders
 waiting jobs and neither preempts running work nor reserves capacity. The picker, local pools,
 runner shapes, run affinity and required checks are unchanged.
+
+Performance runs on every main push, nightly schedule and manual dispatch; it does not
+start a load test for merge groups.
+PR runs start for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load
+workload and its workflow, or an explicit `ci-perf` label. The metadata-only admission job
+checks the PR head before and after its bounded changed-file inventory, including rename
+sources. Only an explicit successful `run=false` skips the optional workload; malformed
+metadata, head drift or failed admission retain coverage. Unrelated label events cannot
+cancel a running load test. The existing load test and its budgets are unchanged.
+Its Namespace priority is always 2. A busy queue can delay optional
+loads and main baseline reports until required work drains; priority does not reserve a slot.
+
+The complete 2026-10-11 UTC day contained 201 PR and 50 merge-group Workspace runs.
+Among runs with all five required checks green (80 PR, 44 merge), required-check completion
+from workflow creation had median/p90 28m57s/35m53s for PRs and 26m25s/33m44s for merge groups.
+Successful workflow duration (40 PR, 44 merge) was 29m41s/40m48s and 26m36s/33m52s.
+These populations differ because optional failures do not change the required-check cohort.
+Median assigned-job waits were about ten seconds; compilation and test execution dominated.
+The mixed revisions and suites do not establish an improvement or meet the 20-minute SLO.
 
 The 2026-10-09 investigation retained a PR build waiting 55.1 minutes at priority 2 before
 15.7 minutes of execution; two sampled merge builds at priority 1 waited 0.3 and 1.7 minutes.
@@ -530,6 +551,42 @@ a fresh Cargo home and no compiler wrappers, stays offline, and prints Cargo std
 Cargo builds use the host's four-job limit. Workspace test shards explicitly use eight test
 threads, with the host's 14 GiB per-job memory limit. The repository variable `CI1_MIN_IDLE`
 can override admission; keep it at four when preserving CPU capacity for reserved lanes.
+
+### Compiler-cache measurement
+
+`python3 scripts/sccache-evidence capture` reads an already-running Linux sccache
+0.16.0 server. The runner owner supplies `--runner`, `--pid`, `--start-ticks`,
+`--port`, `--config-id`, `--job`, `--source`, `--storage`, `--sccache`, and `--output`.
+Use the process's field 22 in `/proc/PID/stat` as its start ticks, and an
+owner-qualified configuration revision or digest as its configuration identity.
+Storage is explicitly `local-disk`, `shared-webdav`, or `remote-webdav`; the
+collector verifies that the observed backend agrees. It checks the executable,
+process start, and ownership of the listening socket before and after collection.
+Missing identity, denied access, incompatible versions, or synthetic empty stats
+abort collection. It never starts, stops, or resets a daemon. Socket inspection
+needs the existing process owner's authority; it grants no host or cache access.
+
+Capture before and after one job, using an identical job/source/daemon/configuration
+identity, then run:
+
+```sh
+python3 scripts/sccache-evidence report --before before.json --after after.json --output interval.json
+```
+
+Omit `--before` only to report explicitly labelled server-lifetime counters.
+Each report separates compile requests, non-cacheable requests, errors, all-language
+hits/misses, and Rust hits/misses. Hit rates use completed hits divided by hits plus
+misses; non-cacheable calls and errors stay visible outside that denominator.
+No lookups means a null rate. Identity changes and counter resets invalidate a delta.
+Use exclusive job ownership to attribute an interval to a job: concurrent users of
+one daemon make it an aggregate interval, and same-process counter resets cannot
+always be detected from two samples alone. Keep snapshots and reports together.
+No cache URLs, paths, or credentials are copied into the evidence.
+
+The source opt-in described in [development](development.md) is off by default.
+This repository provisions no remote route or credential for Namespace or builders.
+Network, method permissions, writer provenance, and access policy remain the cache
+owner's responsibility. Cache hits establish compiler reuse, not fresh test results.
 
 The local test stage sets `TMPDIR`, `TMP` and `TEMP` to the short `RUNNER_TEMP/t` path on
 the runner's memory filesystem. Otherwise `nix develop` chooses disk-backed `/tmp`, making

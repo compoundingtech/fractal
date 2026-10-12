@@ -260,8 +260,11 @@ impl Store {
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for checkpoint in interrupted {
-            self.finish_trim(&checkpoint, actions)?;
+        {
+            let _span = crate::profile::span("trim.resume");
+            for checkpoint in interrupted {
+                self.finish_trim(&checkpoint, actions)?;
+            }
         }
         match self.newest_application(claims)? {
             None | Some(Application::Done) => Ok(None),
@@ -277,16 +280,21 @@ impl Store {
                     plan.sealed_digest == certificate.terms.sealed_digest
                         && plan.drop_digest == certificate.terms.drop_digest
                 };
-                let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
-                let mut plan = self.runtime.plan_checkpoint_drops(&sealed);
-                drop(sealed);
+                // Each complete capture and plan is one `trim.capture_plan` span; a second read
+                // after a torn one is a second span.
+                let capture_plan = || -> Result<super::checkpoint::DropPlan> {
+                    let _span = crate::profile::span("trim.capture_plan");
+                    let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
+                    let plan = self.runtime.plan_checkpoint_drops(&sealed);
+                    drop(sealed);
+                    Ok(plan)
+                };
+                let mut plan = capture_plan()?;
                 if !verified(&plan) {
                     // The set is read in pages, each its own snapshot, so a write between two
                     // pages (a repair changing a record's state) could tear one read. A torn read
                     // must not send the node to adopt a peer's manifest: read once more first.
-                    let sealed = self.checkpoint_sealed_set_through(cut, Some(seal_rowid))?;
-                    plan = self.runtime.plan_checkpoint_drops(&sealed);
-                    drop(sealed);
+                    plan = capture_plan()?;
                 }
                 if verified(&plan) {
                     self.trim_checkpoint(
@@ -582,6 +590,8 @@ impl Store {
             )?;
             Ok(())
         };
+        // Recording, in either branch, through the `trimming` mark; finish_trim's spans follow.
+        let record = crate::profile::span("trim.record");
         if exact {
             // Adoption replaces every other tombstone, so it stays one transaction.
             let mut connection = self.connection.write();
@@ -627,6 +637,7 @@ impl Store {
             mark(&transaction, "trimming")?;
             transaction.commit()?;
         }
+        drop(record);
         self.replica_rows_changed();
         self.stop_for_trim_fault(TrimFault::AfterTombstones)?;
         self.finish_trim(checkpoint, actions)
@@ -645,6 +656,7 @@ impl Store {
         let mut deleted_envelopes = 0;
         let mut deleted_claims = 0;
         let mut cursor = TrimCursor::default();
+        let delete = crate::profile::span("trim.delete");
         loop {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
@@ -707,8 +719,10 @@ impl Store {
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
         }
+        drop(delete);
         self.stop_for_trim_fault(TrimFault::BeforeFinish)?;
         {
+            let _span = crate::profile::span("trim.final_mark");
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             transaction.execute(
@@ -903,3 +917,5 @@ fn deletable_claim(id: String, operation_id: Option<String>) -> ClaimTombstone {
 
 #[cfg(test)]
 mod capture_lifetime_tests;
+#[cfg(test)]
+mod phase_span_tests;

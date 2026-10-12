@@ -1226,6 +1226,7 @@
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
@@ -1246,6 +1247,7 @@
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
           shellHook = ''
+            source ${./scripts/sccache-read-cache-env} || exit $?
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
             fi
