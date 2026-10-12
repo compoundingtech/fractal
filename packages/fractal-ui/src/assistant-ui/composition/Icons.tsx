@@ -40,8 +40,8 @@ const dotRadii = stylex.create({
   size14: { r: `calc(${icon.dot} * 12 / 14)` },
   size16: { r: `calc(${icon.dot} * 12 / 16)` },
 })
-const sizeStyles: Record<IconSize, typeof sizes.size12> = { 12: sizes.size12, 14: sizes.size14, 16: sizes.size16 }
-const dotStyles: Record<IconSize, typeof dotRadii.size12> = { 12: dotRadii.size12, 14: dotRadii.size14, 16: dotRadii.size16 }
+const sizeStyles = { 12: sizes.size12, 14: sizes.size14, 16: sizes.size16 } as const satisfies Record<IconSize, unknown>
+const dotStyles = { 12: dotRadii.size12, 14: dotRadii.size14, 16: dotRadii.size16 } as const satisfies Record<IconSize, unknown>
 const styles = stylex.create({
   icon: { flexShrink: 0 },
   dot: { fill: 'currentColor', stroke: 'none' },
