@@ -103,6 +103,12 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const header = within(answers[0]!).getByTestId('message-header')
   const copy = within(answers[0]!).getByRole('button', { name: 'Copy answer' })
   const markdown = within(answers[0]!).getByTestId('markdown')
+  // Read the exact endpoint only after the native transition finishes; a sampled final easing frame can be nonzero.
+  const settleCopy = async () => {
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    await Promise.all(copy.getAnimations().map(animation => animation.finished))
+    await new Promise(resolve => requestAnimationFrame(resolve))
+  }
   await expect(header).toContainElement(copy)
   await expect(header).toContainElement(answers[0]!.querySelector('time'))
   await expect(header.getBoundingClientRect().height).toBe(16)
@@ -113,14 +119,18 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(getComputedStyle(copy).opacity).toBe('0')
   await expect(getComputedStyle(copy).transitionDuration).toBe(reduced ? '0s' : '0.15s')
   await userEvent.hover(answers[0]!)
+  await settleCopy()
   await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
   await userEvent.unhover(answers[0]!)
+  await settleCopy()
   await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('0'))
   apply.focus()
   for (let step = 0; step < 8 && document.activeElement !== copy; step++) await userEvent.tab()
   await expect(copy).toHaveFocus()
+  await settleCopy()
   await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))
   apply.focus()
+  await settleCopy()
   await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('0'))
 
   // 9: empty disabled composers keep one compact row with the reason in the placeholder.
