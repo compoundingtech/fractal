@@ -11,12 +11,13 @@ const noItems: readonly { readonly id: string }[] = []
 
 /** The import boundary has no conversation demand or runtime of its own. Keep the same
  * Waiting frame as the kit so loading code cannot move the header or history lane. */
-export const ConversationPaneFallback = ({ agentName, visible = true }: {
+export const ConversationPaneFallback = ({ agentName, visible = true, showHeader = true }: {
   readonly agentName: string
   readonly visible?: boolean
+  readonly showHeader?: boolean
 }): React.ReactElement => <div style={{ display: 'contents' }} aria-hidden={!visible}>
   <div aria-label="Transcript" {...stylex.props(styles.frame)}>
-    <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{agentName}</strong></header>
+    {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{agentName}</strong></header>}
     <ErrorOverlayHost lane>
       <EmbraceScrollViewport items={noItems} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
         {/* TODO(kit): replace with the exported TranscriptSkeleton */}

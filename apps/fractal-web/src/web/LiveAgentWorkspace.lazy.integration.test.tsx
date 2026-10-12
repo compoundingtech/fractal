@@ -43,6 +43,7 @@ vi.mock('../data/react.tsx', () => ({
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,
   useGatewaySync: () => gatewayObservation,
+  useConversationSync: () => gatewayObservation,
   useDataSource: () => ({ gateway: 'alpha.example', reconnect }),
   useFeedInterest: () => {},
 }))
@@ -207,7 +208,7 @@ describe('conversation import boundary', () => {
     // No frame or post-paint task has run: a selected thread cannot wait a second frame.
     expect(requested).toHaveBeenCalledTimes(1)
     expect(container.querySelector('[aria-label="Loading conversation"]')).not.toBeNull()
-    expect(container.querySelector('[data-testid="transcript-header"]')?.textContent).toBe('agent/a')
+    expect(container.querySelector('[data-testid="transcript-header"]')).toBeNull()
     expect(container.querySelector('[data-pane-ref]')).toBeNull()
 
     await act(async () => root.render(show('agent/b')))
