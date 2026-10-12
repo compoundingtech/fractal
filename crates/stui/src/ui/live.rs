@@ -1256,6 +1256,7 @@ pub fn run(context: Context) -> Result<()> {
                         let client = client.clone();
                         let tx = fetched_tx.clone();
                         let agent = agent.clone();
+                        let fallback = ui.terminal_fallback;
                         runtime.spawn(async move {
                             let attached = attach_known_then_direct(
                                 &client,
@@ -1263,6 +1264,7 @@ pub fn run(context: Context) -> Result<()> {
                                 known,
                                 &runtime_ids,
                                 owner.as_deref(),
+                                fallback,
                             )
                             .await;
                             let _ = tx.send(match attached {
@@ -1612,6 +1614,7 @@ pub fn run(context: Context) -> Result<()> {
                 .cloned()
                 .unwrap_or_default();
             let owner = terminal_owners.get(&agent).cloned();
+            let fallback = ui.terminal_fallback;
             runtime.spawn(async move {
                 let outcome = attach_direct(
                     &client,
@@ -1619,6 +1622,7 @@ pub fn run(context: Context) -> Result<()> {
                     &runtime_ids,
                     Some(&expected),
                     owner.as_deref(),
+                    fallback,
                 )
                 .await;
                 let _ = tx.send(Fetched::Reattached { agent, outcome });
@@ -3623,15 +3627,18 @@ async fn attach_known_then_direct(
     known: Option<(String, String, String)>,
     runtime_ids: &[String],
     owner: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
     if let Some((name, terminal, incarnation)) = known
         && !agent.starts_with("terminal/")
-        && let Ok(direct) =
-            attach_terminal(client, agent, name, &terminal, incarnation, owner, None).await
     {
-        return Ok(direct);
+        // Once selected, keep this incarnation through every route failure. Rediscovery after
+        // an error could silently attach a process that restarted in the meantime.
+        return attach_terminal(
+            client, agent, name, &terminal, incarnation, owner, None, fallback,
+        ).await;
     }
-    attach_direct(client, agent, runtime_ids, None, owner).await
+    attach_direct(client, agent, runtime_ids, None, owner, fallback).await
 }
 
 async fn attach_direct(
@@ -3640,6 +3647,7 @@ async fn attach_direct(
     runtime_ids: &[String],
     expected: Option<&str>,
     owner: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
     let mut found = Vec::new();
     if subject.starts_with("terminal/") {
@@ -3696,6 +3704,7 @@ async fn attach_direct(
             incarnation,
             owner.as_deref(),
             expected,
+            fallback,
         )
         .await
         {
@@ -3717,6 +3726,7 @@ async fn attach_terminal(
     incarnation: String,
     owner: Option<&str>,
     expected: Option<&str>,
+    fallback: bool,
 ) -> Result<Direct, String> {
     let opened = direct::open(
         client,
@@ -3726,6 +3736,7 @@ async fn attach_terminal(
             incarnation: &incarnation,
             owner,
             expected,
+            fallback,
         },
     )
     .await?;
@@ -3748,11 +3759,11 @@ async fn attach_terminal(
     let attachment = client
         .raw_terminal_attachment(terminal, &incarnation, st3_client::RawTerminalMode::Attach)
         .await
-        .map_err(|error| error.plain())?;
+        .map_err(|error| format!("{route}: {}", error.plain()))?;
     let stream = client
         .raw_terminal_stream(&attachment)
         .await
-        .map_err(|error| error.plain())?;
+        .map_err(|error| format!("{route}: {}", error.plain()))?;
     stream
         .into_std()
         .map(|stream| Direct {

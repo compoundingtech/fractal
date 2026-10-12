@@ -3,7 +3,8 @@
 //! The local daemon only says where a terminal lives (a read of its own store). When Fabric
 //! cannot reach the owner, or this device has no daemon of its own (the phone's situation), the
 //! terminal goes through the client gateway as before, and the route that was used is named, so
-//! the person can see it. An owner that refuses the incarnation is never worked around.
+//! the person can see it. Every failed direct route can use the daemon with the same subject/incarnation fence,
+//! unless this device chose fabric only, no fallback.
 
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
@@ -49,6 +50,8 @@ pub(super) struct Terminal<'a> {
     pub owner: Option<&'a str>,
     /// Only this incarnation, as a reattach needs.
     pub expected: Option<&'a str>,
+    /// This device permits the daemon route after a direct failure.
+    pub fallback: bool,
 }
 
 pub(super) const RESTARTED: &str = "the terminal restarted; Ctrl+] attaches the new one";
@@ -57,10 +60,9 @@ pub(super) async fn open(client: &Client, terminal: &Terminal<'_>) -> Result<Ope
     open_in(client, terminal, state_dir().as_deref()).await
 }
 
-/// Why Fabric did not carry a terminal: the owner turned the incarnation down (a refusal, never
-/// worked around), or it could not be reached (the gateway can still carry it).
+/// Why Fabric did not carry a terminal; only owner-level unavailability is remembered.
 enum Miss {
-    /// The owner answered and refused: an error, never a fallback.
+    /// The owner answered and refused this terminal, without implying owner unavailability.
     Refused(String),
     /// Fabric could not reach this owner (no fleet or fabric, no peer, a failed or slow dial or
     /// tunnel). True of every terminal it owns, so it is remembered for a while.
@@ -78,10 +80,19 @@ async fn open_in(
     terminal: &Terminal<'_>,
     state_dir: Option<&Path>,
 ) -> Result<Opened, String> {
+    if terminal
+        .expected
+        .is_some_and(|expected| expected != terminal.incarnation)
+    {
+        return Err(RESTARTED.into());
+    }
     if !client.is_local_socket() {
-        return Ok(Opened::UseGateway {
-            route: "via the gateway".into(),
-        });
+        return gateway(
+            terminal,
+            "Fabric",
+            "this device has no local daemon for direct attachment",
+            false,
+        );
     }
     match client.local_terminal(terminal.subject).await {
         Ok(Some(here)) => {
@@ -91,6 +102,9 @@ async fn open_in(
             {
                 return Err(RESTARTED.into());
             }
+            if !terminal.incarnation.is_empty() && terminal.incarnation != here.incarnation_id {
+                return Err(RESTARTED.into());
+            }
             let local = LocalTerminal {
                 subject: here.subject,
                 runtime_id: here.runtime_id,
@@ -98,15 +112,15 @@ async fn open_in(
                 pty_root: here.pty_root,
             };
             let (name, incarnation) = (local.runtime_id.clone(), local.incarnation_id.clone());
-            st3_terminal_direct::open_local_terminal(&local)
-                .await
-                .map(|stream| Opened::Stream {
+            match st3_terminal_direct::open_local_terminal(&local).await {
+                Ok(stream) => Ok(Opened::Stream {
                     stream,
                     name,
                     incarnation,
                     route: "local PTY".into(),
-                })
-                .map_err(|error| format!("{error:#}"))
+                }),
+                Err(error) => gateway(terminal, "local PTY", &format!("{error:#}"), false),
+            }
         }
         Ok(None) => {
             let owner = terminal
@@ -144,25 +158,39 @@ async fn open_in(
                         route: format!("Fabric to {owner}"),
                     })
                 }
-                (Err(Miss::Refused(reason)), _) => Err(reason),
+                (Err(Miss::Refused(reason)), _) => gateway(terminal, "Fabric", &reason, false),
                 (Err(Miss::Unavailable(reason)), owner) => {
                     if let Some(owner) = &owner {
                         remember_unavailable(owner, &reason);
                     }
-                    Ok(Opened::UseGateway {
-                        route: format!("via the daemon (Fabric: {reason})"),
-                    })
+                    gateway(terminal, "Fabric", &reason, false)
                 }
-                (Err(Miss::Skipped(reason)), _) => Ok(Opened::UseGateway {
-                    route: format!("via the daemon (Fabric: {reason}, not tried again yet)"),
-                }),
-                (Err(Miss::NotThisTerminal(reason)), _) => Ok(Opened::UseGateway {
-                    route: format!("via the daemon (Fabric: {reason})"),
-                }),
+                (Err(Miss::Skipped(reason)), _) => gateway(terminal, "Fabric", &reason, true),
+                (Err(Miss::NotThisTerminal(reason)), _) => {
+                    gateway(terminal, "Fabric", &reason, false)
+                }
                 (Ok(_), None) => unreachable!("a Fabric stream needs an owner"),
             }
         }
-        Err(error) => Err(error.plain()),
+        Err(error) => gateway(terminal, "local PTY discovery", &error.plain(), false),
+    }
+}
+
+fn gateway(
+    terminal: &Terminal<'_>,
+    kind: &str,
+    reason: &str,
+    skipped: bool,
+) -> Result<Opened, String> {
+    let remembered = if skipped { ", not tried again yet" } else { "" };
+    if terminal.fallback {
+        Ok(Opened::UseGateway {
+            route: format!("via the daemon ({kind}: {reason}{remembered})"),
+        })
+    } else {
+        Err(format!(
+            "{kind}: {reason}{remembered} (fabric only, no fallback)"
+        ))
     }
 }
 
@@ -271,6 +299,7 @@ fn fleet_fabric(
         .map_err(|error| format!("{error:#}"))?
         .ok_or_else(|| format!("this machine is in no fleet to reach {owner} through"))?;
     let program = smallclaims::fleet::transport::resolve_tool(file.fabric.as_deref(), "fabric")
+        .filter(|program| program.is_file())
         .ok_or_else(|| format!("this machine has no `fabric` to reach {owner} with"))?;
     Ok((
         smallclaims::fleet::transport::Fabric::new(program),
@@ -451,10 +480,9 @@ mod tests {
         let subject = std::env::var("STUI_PROBE_SUBJECT").expect("STUI_PROBE_SUBJECT");
         let person = std::env::var("STUI_PROBE_PERSON").expect("STUI_PROBE_PERSON");
         let runtime = std::env::var("STUI_PROBE_RUNTIME").expect("STUI_PROBE_RUNTIME");
-        let socket = st3_client::discover_unix_endpoint(
-            std::env::var_os("ST3_ENDPOINT").map(PathBuf::from),
-        )
-        .unwrap();
+        let socket =
+            st3_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(PathBuf::from))
+                .unwrap();
         let client = Client::unix_as(&socket, person);
         let started = Instant::now();
         // stui's own feed already holds an agent's incarnation and host, so a real attach reads
@@ -494,6 +522,7 @@ mod tests {
                 incarnation: &incarnation,
                 owner: Some(&owner),
                 expected: None,
+                fallback: true,
             },
         )
         .await
@@ -502,8 +531,12 @@ mod tests {
         let Opened::Stream { mut stream, .. } = opened else {
             panic!("gateway")
         };
-        stream.write_all(&pty_core::protocol::encode_peek(true, false)).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        stream
+            .write_all(&pty_core::protocol::encode_peek(true, false))
+            .unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
         let mut reader = pty_core::protocol::PacketReader::new();
         let mut bytes = [0_u8; 65536];
         let mut first = None;
@@ -570,6 +603,7 @@ mod tests {
                 incarnation: "",
                 owner: None,
                 expected: None,
+                fallback: true,
             },
             None,
         )
@@ -621,6 +655,7 @@ mod tests {
                 incarnation: "1:2026-09-28T00:00:00.000Z",
                 owner: None,
                 expected: Some("1:2026-09-28T00:00:00.000Z"),
+                fallback: true,
             },
             None,
         )
@@ -686,7 +721,9 @@ mod tests {
             let route: serde_json::Value = serde_json::from_slice(&line).unwrap();
             if refuse {
                 tunnel
-                    .write_all(b"{\"error\":\"the PTY session is not the incarnation st selected\"}\n")
+                    .write_all(
+                        b"{\"error\":\"the PTY session is not the incarnation st selected\"}\n",
+                    )
                     .unwrap();
                 return Some(route);
             }
@@ -737,6 +774,7 @@ mod tests {
                 incarnation: &incarnation(CREATED_AT),
                 owner: Some("host/owner-ok"),
                 expected: None,
+                fallback: true,
             },
             Some(&root.path().join("state/st3")),
         )
@@ -799,7 +837,11 @@ mod tests {
             )
             .unwrap();
         }
-        (Client::unix_as(&socket, "person/example"), server, tunnel_socket)
+        (
+            Client::unix_as(&socket, "person/example"),
+            server,
+            tunnel_socket,
+        )
     }
 
     fn remote<'a>(owner: Option<&'a str>, incarnation: &'a str) -> Terminal<'a> {
@@ -809,6 +851,7 @@ mod tests {
             incarnation,
             owner,
             expected: None,
+            fallback: true,
         }
     }
 
@@ -856,9 +899,13 @@ mod tests {
         let incarnation = incarnation(CREATED_AT);
         let state_dir = root.path().join("state/st3");
 
-        let first = open_in(&client, &remote(Some("owner-down"), &incarnation), Some(&state_dir))
-            .await
-            .unwrap();
+        let first = open_in(
+            &client,
+            &remote(Some("owner-down"), &incarnation),
+            Some(&state_dir),
+        )
+        .await
+        .unwrap();
         let Opened::UseGateway { route } = first else {
             panic!("an unreachable owner falls back to the daemon")
         };
@@ -866,9 +913,13 @@ mod tests {
         assert!(route.contains("fabric probe owner-down"), "{route}");
         // Remembered: no second dial for a minute.
         let calls_before = std::fs::read_to_string(root.path().join("fabric-calls")).unwrap();
-        let second = open_in(&client, &remote(Some("owner-down"), &incarnation), Some(&state_dir))
-            .await
-            .unwrap();
+        let second = open_in(
+            &client,
+            &remote(Some("owner-down"), &incarnation),
+            Some(&state_dir),
+        )
+        .await
+        .unwrap();
         let Opened::UseGateway { route: skipped } = second else {
             panic!("still the daemon")
         };
@@ -890,14 +941,22 @@ mod tests {
         };
         let (at, reason) = remembered("owner-down");
         assert!(!reason.contains("not tried again yet"), "{reason}");
-        let third = open_in(&client, &remote(Some("owner-down"), &incarnation), Some(&state_dir))
-            .await
-            .unwrap();
+        let third = open_in(
+            &client,
+            &remote(Some("owner-down"), &incarnation),
+            Some(&state_dir),
+        )
+        .await
+        .unwrap();
         let Opened::UseGateway { route: again } = third else {
             panic!("still the daemon")
         };
         assert_eq!(again, skipped, "the route text does not grow");
-        assert_eq!(remembered("owner-down"), (at, reason), "the window is not extended");
+        assert_eq!(
+            remembered("owner-down"),
+            (at, reason),
+            "the window is not extended"
+        );
         server.abort();
     }
 
@@ -926,9 +985,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn an_owner_that_refuses_the_incarnation_is_not_worked_around_through_the_daemon() {
+    async fn an_owner_refusal_falls_back_with_the_reason_and_is_not_remembered() {
         let root = tempfile::tempdir().unwrap();
-        let (client, server, tunnel_socket) = remote_fixture(root.path(), "owner-refuses", true).await;
+        let (client, server, tunnel_socket) =
+            remote_fixture(root.path(), "owner-refuses", true).await;
         let incarnation = incarnation(CREATED_AT);
         let carrier = tunnel(&tunnel_socket, &root.path().join("owner-pty"), true);
 
@@ -939,10 +999,128 @@ mod tests {
         )
         .await;
 
-        let reason = refused.err().expect("a refusal is an error, not a fallback");
-        assert!(reason.contains("owner-refuses refused the terminal"), "{reason}");
-        assert!(reason.contains("not the incarnation st selected"), "{reason}");
+        let Opened::UseGateway { route: reason } = refused.unwrap() else {
+            panic!("refusal falls back")
+        };
+        assert!(recently_unavailable("owner-refuses").is_none());
+        assert!(
+            reason.contains("owner-refuses refused the terminal"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("not the incarnation st selected"),
+            "{reason}"
+        );
         carrier.join().unwrap().expect("the owner was asked");
+        server.abort();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_local_open_obeys_the_device_setting_without_forgetting_the_pin() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let pin = incarnation(CREATED_AT);
+        observe_terminal(&state.store, &pin);
+        let socket = root.path().join("st3.sock");
+        let server = serve(state, &socket).await;
+        let client = Client::unix_as(&socket, "person/example");
+        let mut terminal = remote(None, &pin);
+        // The daemon selects this local runtime, but its PTY socket is absent.
+        let Opened::UseGateway { route } = open_in(&client, &terminal, None).await.unwrap() else {
+            panic!("failed PTY opens through the daemon")
+        };
+        assert!(route.starts_with("via the daemon (local PTY: "), "{route}");
+        terminal.fallback = false;
+        let reason = open_in(&client, &terminal, None).await.err().unwrap();
+        assert!(reason.contains("local PTY:"), "{reason}");
+        assert!(reason.contains("fabric only, no fallback"), "{reason}");
+        terminal.incarnation = "restarted";
+        assert_eq!(
+            open_in(&client, &terminal, None).await.err().as_deref(),
+            Some(RESTARTED)
+        );
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fabric_only_reports_refusal_and_absent_fleet_without_a_daemon_route() {
+        let root = tempfile::tempdir().unwrap();
+        let (client, server, socket) = remote_fixture(root.path(), "owner-only", true).await;
+        let pin = incarnation(CREATED_AT);
+        let mut terminal = remote(Some("owner-only"), &pin);
+        terminal.fallback = false;
+        let carrier = tunnel(&socket, &root.path().join("owner-pty"), true);
+        let reason = open_in(&client, &terminal, Some(&root.path().join("state/st3")))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            reason.contains("owner-only refused the terminal"),
+            "{reason}"
+        );
+        assert!(reason.contains("fabric only, no fallback"), "{reason}");
+        carrier.join().unwrap().expect("owner asked");
+        assert!(recently_unavailable("owner-only").is_none());
+        let reason = open_in(&client, &terminal, Some(&root.path().join("absent")))
+            .await
+            .err()
+            .unwrap();
+        assert!(reason.contains("in no fleet"), "{reason}");
+        assert!(reason.contains("fabric only, no fallback"), "{reason}");
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fabric_failures_keep_the_cause_visible_and_obey_both_policies() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for (index, (script, cause)) in [
+            ("peers) exit 0;; dial) exit 1;;", "no Fabric node"),
+            ("peers) printf 'node\\towner-matrix-1\\tservice\\n';; dial) echo 'missing grant' >&2; exit 1;;", "missing grant"),
+            ("peers) printf 'node\\towner-matrix-2\\tservice\\n';; dial) echo 'dial failed' >&2; exit 1;;", "dial failed"),
+            ("peers) printf 'node\\towner-matrix-3\\tservice\\n';; dial) sleep 8;;", "within 4 s"),
+        ].into_iter().enumerate() {
+            let root = tempfile::tempdir().unwrap();
+            let owner = format!("owner-matrix-{index}");
+            let (client, server, _) = remote_fixture(root.path(), &owner, true).await;
+            let fabric = root.path().join("fabric");
+            std::fs::write(&fabric, format!("#!/bin/sh\ncase \"$1\" in {script} esac\n")).unwrap();
+            std::fs::set_permissions(&fabric, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let pin = incarnation(CREATED_AT);
+            let mut terminal = remote(Some(&owner), &pin);
+            let Opened::UseGateway { route } = open_in(&client, &terminal, Some(&root.path().join("state/st3"))).await.unwrap() else {
+                panic!("direct failure uses the daemon")
+            };
+            assert!(route.contains(cause), "{route}");
+            terminal.fallback = false;
+            let reason = open_in(&client, &terminal, Some(&root.path().join("state/st3"))).await.err().unwrap();
+            assert!(reason.contains(cause), "{reason}");
+            assert!(reason.contains("not tried again yet"), "{reason}");
+            assert!(reason.contains("fabric only, no fallback"), "{reason}");
+            server.abort();
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_missing_configured_fabric_binary_is_reported_as_such() {
+        let root = tempfile::tempdir().unwrap();
+        let (client, server, _) = remote_fixture(root.path(), "owner-no-tool", true).await;
+        std::fs::remove_file(root.path().join("fabric")).unwrap();
+        let pin = incarnation(CREATED_AT);
+        let mut terminal = remote(Some("owner-no-tool"), &pin);
+        let Opened::UseGateway { route } =
+            open_in(&client, &terminal, Some(&root.path().join("state/st3")))
+                .await
+                .unwrap()
+        else {
+            panic!("missing binary falls back")
+        };
+        assert!(route.contains("no `fabric`"), "{route}");
+        terminal.fallback = false;
+        assert!(
+            open_in(&client, &terminal, Some(&root.path().join("state/st3")))
+                .await
+                .err()
+                .unwrap()
+                .contains("no `fabric`")
+        );
         server.abort();
     }
 }
