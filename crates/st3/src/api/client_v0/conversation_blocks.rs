@@ -8,12 +8,43 @@ use std::io::Read as _;
 use std::sync::LazyLock;
 
 // Bound expensive reads without a queued backlog or a second content cache.
+#[cfg(not(test))]
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// The read budget serving `transcript`: the process-wide one, or under test the budget of
+/// the test's own scope, so parallel tests never take each other's slots.
+#[cfg(not(test))]
+fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore {
+    &READ_SLOTS
+}
+
+#[cfg(test)]
+fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<tokio::sync::Semaphore> =
+        LazyLock::new(Default::default);
+    crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
+        tokio::sync::Semaphore::new(4)
+    })
+}
+
+#[cfg(test)]
+fn read_slot(
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    slots.try_acquire_owned().map_err(|_| ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "rate-limited".into(),
+        message: "owner conversation reads are busy; retry this read".into(),
+        details: Box::default(),
+    })
+}
+
 static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let mut key = [0; 32];
     getrandom::fill(&mut key).expect("owner reference key entropy");
     key
 });
+#[cfg(not(test))]
 fn read_slot(slots: &tokio::sync::Semaphore) -> Result<tokio::sync::SemaphorePermit<'_>, ApiError> {
     slots.try_acquire().map_err(|_| ApiError {
         status: StatusCode::TOO_MANY_REQUESTS,
@@ -164,6 +195,25 @@ struct ContentLocator {
     pointer: String,
     image: bool,
     native: Value,
+    shape: String,
+}
+
+/// A digest of an entry's structure: its kind and its blocks. A timeline entry may be a bounded
+/// preview of an oversized native record; a ref minted against the preview applies to the
+/// owner's complete record only while both agree on it, so a pointer never lands elsewhere.
+fn shape(item: &Value) -> String {
+    let shape = json!({
+        "type": item["type"],
+        "role": item["role"],
+        "blocks": item["body"]["blocks"].as_array().map(|blocks| {
+            blocks
+                .iter()
+                .map(|block| json!([block["id"], block["kind"], block["source_type"]]))
+                .collect::<Vec<_>>()
+        }),
+    });
+    let encoded = serde_json::to_vec(&shape).expect("JSON value encodes");
+    URL_SAFE_NO_PAD.encode(ring::digest::digest(&ring::digest::SHA256, &encoded))
 }
 
 fn reference(
@@ -184,6 +234,7 @@ fn reference(
             .pointer(pointer)
             .is_some_and(|value| image(value) && !external_image(value)),
         native: item["_source"].clone(),
+        shape: shape(item),
     };
     let key = aead::LessSafeKey::new(
         aead::UnboundKey::new(&aead::CHACHA20_POLY1305, &*REF_KEY).expect("owner reference key"),
@@ -242,7 +293,11 @@ fn located_value(source: &ExternalSession, locator: &ContentLocator) -> Result<V
     crate::external_sessions::normalized_record(source, &native)
         .map_err(|_| invalidated())?
         .into_iter()
-        .find(|item| item["id"] == locator.entry && item["revision"] == locator.revision)
+        .find(|item| {
+            item["id"] == locator.entry
+                && item["revision"] == locator.revision
+                && shape(item) == locator.shape
+        })
         .and_then(|item| item.pointer(&locator.pointer).cloned())
         .ok_or_else(invalidated)
 }
@@ -305,6 +360,18 @@ pub(crate) fn bound_open_value(value: &mut Value) -> bool {
             }
             changed
         }
+        _ => false,
+    }
+}
+
+/// Preview parsing already clips long strings before wire preparation sees them.
+fn has_preview_marker(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            text.contains("[st truncated this native timeline value: size limit;")
+        }
+        Value::Array(values) => values.iter().any(has_preview_marker),
+        Value::Object(values) => values.values().any(has_preview_marker),
         _ => false,
     }
 }
@@ -406,7 +473,8 @@ pub(super) fn read(
     let mut held = timeline.hold();
     // The fold is held before the slot is taken: waiting viewers of this conversation hold
     // no global read slot, so they never crowd an unrelated conversation out of the budget.
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&source.transcript);
+    let _slot = read_slot(slots)?;
     let before = basis(source)?;
     let items = held.read(source).map_err(ApiError::internal)?;
     if before != basis(source)? {
@@ -438,7 +506,8 @@ pub(super) fn read_slice(
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
     let mut held = timeline.hold();
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&source.transcript);
+    let _slot = read_slot(slots)?;
     let basis = basis(source)?;
     let mut slice = held
         .slice(source, order, before, limit)
@@ -482,6 +551,9 @@ pub(super) fn prepare_one(
     item: &mut Value,
 ) -> Result<(), ApiError> {
     let original = item.clone();
+    // The fold holds oversized native records as bounded previews; their long values reach
+    // the client only through continuations, read from the owner's complete record.
+    let preview = original["_preview_of_bytes"].is_number();
     let body = item["body"]
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("native body is not an object"))?;
@@ -526,27 +598,34 @@ pub(super) fn prepare_one(
                     &original,
                 );
                 let encoded = serde_json::to_vec(&block["payload"]).map_err(ApiError::internal)?;
-                if encoded.len() > VALUE_BYTES || original["_oversized_bytes"].is_number() {
+                // A preview may have clipped a value to within the display window, so every
+                // block of one keeps a way back to the complete native value.
+                if encoded.len() > VALUE_BYTES
+                    || original["_oversized_bytes"].is_number()
+                    || preview
+                {
                     block["continuation"] = continuation(
                         reference(source, basis, session_id, &original, &pointer),
                         "application/json",
-                        Some(
-                            if let Some(size) = original["_oversized_payload_bytes"][index].as_u64()
-                            {
-                                size as usize
-                            } else if body_ref || images_replaced {
-                                // body_ref previews omit the blocks array, and image refs
-                                // replace native bytes. Size describes the owner value,
-                                // not either of those display-only transformations.
+                        if let Some(size) = original["_oversized_payload_bytes"][index].as_u64() {
+                            Some(size as usize)
+                        } else if preview {
+                            // A preview never held the complete value, so it cannot size it.
+                            None
+                        } else if body_ref || images_replaced {
+                            // body_ref previews omit the blocks array, and image refs
+                            // replace native bytes. Size describes the owner value,
+                            // not either of those display-only transformations.
+                            Some(
                                 serde_json::to_vec(
                                     original.pointer(&pointer).expect("native block payload"),
                                 )
                                 .map_err(ApiError::internal)?
-                                .len()
-                            } else {
-                                encoded.len()
-                            },
-                        ),
+                                .len(),
+                            )
+                        } else {
+                            Some(encoded.len())
+                        },
                         "size-limit",
                     );
                     bound(&mut block["payload"]);
@@ -595,32 +674,43 @@ pub(super) fn prepare_one(
             }
         }
     }
-    // Keep open display objects (including assistant text/reasoning metadata)
-    // bounded on both full reads and keyset pages. If another subtree already
-    // needs a ref, fetch the whole original body so neither remainder is lost.
+    // Keep open display objects (including assistant text/reasoning metadata) bounded.
+    // JSON continuations can cover the whole body, but an image's continuation must keep
+    // pointing to its pixels. Its clipped display objects get their own references.
     if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
         for (index, block) in blocks.iter_mut().enumerate() {
+            let pixels = block["kind"] == "image" && block.get("continuation").is_some();
             for key in ["metadata", "view"] {
                 if let Some(value) = block.get_mut(key)
-                    && bound_open_value(value)
+                    && (bound_open_value(value)
+                        || (preview && (!pixels || has_preview_marker(value))))
                 {
-                    let pointer = if block.get("continuation").is_some() {
+                    let pointer = if !pixels && block.get("continuation").is_some() {
                         "/body".to_owned()
                     } else {
                         format!("/body/blocks/{index}/{key}")
                     };
-                    block["continuation"] = continuation(
+                    let more = continuation(
                         reference(source, basis, session_id, &original, &pointer),
                         "application/json",
-                        Some(
-                            serde_json::to_vec(
-                                original.pointer(&pointer).expect("native open value"),
+                        if preview {
+                            None
+                        } else {
+                            Some(
+                                serde_json::to_vec(
+                                    original.pointer(&pointer).expect("native open value"),
+                                )
+                                .map_err(ApiError::internal)?
+                                .len(),
                             )
-                            .map_err(ApiError::internal)?
-                            .len(),
-                        ),
+                        },
                         "size-limit",
                     );
+                    if pixels {
+                        block[key]["continuation"] = more;
+                    } else {
+                        block["continuation"] = more;
+                    }
                 }
             }
         }
@@ -696,6 +786,9 @@ pub(super) fn prepare_one(
     item.as_object_mut()
         .expect("native item")
         .remove("_oversized_payload_bytes");
+    item.as_object_mut()
+        .expect("native item")
+        .remove("_preview_of_bytes");
     if serde_json::to_vec(item).map_err(ApiError::internal)?.len()
         > CLIENT_MAX_RESPONSE_BYTES - 128_000
     {
@@ -818,7 +911,8 @@ pub(super) async fn chunk_local(
 ) -> Result<Value, ApiError> {
     require_scope(session, "read.projections")?;
     let locator = locator(wanted, session_id)?;
-    let _slot = read_slot(&READ_SLOTS)?;
+    let slots = read_slots(&locator.source.transcript);
+    let _slot = read_slot(slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
     let (bytes, media) = crate::api::read_deadline::spawn_blocking(move || -> Result<_, ApiError> {
@@ -1228,7 +1322,9 @@ mod tests {
         let original = located_value(&native, &location).unwrap();
         let encoded = serde_json::to_vec(&original).unwrap();
         assert!(encoded.len() > CHUNK_BYTES * 2);
-        assert_eq!(block["continuation"]["size"], encoded.len());
+        // The timeline only ever held a bounded preview of this record, so it does not
+        // claim a size it never measured; the chunk stream reports the exact one.
+        assert!(block["continuation"].get("size").is_none());
         let fetched = fetch_json_chunks(&state, &native, token).await;
         assert_eq!(fetched, original);
         // tool_output's body_ref covers the complete native tool body, not the
@@ -1244,6 +1340,121 @@ mod tests {
                 .local,
             local
         );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_tool_output_paints_its_first_window_from_a_bounded_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let output = format!(
+            "first synthetic output line\n{}\nlast synthetic output line",
+            "x".repeat(1024 * 1024)
+        );
+        let native = fixture(
+            root.path(),
+            json!([{
+                "type":"toolResult", "call_id":"huge-output", "toolName":"shell",
+                "content":output, "details":{"exitCode":0}
+            }]),
+        );
+        // The fold keeps a bounded preview: neither the complete body nor a raw copy of it.
+        let folded = crate::external_sessions::normalized_timeline(&native).unwrap();
+        let entry = folded
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
+        assert!(entry["_preview_of_bytes"].as_u64().unwrap() > 1024 * 1024);
+        assert!(serde_json::to_vec(entry).unwrap().len() < 128 * 1024);
+        let mut state = super::super::tests::test_state_named(root.path(), "preview-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        let page = read_slice(
+            &native,
+            &session,
+            &native.id,
+            crate::external_sessions::TimelineOrder::Sequence,
+            None,
+            10,
+        )
+        .unwrap();
+        let item = page
+            .items
+            .iter()
+            .find(|item| item["type"] == "tool_result")
+            .unwrap();
+        assert!(item.get("_preview_of_bytes").is_none());
+        assert!(serde_json::to_vec(item).unwrap().len() < 64 * 1024);
+        let shown = item["body"]["content"].as_str().unwrap();
+        assert!(shown.starts_with("first synthetic output line\nxxx"));
+        assert!(shown.contains("[st truncated this native timeline value:"));
+        let block = &item["body"]["blocks"][0];
+        assert_eq!(block["kind"], "tool_output");
+        assert_eq!(block["continuation"]["reason"], "size-limit");
+        // Expanding reads the complete record from the owner, not from the preview.
+        let token = block["continuation"]["ref"].as_str().unwrap();
+        let fetched = fetch_json_chunks(&state, &native, token).await;
+        assert_eq!(fetched["content"], output);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_assistant_image_keeps_its_pixel_continuation_with_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let pixels = b"\x89PNG\r\n\x1a\nsynthetic pixels";
+        let native = fixture(root.path(), json!([]));
+        let mut state = super::super::tests::test_state_named(root.path(), "image-preview-owner");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(None).unwrap();
+        session.conversation_blocks = true;
+        for model in ["synthetic-model".to_owned(), "m".repeat(300 * 1024)] {
+            let header = json!({"type":"session","id":"native-test","cwd":"/work/example","timestamp":"2026-10-06T12:00:00Z"});
+            let message = json!({
+                "type":"message","id":"image-metadata","timestamp":"2026-10-06T12:00:01Z",
+                "message":{
+                    "role":"assistant","model":model,
+                    "usage":{"input":10,"output":20},
+                    "content":[
+                        {"type":"text","text":"x".repeat(300 * 1024)},
+                        {"type":"image","mimeType":"image/png","data":STANDARD.encode(pixels)}
+                    ]
+                }
+            });
+            std::fs::write(&native.transcript, format!("{header}\n{message}\n")).unwrap();
+            let page = read(&native, &session, &native.id).unwrap();
+            let image = page
+                .iter()
+                .filter_map(|item| item["body"]["blocks"].as_array())
+                .flatten()
+                .find(|block| block["kind"] == "image")
+                .unwrap();
+            let reference = &image["continuation"];
+            // Inline data is not decoded until fetch; the chunk reports the detected MIME.
+            assert_eq!(reference["media_type"], "application/octet-stream");
+            assert_eq!(reference["reason"], "on-demand");
+            let token = reference["ref"].as_str().unwrap();
+            assert!(locator(token, &native.id).unwrap().image);
+            let chunk = chunk_local(&state, &session, &native.id, token, 0)
+                .await
+                .unwrap();
+            assert_eq!(chunk["media_type"], "image/png");
+            assert_eq!(
+                STANDARD.decode(chunk["data"].as_str().unwrap()).unwrap(),
+                pixels
+            );
+            assert!(chunk["next_offset"].is_null());
+            if model.len() > VALUE_BYTES {
+                let metadata = &image["metadata"];
+                assert!(metadata["model"].as_str().unwrap().contains("size limit"));
+                let reference = &metadata["continuation"];
+                assert_eq!(reference["media_type"], "application/json");
+                let location = locator(reference["ref"].as_str().unwrap(), &native.id).unwrap();
+                assert!(location.pointer.ends_with("/metadata"));
+                assert!(!location.image);
+                assert_eq!(located_value(&native, &location).unwrap()["model"], model);
+            } else {
+                assert_eq!(image["metadata"]["model"], model);
+                assert!(image["metadata"].get("continuation").is_none());
+            }
+        }
     }
 
     fn assert_native_keyset_pages_match_full_read(
@@ -1325,7 +1536,6 @@ mod tests {
             "{assistant}"
         )
         .unwrap();
-        let originals = crate::external_sessions::normalized_timeline(&native).unwrap();
         let mut state = super::super::tests::test_state_named(root.path(), "view-owner");
         state.native_session_home = Some(root.path().to_path_buf());
         for negotiated in [true, false] {
@@ -1358,13 +1568,12 @@ mod tests {
                     assert_eq!(block[key]["provider"], "example");
                 }
                 let token = block["continuation"]["ref"].as_str().unwrap();
-                let pointer = locator(token, &native.id).unwrap().pointer;
-                let original = originals
-                    .iter()
-                    .find(|entry| entry["id"] == item["id"])
-                    .unwrap();
+                let location = locator(token, &native.id).unwrap();
+                let pointer = location.pointer.clone();
+                // Both records exceed the preview bound: the timeline holds previews, and
+                // the owner's complete record is the reference for a fetched value.
                 let fetched = fetch_json_chunks(&state, &native, token).await;
-                assert_eq!(fetched, *original.pointer(&pointer).unwrap());
+                assert_eq!(fetched, located_value(&native, &location).unwrap());
                 let fetched_value = if pointer == "/body" {
                     &fetched["blocks"][0][key]
                 } else {
@@ -1750,7 +1959,6 @@ mod tests {
                 .contains(&STANDARD.encode(&pixels))
         );
         assert!(serde_json::to_vec(&items).unwrap().len() < CLIENT_MAX_RESPONSE_BYTES);
-        let original = crate::external_sessions::normalized_timeline(&source).unwrap();
         let location = locator(
             blocks[2]["continuation"]["ref"].as_str().unwrap(),
             &source.id,
@@ -1760,13 +1968,36 @@ mod tests {
             located_value(&source, &location).unwrap(),
             json!({"raw":raw})
         );
-        let (decoded, mime) = image_bytes(
-            &source,
-            &original.last().unwrap()["body"]["blocks"][0]["payload"],
-        )
-        .unwrap();
+        // The timeline holds a bounded preview, not fetchable image bytes. Follow the
+        // image's own locator back to the complete native record before decoding.
+        let token = blocks[3]["continuation"]["ref"].as_str().unwrap();
+        let location = locator(token, &source.id).unwrap();
+        assert!(location.image);
+        assert_eq!(location.pointer, "/body/blocks/0/payload");
+        let value = located_value(&source, &location).unwrap();
+        assert_eq!(value["data"], STANDARD.encode(&pixels));
+        let (decoded, mime) = image_bytes(&source, &value).unwrap();
         assert_eq!(decoded, pixels);
         assert_eq!(mime, "image/png");
+        let first = chunk_local(&state, &session, &source.id, token, 0)
+            .await
+            .unwrap();
+        assert_eq!(first["media_type"], "image/png");
+        assert_eq!(first["size"], pixels.len());
+        let mut fetched = STANDARD.decode(first["data"].as_str().unwrap()).unwrap();
+        assert_eq!(fetched.len(), CHUNK_BYTES);
+        let last = chunk_local(
+            &state,
+            &session,
+            &source.id,
+            token,
+            first["next_offset"].as_u64().unwrap(),
+        )
+        .await
+        .unwrap();
+        fetched.extend(STANDARD.decode(last["data"].as_str().unwrap()).unwrap());
+        assert!(last["next_offset"].is_null());
+        assert_eq!(fetched, pixels);
         assert_eq!(
             state.store.index().unwrap(),
             index,
@@ -2316,11 +2547,14 @@ mod tests {
 
     #[test]
     fn concurrent_read_limit_has_no_waiting_backlog() {
-        let slots = tokio::sync::Semaphore::new(4);
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
         let held: Vec<_> = (0..4).map(|_| slots.try_acquire().unwrap()).collect();
-        assert_eq!(read_slot(&slots).unwrap_err().code, "rate-limited");
+        assert_eq!(
+            read_slot(std::sync::Arc::clone(&slots)).unwrap_err().code,
+            "rate-limited"
+        );
         drop(held);
-        assert!(read_slot(&slots).is_ok());
+        assert!(read_slot(std::sync::Arc::clone(&slots)).is_ok());
     }
     #[test]
     fn sqlite_ref_fences_native_message_and_part_identity_not_only_rowid() {

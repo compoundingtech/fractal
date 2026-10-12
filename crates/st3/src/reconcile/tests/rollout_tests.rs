@@ -79,6 +79,9 @@ fn assert_launch(actual: &MemberSpec, expected: &MemberSpec) {
 
 impl Seat {
     fn new() -> Self {
+        Self::new_with_owned_publication(true)
+    }
+    fn new_with_owned_publication(owned: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(&root.path().join("graph.db"), "amber").unwrap());
         let seat = Self {
@@ -86,7 +89,29 @@ impl Seat {
             store,
             runtime: Arc::new(Runtime::default()),
         };
-        seat.publish(1, "first", None, false);
+        if owned {
+            seat.publish(1, "first", None, false);
+        } else {
+            let input = parse_intent(&seat.source("first", ""), "amber").unwrap();
+            let preview = seat
+                .store
+                .mission(
+                    &input,
+                    crate::model::IntentInput {
+                        kdl: String::new(),
+                        source_name: None,
+                    },
+                )
+                .unwrap();
+            seat.store
+                .apply_as(
+                    &input,
+                    &preview.subject_tokens,
+                    "initial",
+                    Some("person/operator"),
+                )
+                .unwrap();
+        }
         let desired = seat.desired();
         let member = desired.member.unwrap();
         let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
@@ -106,6 +131,13 @@ impl Seat {
         seat.busy(true);
         seat
     }
+    fn source(&self, model: &str, edit: &str) -> String {
+        format!(
+            "version 2\nagent \"garden/orchard\" {{ host \"amber\"; workspace {:?}; harness \"claude\" {{ model {model:?}; }}\n{edit}\n}}",
+            self.root.path().display().to_string()
+        )
+    }
+
     fn append(&self, kind: &str, fields: Value) {
         self.store
             .append_claim(&ClaimInput {
@@ -138,21 +170,27 @@ impl Seat {
         policy: Option<Policy>,
         retire: bool,
         manual: bool,
-    ) {
+    ) -> crate::store::owned_sets::Preview {
         let source = if retire {
             "version 2".into()
         } else {
-            format!(
-                "version 2\nagent \"garden/orchard\" {{ host \"amber\"; workspace {:?}; harness \"claude\" {{ model {model:?}; }} }}",
-                self.root.path().display().to_string()
-            )
+            self.source(model, "")
         };
         let source = if manual && !retire {
             source.replacen("{ host", "{ rollout \"manual\"; host", 1)
         } else {
             source
         };
-        let input = crate::graph::parse_owned_set_intent(&source, "amber").unwrap();
+        self.publish_source(sequence, &source, policy, retire)
+    }
+    fn publish_source(
+        &self,
+        sequence: u64,
+        source: &str,
+        policy: Option<Policy>,
+        retire: bool,
+    ) -> crate::store::owned_sets::Preview {
+        let input = crate::graph::parse_owned_set_intent(source, "amber").unwrap();
         let mut options = Options {
             set: "garden".into(),
             source: Source {
@@ -175,8 +213,8 @@ impl Seat {
         };
         let preview = self.store.owned_set_preview(&input, &options).unwrap();
         assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
-        options.confirm_retire = Some(preview.digest);
-        options.expected_subjects = preview.expected_subjects;
+        options.confirm_retire = Some(preview.digest.clone());
+        options.expected_subjects = preview.expected_subjects.clone();
         self.store
             .apply_owned_set(
                 &input,
@@ -185,7 +223,9 @@ impl Seat {
                 "person/operator",
             )
             .unwrap();
+        preview
     }
+
     fn work(&self) -> crate::model::MissionRunView {
         let input = parse_intent("version 2\nmission \"garden/work\" state=\"ready\" { goal \"Tend the garden\"; step \"current\" { assigned-to \"agent/garden/orchard\" }; step \"queued\" { assigned-to \"agent/garden/orchard\" }; }","amber").unwrap();
         let preview = self
@@ -1259,7 +1299,11 @@ fn manual_rollout_does_not_apply_a_pending_change_after_incumbent_exit() {
 fn manual_publication_preserves_completed_suspension_across_reopens() {
     let mut seat = Seat::new();
     let (operation, _, _) = seat.finish_suspend();
-    seat.publish_mode(2, "second", None, false, true);
+    let preview = seat.publish_mode(2, "second", None, false, true);
+    assert!(preview.effects[SUBJECT].contains(&operation));
+    assert!(preview.effects[SUBJECT].contains("hold kept"));
+    assert!(preview.effects[SUBJECT].contains("launch change stays pending"));
+    assert!(preview.effects[SUBJECT].contains("pending (manual)"));
     for _ in 0..3 {
         seat.reopen();
         let suspended = crate::suspension::current(&seat.store, SUBJECT)
@@ -1276,16 +1320,210 @@ fn manual_publication_preserves_completed_suspension_across_reopens() {
 }
 
 #[test]
+fn suspended_non_launch_publications_preserve_hold_and_resume_updated_environment() {
+    for owned in [false, true] {
+        for edit in [r#"env { COLOR "blue"; }"#, r#"name "New label";"#] {
+            for observation in [Some("exited"), Some("vanished"), None] {
+                let mut seat = Seat::new_with_owned_publication(owned);
+                let (operation, old_token, _) = seat.finish_suspend();
+                match observation {
+                    Some(status) => {
+                        seat.runtime
+                            .observation
+                            .lock()
+                            .unwrap()
+                            .as_mut()
+                            .unwrap()
+                            .status = status.into()
+                    }
+                    None => *seat.runtime.observation.lock().unwrap() = None,
+                }
+                assert!(seat.store.latest_actual_value(SUBJECT).unwrap().is_some());
+                let source = seat.source("first", edit);
+                let input = parse_intent(&source, "amber").unwrap();
+                let preview = seat
+                    .store
+                    .mission(
+                        &input,
+                        crate::model::IntentInput {
+                            kdl: source.clone(),
+                            source_name: None,
+                        },
+                    )
+                    .unwrap();
+                let action = &preview.predicted_actions[0];
+                assert_eq!(action.action, "hold-kept");
+                assert!(action.reason.contains(&operation));
+                assert!(action.reason.contains("hold kept"));
+                assert!(
+                    action
+                        .reason
+                        .contains("environment edits take effect only on explicit resume")
+                );
+                if owned {
+                    let owned_preview = seat.publish_source(2, &source, None, false);
+                    assert!(owned_preview.effects[SUBJECT].contains(&operation));
+                    assert!(owned_preview.effects[SUBJECT].contains("hold kept"));
+                } else {
+                    seat.store
+                        .apply_as(
+                            &input,
+                            &preview.subject_tokens,
+                            "edit",
+                            Some("person/operator"),
+                        )
+                        .unwrap();
+                }
+                seat.reopen();
+                let held = crate::suspension::current(&seat.store, SUBJECT)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(held.phase, "suspended");
+                assert_eq!(held.operation_id, operation);
+                assert_eq!(held.native_session_id.as_deref(), Some("native-one"));
+                assert!(
+                    seat.store
+                        .suspension_lineage(SUBJECT)
+                        .unwrap()
+                        .contains(&old_token)
+                );
+                assert_eq!(
+                    seat.store.launch_lineage(SUBJECT).unwrap().contains(&old_token),
+                    !edit.starts_with("env"),
+                    "environment edits must still reset process retry budgets"
+                );
+                let starts_before = seat
+                    .store
+                    .claims_for(SUBJECT, Some("runtime.action.succeeded"))
+                    .unwrap();
+                seat.reconcile();
+                assert!(
+                    seat.runtime.starts.lock().unwrap().is_empty(),
+                    "{edit}: {observation:?}"
+                );
+                assert_eq!(
+                    seat.store
+                        .claims_for(SUBJECT, Some("runtime.action.succeeded"))
+                        .unwrap()
+                        .len(),
+                    starts_before.len()
+                );
+                let member = seat.desired().member.unwrap();
+                if edit.starts_with("env") {
+                    assert_eq!(member.environment["COLOR"], "blue");
+                } else {
+                    assert_eq!(member.display_name.as_deref(), Some("New label"));
+                }
+                let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+                seat.suspension_claim(
+                    "runtime.action.requested",
+                    json!({"action":"resume"}),
+                    vec![token, operation],
+                    None,
+                );
+                seat.reconcile();
+                let started = seat.runtime.starts.lock().unwrap()[0].clone();
+                assert_eq!(
+                    started.environment[crate::suspension::RESUME_ENV],
+                    "native-one"
+                );
+                if edit.starts_with("env") {
+                    assert_eq!(started.environment["COLOR"], "blue");
+                }
+                seat.binding("replacement-1", "native-one");
+                seat.reconcile();
+                assert_eq!(
+                    crate::suspension::current(&seat.store, SUBJECT)
+                        .unwrap()
+                        .unwrap()
+                        .phase,
+                    "resumed"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_stop_preview_names_and_discards_completed_suspension() {
+    let seat = Seat::new_with_owned_publication(false);
+    let (operation, _, _) = seat.finish_suspend();
+    let source = format!("version 2\nstop {SUBJECT:?}\n");
+    let input = crate::graph::parse_internal_intent(&source, "amber").unwrap();
+    let preview = seat
+        .store
+        .mission(
+            &input,
+            crate::model::IntentInput {
+                kdl: source,
+                source_name: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(preview.predicted_actions[0].action, "stop");
+    assert!(preview.predicted_actions[0].reason.contains(&operation));
+    assert!(
+        preview.predicted_actions[0]
+            .reason
+            .contains("explicit stop would discard the hold")
+    );
+    seat.store
+        .apply_as(
+            &input,
+            &preview.subject_tokens,
+            "stop",
+            Some("person/operator"),
+        )
+        .unwrap();
+    assert!(
+        crate::suspension::current(&seat.store, SUBJECT)
+            .unwrap()
+            .is_none()
+    );
+    seat.reconcile();
+    assert!(seat.runtime.starts.lock().unwrap().is_empty());
+}
+
+#[test]
 fn immediate_publication_ends_completed_suspension() {
     let seat = Seat::new();
-    seat.finish_suspend();
-    seat.publish(2, "second", None, false);
-    assert!(crate::suspension::current(&seat.store, SUBJECT).unwrap().is_none());
+    let (operation, _, _) = seat.finish_suspend();
+    let source = seat.source("second", "");
+    let input = parse_intent(&source, "amber").unwrap();
+    let preview = seat
+        .store
+        .mission(
+            &input,
+            crate::model::IntentInput {
+                kdl: source.clone(),
+                source_name: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(preview.predicted_actions[0].action, "start-suspended");
+    assert!(preview.predicted_actions[0].reason.contains(&operation));
+    assert!(
+        preview.predicted_actions[0]
+            .reason
+            .contains("would start a suspended agent")
+    );
+    let preview = seat.publish_source(2, &source, None, false);
+    assert!(preview.effects[SUBJECT].contains(&operation));
+    assert!(preview.effects[SUBJECT].contains("would start a suspended agent"));
+    assert!(
+        crate::suspension::current(&seat.store, SUBJECT)
+            .unwrap()
+            .is_none()
+    );
     seat.reconcile();
     let starts = seat.runtime.starts.lock().unwrap();
     assert_eq!(starts.len(), 1);
     assert_launch(&starts[0], &seat.desired().member.unwrap());
-    assert!(!starts[0].environment.contains_key(crate::suspension::RESUME_ENV));
+    assert!(
+        !starts[0]
+            .environment
+            .contains_key(crate::suspension::RESUME_ENV)
+    );
 }
 
 #[test]

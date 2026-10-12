@@ -27,6 +27,7 @@ use tower::ServiceExt as _;
 
 use crate::archive::hydrate_eval;
 use crate::graph::{parse_intent, resolve_document_references};
+use crate::message_body;
 #[cfg(test)]
 use crate::model::AttentionRequest;
 use crate::model::ClientReplicated;
@@ -62,6 +63,7 @@ use crate::store::Store;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
+mod message_bodies;
 mod client_adapters;
 mod client_presence;
 mod client_v0;
@@ -77,8 +79,10 @@ mod github_watch;
 mod harness_events;
 mod mailbox;
 mod mail_backlog;
+pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
 mod owned_sets;
+mod directive_notes;
 mod request_latency;
 mod client_observations;
 mod terminal_view;
@@ -497,6 +501,8 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/client/capabilities", get(client_capabilities))
+        .route("/v1/client/notes", get(directive_notes::read))
+        .route("/v1/notes", axum::routing::put(directive_notes::write))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/arrangements", get(client_v0::arrangements::list))
@@ -537,6 +543,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/alerts/{*id}", get(client_attention_detail))
         .route("/v1/client/messages", get(client_messages))
         .route("/v1/client/messages/{*id}", get(client_messages_detail))
+        .route("/v1/client/message-bodies/{*id}", get(message_bodies::client_body))
         .route("/v1/client/launches", get(client_launches))
         .route(
             "/v1/client/launches/{id}/variants",
@@ -757,6 +764,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
         .route("/v1/messages/{message_id}/claims", post(post_message_claim))
         .route("/v1/messages/read/{*subject}", get(read_message))
+        .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(message_delivery))
         .route("/v1/messages/by-key", get(message_by_key))
         .route("/v1/status", get(status))
@@ -1726,6 +1734,9 @@ fn client_error_code(code: Option<&str>) -> String {
         | "transcript-unavailable"
         | "terminal-ended"
         | "blob-too-large"
+        | "message-too-large"
+        | "message-store-full"
+        | "long-message-signature-unsupported"
         | "unsupported-media-type"
         | "blob-content-mismatch"
         | "blob-quota-exceeded"
@@ -2150,6 +2161,8 @@ async fn client_capabilities(
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
     let capabilities = client_v0::capabilities(&session);
+    // The longest message body this daemon takes, so a composer shows a limit only when told.
+    let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
         "kind": "capabilities",
         "machine_version": st_drivers::version::machine_version(),
@@ -2161,6 +2174,7 @@ async fn client_capabilities(
             "max_event_items": 500,
             "max_response_bytes": CLIENT_MAX_RESPONSE_BYTES,
             "max_wait_ms": 30_000,
+            "max_message_bytes": max_message_bytes,
             "max_glass_body_bytes": st3_schema::glasses::MAX_BODY_BYTES,
             "max_glasses": st3_schema::glasses::MAX_GLASSES,
             "max_glass_depth": st3_schema::glasses::MAX_DEPTH,
@@ -3358,7 +3372,7 @@ fn managed_session_owner_for_subject_at(
     })
 }
 
-/// How many of a subject's claims, oldest first, date its session in the session list.
+/// Bound the legacy runtime-only scan; incarnation dating uses two index seeks instead.
 const SESSION_CLAIMS: usize = 10_000;
 
 fn client_session_resources(
@@ -3527,12 +3541,12 @@ fn managed_session_resources(
             "stopped" | "exited" | "absent" => "completed",
             _ => "waiting",
         };
-        // A session is dated by the subject's first SESSION_CLAIMS claims, the page this list
-        // once read whole and filtered, so a subject with more keeps the dates it had.
+        // Keep the old page bound only for runtime-only identities, which scan subject history.
+        // Incarnation spans are index-bounded and must include incarnations after that page.
         let through_claim = subject
             .claims
             .get(SESSION_CLAIMS - 1)
-            .filter(|_| subject.claims.len() > SESSION_CLAIMS);
+            .filter(|_| incarnation.is_none() && subject.claims.len() > SESSION_CLAIMS);
         let mut accepted_times = store
             .runtime_claim_span_at(
                 &subject.subject,
@@ -3552,9 +3566,23 @@ fn managed_session_resources(
         let started = fields
             .and_then(|fields| fields.get("started_at_unix_ms"))
             .and_then(|value| value.as_u64().map(u128::from))
-            .map(client_timestamp)
-            .or_else(|| accepted_times.iter().min().copied().map(client_timestamp))
-            .unwrap_or_else(|| at.to_owned());
+            .or_else(|| accepted_times.iter().min().copied());
+        // Client v0 requires a timestamp. Without session evidence, the actual observation's
+        // acceptance time is the closest durable date, not the time someone reads the session.
+        let started = match started {
+            Some(started) => client_timestamp(started),
+            None => subject
+                .actual_claim
+                .as_deref()
+                .or_else(|| subject.claims.first().map(String::as_str))
+                .map(|id| store.claim_by_id(id))
+                .transpose()?
+                .flatten()
+                .map_or_else(
+                    || client_timestamp(0),
+                    |claim| client_timestamp(claim.accepted_at_unix_ms),
+                ),
+        };
         let updated = accepted_times
             .iter()
             .max()
@@ -3888,7 +3916,7 @@ fn client_message_resources(
             reasons.push("superseded");
         }
         let current = reasons.is_empty();
-        resources.push(json!({
+        let mut resource = json!({
             "id": message.subject,
             "kind": "message",
             "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
@@ -3905,7 +3933,13 @@ fn client_message_resources(
             "tags": message.tags,
             "attachments": message.attachments.iter().map(client_attachment).collect::<Vec<_>>(),
             "operational": { "layer": if current { "current" } else { "history" }, "actionable": current, "reasons": reasons }
-        }));
+        });
+        // Only a long message names its body, so every other resource reads as it always has.
+        if let (Some(reference), Some(bytes)) = (&message.body_ref, message.body_bytes) {
+            resource["body_ref"] = json!(reference);
+            resource["body_bytes"] = json!(bytes);
+        }
+        resources.push(resource);
     }
     resources.sort_by(|left, right| {
         right["sent_at"]
@@ -6754,7 +6788,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(st_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
     })))
 }
 
@@ -8260,10 +8294,13 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    checks.push(stale_attention_check(
-        &doctor_attention_items(&state.store, client_now_ms()).map_err(ApiError::internal)?,
-        client_now_ms(),
-    ));
+    let attention_now = client_now_ms();
+    let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
+    checks.push(
+        mission_eligibility_doctor::check(&state.store, &attention, attention_now)
+            .map_err(ApiError::internal)?,
+    );
+    checks.push(stale_attention_check(&attention, attention_now));
     let report_status = if checks.iter().any(|check| check.status == "fail") {
         "fail"
     } else if checks.iter().any(|check| check.status == "warn") {
@@ -8426,9 +8463,10 @@ async fn repair_replication_record(
 /// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
 async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
     let store = state.store.clone();
+    let bodies = message_body::bodies(&state.state_dir);
     let file = blocking_store(move || {
         let mut file = tempfile::tempfile()?;
-        store.write_backup(&mut file)?;
+        store.write_backup_with_bodies(&mut file, Some(&bodies))?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
@@ -12725,6 +12763,22 @@ pub const SIGNED_MESSAGE_FIELDS: &[&str] = &[
     "to",
 ];
 
+/// The fields a device signs on a message past 8 KiB. The claim holds a preview, so it signs
+/// that: `content` is the preview, cut as [`message_body::preview`] cuts it, and `body_sha256`
+/// and `body_bytes` are the hash and length of the whole text, which every member reads from the
+/// claim's `text/plain` `attachments` entry. Sorted, as the check compares them.
+pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
+    "body_bytes",
+    "body_sha256",
+    "content",
+    "from",
+    "in_reply_to",
+    "session_id",
+    "tags",
+    "title",
+    "to",
+];
+
 /// How far a device's signing time may be from this daemon's clock when it first accepts the
 /// message. Members that receive it later check the signature, never the time.
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
@@ -12741,16 +12795,17 @@ fn check_device_signature(
     subject: &str,
     from: &str,
     fields: &BTreeMap<String, Value>,
+    expected: &[&str],
 ) -> Result<(), ApiError> {
     use smallclaims::principal::{FIELDS_FORMAT, Judged, KeyGrant};
     let mut signed = signature.signed_fields.clone();
     signed.sort();
-    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != SIGNED_MESSAGE_FIELDS {
+    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != expected {
         return Err(device_signature_error(
             "device-signature-format",
             format!(
                 "a device signs a message in {FIELDS_FORMAT} over {}",
-                SIGNED_MESSAGE_FIELDS.join(", ")
+                expected.join(", ")
             ),
         ));
     }
@@ -12868,10 +12923,16 @@ fn accept_message_receipt_with_upload_owner(
             "a message needs nonempty content",
         )));
     }
-    if request.content.len() > 4096 && !request.content.starts_with("doc/") {
+    let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
+        && !request.content.starts_with("doc/");
+    if long_body && request.content.len() > message_body::MAX_BYTES {
         return Err(ApiError::bad(St3Error::new(
             "message-too-large",
-            "an inline message cannot exceed 4 KiB; post a document first",
+            format!(
+                "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
+                message_body::MAX_BYTES / 1024,
+                request.content.len().div_ceil(1024)
+            ),
         )));
     }
     if request.content.starts_with("doc/") {
@@ -12976,7 +13037,14 @@ fn accept_message_receipt_with_upload_owner(
     let mut fields = BTreeMap::from([
         ("from".into(), Value::String(from.clone())),
         ("to".into(), Value::String(to.clone())),
-        ("content".into(), Value::String(request.content.clone())),
+        (
+            "content".into(),
+            Value::String(if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content.clone()
+            }),
+        ),
         ("status".into(), Value::String("sent".into())),
         (
             "title".into(),
@@ -13002,15 +13070,65 @@ fn accept_message_receipt_with_upload_owner(
     if let Some(session_id) = session_id {
         fields.insert("session_id".into(), Value::String(session_id));
     }
-    if !attachments.is_empty() {
+    // A long body is a file on this member, named in the claim like an image: nothing of it but
+    // the preview and this reference enters the database or replication. The file is staged
+    // under a temporary name before the claim, so a failed write never leaves a claim without
+    // its text, and renamed into place once the claim has landed, so a refusal or a failed
+    // append leaves no stray file. A repeat of the same send finishes a rename that did not
+    // happen, which heals a crash between the two.
+    let mut body = None;
+    let mut claim_attachments = attachments.clone();
+    if long_body {
+        message_body::bodies(&state.state_dir)
+            .ensure_room(&from, &subject, request.content.len())
+            .map_err(ApiError::bad)?;
+        let entry = crate::model::MessageAttachment {
+            sha256: hex::encode(Sha256::digest(request.content.as_bytes())),
+            media_type: message_body::MEDIA_TYPE.into(),
+            name: None,
+            size: request.content.len() as u64,
+            origin: client_host_id(&state.node),
+        };
+        claim_attachments.push(entry.clone());
+        body = Some(entry);
+    }
+    if !claim_attachments.is_empty() {
         fields.insert(
             "attachments".into(),
-            serde_json::to_value(&attachments).map_err(ApiError::internal)?,
+            serde_json::to_value(&claim_attachments).map_err(ApiError::internal)?,
         );
     }
     if let Some(signature) = &device_signature {
-        check_device_signature(state, signature, &request, &subject, &from, &fields)?;
+        let mut signed = fields.clone();
+        let mut expected = SIGNED_MESSAGE_FIELDS;
+        if let Some(body) = &body {
+            // The claim holds a preview, so the signature must cover the preview, the hash and
+            // the length, which every member can read from the claim. A device that signs the
+            // whole text, as it does under 8 KiB, signs something no other member can check.
+            let mut names = signature.signed_fields.clone();
+            names.sort();
+            if names == SIGNED_MESSAGE_FIELDS {
+                return Err(ApiError::bad(St3Error::new(
+                    "long-message-signature-unsupported",
+                    format!(
+                        "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
+                        message_body::INLINE_MAX_BYTES / 1024
+                    ),
+                )));
+            }
+            signed.insert("body_sha256".into(), Value::String(body.sha256.clone()));
+            signed.insert("body_bytes".into(), json!(body.size));
+            expected = SIGNED_LONG_MESSAGE_FIELDS;
+        }
+        check_device_signature(state, signature, &request, &subject, &from, &signed, expected)?;
     }
+    let staged = if body.is_some() {
+        message_body::bodies(&state.state_dir)
+            .stage(&from, &subject, request.content.as_bytes())
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
     let input = ClaimInput {
         subject: subject.clone(),
         kind: "message.sent".into(),
@@ -13025,7 +13143,21 @@ fn accept_message_receipt_with_upload_owner(
         Some(signature) => state.store.append_signed_message(&input, signature),
         None => state.store.append_claim_outcome(&input),
     }
-    .map_err(ApiError::bad)?;
+    .map_err(|error| {
+        if let Some(staged) = staged.as_ref() {
+            staged.discard();
+        }
+        ApiError::bad(error)
+    })?;
+    if let Some(staged) = staged {
+        // The claim is in. If the text cannot be put in place, the message exists with its
+        // preview: say so as an unconfirmed send, which a repeat of the same send finishes.
+        staged.commit().map_err(|error| {
+            ApiError::internal(anyhow::anyhow!(
+                "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
+            ))
+        })?;
+    }
     // A concurrent sender may have accepted this key first with the same canonical input.
     // Return its accepted classification, rather than this attempt's speculative tags.
     let tags = record.body["fields"]["tags"]
@@ -13058,13 +13190,20 @@ fn accept_message_receipt_with_upload_owner(
             subject,
             from,
             to,
-            content: request.content,
+            content: if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content
+            },
             status: "sent".into(),
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
             created_index: record.store_index,
             attachments,
+            body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
+            body_bytes: body.as_ref().map(|body| body.size),
+            body_origin: body.map(|body| body.origin),
         },
         idempotency_key: request.idempotency_key,
         already_sent: !appended,
@@ -18832,6 +18971,91 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             .unwrap();
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0]["revision"], incarnation);
+        }
+    }
+
+    #[test]
+    fn managed_session_dates_incarnation_after_claim_cap_without_local_timeline() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let subject = "agent/ada";
+        // Build both subjects' old history in one transaction, without projection rebuilds.
+        {
+            let mut connection = state.store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            for _ in 0..=SESSION_CLAIMS {
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    subject,
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle", "incarnation_id": "first"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    "agent/reviewer",
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let first = state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-ada")),
+                ("incarnation_id".into(), json!("second")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(
+            state.store.latest_local_timeline_at(subject, "second", first.store_index).unwrap(),
+            None
+        );
+        for at in ["2026-10-11T10:00:00.000Z", "2026-10-11T10:01:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, first.store_index,
+            ).unwrap().0;
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0]["started_at"], client_timestamp(first.accepted_at_unix_ms));
+            assert_eq!(sessions[0]["updated_at"], client_timestamp(first.accepted_at_unix_ms));
+        }
+        // The unindexed legacy path stays capped, but its required start date is durable too.
+        let legacy = state.store.append_claim(&ClaimInput {
+            subject: "agent/reviewer".into(),
+            kind: "runtime.observed".into(),
+            actor: Some("agent/reviewer".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-reviewer")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        for at in ["2026-10-11T10:02:00.000Z", "2026-10-11T10:03:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, legacy.store_index,
+            ).unwrap().0;
+            let legacy_session = sessions.iter().find(|session| {
+                session["owner_id"] == "agent/reviewer"
+            }).unwrap();
+            assert!(legacy_session["runtime_incarnation"].is_null());
+            assert_eq!(legacy_session["started_at"], client_timestamp(legacy.accepted_at_unix_ms));
         }
     }
 
@@ -27665,3 +27889,5 @@ agent "seat" { workspace "/tmp"; command "true" }
 
 #[cfg(test)]
 mod work_incarnation_tests;
+#[cfg(test)]
+mod message_bodies_tests;

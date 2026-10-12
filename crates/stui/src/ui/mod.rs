@@ -31,6 +31,7 @@ mod lastrun;
 pub(crate) mod open_timing;
 pub mod layout;
 pub mod live;
+pub(crate) mod slo;
 pub mod pane;
 mod drafts_store;
 mod prefs;
@@ -380,6 +381,7 @@ pub struct Ui {
     quit: bool,
     /// Live: actions become `effects` for the live loop instead of demo edits.
     live: bool,
+    quality: slo::Draw,
     effects: Vec<Effect>,
     /// Updates marked read from here, so each is sent once.
     updates_read: HashSet<String>,
@@ -393,6 +395,8 @@ pub struct Ui {
     older_wanted: RefCell<BTreeSet<String>>,
     /// This device opens an agent's tab on its terminal, not its conversation (a setting).
     terminal_first: bool,
+    /// This device permits the daemon after a failed direct terminal route.
+    pub(crate) terminal_fallback: bool,
     /// The agent whose tab just took the focus, and when: its terminal attaches once the tab has
     /// stayed in front for a moment, so passing through tabs attaches nothing.
     attach_when: Option<(String, Instant)>,
@@ -577,6 +581,44 @@ impl Ui {
         })
     }
 
+    fn quality_visible(&self) -> u8 {
+        let frame = self.frame.borrow();
+        let mut visible =
+            if self.glasses.is_none() && frame.area.width >= 20 && frame.area.height >= 6 {
+                1
+            } else {
+                0
+            };
+        for pane in &frame.panes {
+            if !pane.entry_visible(pane.top, pane.total, &frame.covers) {
+                continue;
+            }
+            if pane.key == "list:home" || pane.key.starts_with("home:") {
+                visible |= 1;
+            }
+            if pane.key == "list:agents"
+                || pane.key == "agent-header"
+                || pane.key.starts_with("agent:")
+                || pane.key.starts_with("details:agent/")
+            {
+                visible |= 2;
+            }
+        }
+        visible
+    }
+
+    fn terminal_ready_visible(&self, target: &str) -> bool {
+        let ready = self
+            .terminal_view(target)
+            .and_then(|view| view.native.as_ref())
+            .is_some_and(|native| native.presented());
+        ready
+            && self.frame.borrow().panes.iter().any(|pane| {
+                pane.key.strip_prefix("terminal:") == Some(target)
+                    && pane.entry_visible(pane.top, pane.total, &self.frame.borrow().covers)
+            })
+    }
+
     /// Call only after the terminal successfully presented this frame.
     pub(crate) fn visible_messages(&self) -> HashSet<String> {
         if self.help
@@ -675,12 +717,14 @@ impl Ui {
             demo: None,
             quit: false,
             live: false,
+            quality: slo::Draw::new(Instant::now()),
             effects: Vec::new(),
             updates_read: HashSet::new(),
             acted: HashSet::new(),
             closed: HashSet::new(),
             older_wanted: RefCell::default(),
             terminal_first: false,
+            terminal_fallback: true,
             attach_when: None,
             popover: None,
             chat: None,
@@ -856,6 +900,7 @@ impl Ui {
             let loaded = prefs::load(&path);
             self.simple = simplified(&loaded);
             self.terminal_first = loaded.terminal_first == Some(true);
+            self.terminal_fallback = loaded.terminal_fallback != Some(false);
         }
     }
 
@@ -941,9 +986,21 @@ impl Ui {
                 &prefs::Prefs {
                     simple: Some(self.simple),
                     terminal_first: Some(self.terminal_first),
+                    terminal_fallback: Some(self.terminal_fallback),
                 },
             );
         }
+    }
+
+    /// Change the next terminal attachment's route policy on this device.
+    pub(crate) fn toggle_terminal_fallback(&mut self) {
+        self.terminal_fallback = !self.terminal_fallback;
+        self.save_prefs();
+        self.flash(if self.terminal_fallback {
+            "Terminal routes: fall back through the daemon on failure"
+        } else {
+            "Terminal routes: fabric only, no fallback"
+        });
     }
 
     /// Open an agent's tab on its terminal, or on its conversation (the default): this device's
@@ -2599,7 +2656,7 @@ impl Ui {
                     );
                     if !line.is_empty() {
                         doc.line(Line::from(Span::styled(
-                            format!(" {line} "),
+                            st3_conversation_ui::header::row(&line, width),
                             theme::dim(),
                         )));
                     }
@@ -2656,7 +2713,7 @@ impl Ui {
         };
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
-        // rows from the conversation and never more than a third of the pane.
+        // rows from the conversation and never more than half of the pane.
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
@@ -2665,7 +2722,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize / 3).max(1)));
+        band.truncate(room.min((area.height as usize / 2).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -3707,6 +3764,9 @@ impl Ui {
                     ));
                 }
             }
+            // The other ways to answer or set the card aside are always reachable: write in
+            // words (c), chat about it (t), dismiss it (x), go to the agent (g).
+            KeyCode::Char('c' | 't' | 'x' | 'g') => return false,
             _ => {}
         }
         true
@@ -3822,6 +3882,16 @@ impl Ui {
 
     /// Dispatch the outer terminal's decoded input, shared by the live and demo loops.
     fn input_event(&mut self, event: Event) -> bool {
+        if self.live
+            && matches!(event, Event::Key(key) if key.kind != KeyEventKind::Release)
+            && (self.editing
+                || self.chat.as_ref().is_some_and(|chat| chat.editing)
+                || self.new_mission.is_some()
+                || self.find.is_some()
+                || self.palette_open())
+        {
+            self.quality.key();
+        }
         if let Event::Mouse(mouse) = event
             && mouse.kind == MouseEventKind::Moved
         {
@@ -3989,6 +4059,14 @@ impl Ui {
         // Listening takes every key until the words are sent, kept or dropped.
         if self.voice_key(key) {
             return;
+        }
+        // A text box that has the keyboard always gets the keys: choosing an answer yields to it,
+        // so a person who picked an option and then clicked into a box can type (Nathan,
+        // 2026-10-11: "I can't type until I hit esc").
+        if self.answering.is_some()
+            && (self.editing || self.chat.as_ref().is_some_and(|chat| chat.editing))
+        {
+            self.answering = None;
         }
         // Choosing a structured request's answer: ↑↓ another, Enter sends, Esc puts it away.
         if self.answer_key(key) {
@@ -4587,27 +4665,6 @@ impl Ui {
                     // nothing for the person to do, after a y; an update or a message is read.
                     // A decision or choice needs one of its named answers, which a dismissal
                     // is not, so x says so rather than sending something st would refuse.
-                    ("request", 'x')
-                        if self
-                            .structured_request()
-                            .is_some_and(|(_, request)| !request.answers.is_empty()) =>
-                    {
-                        // A decision usually has an answer that declines; name it, since that
-                        // is the way to close it without agreeing (Nathan, 2026-10-06).
-                        let decline = self.structured_request().and_then(|(_, request)| {
-                            request
-                                .answers
-                                .iter()
-                                .find(|answer| answer.outcome.as_deref() == Some("decline"))
-                                .map(|answer| answer.label.clone())
-                        });
-                        self.flash(match decline {
-                            Some(label) => format!(
-                                "x cannot dismiss a question that needs an answer; a opens its answers, and \"{label}\" declines it"
-                            ),
-                            None => "This asks you to choose, so x cannot dismiss it: a chooses one of its answers".to_owned(),
-                        })
-                    }
                     ("request", 'x') => self.confirm = Some('r'),
                     ("update", 'x') => self.read_update(),
                     ("message", 'x') => self.act('m'),
@@ -4990,6 +5047,7 @@ impl Ui {
                     to_name,
                     editing: true,
                 });
+                self.answering = None;
                 self.editing = false;
                 self.confirm = None;
             }
@@ -5383,10 +5441,16 @@ impl Ui {
             return;
         }
         if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
-            // r closes a request that needs nothing from the person; the step continues.
+            // r closes a request that needs nothing from the person; the step continues. A
+            // decision or choice is set aside by name: st tells its asker it was dismissed.
+            let named = action == 'r'
+                && self
+                    .structured_request()
+                    .is_some_and(|(_, request)| !request.answers.is_empty());
             let answer = match action {
                 'y' => "Yes",
                 'n' => "No",
+                _ if named => "Dismissed without an answer.",
                 _ => "Nothing for me to do here.",
             };
             if self.live {
@@ -5394,7 +5458,7 @@ impl Ui {
                     id,
                     action: "work.done".into(),
                     reason: Some(answer.into()),
-                    answer: None,
+                    answer: named.then(|| "dismiss".to_owned()),
                 });
                 self.flash(format!("Answering “{answer}”…"));
             } else {
@@ -7432,6 +7496,91 @@ mod tests {
     }
 
     #[test]
+    fn a_chosen_answer_never_stops_a_text_box_from_taking_keys() {
+        let mut world = demo::world();
+        let request = st3_client::StructuredRequest {
+            version: 1,
+            entry_type: "choice".into(),
+            question: "Which one?".into(),
+            why_person: "Taste.".into(),
+            answers: vec![
+                st3_client::RequestAnswerOption {
+                    id: "a".into(),
+                    label: "First".into(),
+                    consequence: "Goes first.".into(),
+                    ..Default::default()
+                },
+                st3_client::RequestAnswerOption {
+                    id: "b".into(),
+                    label: "Second".into(),
+                    consequence: "Goes second.".into(),
+                    ..Default::default()
+                },
+            ],
+            custom: true,
+            ..Default::default()
+        };
+        let item = Attention {
+            conversations: vec![],
+            id: "attention/pick".into(),
+            tier: Tier::Stopped,
+            title: "Pick".into(),
+            waiting: None,
+            age: "1m".into(),
+            mission: None,
+            agent: Some("agent/example/cos".into()),
+            kind: AttentionKind::Request {
+                from: "Chief of Staff".into(),
+                from_id: "agent/example/cos".into(),
+                question: request.question.clone(),
+                structured: Some(Box::new(request)),
+            },
+            actions: vec!["work.done".into()],
+            related: Vec::new(),
+            raised_by: None,
+            blocked: None,
+        };
+        if let Load::Ready(items) = &mut world.attention {
+            items.insert(0, item);
+        }
+        let mut ui = Ui::new(world);
+        ui.live = true;
+        ui.tab = 0;
+        let at = ui.listing(60).ids.iter().position(|id| id == "attention/pick").unwrap();
+        ui.select(at);
+        let type_in = |ui: &mut Ui, text: &str| {
+            for letter in text.chars() {
+                ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+            }
+        };
+        // Chat about it, after choosing: the box takes every letter, 'x' and 'j' included.
+        ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(ui.answering, Some(0));
+        ui.click(Hit::Key('t'));
+        assert!(ui.chat.as_ref().is_some_and(|chat| chat.editing));
+        type_in(&mut ui, "xj a question");
+        let key = format!("chat:{}", "attention/pick");
+        assert_eq!(ui.conversation_state.drafts[&key], "xj a question");
+        // Answering in words after choosing does too.
+        let mut ui2 = {
+            let mut again = Ui::new(ui.world.clone());
+            again.live = true;
+            again.tab = 0;
+            let at = again.listing(60).ids.iter().position(|id| id == "attention/pick").unwrap();
+            again.select(at);
+            again
+        };
+        ui2.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        ui2.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(ui2.answering, Some(1));
+        ui2.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(ui2.editing);
+        type_in(&mut ui2, "jk and x too");
+        assert_eq!(ui2.conversation_state.drafts["attention/pick"], "jk and x too");
+        assert_eq!(ui2.answering, None, "the box has the keyboard, the choice yielded");
+    }
+
+    #[test]
     fn a_feedback_request_offers_words_and_a_dismissal_not_an_answer_to_choose() {
         // Nathan, 2026-10-05: "why can't I dismiss this attention item?"
         let feedback = |kind: &str, answers: Vec<st3_client::RequestAnswerOption>| {
@@ -7499,7 +7648,8 @@ mod tests {
             "{:?}",
             ui.effects
         );
-        // A choice has named answers: it offers those, and x says why it cannot dismiss.
+        // A choice has named answers: it offers those, and x still dismisses it after asking,
+        // telling its asker it was set aside (Nathan, 2026-10-11).
         let answer = st3_client::RequestAnswerOption {
             id: "yes".into(),
             label: "Yes".into(),
@@ -7511,11 +7661,19 @@ mod tests {
         let screen = frame(&ui, 140, 50).join("\n");
         assert!(screen.contains("Choose an answer"), "{screen}");
         assert!(!screen.contains("Dismiss: nothing to do"), "{screen}");
+        assert!(screen.contains("Dismiss without answering"), "{screen}");
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
-        assert!(ui.confirm.is_none());
-        assert!(ui.effects.is_empty());
-        // A decision with an answer that declines names it: that is the way to close it
-        // without agreeing (Nathan, 2026-10-06).
+        assert!(ui.confirm.is_some());
+        assert!(ui.effects.is_empty(), "it asks first");
+        assert!(frame(&ui, 140, 50).join("\n").contains("you set it aside without answering"));
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(
+            matches!(&ui.effects[..], [Effect::Attention { id, action, answer: Some(answer), .. }]
+                if id == "attention/feedback" && action == "work.done" && answer == "dismiss"),
+            "{:?}",
+            ui.effects
+        );
+        // Esc at the question keeps it.
         let hold = st3_client::RequestAnswerOption {
             id: "hold".into(),
             label: "Hold".into(),
@@ -7525,14 +7683,11 @@ mod tests {
         };
         let mut ui = feedback("decision", vec![hold]);
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(ui.confirm.is_none());
-        assert!(
-            ui.flash
-                .as_ref()
-                .is_some_and(|(text, _)| text.contains("\"Hold\" declines it")),
-            "{:?}",
-            ui.flash
-        );
+        assert!(ui.effects.is_empty());
+        // A decision with an answer that declines names it: that is the way to close it
+        // without agreeing (Nathan, 2026-10-06).
     }
 
     #[test]
@@ -7616,7 +7771,7 @@ mod tests {
             "Read it",
             "Clears this item.",
             "Why you: You asked for a summary.",
-            "x cannot dismiss this: it needs one of its answers",
+            "Dismiss without answering",
         ] {
             assert!(screen.contains(shown), "{shown}: {screen}");
         }

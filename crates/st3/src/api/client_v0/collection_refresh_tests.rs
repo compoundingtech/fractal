@@ -94,8 +94,9 @@ impl Fixture {
     }
 
     async fn frame(&mut self) -> Value {
+        let until = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let message = tokio::time::timeout(Duration::from_secs(10), self.socket.next())
+            let message = tokio::time::timeout_at(until, self.socket.next())
                 .await
                 .expect("a collection frame")
                 .unwrap()
@@ -552,4 +553,431 @@ async fn a_window_waiting_for_its_first_snapshot_reads_as_soon_as_its_view_publi
     state.store.publish_collection_view("work");
     assert_eq!(fixture.frame().await["kind"], "changes");
     assert_eq!(fixture.counts(), counts(&[("work", 3)]));
+}
+
+async fn inventory_reconnect(
+    state: AppState,
+    session: ClientSession,
+    request: Value,
+    expected: &Value,
+) {
+    let mut reconnect = Fixture::open_as(state, session, true, None, &[]).await;
+    reconnect.send(request).await;
+    let fresh = reconnect.frame().await;
+    assert_eq!(fresh["kind"], "snapshot", "{fresh}");
+    assert_eq!(&fresh["order"], expected);
+}
+
+fn inventory_schema(frame: &Value) {
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+    ))
+    .unwrap();
+    let schema = json!({"$ref":"#/$defs/CollectionFrame", "$defs":schema["$defs"]});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(
+        validator.is_valid(frame),
+        "invalid frame: {frame}; {:?}",
+        validator.iter_errors(frame).collect::<Vec<_>>()
+    );
+    for row in frame["items"]
+        .as_array()
+        .or_else(|| frame["upserts"].as_array())
+        .unwrap()
+    {
+        let resource: st3_client::Resource = serde_json::from_value(row.clone()).unwrap();
+        assert!(!matches!(resource, st3_client::Resource::Unknown(_)));
+    }
+}
+
+#[tokio::test]
+async fn clients_inventory_follows_connect_disconnect_and_reconnect() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "clients-inventory-fixture");
+    let session = ClientSession::local(Some("person/ada")).unwrap();
+    let request = json!({"kind":"subscribe","id":"clients","collection":"clients","limit":1});
+    let mut fixture = Fixture::open_as(state.clone(), session.clone(), true, None, &[]).await;
+    fixture.send(request.clone()).await;
+    let snapshot = fixture.frame().await;
+    inventory_schema(&snapshot);
+    assert_eq!(snapshot["items"], json!([]));
+    let mut headers = HeaderMap::new();
+    headers.insert("x-st3-client", "inventory-example".parse().unwrap());
+    let connection = super::super::client_presence::open_stream(
+        &state.node,
+        &session,
+        &headers,
+        client_now_ms(),
+    );
+    let changed = fixture.frame().await;
+    assert_eq!(changed["kind"], "changes");
+    assert_eq!(changed["upserts"][0]["connected"], true);
+    inventory_schema(&changed);
+    inventory_reconnect(
+        state.clone(),
+        session.clone(),
+        request.clone(),
+        &changed["order"],
+    )
+    .await;
+    drop(connection);
+    let changed = fixture.frame().await;
+    assert_eq!(changed["kind"], "changes");
+    assert_eq!(changed["removes"].as_array().unwrap().len(), 1);
+    inventory_reconnect(state, session, request, &json!([])).await;
+}
+
+#[tokio::test]
+async fn usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "usage-inventory-fixture");
+    let session = ClientSession::local(None).unwrap();
+    let request = json!({"kind":"subscribe","id":"usage","collection":"usage","limit":1,"since_ms":0,"until_ms":100});
+    let mut fixture = Fixture::open(state.clone(), true, None, &[]).await;
+    fixture.send(request.clone()).await;
+    let snapshot = fixture.frame().await;
+    inventory_schema(&snapshot);
+    assert_eq!(snapshot["items"][0]["value"]["rows"], json!([]));
+    fixture.claim(
+        "agent/usage-example",
+        "harness.usage",
+        json!({"driver":"codex", "semantics":"response_rollup",
+        "incarnation_id":"example-one", "model":"example-model", "observed_at_unix_ms":50,
+        "total_tokens":12, "input_tokens":12, "cost_microusd":12}),
+    );
+    let changed = fixture.frame().await;
+    inventory_schema(&changed);
+    assert_eq!(
+        changed["upserts"][0]["value"]["rows"][0]["total_tokens"],
+        12
+    );
+    assert_eq!(changed["upserts"][0]["value"]["until_ms"], 100);
+    fixture.claim(
+        "agent/usage-example",
+        "harness.limits",
+        json!({"driver":"codex", "account":"codex/example",
+        "measured_at_unix_ms":50,"incarnation_id":"example-one","weekly_percent":25.0}),
+    );
+    let changed = fixture.frame().await;
+    assert_eq!(
+        changed["upserts"][0]["value"]["limits"][0]["weekly_percent"], 25.0,
+        "{changed}"
+    );
+    inventory_schema(&changed);
+    inventory_reconnect(state, session, request, &changed["order"]).await;
+}
+
+#[tokio::test]
+async fn machines_inventory_follows_runtime_transport_and_reconnect() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "machines-inventory-fixture");
+    let mut fixture = Fixture::open(state.clone(), true, None, &["machines"]).await;
+    let initial = fixture.frame().await;
+    inventory_schema(&initial);
+    fixture.claim(
+        "agent/machine-example",
+        "runtime.observed",
+        json!({"status":"running", "runtime_id":"example-runtime", "incarnation_id":"example-one"}),
+    );
+    let changed = fixture.frame().await;
+    assert_eq!(changed["kind"], "changes");
+    inventory_schema(&changed);
+    assert_eq!(
+        changed["upserts"][0]["runtime_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "{changed}"
+    );
+    inventory_reconnect(
+        state,
+        ClientSession::local(None).unwrap(),
+        json!({"kind":"subscribe","id":"machines","collection":"machines","limit":200}),
+        &changed["order"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn devices_inventory_follows_pairing_revocation_and_reconnect() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "devices-inventory-fixture");
+    let session = ClientSession::local(Some("person/ada")).unwrap();
+    let request = json!({"kind":"subscribe","id":"devices","collection":"devices","limit":1});
+    let mut fixture = Fixture::open_as(state.clone(), session.clone(), true, None, &[]).await;
+    fixture.send(request.clone()).await;
+    assert_eq!(fixture.frame().await["items"], json!([]));
+    fixture.claim("custom/client/example-device", "custom.client.pairing-completed", json!({
+        "session_actor":"person/ada/session/example", "person_id":"person/ada", "device_id":"device/example",
+        "expires_at_unix_ms":(client_now_ms()+600_000) as u64,"scopes":["read.projections"]}));
+    let changed = fixture.frame().await;
+    inventory_schema(&changed);
+    assert_eq!(changed["order"], json!(["device/example"]));
+    inventory_reconnect(
+        state.clone(),
+        session.clone(),
+        request.clone(),
+        &changed["order"],
+    )
+    .await;
+    fixture.claim(
+        "custom/client/example-device",
+        "custom.client.pairing-revoked",
+        json!({"device_id":"device/example"}),
+    );
+    let changed = fixture.frame().await;
+    assert_eq!(changed["removes"], json!(["device/example"]));
+    inventory_reconnect(state, session, request, &json!([])).await;
+}
+
+#[tokio::test]
+async fn terminals_inventory_follows_runtime_changes_and_reconnect() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "terminals-inventory-fixture");
+    let mut fixture = Fixture::open(state.clone(), true, None, &["terminals"]).await;
+    assert_eq!(fixture.frame().await["items"], json!([]));
+    fixture.claim("agent/terminal-example", "runtime.observed", json!({"status":"running", "runtime_id":"example-runtime", "incarnation_id":"example-one", "terminal":true}));
+    let changed = fixture.frame().await;
+    inventory_schema(&changed);
+    assert_eq!(
+        changed["upserts"][0]["terminal_id"], "terminal/agent/terminal-example",
+        "{changed}"
+    );
+    inventory_reconnect(
+        state,
+        ClientSession::local(None).unwrap(),
+        json!({"kind":"subscribe","id":"terminals","collection":"terminals","limit":200}),
+        &changed["order"],
+    )
+    .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sessions_inventory_follows_files_process_exit_and_reconnect() {
+    use std::io::Read as _;
+    struct NativeProcess(std::process::Child);
+    impl Drop for NativeProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("native");
+    std::fs::create_dir_all(&home).unwrap();
+    let mut state = super::tests::test_state_named(root.path(), "sessions-inventory-fixture");
+    state.native_session_home = Some(home.clone());
+    let mut fixture = Fixture::open(state.clone(), true, None, &["sessions"]).await;
+    let snapshot = fixture.frame().await;
+    let native = "11111111-2222-4333-8444-555555555555";
+    let projects = home.join(".claude/projects/example");
+    std::fs::create_dir_all(&projects).unwrap();
+    let transcript = projects.join(format!("{native}.jsonl"));
+    let mut fake = NativeProcess(
+        std::process::Command::new("bash")
+            .args([
+                "-c",
+                "exec -a claude bash -c 'printf r; read -r value' \"$1\"",
+                "native-inventory-fixture",
+            ])
+            .arg(&transcript)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    fake.0
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut [0; 1])
+        .unwrap();
+    std::fs::write(&transcript, format!("{}\n", json!({"type":"user", "sessionId":native,"cwd":"/tmp","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"example"}}))).unwrap();
+    let changed = fixture.frame().await;
+    inventory_schema(&changed);
+    assert_eq!(changed["kind"], "changes");
+    let row = changed["upserts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["native_session_id"] == native)
+        .expect("new native session");
+    assert_eq!(row["managed"], false);
+    let request = json!({"kind":"subscribe","id":"sessions","collection":"sessions","limit":200});
+    inventory_reconnect(
+        state.clone(),
+        ClientSession::local(None).unwrap(),
+        request.clone(),
+        &changed["order"],
+    )
+    .await;
+    drop(fake);
+    let changed = fixture.frame().await;
+    assert_eq!(changed["kind"], "changes");
+    assert!(
+        changed["removes"].as_array().unwrap().contains(&row["id"]),
+        "{changed}"
+    );
+    inventory_reconnect(
+        state,
+        ClientSession::local(None).unwrap(),
+        request,
+        &snapshot["order"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn inventory_subscriptions_refuse_invalid_filters_limits_and_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "inventory-refusal-fixture");
+    let mut fixture = Fixture::open(state, true, None, &[]).await;
+    for collection in [
+        "clients",
+        "usage",
+        "machines",
+        "devices",
+        "sessions",
+        "terminals",
+    ] {
+        fixture
+            .send(json!({"kind":"subscribe","id":collection,"collection":collection,"limit":0}))
+            .await;
+        let refused = fixture.frame().await;
+        assert_eq!(refused["kind"], "error", "{refused}");
+        assert_eq!(refused["retryable"], false);
+    }
+    for request in [
+        json!({"kind":"subscribe","id":"invalid","collection":"devices"}),
+        json!({"kind":"subscribe","id":"invalid","collection":"usage","since_ms":100,"until_ms":1}),
+        json!({"kind":"subscribe","id":"invalid","collection":"machines","person":"person/ada"}),
+        json!({"kind":"subscribe","id":"invalid","collection":"clients","since_ms":1}),
+    ] {
+        fixture.send(request).await;
+        assert_eq!(fixture.frame().await["kind"], "error");
+    }
+}
+
+#[tokio::test]
+async fn idle_inventory_windows_do_not_reread_across_the_old_client_intervals() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "idle-inventory-fixture");
+    let collections = [
+        "clients",
+        "usage",
+        "machines",
+        "devices",
+        "sessions",
+        "terminals",
+    ];
+    claim(
+        &state.store,
+        "custom/client/idle-inventory",
+        "custom.client.pairing-completed",
+        Some("person/ada"),
+        json!({"session_actor":"person/ada/session/idle-inventory", "person_id":"person/ada",
+            "expires_at_unix_ms":(client_now_ms()+600_000) as u64,"scopes":["read.projections"]}),
+    );
+    let grant = state
+        .store
+        .claims_for_subject_kind_at(
+            "custom/client/idle-inventory",
+            "custom.client.pairing-completed",
+            None,
+            true,
+            1,
+        )
+        .unwrap()
+        .claims
+        .remove(0);
+    let session = paired_client_session(&state, &grant, "fabric-loopback", false).unwrap();
+    let mut fixture = Fixture::open_as(state, session, true, None, &collections).await;
+    for _ in collections {
+        assert_eq!(fixture.frame().await["kind"], "snapshot");
+    }
+    tokio::time::sleep(Duration::from_secs(65)).await;
+    fixture.quiet().await;
+    assert_eq!(
+        fixture.counts(),
+        counts(&collections.map(|collection| (collection, 1)))
+    );
+}
+
+#[tokio::test]
+async fn inventory_pairing_expiry_ends_held_windows_without_a_clock_poll() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "inventory-expiry-fixture");
+    let grant = state.store.append_claim(&ClaimInput {
+        subject:"custom/client/inventory-expiry".into(), kind:"custom.client.pairing-completed".into(), actor:Some("person/ada".into()),
+        fields:serde_json::from_value(json!({"session_actor":"person/ada/session/inventory-expiry", "person_id":"person/ada",
+            "expires_at_unix_ms":(client_now_ms()+3_000) as u64,"scopes":["read.projections"]})).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let session = paired_client_session(&state, &grant, "fabric-loopback", false).unwrap();
+    let collections = [
+        "clients",
+        "usage",
+        "machines",
+        "devices",
+        "sessions",
+        "terminals",
+    ];
+    let mut fixture = Fixture::open_as(state, session, true, None, &collections).await;
+    for _ in collections {
+        assert_eq!(fixture.frame().await["kind"], "snapshot");
+    }
+    for _ in collections {
+        let refused = fixture.frame().await;
+        assert_eq!(refused["kind"], "error", "{refused}");
+        assert_eq!(refused["code"], "forbidden");
+    }
+    assert_eq!(
+        fixture.counts(),
+        counts(&collections.map(|collection| (collection, 2)))
+    );
+}
+
+#[tokio::test]
+async fn devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "devices-deadline-fixture");
+    for (device, ttl) in [("a-visible", 600_000), ("z-hidden", 2_000)] {
+        claim(&state.store, &format!("custom/client/{device}"), "custom.client.pairing-completed", Some("person/ada"),
+            json!({"session_actor":format!("person/ada/session/{device}"), "person_id":"person/ada", "device_id":format!("device/{device}"),
+                "expires_at_unix_ms":(client_now_ms()+ttl) as u64,"scopes":["read.projections"]}));
+    }
+    let mut fixture = Fixture::open_as(state, ClientSession::local(Some("person/ada")).unwrap(), true, None, &[]).await;
+    fixture.send(json!({"kind":"subscribe","id":"devices","collection":"devices","limit":1})).await;
+    let snapshot = fixture.frame().await;
+    assert_eq!(snapshot["order"], json!(["device/a-visible"]));
+    assert_eq!(snapshot["has_more"], true);
+    let changed = fixture.frame().await;
+    assert_eq!(changed["kind"], "changes");
+    assert_eq!(changed["has_more"], false);
+    assert_eq!(changed["order"], snapshot["order"]);
+    assert_eq!(changed["snapshot"]["store_index"], snapshot["snapshot"]["store_index"]);
+    let rows = device_resources(&fixture.state, &new_client_snapshot(&fixture.state), "person/ada").unwrap();
+    assert_eq!(rows.iter().find(|row| row["id"] == "device/z-hidden").unwrap()["state"], "expired");
+    fixture.quiet().await;
+    assert_eq!(fixture.counts(), counts(&[("devices", 2)]));
+}
+
+#[tokio::test]
+async fn clients_inventory_expires_recent_requests_at_their_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "clients-deadline-fixture");
+    let session = ClientSession::local(Some("person/ada")).unwrap();
+    super::super::client_presence::note_request(&state.node, &session, &HeaderMap::new(), client_now_ms()-300_000+2_000);
+    let mut fixture = Fixture::open(state.clone(), true, None, &["clients"]).await;
+    let snapshot = fixture.frame().await;
+    assert_eq!(snapshot["order"].as_array().unwrap().len(), 1);
+    // A competing list prunes the source before this socket next considers its deadline.
+    assert!(super::super::client_presence::list(&state.node, client_now_ms()+3_000).is_empty());
+    fixture.send(json!({"kind":"unsubscribe", "id":"unused"})).await;
+    let changed = fixture.frame().await;
+    assert_eq!(changed["kind"], "changes");
+    assert_eq!(changed["removes"], snapshot["order"]);
+    assert_eq!(changed["order"], json!([]));
 }

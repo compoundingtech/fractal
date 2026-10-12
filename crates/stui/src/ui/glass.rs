@@ -583,6 +583,7 @@ enum Action {
     ToggleSimple,
     /// Agents open on their terminal, or on their conversation.
     ToggleTerminalFirst,
+    ToggleTerminalFallback,
     /// Ask for a name, for a glass to rename, make or copy.
     Name(Naming),
     /// A conversation where the query was said: open it, found at what was said.
@@ -959,6 +960,16 @@ impl Ui {
             "this device; the conversation is the default",
             "terminal conversation default view open agents attach tui".into(),
             Action::ToggleTerminalFirst,
+        ));
+        choices.push(start(
+            if self.terminal_fallback {
+                "Fabric only, no fallback".into()
+            } else {
+                "Fall back through the daemon".into()
+            },
+            "terminal routes on this device; daemon fallback is the default",
+            "terminal fabric direct daemon gateway fallback setting".into(),
+            Action::ToggleTerminalFallback,
         ));
         choices.extend(self.said_choices(name));
         let Some(glasses) = &self.glasses else {
@@ -3013,6 +3024,7 @@ impl Ui {
             Action::NewMission => self.open_new_mission(),
             Action::ToggleSimple => self.toggle_simple(),
             Action::ToggleTerminalFirst => self.toggle_terminal_first(),
+            Action::ToggleTerminalFallback => self.toggle_terminal_fallback(),
             Action::Said { agent, query } => {
                 self.open_in_glass(Pane::Agent(Some(agent.clone())), how);
                 self.find_in(&agent, &query);
@@ -4588,6 +4600,16 @@ mod tests {
             draft_before,
             "nothing is typed into the draft of a tab that is not shown"
         );
+    }
+
+    #[test]
+    fn terminal_fallback_defaults_on_and_the_palette_changes_it_locally() {
+        let mut ui = glass();
+        assert!(ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(!ui.terminal_fallback);
+        ui.toggle_terminal_fallback();
+        assert!(ui.terminal_fallback);
     }
 
     #[test]
@@ -6622,6 +6644,29 @@ mod tests {
         // st's own count stands in for the rows it does not send.
         ui.world.active_missions = Some(57);
         assert!(top(&ui).contains("◇ 57 active"), "{}", top(&ui));
+    }
+
+    #[test]
+    fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![
+            alert_prompt("attention/one", agent),
+            alert_prompt("attention/two", agent),
+        ]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        let shown = screen(&ui);
+        let lines: Vec<&str> = shown.lines().collect();
+        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ hide")).expect(&shown);
+        let rule = lines.iter().position(|line| line.contains("┄┄┄┄")).expect(&shown);
+        let input = lines.iter().position(|line| line.contains("Message Atlas Builder")).expect(&shown);
+        assert!(title < rule && rule < input, "{shown}");
+        // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
+        let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
+        assert!(barred >= 6, "{shown}");
+        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
+        assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
     }
 
     #[test]

@@ -122,6 +122,8 @@ pub enum Update {
     GlassesVersion(u32),
     /// A window's current items, in st's display order.
     Window {
+        /// Client monotonic receipt time, before incremental view maintenance.
+        received: std::time::Instant,
         window: Window,
         snapshot: Snapshot,
         items: Vec<Resource>,
@@ -150,6 +152,8 @@ pub enum Update {
     /// st said it never can (`permanent`).
     ConversationFailed {
         target: String,
+        /// Typed refusal for content-free client error accounting.
+        code: Option<ErrorCode>,
         message: String,
         permanent: bool,
     },
@@ -595,6 +599,7 @@ async fn connected(
                     Ok(None) => return Ended::Dropped("st closed the connection".into()),
                     Err(error) => return Ended::Dropped(error.to_string()),
                 };
+                let received = std::time::Instant::now();
                 *failures = 0;
                 match event {
                     CollectionEvent::Snapshot { id, snapshot, items, order, has_more } => {
@@ -610,7 +615,7 @@ async fn connected(
                         let rows = windows.entry(window).or_default();
                         rows.clear();
                         rows.extend(items.into_iter().map(|item| (item.header().id.clone(), item)));
-                        if !send_window(updates, window, snapshot, rows, &order, has_more) {
+                        if !send_window(updates, received, window, snapshot, rows, &order, has_more) {
                             return Ended::Closed;
                         }
                     }
@@ -626,7 +631,7 @@ async fn connected(
                             rows.remove(&id);
                         }
                         rows.extend(upserts.into_iter().map(|item| (item.header().id.clone(), item)));
-                        if !send_window(updates, window, snapshot, rows, &order, has_more) {
+                        if !send_window(updates, received, window, snapshot, rows, &order, has_more) {
                             return Ended::Closed;
                         }
                     }
@@ -635,7 +640,7 @@ async fn connected(
                     CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
                         let Some(current) = conversing.iter().find(|current| current.id == id) else { continue };
                         let message = st3_client::plain_message(code.as_ref(), &message);
-                        if updates.send(Update::ConversationFailed { target: current.target.clone(), message, permanent: false }).is_err() {
+                        if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent: false }).is_err() {
                             return Ended::Closed;
                         }
                     }
@@ -673,7 +678,7 @@ async fn connected(
                             current.retry_at = Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
                             current.failures += 1;
                         }
-                        if updates.send(Update::ConversationFailed { target: current.target.clone(), message, permanent }).is_err() {
+                        if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent }).is_err() {
                             return Ended::Closed;
                         }
                     }
@@ -894,6 +899,7 @@ impl WindowRetries {
 
 fn send_window(
     updates: &mpsc::Sender<Update>,
+    received: std::time::Instant,
     window: Window,
     snapshot: Snapshot,
     rows: &BTreeMap<String, Resource>,
@@ -906,6 +912,7 @@ fn send_window(
         .collect();
     updates
         .send(Update::Window {
+            received,
             window,
             snapshot,
             items,

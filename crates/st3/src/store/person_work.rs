@@ -976,7 +976,12 @@ fn send_answer_tx(
     let person = response.body["fields"]["acted_for"]
         .as_str()
         .unwrap_or_else(|| response.actor.as_deref().unwrap_or("the person"));
-    let mut content = format!("{person} answered `{}`: {title}\n\n", ask.subject);
+    let verb = if answer.is_some_and(|answer| answer["outcome"] == "dismissed") {
+        "dismissed"
+    } else {
+        "answered"
+    };
+    let mut content = format!("{person} {verb} `{}`: {title}\n\n", ask.subject);
     if response.body["fields"].get("acted_for").is_some() {
         content.push_str(&format!(
             "Recorded by {} for {person}.\n\n",

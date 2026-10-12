@@ -2,7 +2,7 @@
 
 The inventory covers every offered CLI command, every typed client action, every stui daemon effect, and the palette and local controls. It distinguishes real CLI/Unix transport tests, the live stui adapter, local reducer tests, and shared implementations. A test reference describes its actual layer; a shared implementation test alone is not a claim that the entire interactive UI was driven.
 
-`action-coverage.json` is the machine-readable source. Tests compare its 223 CLI rows with Clap's offered command tree, its 55 typed actions with the generated client contract and real dispatch builders, and its 18 stui effects and 13 palette actions with their declarations. Every row must reference an existing test. Hidden driver/replication worker commands and help aliases are internal or alternate spellings, rather than additional person or agent actions.
+`action-coverage.json` is the machine-readable source. Tests compare its 228 CLI rows with Clap's offered command tree, its 55 typed actions with the generated client contract and real dispatch builders, and its 18 stui effects and 13 palette actions with their declarations. Every row must reference an existing test. Hidden driver/replication worker commands and help aliases are internal or alternate spellings, rather than additional person or agent actions.
 
 ## Restart and stale-state model
 
@@ -171,6 +171,9 @@ edits and removes retired subjects without changing unfiltered reads.
 | `st documents get` | real CLI over private Unix socket; disk store reopened between actions | [`cli_metadata_documents_blobs_and_rules_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st documents ls` | real CLI over private Unix socket; disk store reopened between actions | [`cli_reads_preserve_operational_views_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st documents put` | real CLI over private Unix socket; disk store reopened between actions | [`cli_metadata_documents_blobs_and_rules_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
+| `st evidence put` | real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression | [`put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/git_evidence.rs) |
+| `st evidence show` | real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression | [`put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/git_evidence.rs) |
+| `st evidence verify` | real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression | [`put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/git_evidence.rs) |
 | `st fleet create` | existing CLI integration | [`invite_and_join_sync_full_history`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/fleet.rs) |
 | `st fleet invite` | existing CLI integration | [`invite_and_join_sync_full_history`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/fleet.rs) |
 | `st fleet invites` | real CLI over private Unix socket; disk store reopened between actions | [`cli_reads_preserve_operational_views_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
@@ -351,6 +354,7 @@ edits and removes retired subjects without changing unfiltered reads.
 | NewMission | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | ToggleSimple | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | ToggleTerminalFirst | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
+| ToggleTerminalFallback | device-local route preference; no daemon mutation, restart fence not applicable | [`terminal_fallback_defaults_on_and_the_palette_changes_it_locally`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | Name | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | Said | local palette/reducer; resulting daemon effects are listed separately | [`what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs); [`glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
 | open panes, tabs, focus and Home | local UI state; no daemon mutation, restart fence not applicable | [`a_click_in_another_split_focuses_it`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/glass.rs) |
@@ -377,3 +381,17 @@ The sidebar's existing optional `resources.list` read is covered by
 `observed_resources::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix`
 (real Unix socket and arrangement filing), the daemon filter/fence and read-scope tests, and
 `sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing` (test backend navigation and explicit filing).
+
+The optional `inventory-collections` capability follows clients, usage, machines,
+devices, native sessions and terminal lists on the collection socket. The
+`collection_refresh_tests::*_inventory_*` real-socket tests cover source changes,
+frame schema and typed decoding, reconnect snapshots, invalid subscription
+filters/limits, active-device retirement and native filesystem/process events.
+
+The phone uses the same `collections.inventory` reads, covered by the real-socket
+tests above, while the screen displaying each inventory is focused. Its Node
+`inventoryFeed.test.mjs` checks the client layer: shared slots, selected usage
+periods, ordered updates, explicit refresh snapshots, reconnect, background and
+grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
+`collectionSocket.test.mjs` checks authentication and control-event delivery at
+the native bridge boundary; it does not claim an iOS simulator was driven.
