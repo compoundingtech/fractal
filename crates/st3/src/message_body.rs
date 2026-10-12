@@ -372,6 +372,12 @@ pub fn split_attachments(
     Vec<crate::model::MessageAttachment>,
     Option<crate::model::MessageAttachment>,
 ) {
+    // The body is the entry the signature judge takes, chosen by one function in smallclaims.
+    let body = attachments
+        .and_then(smallclaims::principal::message_body_entry)
+        .and_then(|entry| {
+            serde_json::from_value::<crate::model::MessageAttachment>(entry.clone()).ok()
+        });
     let entries = attachments
         .cloned()
         .and_then(|value| {
@@ -383,13 +389,9 @@ pub fn split_attachments(
             crate::blobs::is_sha256(&attachment.sha256) && attachment.origin.starts_with("host/")
         });
     let mut images = Vec::new();
-    let mut body = None;
     for attachment in entries {
-        if attachment.media_type == MEDIA_TYPE {
-            if body.is_none() && (1..=MAX_BYTES as u64).contains(&attachment.size) {
-                body = Some(attachment);
-            }
-        } else if crate::blobs::MEDIA_TYPES.contains(&attachment.media_type.as_str())
+        if attachment.media_type != MEDIA_TYPE
+            && crate::blobs::MEDIA_TYPES.contains(&attachment.media_type.as_str())
             && images.len() < crate::blobs::MAX_ATTACHMENTS
         {
             images.push(attachment);

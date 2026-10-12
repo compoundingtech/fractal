@@ -459,27 +459,7 @@ fn judge_claim(
     if row.kind == "message.sent"
         && let Some(body) = fields
             .get("attachments")
-            .and_then(Value::as_array)
-            .and_then(|entries| {
-                // The same entry a reader takes as the body: the first text/plain one with a
-                // hash, a host origin and a size of 1 byte to 256 KiB. Otherwise a claim could
-                // verify against one body and display another.
-                entries.iter().find(|entry| {
-                    entry.get("media_type").and_then(Value::as_str) == Some("text/plain")
-                        && entry.get("sha256").and_then(Value::as_str).is_some_and(|hash| {
-                            hash.len() == 64
-                                && hash.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-                        })
-                        && entry
-                            .get("origin")
-                            .and_then(Value::as_str)
-                            .is_some_and(|origin| origin.starts_with("host/"))
-                        && entry
-                            .get("size")
-                            .and_then(Value::as_u64)
-                            .is_some_and(|size| (1..=256 * 1024).contains(&size))
-                })
-            })
+            .and_then(crate::principal::message_body_entry)
             .cloned()
     {
         fields["body_sha256"] = body.get("sha256").cloned().unwrap_or(Value::Null);
