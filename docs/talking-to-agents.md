@@ -14,6 +14,28 @@ st devices --as person/ada pair --full-control 'Garden phone'
 
 Enter the returned pairing ID and code in the app with your paired-only gateway URL. Use [gateway setup](st3/client-v0/README.md#tailnet-carrier) and [the phone connection guide](../apps/ios/README.md#connect); never forward the privileged daemon socket. `--full-control` lets this trusted device send messages and use the work controls. An offline app keeps its last view; reconnect before sending an action.
 
+Large native tool output is a preview, not the complete result. In stui, use
+**Ctrl+Up/Down** to focus a tool or image and **Ctrl+Enter** to expand or collapse tool
+output. **o** in the classic view, or **Ctrl+E** in glasses, expands all tool rows and
+loads visible clipped output one value at a time. Scrolling another clipped row into
+view loads it next; offscreen rows are not prefetched. Already loaded rows stay in
+memory when scrolled away, until collapsed. Restoring saved expansion state does not
+start loading full output. Native images load automatically when their image row is
+visible, without prefetching offscreen images. stui does this only on terminals known
+to support graphics and shares the one-value-at-a-time content reader. **Ctrl+U**,
+outside the composer, still loads or hides images explicitly; a hidden image stays
+hidden when scrolled back into view. Other terminals keep explicit loading through
+the half-block renderer. **Ctrl+O** keeps its pane-zoom action. On the phone,
+**Show all** loads the clipped result and **Show less** collapses it; visible image
+boxes load automatically, and a failed image offers **Retry loading image**.
+Image media type and byte size become exact after loading. Expanded native output
+and fetched native images stay in memory only; collapsing output or hiding an image
+releases the fetched data, as does leaving the retained timeline. Reopening explicitly
+loads it again. This does not change mail attachment opening: stui still saves a
+received mail image under its attachment directory and opens the machine's viewer.
+In Simple density, full output and inline images stay beneath their individual call
+inside an opened tool bundle; loading the last call does not replace the other calls.
+
 ## In the web conversation
 
 Tool rows show a short description rather than raw commands or infrastructure paths.
@@ -54,6 +76,22 @@ st conversations send agent/garden/worker --from person/ada \
 ```
 
 Attachments are fetched by the member that reads or delivers the message. Ordinary workspace files do not replicate; put longer text in a graph document or a repository and send its reference. See [message examples](../examples/st3/SEND-A-MESSAGE-PROPERLY.md).
+
+## Keep a current person note
+
+Use a note for bounded context that the agents you own or work with can explicitly read:
+
+```sh
+st note
+st note set 'Prefer a small reviewed change over a broad rewrite.' --expires-at 2099-01-01T00:00:00Z
+st note clear
+```
+
+The actor defaults to your configured person outside a harness and the harness identity inside one; `--actor person/ada` makes a human read explicit. Set and clear always target the resolved person's own note, not another person. Agents cannot set or clear notes or impersonate a person. Each note shows its author, time, optional UTC expiry and revision. Text must be nonblank and at most 4096 UTF-8 bytes; expired notes are absent.
+
+Notes inform, never assign work, approve a gate, answer an ask or grant authority. Use messages and missions for work and the actual approval or answer controls for decisions. This slice is explicit read-only delivery: no launch delivery, notifications or UI. CLI reads and writes use the authenticated trusted local Unix socket; this adds no new principal authentication system.
+
+Before publishing, fleet membership must be anchored and every active member must advertise `features.person_directive_note=1`. Fence legacy peers from replication before enabling notes: feature advertisement alone cannot prove that all legacy peers were discovered.
 
 ## Home shows your alerts
 

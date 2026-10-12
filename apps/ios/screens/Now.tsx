@@ -4,19 +4,20 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
-import { HOME_LEGEND, homeRows, homeSections, type HomeRow, cleanMessageText, ANSWERS, isRequest, report, spaced, yesNo } from '@smalltalk/st3-views';
+import { HOME_LEGEND, alertsHeading, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, report, spaced, yesNo } from '@smalltalk/st3-views';
 import type { RootParams } from '../navigation';
 import { agentName } from '../agentsView';
 import { attentionActionLabel, attentionKindLabel, blockedLine } from '../presentation';
 import { missionTitle } from '../missionsView';
 import { useStore } from '../store';
 import { randomName } from '../launcher';
+import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
 import { theme } from '../theme';
 import { Button, Legend, ListRow, Markdown, Note, Screen, SectionHeader, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
-// Home: what needs the person, as stui's Home lists it.
-export function HomeScreen() {
+// Now: what needs the person, as stui's Home lists it.
+export function NowScreen() {
   const { data, caps, hasSynced, truncated, loadErrors, busy, status, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
@@ -36,12 +37,14 @@ export function HomeScreen() {
       }],
     });
   }, [navigation, actions]);
+  // The count of what waits on the person, as the other clients print it: nothing at zero.
+  const heading = alertsHeading(openAlerts(data.attention, caps?.session_actor).length);
   const sections = useMemo(() => homeSections(rows).map(section => ({ ...section, data: section.rows })), [rows]);
   // Dismiss, as stui's x: a request is closed with word to its asker that there is nothing for
   // the person to do (after a confirm), an update or a message is read. A decision has none.
   const dismiss = (row: HomeRow): (() => void) | undefined => {
     const item = row.item;
-    // Closed elsewhere: only clearing it takes it off Home.
+    // Closed elsewhere: only clearing it takes it off Now.
     if (item.closedElsewhere) return () => actions.clearClosed(item.id);
     if (item.update && item.actions.includes('work.done')) return () => void actions.done(item, 'Read', 'read');
     if (isRequest(item.attention_kind) && item.actions.includes('work.done')) {
@@ -78,9 +81,9 @@ export function HomeScreen() {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />
       </ContextMenu>}
-      ListHeaderComponent={<StatusLine />}
+      ListHeaderComponent={<View><StatusLine />{heading ? <T bold color={theme.person} style={{ paddingHorizontal: 12, paddingTop: 4 }}>◆ {heading}</T> : null}</View>}
       refreshControl={refresh}
-      ListEmptyComponent={<Empty text={loadErrors.attention ? `Attention could not be loaded: ${loadErrors.attention}` : hasSynced ? 'Nothing needs you.' : 'Checking what needs you…'} />}
+      ListEmptyComponent={loadErrors.attention ? <Empty text={`Alerts could not be loaded: ${loadErrors.attention}`} /> : hasSynced ? null : <Empty text="Checking for alerts…" />}
       ListFooterComponent={<View>
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `st now` lists them all.</Note> : null}
         <Legend entries={HOME_LEGEND.map(entry => ({ ...entry, color: theme[entry.color] }))} />
@@ -95,7 +98,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const { data, busy, status, actions } = useStore();
   useMissionsOnFocus();
   const found = data.attention.find(candidate => candidate.id === route.params.id);
-  // Nothing leaves Home by itself: an update is read when the person says so, never by opening it.
+  // Nothing leaves Now by itself: an update is read when the person says so, never by opening it.
   const kept = useRef(found);
   if (found) kept.current = found;
   const item = found ?? kept.current;
@@ -104,7 +107,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const mission = item.mission_id ? data.missions.find(candidate => candidate.id === item.mission_id) : undefined;
-  const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read');
+  const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
   // Closed elsewhere, so nothing here can be answered; it stays until the person clears it.
   if (item.closedElsewhere && !item.update) {
     return <Screen>
@@ -114,7 +117,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
-        <Button label="clear from Home" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
+        <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
       </ScrollView>
     </Screen>;
@@ -132,9 +135,9 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         {item.update.subjects?.map((subject, index) => subject.url
           ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
           : <T key={index} dim>↗ {subject.label}  {subject.ref ?? ''}</T>)}
-        <T dim>{item.closedElsewhere ? 'This was closed. It stays under Recently closed until you clear it.' : 'Nothing waits on this. It stays on Home until you mark it read.'}</T>
+        <T dim>{item.closedElsewhere ? 'This was closed. It stays under Recently closed until you clear it.' : 'Nothing waits on this. It stays on Now until you mark it read.'}</T>
         {item.closedElsewhere
-          ? <Button label="clear from Home" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
+          ? <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
           : item.actions.includes('work.done') ? <Button label="mark read" disabled={busy || status !== 'online'} onPress={() => void actions.done(item, 'Read', 'read').then(done => { if (done) navigation.goBack(); })} /> : null}
         {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
         <T dim selectable>{item.id}</T>
@@ -167,7 +170,10 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
       <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {attentionKindLabel(item.attention_kind)} · {item.priority} · waited {row.age}</T></T>
       <T bold selectable>{row.title}</T>
-      {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
+      {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'
+        // A prompt is allowed from its conversation, where the call it asks about is shown.
+        ? <AlertBody item={item} from={agent ? agentName(agent) : item.source_id} calls={[]} seats={[]} />
+        : item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
       {item.because ? <T soft>because {item.because}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}
       {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
@@ -178,69 +184,4 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       {other.length ? <Note>in the CLI: {other.map(attentionActionLabel).join(', ')}</Note> : null}
     </ScrollView>
   </Screen>;
-}
-
-// A structured request (#1010) as stui shows it: the recommendation first, then the question, its
-// summary, reasons and links, and each named answer with what it does. A tap on an answer asks
-// to confirm, then sends it by its id.
-type Structured = NonNullable<Parameters<ReturnType<typeof useStore>['actions']['done']>[0]['request']>;
-function StructuredRequestView({ item, request, from, onAnswered }: { item: Parameters<ReturnType<typeof useStore>['actions']['done']>[0]; request: Structured; from: string; onAnswered: () => void }) {
-  const { busy, status, actions } = useStore();
-  const disabled = busy || status !== 'online';
-  const label = (id: string) => request.answers?.find(answer => answer.id === id)?.label ?? id;
-  const send = (answer: { id: string; label: string; outcome?: string | null }) => answer.outcome === 'request_changes'
-    // Requesting changes needs the changes, in words.
-    ? Alert.prompt(answer.label, 'What should change?', text => { if (text.trim()) void actions.done(item, text.trim(), answer.id).then(done => { if (done) onAnswered(); }); })
-    : Alert.alert(`Answer ${from} “${answer.label}”`, undefined, [
-    { text: 'Cancel', style: 'cancel' },
-    { text: 'Send', onPress: () => void actions.done(item, answer.label, answer.id).then(done => { if (done) onAnswered(); }) },
-  ]);
-  const words = () => Alert.prompt(`Answer ${from}`, item.title, text => { if (text.trim()) void actions.done(item, text.trim()).then(done => { if (done) onAnswered(); }); });
-  return <View style={{ gap: 8 }}>
-    {request.recommendation ? <T><T dim>recommends  </T><T bold color={theme.green}>{label(request.recommendation.answer)}</T><T soft>  {request.recommendation.reason}</T></T> : null}
-    <RequestQuestion text={request.question} />
-    {request.summary ? <Markdown text={spaced(request.summary)} color={theme.subtext0} /> : null}
-    {request.reasons?.length ? <View style={{ gap: 2 }}>{request.reasons.map((reason, index) => <T key={index}><T color={theme.lavender}>•  </T>{reason}</T>)}</View> : null}
-    {request.subjects?.map((subject, index) => subject.url
-      ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
-      : <T key={index} dim>↗ {subject.label}  {subject.ref ?? ''}</T>)}
-    <T bold color={theme.person}>{from} is waiting on you.</T>
-    {request.answers?.map(answer => <Pressable key={answer.id} disabled={disabled} onPress={() => send(answer)}
-      style={{ borderLeftWidth: 2, borderLeftColor: request.recommendation?.answer === answer.id ? theme.green : theme.surface1, paddingLeft: 8, paddingVertical: 4, opacity: disabled ? 0.5 : 1 }}>
-      <T bold color={theme.accent}>{answer.label}{request.recommendation?.answer === answer.id ? <T color={theme.green}>  recommended</T> : null}{answer.outcome === 'request_changes' ? <T color={theme.yellow}>  needs your words</T> : null}</T>
-      <T dim>{answer.consequence}</T>
-    </Pressable>)}
-    {request.custom ? <Button label="Answer in words" disabled={disabled} onPress={words} /> : null}
-    {request.why_person ? <T dim>Why you: {request.why_person}</T> : null}
-  </View>;
-}
-
-// A request's question: a JSON report as its telling fields, anything else as Markdown.
-function RequestQuestion({ text }: { text: string }) {
-  const shown = report(text);
-  if (!shown) return <Markdown text={spaced(text)} color={theme.text} />;
-  const tone = { fault: theme.red, text: theme.text, soft: theme.subtext0 } as const;
-  return <View style={{ gap: 2 }}>
-    {shown.before ? <Markdown text={shown.before} color={theme.text} /> : null}
-    {shown.rows.map(row => <T key={row.key} numberOfLines={1}><T dim>{row.key}  </T><T color={tone[row.tone]}>{row.value}</T></T>)}
-    {shown.more ? <T dim>… {shown.more} more fields</T> : null}
-  </View>;
-}
-
-// stui's answers: Yes and No for a yes-or-no question, words, or Nothing to do. Each completes
-// the waiting step with a short reason, after the person confirms it.
-function RequestAnswers({ item, from, onAnswered }: { item: Parameters<ReturnType<typeof useStore>['actions']['done']>[0]; from: string; onAnswered: () => void }) {
-  const { busy, status, actions } = useStore();
-  const disabled = busy || status !== 'online';
-  const send = (reason: string) => void actions.done(item, reason).then(done => { if (done) onAnswered(); });
-  const confirm = (label: string, reason: string) => Alert.alert(label, undefined, [{ text: 'Cancel', style: 'cancel' }, { text: 'Send', onPress: () => send(reason) }]);
-  const words = () => Alert.prompt(`Answer ${from}`, item.title, text => { if (text.trim()) send(text.trim()); });
-  return <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-    {yesNo(item.title) ? <>
-      <Button label="Yes" color={theme.green} disabled={disabled} onPress={() => confirm(`Answer ${from} “Yes”`, ANSWERS.yes)} />
-      <Button label="No" color={theme.red} disabled={disabled} onPress={() => confirm(`Answer ${from} “No”`, ANSWERS.no)} />
-      <Button label="Answer in words" disabled={disabled} onPress={words} />
-    </> : <Button label="Answer" disabled={disabled} onPress={words} />}
-    <Button label="Nothing to do" color={theme.overlay1} disabled={disabled} onPress={() => confirm(`Tell ${from} there is nothing for you to do`, ANSWERS.nothing)} />
-  </View>;
 }

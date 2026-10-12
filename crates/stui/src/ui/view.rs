@@ -54,6 +54,11 @@ pub struct World {
     /// Whether the missions window is followed now. Not part of the shared contract.
     #[serde(skip)]
     pub missions_followed: bool,
+    /// Whether the attention and agents windows are st's own on this run, not a cached copy. The
+    /// top bar prints nothing about them until they are, so it never shows one picture and then
+    /// another. Not part of the shared contract.
+    #[serde(skip)]
+    pub settled: bool,
     /// The number of active missions st reports, when the mission rows are not followed.
     #[serde(skip)]
     pub active_missions: Option<usize>,
@@ -405,6 +410,9 @@ pub struct AgentDetails {
     /// The next step queued for it, as "mission › step".
     pub next: Option<String>,
     pub queue: Vec<String>,
+    /// The mission each of `next` and `queue` belongs to, by the same place, for opening it.
+    pub next_mission: Option<String>,
+    pub queue_missions: Vec<String>,
     pub queued: u64,
     pub harness_state: Option<String>,
     pub runtime: Option<String>,
@@ -412,6 +420,8 @@ pub struct AgentDetails {
     pub under: Option<String>,
     /// The model its harness last reported using, as reported ("claude-sonnet-5-5").
     pub model: Option<String>,
+    /// The effort level its seat is configured to run at ("high"), when it names one.
+    pub effort: Option<String>,
     /// What the step it holds last reported (`st work progress`): the status a person reads first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<String>,

@@ -28,10 +28,329 @@ use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::{Layer as _, SubscriberExt};
 
 static EXPORT_ENABLED: AtomicBool = AtomicBool::new(false);
+static METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
 static INSTANCE_ID: OnceLock<String> = OnceLock::new();
 
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static FIXTURE_EXPORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn fixture_export_scope() -> impl Drop {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FIXTURE_EXPORT.with(|slot| slot.set(self.0));
+        }
+    }
+    Restore(FIXTURE_EXPORT.with(|slot| slot.replace(true)))
+}
 pub fn export_enabled() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if FIXTURE_EXPORT.with(std::cell::Cell::get) {
+        return true;
+    }
+    #[cfg(test)]
+    if TEST_EXPORT_ENABLED.get() { return true; }
     EXPORT_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Only the finished upgrade's identity crosses into a socket task, never its server span.
+#[derive(Clone)]
+pub struct UpgradeContext(pub Option<opentelemetry::trace::SpanContext>);
+
+/// Record the branch that produced a roster on the current request or first-frame root.
+pub fn record_roster(mode: &'static str, cards: usize) {
+    if !export_enabled() {
+        return;
+    }
+    let span = tracing::Span::current();
+    span.record("st.roster.mode", mode);
+    span.record("st.roster.cards", cards as i64);
+    for (field, selected) in [
+        ("st.projection.hit", mode == "hit"),
+        ("st.projection.cold", mode == "cold"),
+        ("st.projection.incremental", mode == "incremental"),
+        ("st.projection.shared", mode == "shared"),
+    ] {
+        span.record(field, selected);
+    }
+}
+
+pub fn record_page(rows: usize, bytes: usize) {
+    if !export_enabled() {
+        return;
+    }
+    let span = tracing::Span::current();
+    span.record("st.page.rows", rows as i64);
+    span.record("st.page.bytes", bytes as i64);
+}
+
+/// Bounded standalone work is a fresh INTERNAL trace, optionally correlated by a link.
+pub fn stage_root(
+    name: &'static str,
+    label: &'static str,
+    link: Option<opentelemetry::trace::SpanContext>,
+) -> Option<opentelemetry::global::BoxedSpan> {
+    if !export_enabled() {
+        return None;
+    }
+    use opentelemetry::trace::Tracer as _;
+    let tracer = opentelemetry::global::tracer("st3");
+    let mut builder = tracer
+        .span_builder(name)
+        .with_kind(opentelemetry::trace::SpanKind::Internal)
+        .with_attributes([KeyValue::new("span.label", label)]);
+    if let Some(link) = link.filter(opentelemetry::trace::SpanContext::is_valid) {
+        builder = builder.with_links(vec![opentelemetry::trace::Link::new(link, Vec::new(), 0)]);
+    }
+    Some(tracer.build_with_context(builder, &opentelemetry::Context::new()))
+}
+
+#[derive(Default)]
+pub(crate) struct RosterAttributes {
+    values: std::collections::BTreeMap<&'static str, opentelemetry::Value>,
+    worker_queue_ms: Option<f64>,
+    reader_acquire_ms: Option<f64>,
+}
+
+thread_local! {
+    static ROSTER_SCOPE: std::cell::RefCell<Option<RosterAttributes>> = const { std::cell::RefCell::new(None) };
+    static COLLECT_ROSTER_WARM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Only preparatory warming may collect attributes before its cold publication span exists.
+pub(crate) fn roster_collect_warm<T>(work: impl FnOnce() -> T) -> T {
+    if !export_enabled() {
+        return work();
+    }
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            COLLECT_ROSTER_WARM.with(|slot| slot.set(self.0));
+        }
+    }
+    let _restore = Restore(COLLECT_ROSTER_WARM.with(|slot| slot.replace(true)));
+    roster_scope(work)
+}
+
+/// Move accumulated measurements across a preparatory warm worker or a WS read retry.
+pub(crate) fn seed_roster_attributes(attributes: Option<RosterAttributes>) {
+    if let Some(attributes) = attributes {
+        ROSTER_SCOPE.with(|slot| *slot.borrow_mut() = Some(attributes));
+    }
+}
+
+pub(crate) fn take_roster_attributes() -> Option<RosterAttributes> {
+    if !export_enabled() {
+        return None;
+    }
+    ROSTER_SCOPE.with(|slot| slot.borrow_mut().take())
+}
+
+pub(crate) struct RosterScopeGuard(Option<RosterAttributes>);
+
+impl Drop for RosterScopeGuard {
+    fn drop(&mut self) {
+        ROSTER_SCOPE.with(|slot| *slot.borrow_mut() = self.0.take());
+    }
+}
+
+/// A cold rebuild can run after the first frame; it still attributes its own synchronous work.
+pub(crate) fn ensure_roster_scope() -> Option<RosterScopeGuard> {
+    ROSTER_SCOPE.with(|slot| {
+        let active = slot.borrow().is_some();
+        if active {
+            None
+        } else {
+            Some(RosterScopeGuard(slot.replace(Some(Default::default()))))
+        }
+    })
+}
+
+/// Opt in only the roster worker to connection/snapshot attribution.
+pub fn roster_scope<T>(work: impl FnOnce() -> T) -> T {
+    if !export_enabled() || ROSTER_SCOPE.with(|slot| slot.borrow().is_some()) {
+        return work();
+    }
+    let _restore = ensure_roster_scope();
+    smallclaims::sqlite::with_reader_timing(
+        |elapsed| roster_wait("st.roster.reader_acquire_ms", elapsed.as_secs_f64() * 1000.0),
+        work,
+    )
+}
+
+pub(crate) fn roster_recording() -> bool {
+    export_enabled()
+        && ROSTER_SCOPE.with(|slot| slot.borrow().is_some())
+        && (COLLECT_ROSTER_WARM.with(std::cell::Cell::get) || roster_destination_recording())
+}
+
+fn roster_destination_recording() -> bool {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    if opentelemetry::Context::current().span().is_recording() {
+        return true;
+    }
+    let span = tracing::Span::current();
+    if span.is_disabled() {
+        return false;
+    }
+    // The tracing bridge supplies a presampled, non-recording context; its sampling
+    // flag represents the recording tracing span (the production sampler is AlwaysOn).
+    let context = span.context();
+    let span_context = context.span().span_context().clone();
+    span_context.is_valid() && span_context.is_sampled()
+}
+
+/// Bounded attributes on existing request/first-frame spans and the active rebuild root.
+pub fn roster_attribute(key: &'static str, value: impl Into<opentelemetry::Value>) {
+    if !export_enabled()
+        || !(COLLECT_ROSTER_WARM.with(std::cell::Cell::get) || roster_destination_recording())
+    {
+        return;
+    }
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let value = value.into();
+    tracing::Span::current().set_attribute(key, value.clone());
+    let context = opentelemetry::Context::current();
+    if context.span().is_recording() {
+        context.span().set_attribute(KeyValue::new(key, value.clone()));
+    }
+    ROSTER_SCOPE.with(|slot| {
+        if let Some(attributes) = slot.borrow_mut().as_mut() {
+            attributes.values.insert(key, value);
+        }
+    });
+}
+
+pub fn record_roster_read(path: &'static str, requested: u64, publication: Option<u64>, fresh: bool) {
+    if !export_enabled() {
+        return;
+    }
+    roster_attribute("st.roster.path", path);
+    roster_attribute("st.roster.fresh_requested", fresh);
+    roster_attribute("st.roster.requested_cut", requested as i64);
+    if let Some(publication) = publication {
+        roster_attribute("st.roster.publication_cut", publication as i64);
+    }
+}
+
+fn roster_accumulate(key: &'static str, elapsed: f64) {
+    let previous = ROSTER_SCOPE.with(|slot| slot.borrow().as_ref().and_then(|attributes| {
+        match attributes.values.get(key) { Some(opentelemetry::Value::F64(value)) => Some(*value), _ => None }
+    })).unwrap_or_default();
+    roster_attribute(key, previous + elapsed);
+}
+
+/// Fixed scalar staging retains pre-build waits without allocating discarded attributes.
+fn roster_wait(key: &'static str, elapsed: f64) {
+    if !export_enabled() {
+        return;
+    }
+    let total = ROSTER_SCOPE.with(|slot| {
+        let mut scope = slot.borrow_mut();
+        let attributes = scope.as_mut()?;
+        let counter = match key {
+            "st.roster.worker_queue_ms" => &mut attributes.worker_queue_ms,
+            "st.roster.reader_acquire_ms" => &mut attributes.reader_acquire_ms,
+            _ => unreachable!("roster waits use a closed vocabulary"),
+        };
+        let total = counter.unwrap_or_default() + elapsed;
+        *counter = Some(total);
+        Some(total)
+    }).unwrap_or(elapsed);
+    roster_attribute(key, total);
+}
+
+/// The closure never yields: both clocks therefore belong to one physical worker thread.
+pub fn roster_phase<T>(name: &'static str, work: impl FnOnce() -> T) -> T {
+    if !roster_recording() {
+        return work();
+    }
+    let (wall_key, cpu_key) = match name {
+        "membership" => ("st.roster.phase.membership.wall_ms", "st.roster.phase.membership.cpu_ms"),
+        "status_fold" => ("st.roster.phase.status_fold.wall_ms", "st.roster.phase.status_fold.cpu_ms"),
+        "card_presentation" => ("st.roster.phase.card_presentation.wall_ms", "st.roster.phase.card_presentation.cpu_ms"),
+        "queue_selection" => ("st.roster.phase.queue_selection.wall_ms", "st.roster.phase.queue_selection.cpu_ms"),
+        "serialization" => ("st.roster.phase.serialization.wall_ms", "st.roster.phase.serialization.cpu_ms"),
+        _ => unreachable!("roster phases use a closed vocabulary"),
+    };
+    let started = Instant::now();
+    let cpu = crate::incremental::thread_cpu();
+    let value = work();
+    let cpu_elapsed = crate::incremental::thread_cpu().saturating_sub(cpu);
+    let wall_elapsed = started.elapsed();
+    roster_accumulate(wall_key, wall_elapsed.as_secs_f64() * 1000.0);
+    roster_accumulate(cpu_key, cpu_elapsed.as_secs_f64() * 1000.0);
+    value
+}
+
+pub fn roster_worker_started(submitted: Option<Instant>) {
+    if let Some(submitted) = submitted {
+        roster_wait("st.roster.worker_queue_ms", submitted.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+pub(crate) fn copy_roster_attributes(context: &opentelemetry::Context) {
+    use opentelemetry::trace::TraceContextExt as _;
+    if !context.span().is_recording() {
+        return;
+    }
+    ROSTER_SCOPE.with(|slot| {
+        if let Some(attributes) = slot.borrow_mut().as_mut() {
+            for (key, elapsed) in [
+                ("st.roster.worker_queue_ms", attributes.worker_queue_ms),
+                ("st.roster.reader_acquire_ms", attributes.reader_acquire_ms),
+            ] {
+                if let Some(elapsed) = elapsed {
+                    attributes.values.insert(key, elapsed.into());
+                }
+            }
+            context.span().set_attributes(attributes.values.iter().map(|(key, value)| KeyValue::new(*key, value.clone())));
+        }
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_EXPORT_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn capture_test_spans(work: impl FnOnce()) -> Vec<opentelemetry_sdk::trace::SpanData> {
+    use opentelemetry::trace::TracerProvider as _;
+    #[derive(Clone, Debug)]
+    struct Exporter(std::sync::mpsc::Sender<Vec<opentelemetry_sdk::trace::SpanData>>);
+    impl opentelemetry_sdk::trace::SpanExporter for Exporter {
+        async fn export(&self, batch: Vec<opentelemetry_sdk::trace::SpanData>) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0.send(batch).expect("the capture receiver stays open");
+            Ok(())
+        }
+    }
+    struct Enabled;
+    impl Drop for Enabled {
+        fn drop(&mut self) { TEST_EXPORT_ENABLED.set(false); }
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let exporter = Exporter(sender);
+    let provider = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("st3.test")));
+    TEST_EXPORT_ENABLED.set(true);
+    let _enabled = Enabled;
+    tracing::subscriber::with_default(subscriber, work);
+    provider.force_flush().unwrap();
+    receiver.try_iter().flatten().collect()
+}
+
+/// Whether a meter provider was installed. Independent of trace export: the RED metrics
+/// are recorded whenever metrics are on, whatever sampling and the trace signal do.
+pub fn metrics_enabled() -> bool {
+    METRICS_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Shared by the SDK resource and the daemon's observations exporter.
@@ -206,17 +525,220 @@ const DURATION_BUCKET_BOUNDARIES: [f64; 14] = [
 ];
 
 fn duration_view(instrument: &Instrument) -> Option<Stream> {
-    (instrument.unit() == "s"
-        && instrument.kind() == opentelemetry_sdk::metrics::InstrumentKind::Histogram)
-        .then(|| {
-            Stream::builder()
-                .with_aggregation(Aggregation::ExplicitBucketHistogram {
-                    boundaries: DURATION_BUCKET_BOUNDARIES.into(),
-                    record_min_max: true,
-                })
-                .build()
-                .expect("seconds histogram view is valid")
+    if instrument.unit() != "s"
+        || instrument.kind() != opentelemetry_sdk::metrics::InstrumentKind::Histogram
+        // Startup owns longer, explicit boundaries rather than the request-duration view.
+        || instrument.name() == "st.startup.duration"
+    {
+        return None;
+    }
+    let mut stream = Stream::builder().with_aggregation(Aggregation::ExplicitBucketHistogram {
+        boundaries: DURATION_BUCKET_BOUNDARIES.into(),
+        record_min_max: true,
+    });
+    if instrument.name() == HTTP_SERVER_DURATION_INSTRUMENT {
+        stream = stream.with_cardinality_limit(HTTP_SERVER_DURATION_CARDINALITY_LIMIT);
+    }
+    Some(stream.build().expect("seconds histogram view is valid"))
+}
+
+/// The request-duration histogram shares the st2 view (30 s and 60 s buckets
+/// included for long-polls and replay); startup owns its longer bucket range.
+const HTTP_SERVER_DURATION_INSTRUMENT: &str = "http.server.request.duration";
+
+/// O11Y-R14 active-series budget for the request-duration histogram. The raw label
+/// product is 237 real (route, method) pairs from the router x 12 client classes x
+/// 5 status classes = 14,220, above the 2,000-series per-daemon budget, so the SDK view
+/// caps this stream and folds anything beyond into the `otel.metric.overflow` series.
+const HTTP_SERVER_DURATION_CARDINALITY_LIMIT: usize = 1_500;
+
+/// Extractor over the request's headers, so W3C `traceparent`/`tracestate` extraction
+/// needs no header copy and no extra dependency.
+struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
+
+impl opentelemetry::propagation::Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|key| key.as_str()).collect()
+    }
+}
+
+/// The remote span context from `traceparent`/`tracestate`, or an empty context when the
+/// caller sent none: the request span is then a local root.
+/// Server roots record external sampled parents as `st.parent.sampled` for the collector
+/// policy; st-marked parents record false. AlwaysOn exports either way.
+pub fn extract_remote_context(headers: &axum::http::HeaderMap) -> opentelemetry::Context {
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(headers))
+    })
+}
+
+static HTTP_DURATION: OnceLock<opentelemetry::metrics::Histogram<f64>> = OnceLock::new();
+
+/// The five status classes the request-duration histogram labels; 101 WebSocket upgrades
+/// count as `1xx`.
+fn status_class(status: axum::http::StatusCode) -> &'static str {
+    match status.as_u16() / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        _ => "5xx",
+    }
+}
+
+/// Record one request on the `http.server.request.duration` histogram, next to the
+/// in-memory latency meter so both describe the same measurement. Unsampled and
+/// independent of the trace signal: early-outs when no meter provider is installed.
+pub fn record_http_request_duration(
+    method: &str,
+    route: &str,
+    client_class: crate::otel_client_class::ClientClass,
+    status: axum::http::StatusCode,
+    elapsed: Duration,
+) {
+    if !metrics_enabled() {
+        return;
+    }
+    let histogram = HTTP_DURATION.get_or_init(|| {
+        opentelemetry::global::meter("st3.http")
+            .f64_histogram(HTTP_SERVER_DURATION_INSTRUMENT)
+            .with_unit("s")
+            .with_description(
+                "st3 HTTP server request duration by route, method, client class and status class",
+            )
+            .build()
+    });
+    histogram.record(
+        elapsed.as_secs_f64(),
+        &[
+            KeyValue::new("http.request.method", method.to_owned()),
+            KeyValue::new("http.route", route.to_owned()),
+            KeyValue::new("st3.client.class", client_class.as_str()),
+            KeyValue::new("http.response.status_class", status_class(status)),
+        ],
+    );
+}
+
+/// Request totals stay on the SERVER span, without sub-millisecond noise.
+pub fn record_writer_wait(server: &tracing::Span, (wait_ms, ops): (f64, u64)) {
+    if wait_ms >= 1.0 {
+        server.record("st.writer.wait_ms", wait_ms);
+    }
+    server.record("st.writer.ops", i64::try_from(ops).unwrap_or(i64::MAX));
+}
+
+/// Retrospective span: ordinary passes never construct a span. The explicit empty
+/// parent prevents both tracing and OTel ambient contexts from parenting the root.
+pub fn record_wal_checkpoint(
+    started: SystemTime,
+    report: Option<&smallclaims::sqlite::WalCheckpointReport>,
+    abnormal: bool,
+) {
+    use opentelemetry::trace::{Span as _, Tracer as _};
+    if !export_enabled()
+        || (!abnormal && report.is_some_and(|report| report.truncate_ms.is_none()))
+    {
+        return;
+    }
+    let truncate = report.is_some_and(|report| report.truncate_ms.is_some());
+    let operation = if truncate { "checkpoint.truncate" } else { "checkpoint.passive" };
+    let tracer = opentelemetry::global::tracer("st3");
+    let mut span = tracer
+        .span_builder("st.db.checkpoint")
+        .with_start_time(started)
+        .with_attributes([
+            KeyValue::new("span.label", operation),
+            KeyValue::new("db.system.name", "sqlite"),
+            KeyValue::new("db.operation.name", operation),
+        ])
+        .start_with_context(&tracer, &opentelemetry::Context::new());
+    if let Some(report) = report
+        && let Some(ms) = report.truncate_ms
+    {
+        span.set_attribute(KeyValue::new("st.db.wal.checkpoint.duration", ms as f64 / 1000.));
+    }
+    if abnormal || report.is_none() {
+        span.set_status(opentelemetry::trace::Status::error("abnormal checkpoint"));
+    }
+    span.end();
+}
+
+/// Process metrics belong only to the daemon and are sampled by the SDK reader.
+fn register_daemon_memory_metrics(provider: &SdkMeterProvider) {
+    use opentelemetry::metrics::MeterProvider as _;
+
+    let meter = provider.meter("st3");
+    #[cfg(target_os = "linux")]
+    meter
+        .u64_observable_gauge("st.process.memory.rss")
+        .with_description("Resident process memory from /proc/self/statm")
+        .with_unit("By")
+        .with_callback(|observer| {
+            if let Some(bytes) = linux_rss_bytes() {
+                observer.observe(bytes, &[]);
+            }
         })
+        .build();
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    meter
+        .u64_observable_gauge("st.allocator.heap")
+        .with_description("glibc heap bytes by allocator state")
+        .with_unit("By")
+        .with_callback(|observer| {
+            // SAFETY: the supported Linux GNU runtime provides glibc >= 2.33.
+            // This runs on a normally initialized SDK thread, outside allocator
+            // initialization, concurrent mallopt mutation, signal handlers and
+            // asynchronous thread cancellation. mallinfo2 takes no pointers and
+            // returns counters by value; arena locking does not invalidate allocations
+            // but provides neither an atomic all-arena instant nor a latency bound.
+            let heap = unsafe { libc::mallinfo2() };
+            for (state, bytes) in [
+                ("allocated", heap.uordblks),
+                ("free", heap.fordblks),
+                ("mmapped", heap.hblkhd),
+                ("arena", heap.arena),
+                ("releasable", heap.keepcost),
+            ] {
+                observer.observe(bytes as u64, &[KeyValue::new("state", state)]);
+            }
+        })
+        .build();
+
+    meter
+        .u64_observable_counter("st.allocator.reclaim.count")
+        .with_description("Checkpoint allocator reclamation attempts")
+        .with_unit("{attempt}")
+        .with_callback(|observer| {
+            observer.observe(smallclaims::store::allocator_reclaim_stats().attempts, &[]);
+        })
+        .build();
+    meter
+        .f64_observable_counter("st.allocator.reclaim.duration")
+        .with_description("Cumulative time spent reclaiming checkpoint allocator memory")
+        .with_unit("s")
+        .with_callback(|observer| {
+            observer.observe(
+                smallclaims::store::allocator_reclaim_stats().elapsed.as_secs_f64(), &[],
+            );
+        })
+        .build();
+}
+
+#[cfg(target_os = "linux")]
+fn linux_rss_bytes() -> Option<u64> {
+    let mut buffer = [0_u8; 128];
+    let bytes = std::fs::File::open("/proc/self/statm").ok()?.read(&mut buffer).ok()?;
+    let pages = std::str::from_utf8(&buffer[..bytes]).ok()?
+        .split_whitespace().nth(1)?.parse::<u64>().ok()?;
+    // SAFETY: sysconf reads the process's system configuration; this constant
+    // requires no pointer arguments. An unsupported/error return is not a sample.
+    let page_size = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+    pages.checked_mul(page_size)
 }
 
 pub struct Telemetry {
@@ -285,6 +807,11 @@ impl Telemetry {
                         .with_resource(resource.clone())
                         .build();
                     opentelemetry::global::set_tracer_provider(provider.clone());
+                    // Inbound W3C traceparent/tracestate extraction for every request
+                    // surface (HTTP and WebSocket upgrades alike).
+                    opentelemetry::global::set_text_map_propagator(
+                        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+                    );
                     telemetry.tracer_provider = Some(provider);
                 }
                 Err(error) => {
@@ -306,7 +833,14 @@ impl Telemetry {
                         .with_view(duration_view)
                         .with_resource(resource.clone())
                         .build();
+                    if matches!(unit, Unit::Daemon) {
+                        register_daemon_memory_metrics(&provider);
+                    }
                     opentelemetry::global::set_meter_provider(provider.clone());
+                    METRICS_ENABLED.store(true, Ordering::Relaxed);
+                    if matches!(unit, Unit::Daemon) {
+                        crate::reconcile_telemetry::init();
+                    }
                     telemetry.meter_provider = Some(provider);
                 }
                 Err(error) => {
@@ -375,6 +909,9 @@ impl Telemetry {
             installed && telemetry.tracer_provider.is_some(),
             Ordering::Relaxed,
         );
+        if matches!(unit, Unit::ReplicationWorker) {
+            smallclaims::sync::telemetry::init(export_enabled(), crate::otel::metrics_enabled());
+        }
         telemetry
     }
 
@@ -385,6 +922,8 @@ impl Telemetry {
     /// One deadline covers every signal, including provider destruction.
     pub fn shutdown(&mut self) {
         EXPORT_ENABLED.store(false, Ordering::Relaxed);
+        METRICS_ENABLED.store(false, Ordering::Relaxed);
+        smallclaims::sync::telemetry::init(false, false);
         let tracer = self.tracer_provider.take();
         let meter = self.meter_provider.take();
         let logger = self.logger_provider.take();
@@ -461,6 +1000,86 @@ mod tests {
     };
     use opentelemetry::{Key, KeyValue, Value};
     use opentelemetry_sdk::Resource;
+
+    #[test]
+    fn roster_warm_measurements_move_to_the_publication_worker() {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _, TracerProvider as _};
+        let attributes = std::thread::spawn(|| {
+            let _export = super::fixture_export_scope();
+            super::roster_collect_warm(|| {
+                super::roster_accumulate("st.roster.phase.status_fold.wall_ms", 1.0);
+                super::take_roster_attributes()
+            })
+        }).join().unwrap();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let context = opentelemetry::Context::new().with_span(provider.tracer("roster-test").start("publication"));
+        let _context = context.attach();
+        let _export = super::fixture_export_scope();
+        let attributes = super::roster_scope(|| {
+            super::seed_roster_attributes(attributes);
+            super::roster_accumulate("st.roster.phase.status_fold.wall_ms", 2.0);
+            super::take_roster_attributes().unwrap()
+        });
+        assert_eq!(attributes.values.get("st.roster.phase.status_fold.wall_ms"), Some(&Value::F64(3.0)));
+        assert!(!super::roster_recording(), "worker scopes restore their thread-local state");
+    }
+
+    #[test]
+    fn roster_without_recording_destination_skips_attribute_construction() {
+        struct UnexpectedConversion;
+        impl From<UnexpectedConversion> for Value {
+            fn from(_: UnexpectedConversion) -> Self {
+                panic!("a nonrecording roster must not construct attribute values");
+            }
+        }
+        let _context = opentelemetry::Context::new().attach();
+        let _export = super::fixture_export_scope();
+        let attributes = super::roster_scope(|| {
+            assert!(!super::roster_recording());
+            super::roster_attribute("st.roster.path", UnexpectedConversion);
+            assert_eq!(super::roster_phase("membership", || 7), 7);
+            super::roster_wait("st.roster.worker_queue_ms", 1.0);
+            super::roster_wait("st.roster.reader_acquire_ms", 2.0);
+            super::take_roster_attributes().unwrap()
+        });
+        assert!(attributes.values.is_empty(), "no attribute-map allocations without a destination");
+        assert_eq!(attributes.worker_queue_ms, Some(1.0));
+        assert_eq!(attributes.reader_acquire_ms, Some(2.0));
+    }
+
+    #[test]
+    fn roster_retry_workers_accumulate_waits_and_preserve_cut() {
+        use opentelemetry::trace::{TraceContextExt as _, Tracer as _, TracerProvider as _};
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
+        let probe_provider = provider.clone();
+        let attributes = std::thread::spawn(move || {
+            let context = opentelemetry::Context::new().with_span(probe_provider.tracer("roster-test").start("probe"));
+            let _context = context.attach();
+            let _export = super::fixture_export_scope();
+            super::roster_scope(|| {
+                super::roster_wait("st.roster.worker_queue_ms", 1.0);
+                super::roster_wait("st.roster.reader_acquire_ms", 2.0);
+                super::roster_attribute("st.roster.requested_cut", 7_i64);
+                super::take_roster_attributes()
+            })
+        }).join().unwrap();
+        let attributes = std::thread::spawn(move || {
+            let context = opentelemetry::Context::new().with_span(provider.tracer("roster-test").start("retry"));
+            let _context = context.attach();
+            let _export = super::fixture_export_scope();
+            super::roster_scope(|| {
+                super::seed_roster_attributes(attributes);
+                super::roster_wait("st.roster.worker_queue_ms", 3.0);
+                super::roster_wait("st.roster.reader_acquire_ms", 4.0);
+                super::take_roster_attributes().unwrap()
+            })
+        }).join().unwrap();
+        assert_eq!(attributes.values.get("st.roster.worker_queue_ms"), Some(&Value::F64(4.0)));
+        assert_eq!(attributes.values.get("st.roster.reader_acquire_ms"), Some(&Value::F64(6.0)));
+        assert_eq!(attributes.values.get("st.roster.requested_cut"), Some(&Value::I64(7)));
+        assert_eq!(attributes.worker_queue_ms, Some(4.0));
+        assert_eq!(attributes.reader_acquire_ms, Some(6.0));
+    }
 
     #[derive(Debug)]
     struct StalledExporter(std::sync::mpsc::Sender<()>);
@@ -634,5 +1253,126 @@ mod tests {
                 assert_eq!(resource.get(&Key::new(key)), Some(Value::from(expected)));
             }
         }
+    }
+
+    #[test]
+    fn disabled_daemon_metrics_do_not_initialize_meter_provider() {
+        const CHILD: &str = "ST3_DISABLED_DAEMON_METRICS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "otel::tests::disabled_daemon_metrics_do_not_initialize_meter_provider",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env(CHILD, "1")
+                .env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+                // Keep another real exporter enabled to exercise the initialized
+                // telemetry path rather than the all-signals-disabled early return.
+                .env("OTEL_TRACES_EXPORTER", "otlp")
+                .env("OTEL_METRICS_EXPORTER", "none")
+                .env("OTEL_LOGS_EXPORTER", "none")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "isolated telemetry proof failed: {output:?}");
+            return;
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _runtime = runtime.enter();
+        let mut telemetry = super::Telemetry::init(Unit::Daemon, Some("memory-test"));
+        assert!(telemetry.tracer_provider.is_some(), "real trace exporter initializes");
+        assert!(telemetry.meter_provider.is_none(), "disabled metrics create no provider");
+        assert!(!super::metrics_enabled(), "daemon metrics stay disabled");
+        telemetry.shutdown();
+    }
+
+    #[test]
+    fn http_duration_view_caps_active_series() {
+        use super::{
+            HTTP_SERVER_DURATION_CARDINALITY_LIMIT, HTTP_SERVER_DURATION_INSTRUMENT, duration_view,
+        };
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        };
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .with_view(duration_view)
+            .build();
+        let histogram = provider
+            .meter("st3.http")
+            .f64_histogram(HTTP_SERVER_DURATION_INSTRUMENT)
+            .with_unit("s")
+            .with_description("test")
+            .build();
+        let limit = HTTP_SERVER_DURATION_CARDINALITY_LIMIT;
+        for series in 0..limit + 25 {
+            histogram.record(0.1, &[KeyValue::new("series", series.to_string())]);
+        }
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        let histogram = finished
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .find(|metric| metric.name() == HTTP_SERVER_DURATION_INSTRUMENT)
+            .and_then(|metric| match metric.data() {
+                AggregatedMetrics::F64(MetricData::Histogram(histogram)) => Some(histogram),
+                _ => None,
+            })
+            .expect("the duration histogram is exported");
+        assert_eq!(
+            histogram.data_points().count(),
+            limit + 1,
+            "capped series plus the single otel.metric.overflow series"
+        );
+        assert!(
+            histogram.data_points().any(|point| {
+                point
+                    .attributes()
+                    .any(|attribute| attribute.key.as_str() == "otel.metric.overflow")
+            }),
+            "series beyond the cap fold into otel.metric.overflow"
+        );
+    }
+
+    /// Opt-in cost proof: ~1 GiB in small, touched allocations, with alternate
+    /// allocations freed so the arena retains fragmented free bins.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    #[ignore = "allocates a fragmented 1 GiB heap; run explicitly for allocator cost evidence"]
+    fn mallinfo2_fragmented_heap_cost() {
+        let mut allocations: Vec<_> = (0..262_144)
+            .map(|_| Some(vec![0x5a_u8; 4096].into_boxed_slice()))
+            .collect();
+        for allocation in allocations.iter_mut().step_by(2) {
+            *allocation = None;
+        }
+        std::hint::black_box(&allocations);
+        // SAFETY: this normally initialized test thread is outside allocator init,
+        // concurrent mallopt mutation, signal handlers and asynchronous cancellation.
+        // Supported glibc >= 2.33 returns counters by value without invalidating
+        // allocations; arena locks give neither an atomic snapshot nor a latency bound.
+        let fragmented = unsafe { libc::mallinfo2() };
+        assert!(fragmented.arena >= 1_073_741_824);
+        assert!(fragmented.fordblks >= 500_000_000);
+        let mut samples = [std::time::Duration::ZERO; 101];
+        for sample in &mut samples {
+            let started = std::time::Instant::now();
+            // SAFETY: the same initialized-thread and allocator-context conditions
+            // as the snapshot above hold; no signal/cancellation context is involved.
+            std::hint::black_box(unsafe { libc::mallinfo2() });
+            *sample = started.elapsed();
+        }
+        samples.sort_unstable();
+        println!(
+            "mallinfo2 fragmented heap: arena={} allocated={} free={} bytes; n={}; median={:?} p95={:?} max={:?}",
+            fragmented.arena, fragmented.uordblks, fragmented.fordblks,
+            samples.len(), samples[50], samples[95], samples[100],
+        );
     }
 }

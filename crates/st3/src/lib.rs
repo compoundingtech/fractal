@@ -24,7 +24,12 @@ pub mod delivery_hold;
 pub mod driver_hook;
 pub mod environment;
 pub(crate) mod external_sessions;
+pub(crate) mod native_views;
+pub(crate) mod conversation_header;
+pub(crate) mod subagent_sessions;
 pub mod fleet;
+/// Silent messages are stored and readable without waking the recipient.
+pub mod silent;
 /// `st missions check`: run a mission file's exec gates once, now, the way a run would.
 pub mod gate_check;
 /// Built-in gate kinds: what gates shelled out for most, answered by st itself.
@@ -54,6 +59,7 @@ pub mod node_identity;
 pub mod omp_ask_resume;
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 pub mod otel;
+pub mod otel_client_class;
 pub mod otlp;
 pub mod peer;
 pub mod placement;
@@ -63,6 +69,7 @@ pub use smallclaims::{performance, profile};
 pub mod projection;
 pub mod provenance;
 pub mod reconcile;
+mod reconcile_telemetry;
 mod relay_trace;
 pub mod rules;
 /// Observes git and gh calls without changing their command behavior.
@@ -86,6 +93,7 @@ pub mod service;
 pub mod skill;
 pub mod slo;
 pub mod startup;
+pub mod startup_telemetry;
 pub mod store;
 pub mod subagents;
 /// Suspends a quiet seat and resumes its own native session.
