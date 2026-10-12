@@ -1904,7 +1904,7 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
     let captured = requests.clone();
     let release_request = release.clone();
     let recorded = committed.clone();
-    let app = st3::api::router(daemon.state()).layer(axum::middleware::from_fn(
+    let app = st3::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let captured = captured.clone();
             let release = release_request.clone();
