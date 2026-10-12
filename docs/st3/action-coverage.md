@@ -386,4 +386,12 @@ devices, native sessions and terminal lists on the collection socket. The
 frame schema and typed decoding, reconnect snapshots, invalid subscription
 filters/limits, active-device retirement and native filesystem/process events.
 
+The phone uses the same `collections.inventory` reads, covered by the real-socket
+tests above, while the screen displaying each inventory is focused. Its Node
+`inventoryFeed.test.mjs` checks the client layer: shared slots, selected usage
+periods, ordered updates, explicit refresh snapshots, reconnect, background and
+grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
+`collectionSocket.test.mjs` checks authentication and control-event delivery at
+the native bridge boundary; it does not claim an iOS simulator was driven.
+
 `st ui` opens the terminal interface; plain `st` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/st3/tests` exercise this entry point. Pair with `st devices complete`.

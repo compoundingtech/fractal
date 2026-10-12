@@ -700,6 +700,9 @@ pub struct Args {
     /// Require a paired device; pair with `st devices complete` first.
     #[arg(long)]
     pub client: bool,
+    /// Print this device's recent quality summaries and exit.
+    #[arg(long)]
+    pub slo: bool,
     #[arg(long, hide = true)]
     glasses: bool,
     #[arg(long, hide = true, requires = "demo")]
@@ -761,6 +764,10 @@ impl Args {
 /// and sets the client name before any connection can initialize the shared name lock.
 pub fn run(options: Args) -> Result<()> {
     let process_started = std::time::Instant::now();
+    if options.slo {
+        ui::slo::print_history();
+        return Ok(());
+    }
     let open_timing = ui::open_timing::Trace::from_env(process_started);
     st3_client::set_client_name(version::client_name());
     ui::lastrun_log_panics(&version::short(version::now()));
@@ -774,6 +781,7 @@ pub fn run(options: Args) -> Result<()> {
     if !io::stdout().is_terminal() {
         anyhow::bail!("st ui needs an interactive terminal");
     }
+    let _quality_session = ui::slo::Session::start();
     let stopping = Arc::new(AtomicBool::new(false));
     for signal in [
         signal_hook::consts::SIGINT,
@@ -866,6 +874,7 @@ pub fn run(options: Args) -> Result<()> {
         cached,
         glass: ui::glass_request(&args),
         open_timing,
+        process_started,
     })
 }
 
