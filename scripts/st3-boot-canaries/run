@@ -46,7 +46,7 @@ sys.dont_write_bytecode = True
 from st_boundary import fresh_seat_findings, output_findings
 
 HARNESSES = ("claude", "codex", "pi", "omp", "opencode")
-SCENARIOS = ("access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
+SCENARIOS = ("claim-socket-denied", "access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
 MISSION = "canary/boot"
 RUN_ID = f"{MISSION}/c1"
 LETTERS = "abcde"
@@ -935,6 +935,42 @@ def scenario(node, seats, name, scratch, replacement_binary=None):
         fail(f"{name}: already-read boot mail reached the provider again: {repeated}")
 
 
+def prove_claim_socket_denied(node, seats, evidence):
+    subject = seat_subject("a")
+    def diagnostic():
+        rows = trace(node, subject)
+        return next((row for row in rows if row["kind"] == "harness.diagnostic"
+                     and row["body"].get("fields", {}).get("code") == "work-wake-exhausted"), None)
+    fault = until(diagnostic, 90, "the observed socket denial did not raise a readiness fault")
+    agent, work = seats.view("a")
+    assert work["state"] == "ready"
+    fields = fault["body"]["fields"]
+    assert "Operation not permitted" in fields["reason"] and str(node.endpoint) in fields["reason"]
+    observed = [row for row in trace(node, subject) if row["kind"] == "harness.diagnostic"
+                and row["body"].get("fields", {}).get("code") == "work-claim-socket-failed"]
+    assert len(observed) == 1 and observed[0]["body"]["fields"]["os_error"] == 1
+    assert observed[0]["id"] in fault["body"]["evidence"]
+    claims = [row for row in receipts(node, "a") if row["event"] == "claim"]
+    assert len(claims) == 1 and claims[0]["exit"] == 5 and claims[0]["seconds"] < 5
+    assert "st-work-claim-socket-failure:" in claims[0]["stderr"]
+    (evidence / "socket-denial.json").write_text(json.dumps({
+        "denial": "real Linux seccomp connect(2) EPERM", "provider": "native Codex protocol stand-in",
+        "claim": claims[0], "diagnostic": observed[0], "fault": fault,
+        "ready_before_recovery": True, "daemon_wait_seconds": 30,
+    }, indent=2) + "\n")
+    (node.root / "ws/claim-socket-denied").unlink()
+    node.cli("work", "wake", seats.step("a"), "--as", "person/eval")
+    until(lambda: seats.view("a")[1]["state"] == "claimed", 60,
+          "the same seat could not claim after its socket access was fixed")
+    final = trace(node, subject)
+    assert len([row for row in final if row["kind"] == "harness.diagnostic"
+                and row["body"].get("fields", {}).get("code") == "work-wake-exhausted"]) == 1
+    (evidence / "socket-recovered.json").write_text(json.dumps({
+        "agent": seats.view("a")[0], "work": seats.view("a")[1],
+        "fault_count": 1, "claim_receipts": [row for row in receipts(node, "a") if row["event"] == "claim"],
+    }, indent=2) + "\n")
+
+
 def run(args, root, evidence):
     node = Node(root, args.binary, args.harness)
     if args.scenario == "access-auto":
@@ -944,6 +980,9 @@ def run(args, root, evidence):
     letters = LETTERS[:count]
     seats = Seats(node, letters, args.bound)
     try:
+        if args.scenario == "claim-socket-denied":
+            assert args.harness == "codex"
+            (root / "ws/claim-socket-denied").write_text("deny only the model's claim CLI connect syscall\n")
         if args.scenario == "import":
             if args.harness != "codex":
                 fail("the import regression uses Codex")
@@ -951,10 +990,14 @@ def run(args, root, evidence):
         else:
             node.start()
         source = root / "mission.kdl"
-        source.write_text(mission_source(node, count, args.harness, hold=args.scenario == "suspend"))
+        source.write_text(mission_source(node, count, args.harness, hold=args.scenario in ("suspend", "claim-socket-denied")))
         node.cli("apply", str(source), "--as", "person/eval")
         node.cli("missions", "start", MISSION, "--id", RUN_ID, "--workspace", str(root / "ws"),
                  "--as", "person/eval")
+        if args.scenario == "claim-socket-denied":
+            prove_claim_socket_denied(node, seats, evidence)
+            return {"verdict": "pass", "harness": args.harness, "scenario": args.scenario,
+                    "cause": "connect EPERM", "same_seat_recovered": True}
         seats.prove("boot")
         catalogs_before = {str(path): path.read_bytes() for pattern in ("catalog.kdl", "agent.kdl")
                            for path in (root / "state/drivers").rglob(pattern)}

@@ -279,7 +279,15 @@ class AppServer:
             self.send(client, {"id": ident, "result": {}})
 
     def finish(self, turn, text):
-        stubmodel.act(text)
+        result = stubmodel.act(text)
+        if result and (Path.cwd() / "claim-socket-denied").exists():
+            command, completed = result
+            item = {"type": "commandExecution", "id": f"claim-{turn}", "command": command,
+                    "status": "completed", "exitCode": completed.returncode,
+                    "aggregatedOutput": completed.stdout + completed.stderr}
+            stubmodel.receipt("claim-tool-result", item=item)
+            self.broadcast({"method": "item/completed", "params": {
+                "threadId": self.thread_id, "turnId": turn, "item": item}})
         self.broadcast({"method": "turn/completed", "params": {
             "threadId": self.thread_id, "turn": {"id": turn, "status": "completed"}}})
 

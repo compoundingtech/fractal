@@ -19601,7 +19601,7 @@ impl ObservationClient<'_> {
                     .and_then(Value::as_str)
                     .unwrap_or(if claim.kind == "harness.todo.observed" { "normalized" } else { "" })
             );
-            let claim = serde_json::from_value(st_drivers::harness_events::prepare_publication(
+            let claim: ClaimInput = serde_json::from_value(st_drivers::harness_events::prepare_publication(
                 dir,
                 sequence,
                 &slot,
