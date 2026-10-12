@@ -17,7 +17,7 @@ export const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 
 export type FeedHandlers = {
   /** A window's whole ordered list, after each frame that changed it. */
-  onWindow: <K extends FeedWindow>(name: K, items: FeedLists[K], hasMore: boolean, snapshot: Snapshot) => void;
+  onWindow: <K extends FeedWindow>(name: K, items: FeedLists[K], hasMore: boolean, snapshot: Snapshot, received: number) => void;
   /** `live` once a socket delivers its first snapshot; `reconnecting` while a dropped one waits. */
   onConnection: (state: 'connecting' | 'live' | 'reconnecting', issue?: string) => void;
   /** The server refused a window; the others keep going. */
@@ -49,6 +49,8 @@ export type ConversationHandlers = {
   /** A problem to show; an empty string clears it. `stopped`: st refused for good, so nothing
    * asks again until the person follows the conversation again. */
   onIssue: (issue: string, stopped?: boolean) => void;
+  /** Typed, content-free refusal for local quality accounting. */
+  onQualityError?: (code?: string) => void;
 };
 
 type Client = Pick<St3Client, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'> & Partial<Pick<St3Client, 'capabilities'>>;
@@ -285,7 +287,7 @@ export class Feed {
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
       const opened = await this.client.collectionStream({
-        onFrame: frame => { if (!stale()) { this.lastFrameAt = Date.now(); this.frame(frame); } },
+        onFrame: frame => { if (!stale()) { this.lastFrameAt = Date.now(); this.frame(frame, performance.now()); } },
         onEnd: error => { if (!stale()) this.dropped(error ?? new Error('The collections socket closed.')); },
       });
       if (stale()) { opened.close(); return; }
@@ -344,7 +346,7 @@ export class Feed {
     this.live = false;
     this.windows = {};
     this.stopProbing();
-    this.terminal?.socketLost();
+    this.terminal?.socketLost(true);
     if (!this.foreground.active) return;
     const delay = this.retryDelaysMs[Math.min(this.failures, this.retryDelaysMs.length - 1)];
     this.failures++;
@@ -352,7 +354,7 @@ export class Feed {
     this.timer = setTimeout(() => { void this.connect(); }, delay);
   }
 
-  private frame(frame: CollectionFrame): void {
+  private frame(frame: CollectionFrame, received: number): void {
     const id = 'id' in frame ? frame.id : undefined;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;
@@ -385,11 +387,11 @@ export class Feed {
         if (!this.live) { this.live = true; this.handlers.onConnection('live'); this.startProbing(); }
       }
       const items = next.items.filter(item => item.kind === KINDS[name]) as FeedLists[typeof name];
-      this.handlers.onWindow(name, items, next.hasMore, next.snapshot);
+      this.handlers.onWindow(name, items, next.hasMore, next.snapshot, received);
     } else if (frame.kind === 'resync') {
       // st keeps a conversation's subscription and retries it itself; it says why, so the last
       // copy shown can say it is stale (the owner's host is away).
-      if (id === CONVERSATION && this.conversation) { if (frame.message) this.conversation.handlers.onIssue(`${plainMessage(frame.code, frame.message)} · trying again`); }
+      if (id === CONVERSATION && this.conversation) { this.conversation.handlers.onQualityError?.(frame.code); if (frame.message) this.conversation.handlers.onIssue(`${plainMessage(frame.code, frame.message)} · trying again`); }
       else if (frame.id === ARRANGEMENTS && this.arrangements) { if (!frame.retryable) { this.arrangements.window = undefined; this.stream?.subscribeArrangements(ARRANGEMENTS, this.arrangements.person); } }
       else if (frame.id === GLASSES && this.glasses) { this.glasses.window = undefined; this.stream?.subscribeGlasses(GLASSES); }
       else if (frame.id in FEED_WINDOWS) {
@@ -414,6 +416,7 @@ export class Feed {
       if (id === TERMINAL) this.terminal?.failed(frame.code, frame.message);
       else if (id === CONVERSATION && this.conversation) {
         const follow = this.conversation;
+        follow.handlers.onQualityError?.(frame.code);
         // st keeps no start for this transcript: asking again cannot help, so say st's reason
         // once and stop, as stui does.
         if (!conversationMayClear(frame.code)) {
@@ -464,6 +467,7 @@ class TerminalFollow {
   private incarnation = '';
   private attempt = 0;
   private failures = 0;
+  private attached = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly client: Client;
   private readonly terminalId: string;
@@ -486,6 +490,7 @@ class TerminalFollow {
 
   async attach(): Promise<void> {
     this.cancel();
+    this.handlers.onQuality?.('attempt');
     const current = this.attempt;
     const stale = () => this.closed || current !== this.attempt;
     try {
@@ -502,11 +507,14 @@ class TerminalFollow {
       });
       if (stale()) return;
       const attachment = result.value.terminal_attachment;
-      if (!attachment?.stream_capability) { this.stop('The gateway returned no terminal stream.'); return; }
+      if (!attachment?.stream_capability) { this.handlers.onQuality?.('error'); this.stop('The gateway returned no terminal stream.'); return; }
       // A socket that dropped meanwhile attaches again when it reconnects.
+      this.attached = true;
+      this.handlers.onQuality?.('attached');
       this.stream()?.subscribeTerminal(TERMINAL, this.terminalId, attachment.runtime_incarnation ?? this.incarnation, attachment.stream_capability);
     } catch (error) {
       if (stale()) return;
+      this.handlers.onQuality?.('error');
       const code = errorCode(error);
       if (error instanceof Error && error.message === TERMINAL_RESTARTED) this.stop(TERMINAL_RESTARTED);
       // The attach lost the race with a busy store (its fence is the store's whole index): try again.
@@ -533,7 +541,7 @@ class TerminalFollow {
   }
 
   /** The socket closed: whatever was in flight belongs to it. */
-  socketLost(): void { this.cancel(); }
+  socketLost(unexpected = false): void { if (unexpected) this.dead(); else this.attached = false; this.cancel(); }
 
   close(): void {
     if (this.closed) return;
@@ -547,7 +555,10 @@ class TerminalFollow {
     }).catch(() => {});
   }
 
+  private dead(): void { if (this.attached) { this.attached = false; this.handlers.onQuality?.('dead'); } }
+
   private retry(issue: string): void {
+    this.dead();
     const delay = this.retryDelaysMs[Math.min(this.failures, this.retryDelaysMs.length - 1)];
     this.failures++;
     this.handlers.onIssue(`Terminal stream interrupted; reconnecting (${issue}).`);
@@ -566,6 +577,7 @@ class TerminalFollow {
     this.cancel();
     this.released();
     if (!wasClosed && issue) {
+      this.dead();
       this.stream()?.unsubscribe(TERMINAL);
       this.handlers.onIssue(issue);
     }
