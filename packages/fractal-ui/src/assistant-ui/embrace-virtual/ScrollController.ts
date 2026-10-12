@@ -371,23 +371,24 @@ export class ScrollController {
           this.prependBottom = 'step'
           return
         }
-        // Estimated sizes can still miss the row. Walk past the mounted rows
+        // Estimated sizes can still miss the row. Walk past the visible rows
         // toward it; each mutation re-enters here until the anchor row mounts.
+        // Off-screen persisted rows (RAC keeps the focused one) do not count.
         const targetIndex = this.rowIndex.get(key)
-        if (targetIndex === undefined) return
+        const viewport = element.getBoundingClientRect()
         let before: { index: number; bottom: number } | undefined
         let after: { index: number; top: number } | undefined
         for (const row of element.querySelectorAll<HTMLElement>('[data-embrace-entry-id]')) {
           const index = this.rowIndex.get(row.dataset['embraceEntryId'] ?? '')
           const rect = row.getBoundingClientRect()
-          if (index === undefined || rect.height === 0) continue
+          if (targetIndex === undefined || index === undefined || rect.height === 0 || rect.bottom <= viewport.top || rect.top >= viewport.bottom) continue
           if (index < targetIndex && (before === undefined || index > before.index)) before = { index, bottom: rect.bottom }
           if (index > targetIndex && (after === undefined || index < after.index)) after = { index, top: rect.top }
         }
-        const viewport = element.getBoundingClientRect()
-        if (after === undefined && before !== undefined && before.bottom > viewport.top) element.scrollTop += before.bottom - viewport.top
-        else if (before === undefined && after !== undefined && after.top < viewport.bottom) element.scrollTop -= viewport.bottom - after.top
-        return
+        if (after === undefined && before !== undefined) { element.scrollTop += before.bottom - viewport.top; return }
+        if (before === undefined && after !== undefined) { element.scrollTop -= viewport.bottom - after.top; return }
+        // Nothing visible to walk from: fall back to the layout position.
+        this.prependBottom = undefined
       } else this.prependBottom = undefined
     }
     // RAC publishes its collection after the parent commit. Keep the stable anchor
