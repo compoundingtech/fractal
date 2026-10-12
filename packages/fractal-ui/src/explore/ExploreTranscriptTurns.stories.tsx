@@ -118,10 +118,12 @@ function Explorer(initialArgs: ExploreArgs) {
   return <main data-turns-explorer data-token-probe {...stylex.props(...baselineTheme, args.scheme === 'light' && lightTheme, styles.root, args.width === 1440 ? styles.wide : styles.narrow)}>
     <style>{projectionCss}</style>
     <h1 {...stylex.props(styles.title)}>Transcript turns</h1><p {...stylex.props(styles.explanation)}>Inputs trigger the turn. The owning seat replies. Compare language, input cues and metadata without adding a footer.</p>
-    <Button onPress={() => updateArgs({ ...recommendedArgs, scheme: args.scheme, width: args.width })} aria-pressed={args.recommended} {...stylex.props(styles.control)}>Recommended preset</Button>
+    <div {...stylex.props(styles.pickers)}>
+    <Button onPress={() => updateArgs({ ...recommendedArgs, scheme: args.scheme, width: args.width })} aria-pressed={args.recommended} {...stylex.props(styles.control, styles.preset)}>Recommended preset</Button>
     <VariantPicker label="Turn structure" choices={dimensions.T} value={args.turn} compare={args.compareT} onChange={turn => updateArgs({ turn: turn as ExploreArgs['turn'], recommended: false })} onCompare={compareT => updateArgs({ compareT, recommended: false })} />
     <VariantPicker label="Input kind" choices={dimensions.K} value={args.kind} compare={args.compareK} onChange={kind => updateArgs({ kind: kind as ExploreArgs['kind'], recommended: false })} onCompare={compareK => updateArgs({ compareK, recommended: false })} />
     <VariantPicker label="Time and copy" choices={dimensions.M} value={args.meta} compare={args.compareM} onChange={meta => updateArgs({ meta: meta as ExploreArgs['meta'], recommended: false })} onCompare={compareM => updateArgs({ compareM, recommended: false })} />
+    </div>
     <div {...stylex.props(styles.controls)}>{(['dark', 'light'] as const).map(scheme => <Button key={scheme} aria-pressed={args.scheme === scheme} onPress={() => updateArgs({ scheme })} {...stylex.props(styles.control)}>{scheme}</Button>)}{([1440, 900] as const).map(width => <Button key={width} aria-pressed={args.width === width} onPress={() => updateArgs({ width })} {...stylex.props(styles.control)}>{width} lane</Button>)}</div>
     <div {...stylex.props(styles.comparisons)}>{turns.flatMap(turn => kinds.flatMap(kind => metas.map(meta => <Lane key={`${turn}-${kind}-${meta}-${args.recommended}`} args={{ ...args, turn, kind, meta } as ExploreArgs} />)))}</div>
     {args.probe ? <section aria-label="Deliberately failing controls" data-controls {...stylex.props(styles.negativeControls)}>
@@ -160,6 +162,7 @@ const styles = stylex.create({
   root: { padding: s.section, maxWidth: '100%', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, boxSizing: 'border-box' },
   wide: { width: g.polishWide }, narrow: { width: geometry.narrow },
   title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading }, explanation: { color: ink.fgMuted, marginBlock: s.md },
+  pickers: { display: 'flex', flexDirection: 'column', gap: s.md }, preset: { alignSelf: 'start' },
   controls: { display: 'flex', gap: s.md, marginBlock: s.md }, control: { padding: s.xs, color: ink.fg, backgroundColor: surface.rowActive, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, cursor: 'pointer', fontFamily: t.fontSans, ':focus-visible': { outlineColor: accent.primary, outlineStyle: 'solid', outlineWidth: g.focusRing } },
   comparisons: { display: 'flex', alignItems: 'start', gap: s.section, overflowX: 'auto' },
   lane: { flex: '0 0 auto', width: '100%', minWidth: 0, boxSizing: 'border-box' }, laneTitle: { marginBlock: s.lg, fontSize: t.metaSize, color: ink.fgMuted, fontWeight: t.weightMedium },
@@ -512,21 +515,13 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
 }
 export const Exploration: Story = {}
 export const ExplorationProbe: Story = { args: { probe: true }, play }
-export const AllStates: Story = { args: { compareT: true, compareK: true, compareM: true } }
+// One public Exploration; every pick (and the Recommended preset) is a URL arg. Probe stories carry the plays.
 export const AllStatesProbe: Story = { args: { compareT: true, compareK: true, compareM: true, probe: true }, play }
-export const MetaM1: Story = { args: { meta: 'M1' } }
 export const MetaM1Probe: Story = { args: { meta: 'M1', probe: true }, play }
-export const MetaM2: Story = { args: { meta: 'M2' } }
 export const MetaM2Probe: Story = { args: { meta: 'M2', probe: true }, play }
-export const MetaM3: Story = { args: { meta: 'M3' } }
 export const MetaM3Probe: Story = { args: { meta: 'M3', probe: true }, play }
-export const MetaM4: Story = { args: { meta: 'M4' } }
 export const MetaM4Probe: Story = { args: { meta: 'M4', probe: true }, play }
-export const Light900: Story = { args: { scheme: 'light', width: 900, compareM: true } }
 export const Light900Probe: Story = { args: { scheme: 'light', width: 900, compareM: true, probe: true }, play }
-export const Dark900: Story = { args: { scheme: 'dark', width: 900, compareM: true } }
 export const Dark900Probe: Story = { args: { scheme: 'dark', width: 900, compareM: true, probe: true }, play }
-export const Light1440: Story = { args: { scheme: 'light', width: 1440, compareM: true } }
 export const Light1440Probe: Story = { args: { scheme: 'light', width: 1440, compareM: true, probe: true }, play }
-export const Recommended: Story = { args: recommendedArgs }
 export const RecommendedProbe: Story = { args: { ...recommendedArgs, probe: true }, play }
