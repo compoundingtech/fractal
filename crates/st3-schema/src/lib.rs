@@ -1029,6 +1029,7 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
                 ("author", string()),
                 ("head", reference()),
                 ("head_sha", string()),
+                ("base_sha", string()),
                 ("branch", string()),
                 ("opened_by", reference()),
                 ("opened_by_run", reference()),
@@ -1119,6 +1120,9 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
             &[
                 ("target", reference()),
                 ("document", string()),
+                // Immutable Git notes IDs explicitly considered by the reviewer.
+                // The protected evidence observer validates each full object ID.
+                ("evidence_tests", array()),
                 ("reviewer", reference()),
                 (
                     "decision",
@@ -4143,6 +4147,7 @@ mod tests {
             [
                 "decision",
                 "document",
+                "evidence_tests",
                 "reason",
                 "reviewer",
                 "submitted_at",
@@ -4613,6 +4618,54 @@ mod tests {
             registry().markdown()
         );
     }
+
+    #[test]
+    fn review_test_citations_and_pull_base_are_optional_typed_facts() {
+        let review = BTreeMap::from([
+            (
+                "target".into(),
+                Value::String("resource/github/acme/garden/pull-request/7".into()),
+            ),
+            (
+                "document".into(),
+                Value::String("doc/review/fixture@digest".into()),
+            ),
+            (
+                "reviewer".into(),
+                Value::String("agent/fixture-reviewer".into()),
+            ),
+            ("decision".into(), Value::String("approve".into())),
+        ]);
+        registry()
+            .validate_resource_facts("human.review", &review)
+            .unwrap();
+        let mut cited = review;
+        cited.insert("evidence_tests".into(), serde_json::json!(["a".repeat(40)]));
+        registry()
+            .validate_resource_facts("human.review", &cited)
+            .unwrap();
+        cited.insert("evidence_tests".into(), Value::String("a".repeat(40)));
+        assert!(
+            registry()
+                .validate_resource_facts("human.review", &cited)
+                .is_err()
+        );
+        registry()
+            .validate_resource_facts(
+                "vcs.pull-request",
+                &BTreeMap::from([("base_sha".into(), Value::String("b".repeat(40)))]),
+            )
+            .unwrap();
+        assert!(
+            registry()
+                .validate_resource_facts(
+                    "vcs.pull-request",
+                    &BTreeMap::from([("base_sha".into(), serde_json::json!(7))])
+                )
+                .is_err()
+        );
+    }
+
 
     #[test]
     fn custom_claims_need_both_custom_namespaces() {
