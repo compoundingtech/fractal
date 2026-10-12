@@ -70,6 +70,28 @@ assert.throws(() => completeFrames('{broken}\n'), SyntaxError);
 const readFrames = () => completeFrames(
   fs.existsSync(framesPath) ? fs.readFileSync(framesPath, "utf8") : "",
 );
+const observeRecording = async (action, received) => {
+  let watcher;
+  let deadline;
+  const receipt = new Promise((resolve, reject) => {
+    watcher = fs.watch(framesPath, () => {
+      try {
+        if (received()) resolve();
+      } catch (error) {
+        reject(error);
+      }
+    });
+    watcher.on("error", reject);
+    deadline = setTimeout(() => reject(new Error("recorder did not receive the expected frame")), 5000);
+  });
+  try {
+    // Arm the listener before the producer writes, and await both ends of the pipe.
+    await Promise.all([Promise.resolve().then(action), receipt]);
+  } finally {
+    clearTimeout(deadline);
+    watcher?.close();
+  }
+};
 
 process.env.ST_OMP_CHANNEL_BIN = recorder;
 process.env.ST_OMP_CHANNEL_CATALOG = "/tmp/st2-smoke-catalog";
@@ -797,11 +819,10 @@ if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo
   assert.deepStrictEqual(todos().at(-1).totals, totals());
   assert.strictEqual(todos().at(-1).truncated, false);
   const todosBeforeRebinding = todos().length;
-  await handlers.get("session_start")({}, todoCtx);
   // The producer has written to a pipe; the recorder still needs to consume it.
-  // Wait for a new receipt, then check its contents rather than a stale snapshot.
-  const rebindDeadline = Date.now() + 5000;
-  while (todos().length === todosBeforeRebinding && Date.now() < rebindDeadline) await pause(10);
+  // Observe a new receipt, then check its contents rather than a stale snapshot.
+  await observeRecording(() => handlers.get("session_start")({}, todoCtx),
+    () => todos().length > todosBeforeRebinding);
   assert.ok(todos().length > todosBeforeRebinding, "new binding emits a todo receipt");
   assert.strictEqual(todos()[todosBeforeRebinding].source_op, "hydrate", "first rebind receipt is hydration");
   assert.strictEqual(todos().at(-1).source_op, "hydrate", "clear survives a new binding");

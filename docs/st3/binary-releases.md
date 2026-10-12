@@ -76,8 +76,9 @@ the baked source version dirty. The extracted, installed binary must still repor
 checkout version.
 
 The separate **Nix** workflow builds the default Linux package and every native flake check on
-tags, relevant trusted PRs, manual dispatch, and daily at 01:17 UTC. It uses ci1's persistent Nix
-store, retains the latest outputs per runner as GC roots, and repeats the build with downloads
+tags, relevant trusted PRs, manual dispatch, and daily at 01:17 UTC. It uses the dedicated
+`smalltalk-nix-persistent` Linux runner's preinstalled Nix and persistent store,
+retains the latest outputs per runner as GC roots, and repeats the build with downloads
 and both local and remote builders disabled to prove the results are cached. It needs neither
 GitHub's Actions cache nor FlakeHub. The `nix-release-proof` artifact records the exact source,
 targets, and output paths. The scheduled check starts four hours before the daily release schedule
