@@ -159,6 +159,54 @@ fn fused_message_sort_removes_exactly_one_statement_per_message_after_both_warmu
     assert_eq!(old_work.statements, new_work.statements + messages.len() as u64);
 }
 
+#[test]
+fn unrelated_same_subject_kinds_preserve_each_warmed_sorters_vm_and_fullscan_work() {
+    fn measure(
+        connection: &Connection,
+        messages: &[MessageView],
+    ) -> (smallclaims::sqlite::work::SqliteWork, smallclaims::sqlite::work::SqliteWork) {
+        parity(connection, messages); // warm both complete paths outside both scopes
+        let mut old = messages.to_vec();
+        let old_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        old_sort(connection, &mut old).unwrap();
+        let old_work = old_scope.finish();
+        let mut new = messages.to_vec();
+        let new_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        sort_messages_canonically(connection, &mut new).unwrap();
+        let new_work = new_scope.finish();
+        assert_eq!(serde_json::to_value(old).unwrap(), serde_json::to_value(new).unwrap());
+        (old_work, new_work)
+    }
+
+    // Observed raw fixture, not a populated production Store or a CPU/scale bound.
+    let mut connection = Connection::open_in_memory().unwrap();
+    schema(&mut connection);
+    batch(&connection, "batch", "writer", 1);
+    let subject = "message/fixed";
+    claim(&connection, 1, "fixed-sent", "batch", subject, "message.sent", "10");
+    claim(&connection, 2, "fixed-desired", "batch", subject, "intent.desired", "20");
+    // Native positions keep unrelated growth from changing legacy-position work.
+    position(&connection, "fixed-sent", 9);
+    position(&connection, "fixed-desired", 3);
+    let messages = vec![message(subject, 0)];
+    let before = measure(&connection, &messages);
+    for index in 0..512 {
+        // Earlier accepted times would precede the fixed candidates in a subject-only walk.
+        // Arrival indexes are later; the sent/desired rows and native positions never change.
+        let kind = if index % 2 == 0 { "message.read" } else { "intent.closed" };
+        claim(&connection, index + 3, &format!("unrelated-{index}"), "batch", subject, kind, "1");
+    }
+    let after = measure(&connection, &messages);
+    println!("unrelated-kind growth: rows=512, fixed_candidates=2; before={before:?}; after={after:?}");
+    for (before, after) in [(before.0, after.0), (before.1, after.1)] {
+        assert!(before.statements > 0 && before.vm_steps > 0, "before={before:?}; after={after:?}");
+        assert_eq!(before.statements, after.statements, "before={before:?}; after={after:?}");
+        assert_eq!(before.vm_steps, after.vm_steps, "before={before:?}; after={after:?}");
+        assert_eq!(before.fullscan_steps, 0, "before={before:?}; after={after:?}");
+        assert_eq!(after.fullscan_steps, 0, "before={before:?}; after={after:?}");
+    }
+}
+
 fn same_error_without_reordering(connection: &Connection, messages: Vec<MessageView>) {
     let before = serde_json::to_value(&messages).unwrap();
     let mut old = messages.clone();
@@ -244,7 +292,7 @@ fn normalize_subquery_number(detail: &str) -> String {
 }
 
 #[test]
-fn fused_message_key_plan_matches_old_subject_seek_and_canonical_subtree() {
+fn fused_message_key_plan_matches_old_subject_kind_seek_and_canonical_subtree() {
     // Both queries use this same empty actual Store, population and SQLite build.
     // This does not establish the plan for differently populated or analyzed stores.
     let store = Store::open_memory("node").unwrap();
@@ -280,7 +328,7 @@ fn fused_message_key_plan_matches_old_subject_seek_and_canonical_subtree() {
         .collect::<Vec<_>>();
     assert_eq!(old_claims.len(), 1, "{context}");
     assert_eq!(old_claims[0].detail,
-        "SEARCH claims USING INDEX claims_subject_accepted_index (subject=?)", "{context}");
+        "SEARCH claims USING INDEX claims_subject_kind_index (subject=? AND kind=?)", "{context}");
     assert_eq!(old.iter().map(|step| normalize_subquery_number(&step.detail)).collect::<Vec<_>>(),
         inner.iter().map(|step| normalize_subquery_number(&step.detail)).collect::<Vec<_>>(),
         "complete earliest-ID plan changed; {context}");

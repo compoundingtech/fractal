@@ -24344,7 +24344,7 @@ fn message_canonical_key_query() -> &'static str {
                     chosen.batch_id, {}, chosen.id
              FROM claims AS chosen JOIN batches ON batches.id=chosen.batch_id
              WHERE chosen.id=(
-                 SELECT id FROM claims WHERE subject=?1
+                 SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=?1
                    AND kind IN ('message.sent','intent.desired')
                  ORDER BY CANONICAL_ASC(claims) LIMIT 1
              )",
