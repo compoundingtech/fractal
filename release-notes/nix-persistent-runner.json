@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "summary": "Verify Nix packages and native checks on a dedicated persistent runner",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database layout or schema-version change. Graph and runtime table, index and trigger declarations commit in groups instead of syncing each declaration separately; a failed declaration rolls back its group."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, protocol or harness contract change. Telemetry test daemons use the existing non-installed fixture executable. Cancelled runs preserve the answer of an already-started final gate instead of cancelling that step during its exit race."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No installed daemon restart or service interruption is required."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "CI operators must provide the dedicated smalltalk-nix-persistent Linux runner with preinstalled Nix, a persistent store and CI_LOCAL_CARGO_HOME for GC roots. Configure free-space policy on the Nix daemon, because untrusted runner accounts cannot override it; retain the untrusted account and place daemon build scratch space on a separate persistent build disk. Dispatch can select an existing release tag without changing that tag or release. Installed users need no additional steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  },
+  "commits": [
+    "2774bbe197c7004ec23538c9540297e4b10e2bfe"
+  ]
+}

@@ -572,7 +572,11 @@ impl ExportDaemon {
         let socket = root.join("run/api.sock");
         let log = root.join("daemon.log");
         let output = std::fs::File::create(&log).unwrap();
-        let mut command = isolated_command(collector.unwrap_or_else(|| st3()), root);
+        // The fixture executable supplies a disposable login shell. Production `st3`
+        // uses the account's passwd shell, which does not exist in the Nix sandbox.
+        // CLI export assertions below still execute the production binary.
+        let daemon_binary = test_bin!("st3-fixture");
+        let mut command = isolated_command(collector.unwrap_or(daemon_binary), root);
         // Own a process group so failed startup also cannot orphan otelite's child.
         command.process_group(0);
         if collector.is_some() {
@@ -584,7 +588,7 @@ impl ExportDaemon {
                 .args(["run", "--out"])
                 .arg(root.join("capture"))
                 .args(["--protocol", "http/json", "--"])
-                .arg(st3());
+                .arg(daemon_binary);
         }
         command.args(["up", "--node", "otel-test", "--state-dir"])
             .arg(root.join("daemon-state"))

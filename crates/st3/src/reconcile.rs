@@ -8263,6 +8263,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && ((step.spec.uses_mission.is_none() && step.spec.loop_spec.is_none())
                     || !self.store.step_has_active_child_runs(&view.subject)?)
                 && !self.step_has_live_process(&view.subject)?
+                && !self.step_has_unsettled_gate_check(&view.subject)?
             {
                 changed |= self.store.set_step_state(
                     &view.subject,
@@ -11156,6 +11157,27 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         Ok(())
+    }
+
+    /// A gate can exit after this pass evaluated it as pending. Its durable answer must
+    /// settle before cancellation treats its owner as merely waiting on evidence.
+    fn step_has_unsettled_gate_check(&self, step_subject: &str) -> Result<bool> {
+        for runner in self.store.mission_gate_runners()? {
+            if runner.owner_step.as_deref() != Some(step_subject) || runner.retired {
+                continue;
+            }
+            let result_subject = runner.subject.rsplit_once("/check/")
+                .filter(|(_, check)| check.parse::<u64>().is_ok())
+                .map_or(runner.subject.as_str(), |(result, _)| result);
+            let answered = self.store.latest_claim(result_subject, Some("gate.result"))?
+                .is_some_and(|result| result.body.pointer("/fields/operation")
+                    .and_then(Value::as_str)
+                    .is_none_or(|operation| operation == runner.subject));
+            if !answered {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn step_has_live_process(&self, step_subject: &str) -> Result<bool> {
@@ -16674,6 +16696,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         snapshot_error: Mutex<bool>,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        after_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         logs: Mutex<HashMap<String, String>>,
@@ -16819,7 +16842,11 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 !self.failed_observes.lock().unwrap().contains(runtime_id),
                 "fake observe failed"
             );
-            Ok(self.execs.lock().unwrap().get(runtime_id).cloned())
+            let observation = self.execs.lock().unwrap().get(runtime_id).cloned();
+            if let Some(after) = self.after_observe_exec.lock().unwrap().take() {
+                after();
+            }
+            Ok(observation)
         }
         fn start(&self, member: &MemberSpec) -> Result<()> {
             self.starts.lock().unwrap().push(member.runtime_id.clone());
@@ -25728,6 +25755,62 @@ mission "orchid/cancel" state="ready" {
                 .unwrap()
                 .contains("report: the final status gate failed")
         );
+    }
+
+    #[test]
+    fn a_final_gate_exit_between_evaluation_and_cleanup_keeps_its_failure() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, r#"version 2
+mission "orchid/exit-race" state="ready" {
+  goal "Record the final gate's answer."
+  step "wait" { agentless }
+  finally {
+    step "report" {
+      agentless
+      gate "final-result" { exec "exit 7"; host "node"; workspace "/tmp"; time-limit "1m" }
+    }
+  }
+}
+"#, "final-exit-race");
+        let run = store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "orchid/exit-race".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/test".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: "final-exit-race-run".into(),
+        }).unwrap();
+        store.set_mission_run_state(&run.id, "running", "final-cancelled", None).unwrap();
+        let report = step_of(&run, "report");
+        store.set_step_state(&report.subject, "working", None).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(),
+            Arc::new(Notify::new()));
+        let current = store.mission_run_for_reconcile(&run.id).unwrap();
+        let mission = store.mission_spec("orchid/exit-race", Some(&run.revision))
+            .unwrap().unwrap();
+        let steps = flatten_mission_steps(&mission);
+        let step = steps.iter().find(|step| step.spec.path == "report").unwrap();
+        assert!(matches!(reconciler.evaluate_mission_gate(&current, step,
+            step_of(&current, "report"), &step.spec.gates[0]).unwrap(), GateOutcome::Pending));
+        let runner = gate_runners(&runtime).pop().unwrap();
+        runtime.execs.lock().unwrap().insert(runner.runtime_id.clone(), RuntimeObservation {
+            runtime_id: runner.runtime_id.clone(), terminal: false, status: "running".into(),
+            exit_code: None, incarnation_id: Some(format!("{}-one", runner.runtime_id)),
+        });
+        // The evaluation reads running; its later cleanup read observes the exit.
+        let exited = runtime.clone();
+        *runtime.after_observe_exec.lock().unwrap() = Some(Box::new(move || {
+            exit_gate_runner(&exited, &runner, Some(7), "");
+        }));
+        let current = store.mission_run_for_reconcile(&run.id).unwrap();
+        reconciler.evaluate_active_mission_run(&current).unwrap();
+        assert_eq!(gate_runners(&runtime).len(), 1, "both passes evaluate the same gate");
+        assert_eq!(step_of(&store.mission_run(&run.id).unwrap().unwrap(), "report").status,
+            "working", "an exit without its gate answer cannot cancel the final step");
+        let current = store.mission_run_for_reconcile(&run.id).unwrap();
+        reconciler.evaluate_active_mission_run(&current).unwrap();
+        let answered = store.mission_run(&run.id).unwrap().unwrap();
+        assert_eq!(step_of(&answered, "report").status, "failed");
+        assert!(step_of(&answered, "report").blocked_reason.as_deref().unwrap()
+            .contains("final-result"));
     }
 
     #[tokio::test]
