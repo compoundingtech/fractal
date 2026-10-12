@@ -107,7 +107,7 @@ fn existing_incomplete_core_install_keeps_completed_ddl() {
 }
 
 #[test]
-fn complete_core_schema_does_not_take_a_held_writer_lock() {
+fn complete_core_ddl_does_not_take_a_held_writer_lock() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("schema.sqlite");
     let writer = Connection::open(&path).unwrap();
@@ -117,10 +117,17 @@ fn complete_core_schema_does_not_take_a_held_writer_lock() {
         .unwrap();
     let reader = Connection::open(&path).unwrap();
     reader.busy_timeout(std::time::Duration::ZERO).unwrap();
-    reader.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
+    let skipped_seeds = Arc::new(AtomicUsize::new(0));
+    let observed = skipped_seeds.clone();
+    reader.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
         use rusqlite::hooks::{AuthAction, Authorization};
         // Keep zero timeout while executing the production script's connection PRAGMAs.
         if matches!(context.action, AuthAction::Pragma { pragma_name, .. } if pragma_name == "busy_timeout") {
+            Authorization::Ignore
+        } else if matches!(context.action, AuthAction::Insert { table_name } if matches!(table_name, "graph_generation" | "checkpoint_capture_epoch")) {
+            // These two pre-existing seed writes already require writer admission. Check the
+            // affected DDL independently, without changing either seed in production.
+            observed.fetch_add(1, Ordering::Relaxed);
             Authorization::Ignore
         } else {
             Authorization::Allow
@@ -128,6 +135,7 @@ fn complete_core_schema_does_not_take_a_held_writer_lock() {
     }));
     // The writer remains held until this returns: added write admission would fail, not pass late.
     reader.execute_batch(SCHEMA).unwrap();
+    assert_eq!(skipped_seeds.load(Ordering::Relaxed), 2);
     assert!(reader.is_autocommit());
     assert!(reader.execute_batch("BEGIN IMMEDIATE;").is_err());
 }
