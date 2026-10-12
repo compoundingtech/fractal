@@ -442,10 +442,12 @@ export class ScrollController {
       }
       if (leadingKey !== undefined) this.rowKeys.add(leadingKey)
     }
-    if (leadingKey !== undefined && previousLeading !== leadingKey && !this.following &&
+    if (leadingKey !== undefined && previousLeading !== leadingKey && !this.following && !this.restoring &&
       (this.element?.scrollTop === 0 || this.homeNavigation && this.anchor?.key === this.firstKey)) {
       // The logical top includes the inline history state, not a focused turn
       // below it. Keep that edge stable while the collection adopts the marker.
+      // A mount restoring a saved reading position owns its anchor: its
+      // unrestored scrollTop of 0 is not the reader's edge.
       this.anchor = { key: leadingKey, offset: 0 }
       this.pendingAnchor = this.anchor
       this.scheduleRestore()
