@@ -83,8 +83,10 @@ setup first, then run `st agents restart agent/st/expert --as person/ada` to ret
 the existing seat (replace `ada` with your configured person). Keep its
 original onboarding run; do not use `st setup --onboarding` while that run is active.
 
-Your agents run without permission prompts inside their own workspaces. Choose the
-projects and tasks you give them accordingly.
+Setup prints the access mode your agents run in. A new install uses `auto`: the provider's
+managed permission checks, which reduce accidents but are not a security boundary. A config
+without an access mode keeps reading as `bypass`, which runs agents without permission
+prompts. Choose the projects and tasks you give your agents accordingly.
 
 ## 3. Work with the expert
 
