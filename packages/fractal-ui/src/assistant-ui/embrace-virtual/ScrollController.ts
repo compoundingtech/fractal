@@ -37,6 +37,8 @@ export class ScrollController {
   private homeNavigation = false
   /** scrollTop when an older-navigation command began, until RAC moves the viewport. */
   private navigationTop: number | undefined
+  /** Content below the viewport top when older rows were inserted, until the anchor row mounts. */
+  private prependBottom: number | undefined
   private anchor: ReadingPosition | undefined
   private pendingAnchor: ReadingPosition | undefined
   private restoreFrame: number | undefined
@@ -66,6 +68,7 @@ export class ScrollController {
     this.userInputAt = performance.now()
     this.userScrolling = true
     this.navigationTop = this.element?.scrollTop
+    this.prependBottom = undefined
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
     this.restoreFrame = undefined
     this.captureAnchor()
@@ -80,6 +83,7 @@ export class ScrollController {
     this.homeNavigation = false
     this.following = false
     this.navigationTop = undefined
+    this.prependBottom = undefined
     this.restoring = false
     this.pendingAnchor = { key: this.rowByTarget.get(key) ?? key, offset: 0 }
     // The kit targets ES2022; this deferred completion needs its executor API.
@@ -115,6 +119,7 @@ export class ScrollController {
     this.olderNavigation = false
     this.homeNavigation = false
     this.navigationTop = undefined
+    this.prependBottom = undefined
     this.restoring = false
     this.pendingAnchor = undefined
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
@@ -133,6 +138,7 @@ export class ScrollController {
       this.olderNavigation = false
       this.homeNavigation = false
       this.navigationTop = undefined
+      this.prependBottom = undefined
       this.userInputAt = performance.now()
       this.userScrolling = true
       this.pendingAnchor = undefined
@@ -344,6 +350,23 @@ export class ScrollController {
       this.restoring = false
       return
     }
+    const mounted = (target: string) => {
+      for (const candidate of element.querySelectorAll<HTMLElement>(`[data-embrace-entry-id="${CSS.escape(target)}"]`)) {
+        if (candidate.isConnected && candidate.getBoundingClientRect().height > 0) return candidate
+      }
+      return undefined
+    }
+    if (this.prependBottom !== undefined) {
+      if (key === undefined) this.prependBottom = undefined
+      else if (mounted(key) === undefined) {
+        // RAC rebuilds only its requested rect: after an insert above the reader,
+        // an unmounted anchor keeps its pre-insert layout y. Only content above
+        // the reader changed, so the distance to the bottom stays exact until
+        // the anchor row mounts and DOM correction takes over.
+        element.scrollTop = element.scrollHeight - this.prependBottom
+        return
+      } else this.prependBottom = undefined
+    }
     // RAC publishes its collection after the parent commit. Keep the stable anchor
     // through estimated and measured layouts instead of consuming it prematurely.
     if (
@@ -353,10 +376,7 @@ export class ScrollController {
       element.scrollHeight >= info.rect.y + Math.min(info.rect.height, element.clientHeight)
     ) {
       scrollToLayoutKey(this.options.layout, key, element, anchor.offset)
-      let target: HTMLElement | undefined
-      for (const candidate of element.querySelectorAll<HTMLElement>(`[data-embrace-entry-id="${CSS.escape(key)}"]`)) {
-        if (candidate.isConnected && candidate.getBoundingClientRect().height > 0) { target = candidate; break }
-      }
+      const target = mounted(key)
       if (target !== undefined) {
         element.scrollTop +=
           target.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset
@@ -445,6 +465,8 @@ export class ScrollController {
       // The collection rebuild follows this commit. ResizeObserver restores before
       // paint when the sizer grows; the tracked animation frame is the fallback.
       this.pendingAnchor = this.anchor
+      // The sizer may already include the inserted rows; the settled geometry does not.
+      if (this.element !== null) this.prependBottom = (this.geometry.contentHeight || this.element.scrollHeight) - this.element.scrollTop
       this.scheduleRestore()
     } else if (this.pendingAnchor !== undefined) {
       this.restore()
