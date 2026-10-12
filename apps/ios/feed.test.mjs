@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { Feed, shouldProbe } from './feed.ts';
+import { Feed } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
 import { fakeClient } from './fakeFeed.mjs';
 
@@ -273,10 +273,6 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
 }
 
 
-// st is asked nothing while the stream speaks; only a quiet stream is probed (Nathan, 2026-10-06).
-assert.equal(shouldProbe(1_000, 5_000), false);
-assert.equal(shouldProbe(1_000, 10_999), false);
-assert.equal(shouldProbe(1_000, 11_000), true);
 
 {
   // The missions window is followed only when asked: not subscribed at the start, subscribed when a

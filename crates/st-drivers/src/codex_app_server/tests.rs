@@ -8361,6 +8361,12 @@ fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resu
     assert!(bypass.ends_with(&plain[1..]));
     let auto = managed_codex_argv(AccessMode::Auto, socket, workspace, plain).unwrap();
     assert!(!auto.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    // The remote TUI drops the named profile's network table; only the legacy key reaches the
+    // thread, and without it a seat's claim gets EPERM on the daemon socket.
+    let has_config = |value: &str| auto.windows(2).any(|pair| pair[0] == "-c" && pair[1] == value);
+    assert!(has_config("sandbox_workspace_write.network_access=true"));
+    assert!(has_config("web_search=\"live\""));
+    assert!(!bypass.iter().any(|arg| arg.starts_with("sandbox_workspace_write")));
     let profile = auto.iter().find(|value| value.starts_with("permissions.st-managed=")).unwrap();
     let parsed: toml::Value = toml::from_str(profile).unwrap();
     assert_eq!(parsed["permissions"]["st-managed"]["workspace_roots"]["/work/example"].as_bool(), Some(true));

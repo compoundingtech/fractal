@@ -50,8 +50,9 @@ export type TerminalStreamOptions = {
 };
 export type TerminalStream = { close(): void };
 
-/** `person` applies to attention, `actor` to work, and `status` to agents. */
-export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null };
+/** `person` applies to attention and usage, `actor` to work, `status` to agents;
+ * `since_ms` and `until_ms` select the optional usage inventory period. */
+export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null; since_ms?: number; until_ms?: number };
 /** The WebSocket surface the collections socket uses: a terminal socket that also sends. */
 export type CollectionSocket = TerminalSocket & {
     onopen: (() => void) | null;

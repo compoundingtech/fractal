@@ -13,7 +13,7 @@ Real sandboxing is separate later work. Codex hook trust is bypassed in both mod
 | Mode | Codex | Claude |
 | --- | --- | --- |
 | bypass, including a missing key | `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-bypass-hook-trust` | `--dangerously-skip-permissions` |
-| auto | Named `st-managed` profile extending `:workspace`, the seat's workspace root, networking enabled, and the daemon socket explicitly allowed; `on-request` approval with `auto_review`; `--dangerously-bypass-hook-trust` | `--permission-mode auto` |
+| auto | Named `st-managed` profile extending `:workspace`, the seat's workspace root, networking enabled (also through `sandbox_workspace_write.network_access`), and the daemon socket explicitly allowed; live web search; `on-request` approval with `auto_review`; `--dangerously-bypass-hook-trust` | `--permission-mode auto` |
 
 These are driver defaults for st-launched seats. They do not modify the provider's
 account settings or change a manually launched provider. Authored permission options
@@ -25,6 +25,34 @@ to use the install policy.
 New seat and planner declarations omit permission arguments. An automatically resumed
 Codex thread receives its named profile through `thread/resume`, before the TUI
 loads it, and the driver verifies the returned active profile.
+
+What the auto profile does for a Codex seat, as run through the real launch path (an app server
+plus a remote TUI) on Codex 0.160.1:
+
+- It writes the seat's workspace and the temporary directories and reads everything else. A write to
+  the home directory or anywhere else fails with a read-only file system.
+- It reaches the st daemon socket and the network (git and gh over https, package registries). The
+  remote TUI that owns the thread flattens the named profile and drops its `network` table, so the
+  profile alone leaves the daemon socket at `EPERM`. The driver therefore also passes
+  `sandbox_workspace_write.network_access=true`, the one network key that reaches the thread.
+- Web search is live, because Codex only defaults to live search with no sandbox.
+- It cannot write the workspace's own `.git`, or the home-directory package caches, without an
+  escalation. Codex keeps `.git` read-only, and a remote TUI rejects `--add-dir` and
+  `sandbox_workspace_write.writable_roots` ("configure additional workspace roots on the server")
+  and ignores `filesystem` entries in a named profile, so no setting grants them. A seat that needs
+  a commit, a push or a package install asks for an escalation, which `on-request` approval with
+  `auto_review` answers. That is the next narrowest setting; the bypass would be wider.
+
+Codex also cannot express two of the rules the policy wants. It cannot allow the network while
+naming the only local socket: with networking on, any local Unix socket the seat's OS user can
+reach connects. That includes other seats' PTY and attach sockets, the ssh agent, and any local
+daemon socket. With networking off, even the named socket is refused. A control in
+`crates/st-drivers/tests/codex_managed_sandbox.rs` keeps this visible and fails the day Codex
+learns the rule. And Codex's `domains` allowlist is not enforced by `codex sandbox`, so egress is
+not narrowed to git, gh and registries.
+
+The live eval `evals/st3/codex-minimal-access` is paid and run by hand; no CI gate proves the real
+launch path. The argv test and the sandbox tests are the CI evidence.
 
 Codex's workspace profile allows reads and temporary-directory writes according to
 its built-in rules. On Linux, enabling networking also permits other Unix sockets:
