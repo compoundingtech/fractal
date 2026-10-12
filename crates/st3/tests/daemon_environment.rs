@@ -429,7 +429,7 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
         let agent = identity.is_some();
         for json in [false, true] {
             let mut command =
-                st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"));
+                st3::test_support::command(test_bin!("st3-fixture"));
             command
                 .env_clear()
                 .env("HOME", root.path())
@@ -491,7 +491,7 @@ fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
     )
     .unwrap();
     let run = || {
-        st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+        st3::test_support::command(test_bin!("st3-fixture"))
             .env_clear()
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -531,7 +531,7 @@ fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
 
 #[test]
 fn developer_doctor_cannot_be_combined_with_performance() {
-    let output = st3::test_support::command(assert_cmd::cargo::cargo_bin!("st3-fixture"))
+    let output = st3::test_support::command(test_bin!("st3-fixture"))
         .args(["doctor", "--developer", "--performance"])
         .output()
         .unwrap();
