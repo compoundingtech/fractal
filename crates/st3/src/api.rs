@@ -18797,18 +18797,29 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let subject = "agent/ada";
-        // Build the old history in one transaction, without 10,001 projection rebuilds.
+        // Build both subjects' old history in one transaction, without projection rebuilds.
         {
             let mut connection = state.store.connection.write();
             let transaction = connection.transaction().unwrap();
             for _ in 0..=SESSION_CLAIMS {
-                smallclaims::sqlite::append_claim_tx(
+                crate::store::append_claim_tx(
                     &transaction,
                     &state.store.origin,
                     subject,
                     "harness.observed",
                     None,
                     &json!({"fields": {"state": "idle", "incarnation_id": "first"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    "agent/reviewer",
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle"}}),
                     &[],
                     None,
                 )
@@ -18835,7 +18846,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         );
         for at in ["2026-10-11T10:00:00.000Z", "2026-10-11T10:01:00.000Z"] {
             let sessions = managed_session_resources(
-                &state.store, false, at, first.store_index, None,
+                &state.store, false, at, first.store_index,
             ).unwrap().0;
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0]["started_at"], client_timestamp(first.accepted_at_unix_ms));
@@ -18843,9 +18854,9 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         }
         // The unindexed legacy path stays capped, but its required start date is durable too.
         let legacy = state.store.append_claim(&ClaimInput {
-            subject: subject.into(),
+            subject: "agent/reviewer".into(),
             kind: "runtime.observed".into(),
-            actor: Some(subject.into()),
+            actor: Some("agent/reviewer".into()),
             fields: BTreeMap::from([
                 ("status".into(), json!("running")),
                 ("runtime_id".into(), json!("runtime-reviewer")),
@@ -18856,9 +18867,13 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         }).unwrap();
         for at in ["2026-10-11T10:02:00.000Z", "2026-10-11T10:03:00.000Z"] {
             let sessions = managed_session_resources(
-                &state.store, false, at, legacy.store_index, None,
+                &state.store, false, at, legacy.store_index,
             ).unwrap().0;
-            assert_eq!(sessions[0]["started_at"], client_timestamp(legacy.accepted_at_unix_ms));
+            let legacy_session = sessions.iter().find(|session| {
+                session["owner_id"] == "agent/reviewer"
+            }).unwrap();
+            assert!(legacy_session["runtime_incarnation"].is_null());
+            assert_eq!(legacy_session["started_at"], client_timestamp(legacy.accepted_at_unix_ms));
         }
     }
 
