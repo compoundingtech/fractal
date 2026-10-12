@@ -61,4 +61,9 @@ export const quotaGeometry = stylex.defineVars({
   captionMargin: '0 0 8px',
   proofButtonPadding: '4px 6px',
   rowSeparator: `inset 0 -1px ${border.border}`,
+  drawerLargeWidth: '420px',
+  drawerFixtureHeight: '640px',
+  usageNarrowWidth: '900px',
+  usageWideWidth: '1440px',
+  proofToolbarHeight: '36px',
 })

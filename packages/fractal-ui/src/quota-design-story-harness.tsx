@@ -11,7 +11,7 @@ import { assertQuotaDrawerDensity } from './quota-design-density-proof.ts'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
-import { accentVars as accent, borderVars as border, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 
 export interface QuotaStoryArgs {
   scheme: Scheme
@@ -186,16 +186,16 @@ export const quotaFilterPlay = async ({ canvasElement }: { canvasElement: HTMLEl
   const canvas = within(canvasElement)
   const root = storyRoot(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: /Filter provider/ }))
-  await userEvent.click(canvas.getByRole('option', { name: 'Cedar', exact: true }))
+  await userEvent.click(canvas.getByRole('option', { name: 'Cedar' }))
   await waitFor(() => expect(root.dataset.provider).toBe('Cedar'))
   await expect(root.dataset.plan).toBe('')
   await expect(root.dataset.state).toBe('')
   await userEvent.click(canvas.getByRole('button', { name: /Filter plan/ }))
-  await userEvent.click(canvas.getByRole('option', { name: 'Team', exact: true }))
+  await userEvent.click(canvas.getByRole('option', { name: 'Team' }))
   await waitFor(() => expect(root.dataset.plan).toBe('Team'))
   await expect(root.dataset.provider).toBe('Cedar')
   await userEvent.click(canvas.getByRole('button', { name: /Filter state/ }))
-  await userEvent.click(canvas.getByRole('option', { name: 'stale', exact: true }))
+  await userEvent.click(canvas.getByRole('option', { name: 'stale' }))
   await waitFor(() => expect(root.dataset.state).toBe('stale'))
   await waitFor(() => expect(ids(canvasElement)).toEqual(['elm']))
   await userEvent.click(canvas.getByRole('button', { name: 'Clear quota filters' }))
@@ -217,11 +217,11 @@ export const quotaRefreshPlay = async ({ canvasElement }: { canvasElement: HTMLE
 }
 const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', boxSizing: 'border-box', backgroundColor: surface.canvas, color: ink.fg, fontFamily: type.fontSans, fontSize: type.metaSize, maxWidth: '100%', minWidth: 0 },
-  small: { width: 240, height: 640 }, medium: { width: 320, height: 640 }, large: { width: 420, height: 640 },
-  pageNarrow: { width: 900 }, pageWide: { width: 1440 },
-  matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 20, padding: 16, backgroundColor: surface.canvas, boxSizing: 'border-box', maxWidth: '100%' },
+  small: { width: quotaGeometry.px240, height: quotaGeometry.drawerFixtureHeight }, medium: { width: quotaGeometry.px320, height: quotaGeometry.drawerFixtureHeight }, large: { width: quotaGeometry.drawerLargeWidth, height: quotaGeometry.drawerFixtureHeight },
+  pageNarrow: { width: quotaGeometry.usageNarrowWidth }, pageWide: { width: quotaGeometry.usageWideWidth },
+  matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: space.xxl, padding: space.xl, backgroundColor: surface.canvas, boxSizing: 'border-box', maxWidth: '100%' },
   matrixItem: { minWidth: 0, maxWidth: '100%' },
-  caption: { fontFamily: type.fontSans, fontSize: 12, fontWeight: 500, margin: quotaGeometry.captionMargin, color: ink.fgMuted },
-  proofToolbar: { display: 'flex', flexShrink: 0, flexWrap: 'wrap', gap: 4, minHeight: 36, padding: 4, borderBottom: quotaGeometry.hair },
-  button: { fontFamily: type.fontSans, fontSize: 10, padding: quotaGeometry.proofButtonPadding, backgroundColor: surface.controlFill, color: ink.fgMuted, border: quotaGeometry.strongHair, borderRadius: 4, cursor: 'pointer', ':focus-visible': { outline: quotaGeometry.focusOutline, outlineOffset: 2 } },
+  caption: { fontFamily: type.fontSans, fontSize: type.metaSize, fontWeight: type.weightMedium, margin: quotaGeometry.captionMargin, color: ink.fgMuted },
+  proofToolbar: { display: 'flex', flexShrink: 0, flexWrap: 'wrap', gap: space.xs, minHeight: quotaGeometry.proofToolbarHeight, padding: space.xs, borderBottom: quotaGeometry.hair },
+  button: { fontFamily: type.fontSans, fontSize: type.microSize, padding: quotaGeometry.proofButtonPadding, backgroundColor: surface.controlFill, color: ink.fgMuted, border: quotaGeometry.strongHair, borderRadius: radius.keyboard, cursor: 'pointer', ':focus-visible': { outline: quotaGeometry.focusOutline, outlineOffset: space.xs2 } },
 })

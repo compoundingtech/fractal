@@ -38,7 +38,7 @@ const WindowMeter = ({ window, chip = false, stale = false }: { readonly window:
   const reading = fraction === undefined ? '—' : `${Math.round(fraction * 100)}%`
   const explanation = `${window.label}: ${fraction === undefined ? window.reported ? 'usage unknown' : 'not reported' : `${reading} used`}${window.exhausted ? '; exhausted' : ''}${window.governing ? '; governing' : ''}${window.comparison ? '; comparison' : ''}${stale ? '; last-known reading' : ''}`
   return <div aria-label={explanation} title={explanation} data-quota-window={window.id} data-quota-exhausted={window.exhausted || undefined} data-quota-fraction={fraction} data-quota-stale={stale || undefined} {...stylex.props(styles.meter, chip && styles.chip)}>
-    <span {...stylex.props(styles.reading, warning && styles.warning, danger && styles.danger)}>{reading}{window.exhausted && <span aria-hidden="true" {...stylex.props(styles.exhausted)}>!</span>}</span>
+    <span {...stylex.props(styles.reading, warning && styles.warning, danger && styles.danger)}>{reading}{window.exhausted && <Icon name="alert" size={10} />}</span>
     {fraction !== undefined && <span aria-hidden="true" data-quota-bar {...stylex.props(styles.track, stale && styles.staleMeter)}><span {...stylex.props(styles.fill, warning && styles.warningFill, danger && styles.dangerFill, styles.fraction(Math.min(1, fraction)))} /></span>}
   </div>
 }
@@ -226,21 +226,20 @@ const styles = stylex.create({
   amount: { color: ink.fgSoft, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums' },
   resetToken: { color: ink.fgMuted, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums' },
   moreButton: { flexShrink: 0, padding: 0, border: 0, backgroundColor: surface.transparent, color: ink.fgSoft, font: 'inherit', fontSize: type.microSize, lineHeight: usageMeterGridVars.lineHeight, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.pxNegative1 },
-  meter: { display: 'flex', flex: '1 1 0', flexDirection: 'row', alignItems: 'center', minWidth: 0, height: usageMeterGridVars.lineHeight, gap: 2, overflow: 'hidden' },
+  meter: { display: 'flex', flex: '1 1 0', flexDirection: 'row', alignItems: 'center', minWidth: 0, height: usageMeterGridVars.lineHeight, gap: space.xs2, overflow: 'hidden' },
   staleMeter: { opacity: 0.65 },
   reading: { flexShrink: 0, color: ink.fgSoft, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums', lineHeight: usageMeterGridVars.lineHeight, whiteSpace: 'nowrap' },
-  exhausted: { fontFamily: type.fontSans, fontWeight: type.weightSemibold, fontSize: type.microSize },
-  track: { display: 'block', flex: '1 1 0', minWidth: 2, height: quotaGeometry.px3, backgroundColor: surface.rowActive, overflow: 'hidden' },
+  track: { display: 'block', flex: '1 1 0', minWidth: space.xs2, height: quotaGeometry.px3, backgroundColor: surface.rowActive, overflow: 'hidden' },
   fill: { display: 'block', height: '100%', backgroundColor: ink.fgMuted },
   fraction: (fraction: number) => ({ width: `${fraction * 100}%` }),
   warning: { color: status.attention },
   danger: { color: status.dangerFg },
   warningFill: { backgroundColor: status.attention },
   dangerFill: { backgroundColor: status.danger },
-  windowList: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 2, minWidth: 0, height: usageMeterGridVars.lineHeight, overflow: 'hidden' },
-  stackedList: { gap: 3 },
-  chipList: { gap: 3 },
-  chip: { paddingInline: 2, boxSizing: 'border-box', backgroundColor: surface.raised, borderRadius: radius.keyboard },
+  windowList: { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: space.xs2, minWidth: 0, height: usageMeterGridVars.lineHeight, overflow: 'hidden' },
+  stackedList: { gap: quotaGeometry.px3 },
+  chipList: { gap: quotaGeometry.px3 },
+  chip: { paddingInline: space.xs2, boxSizing: 'border-box', backgroundColor: surface.raised, borderRadius: radius.keyboard },
   groupRow: { backgroundColor: surface.raised },
   groupLabel: { color: ink.fgSoft, fontWeight: type.weightSemibold },
   empty: { padding: `${space.xl} ${space.md}`, textAlign: 'center', color: ink.fgSoft, overflowWrap: 'anywhere' },
