@@ -16388,16 +16388,28 @@ fn trace_model_route(driver: &str, model: &str, provider: Option<&str>) -> Optio
     Some(format!("{provider}/{model}"))
 }
 
-fn trace_lease<'a>(work: &'a [StepRunView], subject: &str, incarnation: &str) -> Option<&'a StepRunView> {
+fn trace_lease<'a>(
+    work: &'a [StepRunView],
+    subject: &str,
+    incarnation: &str,
+) -> (Option<&'a StepRunView>, Option<String>) {
     let now = u128::from(st_drivers::message::now_ms());
     let mut held = work.iter().filter(|step| {
         work_claim_is_held_by(step, subject)
             && step.claim_incarnation.as_deref() == Some(incarnation)
             && step.claim_expires_at_unix_ms.is_some_and(|expires| expires > now)
     });
-    let lease = held.next()?;
-    // There is no unique current step when a seat holds several claims.
-    held.next().is_none().then_some(lease)
+    let Some(lease) = held.next() else { return (None, None) };
+    let Some(second) = held.next() else { return (Some(lease), None) };
+    // Only ambiguity allocates a diagnostic; the common idle/single-lease paths do not.
+    let subjects: Vec<&str> = std::iter::once(lease).chain(std::iter::once(second))
+        .chain(held).map(|step| step.subject.as_str()).collect();
+    let diagnostic = json!({
+        "type": "agent_trace_purpose_ambiguous",
+        "claim_count": subjects.len(),
+        "subjects": subjects,
+    }).to_string();
+    (None, Some(diagnostic))
 }
 
 async fn lock_agent_trace(path: &Path) -> Result<std::fs::File> {
@@ -16442,7 +16454,10 @@ async fn initialize_agent_trace(
     };
     let work: Vec<StepRunView> = client
         .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
-    let lease = trace_lease(&work, subject, incarnation);
+    let (lease, diagnostic) = trace_lease(&work, subject, incarnation);
+    if let Some(diagnostic) = diagnostic {
+        write_driver_log(subject, &diagnostic)?;
+    }
     let mission_name = trace_mission_name(client, lease).await?;
     let facts = trace_launch_facts(client, subject, Some(driver), incarnation, argv,
         principal, mission_name).await?;
@@ -16529,7 +16544,10 @@ async fn refresh_agent_trace(
     if raw.is_none() && incarnation.is_empty() {
         return Ok(work);
     }
-    let lease = trace_lease(&work, subject, incarnation);
+    let (lease, diagnostic) = trace_lease(&work, subject, incarnation);
+    if let Some(diagnostic) = diagnostic {
+        write_driver_log(subject, &diagnostic)?;
+    }
     let mission_name = trace_mission_name(client, lease).await?;
     let mut runtime = if let Some(raw) = raw.as_ref() {
         let mut runtime: issuer::Runtime = serde_json::from_slice(raw)?;
@@ -25572,6 +25590,35 @@ mod claude_attachment_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ambiguous_trace_purpose_reports_all_current_claims_without_selecting_one() {
+        let subjects = ["step-run/one/build", "step-run/two/review", "step-run/three/check"];
+        let mut work: Vec<StepRunView> = subjects.iter().map(|subject| {
+            serde_json::from_value(json!({
+                "subject": subject, "run": "mission-run/demo", "generation": "run-generation/one",
+                "step": "work", "definition_hash": "hash", "status": "working", "attempt": 1,
+                "assigned_to": "agent/worker", "agentless": false, "title": null,
+                "worker_reported": false, "claimant": "agent/worker", "claim_incarnation": "worker:1",
+                "claim_expires_at_unix_ms": u64::MAX, "readiness_epoch": 1,
+                "blocked_reason": null, "not_before_unix_ms": null,
+                "created_at_unix_ms": 0, "updated_at_unix_ms": 0,
+            })).unwrap()
+        }).collect();
+        let mut predecessor = work[0].clone();
+        predecessor.subject = "step-run/old/build".into();
+        predecessor.claim_incarnation = Some("worker:old".into());
+        work.push(predecessor);
+        let (lease, diagnostic) = trace_lease(&work, "agent/worker", "worker:1");
+        assert!(lease.is_none(), "ambiguity must not select an arbitrary lease");
+        let diagnostic: Value = serde_json::from_str(&diagnostic.unwrap()).unwrap();
+        assert_eq!(diagnostic, json!({
+            "type": "agent_trace_purpose_ambiguous", "claim_count": 3, "subjects": subjects,
+        }));
+        let (lease, diagnostic) = trace_lease(&work[..1], "agent/worker", "worker:1");
+        assert_eq!(lease.unwrap().subject, subjects[0]);
+        assert!(diagnostic.is_none(), "a unique purpose needs no warning");
+    }
 
     #[test]
     fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
