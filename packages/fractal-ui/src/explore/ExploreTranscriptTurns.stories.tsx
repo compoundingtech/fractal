@@ -101,7 +101,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
 function Lane({ args }: { args: ExploreArgs }) {
   return <section data-lane data-recommended={args.recommended || undefined} data-turn-variant={args.turn} data-kind-variant={args.kind} data-meta-variant={args.meta} data-scheme={args.scheme} data-width={args.width} aria-label={`${args.turn} ${args.kind} ${args.meta} · ${args.scheme} · ${args.width}`} {...stylex.props(styles.lane)}>
     <h2 {...stylex.props(styles.laneTitle)}>{args.recommended ? 'Recommended · pending ratification · ' : ''}{args.turn} · {args.kind} · {args.meta} / {args.scheme} / {args.width}</h2>
-    <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root {...stylex.props(styles.thread)}>{turnBlocks.map((block, index) => <React.Fragment key={block.id}><Block block={block} previous={turnBlocks[index - 1]} turn={args.turn} kind={args.recommended && block.kind === 'System' ? 'K3' : args.kind} meta={args.meta} marker={args.recommended && block.kind === 'System'} />{index === 7 ? <div data-work-fixture {...stylex.props(styles.work)}><WorkLogV1 turn={workTurn} ariaLabel={`Work log · ${args.turn} ${args.kind} ${args.meta}`} /></div> : null}</React.Fragment>)}</ThreadPrimitive.Root></EmbraceRuntimeProvider>
+    <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false, onNew: async () => {} }}><ThreadPrimitive.Root {...stylex.props(styles.thread)}>{turnBlocks.map((block, index) => <React.Fragment key={block.id}><Block block={block} previous={turnBlocks[index - 1]} turn={args.turn} kind={args.recommended && block.kind === 'System' ? 'K3' : args.kind} meta={args.meta} marker={args.recommended && block.kind === 'System'} />{index === 7 ? <div data-work-fixture {...stylex.props(styles.work)}><WorkLogV1 turn={workTurn} ariaLabel={`Work log · ${args.turn} ${args.kind} ${args.meta}`} /></div> : null}</React.Fragment>)}</ThreadPrimitive.Root></EmbraceRuntimeProvider>
   </section>
 }
 function Explorer(initialArgs: ExploreArgs) {
@@ -132,7 +132,7 @@ function Explorer(initialArgs: ExploreArgs) {
       <div data-control-focus {...stylex.props(styles.block)}><span data-affordance="reveal" {...stylex.props(styles.hoverOnly)}>Hover-only time</span><Button {...stylex.props(styles.control)}>Control copy</Button></div>
       <div data-control-style>Unstyled token probe</div>
       <div data-control-transition data-turn-variant="T1" data-kind-variant="K1" data-meta-variant="M1" data-scheme="dark" data-width="1440" data-lane-count="1"><Button {...stylex.props(styles.control)}>Inert transition control</Button><Button aria-expanded={false} {...stylex.props(styles.control)}>Inert disclosure control</Button></div>
-      <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root data-control-production-meta><ThreadPrimitive.Unstable_MessageById messageId={replyItems[0]!.id} components={metaControlComponents} /></ThreadPrimitive.Root></EmbraceRuntimeProvider>
+      <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false, onNew: async () => {} }}><ThreadPrimitive.Root data-control-production-meta><ThreadPrimitive.Unstable_MessageById messageId={replyItems[0]!.id} components={metaControlComponents} /></ThreadPrimitive.Root></EmbraceRuntimeProvider>
       <div data-control-k3 {...stylex.props(styles.quietInputControl)}><span data-input-title>Quiet summary with no sender or kind cue</span></div>
       <div data-control-k3-stacked {...stylex.props(styles.stackedInputControl)}><span data-input-title><span data-input-title-run>Sender<br />Wrapped title</span></span></div>
       <FocusRemountControl />
@@ -407,7 +407,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
   await step('Apply Recommended preset; inert preset control cannot change the composition', async () => {
     await userEvent.click(inert)
     await expect(control).not.toHaveAttribute('data-recommended')
-    await userEvent.click(canvas.getByRole('button', { name: 'Recommended preset', exact: true }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Recommended preset' }))
     await waitFor(() => {
       expect(canvasElement.querySelectorAll('[data-lane]')).toHaveLength(1)
       const lane = canvasElement.querySelector('[data-lane]')!
@@ -477,7 +477,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
     const controlPaint = getComputedStyle(control).backgroundColor
     await userEvent.click(inert)
     await expect(getComputedStyle(control).backgroundColor).toBe(controlPaint)
-    await userEvent.click(canvas.getByRole('button', { name: scheme, exact: true }))
+    await userEvent.click(canvas.getByRole('button', { name: scheme }))
     await waitFor(() => {
       expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-scheme', scheme)
       expect(getComputedStyle(canvasElement.querySelector('[data-token-probe]')!).backgroundColor).not.toBe(paint)
@@ -489,7 +489,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
     const controlWidth = control.getBoundingClientRect().width
     await userEvent.click(inert)
     await expect(control.getBoundingClientRect().width).toBe(controlWidth)
-    await userEvent.click(canvas.getByRole('button', { name: `${width} lane`, exact: true }))
+    await userEvent.click(canvas.getByRole('button', { name: `${width} lane` }))
     await waitFor(() => {
       expect(canvasElement.querySelector('[data-lane]')).toHaveAttribute('data-width', `${width}`)
       expect(canvasElement.querySelector('[data-token-probe]')!.getBoundingClientRect().width).toBe(Math.min(width, canvasElement.ownerDocument.documentElement.clientWidth))
