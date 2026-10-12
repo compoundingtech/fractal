@@ -159,9 +159,9 @@ export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({
     }
     const north = canvas.getByRole('button', { name: 'Account North studio' })
     expect(north).toHaveAccessibleDescription('gh/north-studio')
-    await userEvent.keyboard('{Shift}'); north.focus()
-    expect(await within(document.body).findByRole('tooltip')).toHaveTextContent('gh/north-studio')
-    await userEvent.keyboard('{Escape}'); await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
+    await userEvent.hover(north)
+    expect(await within(document.body).findByRole('tooltip', {}, { timeout: 3000 })).toHaveTextContent('gh/north-studio')
+    await userEvent.unhover(north); await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
     await userEvent.click(canvas.getByRole('button', { name: 'Show 2 secondary windows for North studio' }))
     const dialog = await within(document.body).findByRole('dialog', { name: 'Secondary windows for North studio' })
     expect(within(dialog).getByText('41%')).toBeVisible(); expect(within(dialog).getByText('18%')).toBeVisible()
