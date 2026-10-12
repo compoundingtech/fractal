@@ -51,7 +51,7 @@ describe('native reasoning convention', () => {
 })
 
 describe('native truncation boundary', () => {
-  it('retains HasOlder but never fabricates a transcript notice', () => {
+  it('retains the native older-history signal but never fabricates a transcript notice', () => {
     const timeline = new LiveTimeline()
     timeline.apply({
       replace: true, hasMore: false,

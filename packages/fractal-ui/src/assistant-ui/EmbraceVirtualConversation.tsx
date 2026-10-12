@@ -10,6 +10,7 @@ import {
 } from 'react-aria-components'
 
 import { readScrollAnchor, saveScrollAnchor, ScrollController } from './embrace-virtual/ScrollController'
+import { measuredListLayoutOptions } from './composition/virtual-layout'
 import { accentTokens, tokens } from './embrace-tokens.stylex'
 
 export interface EmbraceVirtualConversationProps<T extends { readonly id: string }> {
@@ -42,7 +43,7 @@ function VirtualConversationBody<T extends { readonly id: string }>({
   renderItem,
   className,
   style,
-  estimatedRowHeight = 160,
+  estimatedRowHeight = measuredListLayoutOptions.estimatedRowHeight,
   anchorKey = 'story',
   persistAnchor = false,
 }: EmbraceVirtualConversationProps<T>) {
@@ -58,7 +59,7 @@ function VirtualConversationBody<T extends { readonly id: string }>({
     setUnread,
   }))
   React.useLayoutEffect(() => scroll.afterRowsChange(items), [scroll, items])
-  const layoutOptions = React.useMemo(() => ({ estimatedRowHeight }), [estimatedRowHeight])
+  const layoutOptions = React.useMemo(() => ({ ...measuredListLayoutOptions, estimatedRowHeight }), [estimatedRowHeight])
   const indexById = React.useMemo(() => {
     const indices = new Map<string, number>()
     items.forEach((item, index) => indices.set(item.id, index))

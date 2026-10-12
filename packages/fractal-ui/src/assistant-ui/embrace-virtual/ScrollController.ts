@@ -1,4 +1,5 @@
 import type { ListLayout } from 'react-aria-components'
+import { scrollToLayoutKey } from '../composition/virtual-layout'
 
 /** The source transcript persists a mode or a stable entry, never a numeric bottom. */
 export type ScrollAnchor =
@@ -10,7 +11,7 @@ export type ScrollAnchor =
       readonly scrollTop: number
     }
 
-type Row = { readonly id: string }
+type Row = { readonly id: string; readonly version?: string }
 type ReadingPosition = { readonly key: string; readonly offset: number }
 
 const FOLLOW_SLACK = 48
@@ -34,6 +35,20 @@ export class ScrollController {
   private rows: readonly Row[] = []
   private rowKeys = new Set<string>()
   private geometry = { contentHeight: 0, viewportHeight: 0 }
+  private pressed: ReadingPosition | undefined
+  private pendingJump: string | undefined
+
+  readonly jumpTo = (key: string) => {
+    this.pendingJump = key
+    this.following = false
+    this.restoring = false
+    this.pendingAnchor = { key, offset: 0 }
+    this.restore()
+  }
+
+  readonly position = (): ScrollAnchor => this.following
+    ? { _tag: 'Following' }
+    : { _tag: 'Reading', entry: this.anchor?.key ?? null, offset: this.anchor?.offset ?? 0, scrollTop: this.element?.scrollTop ?? 0 }
 
   constructor(
     private readonly options: {
@@ -66,6 +81,7 @@ export class ScrollController {
     if (element === null) return
     this.element = element
     const onUserInput = () => {
+      this.pendingJump = undefined
       this.userInputAt = performance.now()
       this.userScrolling = true
       this.pendingAnchor = undefined
@@ -93,8 +109,12 @@ export class ScrollController {
     }
     let resizeFrame: number | undefined
     const observer = new ResizeObserver(() => {
-      // Scroll writes inside RO can synchronously remount RAC rows and resize its
-      // sizer again. Coalesce them into the next frame rather than a resize loop.
+      // Correct visible geometry before paint; RAC's measured layout can settle
+      // in the next frame, so retain the id/offset until the next reader input.
+      if (this.pressed !== undefined) this.pendingAnchor = this.pressed
+      else if (!this.following && this.anchor !== undefined && this.pendingAnchor === undefined) this.pendingAnchor = this.anchor
+      if (this.pendingAnchor !== undefined || this.restoring) this.restore()
+      else if (this.following) element.scrollTop = element.scrollHeight
       if (resizeFrame !== undefined) return
       resizeFrame = requestAnimationFrame(() => {
         resizeFrame = undefined
@@ -106,6 +126,29 @@ export class ScrollController {
     observer.observe(element)
     const sizer = element.firstElementChild
     if (sizer !== null) observer.observe(sizer)
+    const press = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return
+      const row = event.target.closest<HTMLElement>('[data-embrace-entry-id]')
+      const key = row?.dataset['embraceEntryId']
+      if (row !== null && row !== undefined && key !== undefined && element.contains(row)) {
+        this.pressed = { key, offset: row.getBoundingClientRect().top - element.getBoundingClientRect().top }
+      }
+    }
+    const release = () => {
+      if (this.pressed === undefined) return
+      this.pressed = undefined
+      if (this.following) {
+        this.pendingAnchor = undefined
+        element.scrollTop = element.scrollHeight
+      } else {
+        this.captureAnchor()
+        this.pendingAnchor = this.anchor
+      }
+    }
+    element.addEventListener('pointerdown', press, true)
+    element.ownerDocument.addEventListener('pointerup', release, true)
+    element.ownerDocument.addEventListener('pointercancel', release, true)
+    element.ownerDocument.defaultView?.addEventListener('blur', release)
     const inputs = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const
     for (const type of inputs) element.addEventListener(type, onUserInput, { passive: true })
     element.addEventListener('scroll', onScroll, { passive: true })
@@ -116,6 +159,10 @@ export class ScrollController {
       if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
       this.restoreFrame = undefined
       for (const type of inputs) element.removeEventListener(type, onUserInput)
+      element.removeEventListener('pointerdown', press, true)
+      element.ownerDocument.removeEventListener('pointerup', release, true)
+      element.ownerDocument.removeEventListener('pointercancel', release, true)
+      element.ownerDocument.defaultView?.removeEventListener('blur', release)
       element.removeEventListener('scroll', onScroll)
       element.removeEventListener('scrollend', onScrollEnd)
       if (!this.restoring) this.savePosition()
@@ -150,7 +197,10 @@ export class ScrollController {
       }
     }
     const key = nearest?.dataset['embraceEntryId']
-    if (key !== undefined) this.anchor = { key, offset: nearestTop - top }
+    if (key !== undefined) {
+      this.anchor = { key, offset: nearestTop - top }
+      if (this.pendingAnchor !== undefined) this.pendingAnchor = this.anchor
+    }
   }
 
   private scheduleRestore() {
@@ -189,7 +239,7 @@ export class ScrollController {
       info !== null &&
       element.scrollHeight >= info.rect.y + Math.min(info.rect.height, element.clientHeight)
     ) {
-      element.scrollTop = info.rect.y - anchor.offset
+      scrollToLayoutKey(this.options.layout, key, element, anchor.offset)
       const target = element.querySelector<HTMLElement>(
         `[data-embrace-entry-id="${CSS.escape(key)}"]`,
       )
@@ -200,6 +250,7 @@ export class ScrollController {
         this.pendingAnchor = this.anchor
         this.restoring = false
         this.savePosition()
+        if (this.pendingJump === key) this.pendingJump = undefined
       }
     }
     if (this.restoring) this.scheduleRestore()
@@ -216,6 +267,11 @@ export class ScrollController {
       for (const row of rows) this.rowKeys.add(row.id)
     }
     if (this.restoring && this.element !== null && rows.length > 0) this.restore()
+    if (this.pendingJump !== undefined) {
+      this.pendingAnchor = { key: this.pendingJump, offset: 0 }
+      this.restore()
+      return
+    }
     if (this.following) {
       this.options.setUnread(false)
       if (this.element !== null) this.element.scrollTop = this.element.scrollHeight
@@ -239,7 +295,7 @@ export class ScrollController {
     if (
       start < 0 ||
       rows.length - start !== previous.length ||
-      previous.some((row, index) => row !== rows[start + index])
+      previous.some((row, index) => row.id !== rows[start + index]?.id || (row.version === undefined ? row !== rows[start + index] : row.version !== rows[start + index]?.version))
     ) this.options.setUnread(true)
   }
 }

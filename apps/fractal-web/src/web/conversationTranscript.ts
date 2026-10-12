@@ -235,7 +235,8 @@ export const mapConversationFeed = (
         _tag: 'Observed',
         turns,
         items: turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]),
-        history: hasOlder ? { _tag: 'HasOlder' } : { _tag: 'Complete' },
+        // The source retains its native truncation signal, but offers no older-page fetch.
+        history: { _tag: 'Complete' },
         filteredEmpty,
         emptyState: filteredEmpty ? { title: 'This page contains no displayable conversation entries.' } : undefined,
         isRunning: turns.some(turn => turn.work.running),

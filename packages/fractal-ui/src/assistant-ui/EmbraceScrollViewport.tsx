@@ -1,6 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button } from 'react-aria-components'
+import { Button, ButtonContext, GridList, GridListItem, ListLayout, Virtualizer } from 'react-aria-components'
+import { ScrollController, type ScrollAnchor } from './embrace-virtual/ScrollController'
+import { measuredListLayoutOptions } from './composition/virtual-layout'
 import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers } from './composition-tokens.stylex'
 
 const rowSelector = '[data-item-id], [data-embrace-entry-id]'
@@ -17,7 +19,7 @@ function pressScrollOwner(lane: HTMLElement): HTMLElement {
 }
 
 /** Scroll state a conversation keeps while it stays on a surface. */
-export interface ViewportState { readonly top: number; readonly following: boolean; readonly unread: boolean }
+export interface ViewportState { readonly top: number; readonly following: boolean; readonly unread: boolean; readonly anchor?: ScrollAnchor }
 
 /** Per-surface memory, one entry per conversation. Owners drop closed keys and dispose on unmount. */
 export class ViewportStore {
@@ -351,8 +353,121 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   </div>
 })
 
+export interface VirtualViewportHandle { readonly jumpTo: (id: string) => void }
+export type VirtualViewportHistory =
+  | { readonly _tag: 'Complete' }
+  | { readonly _tag: 'More'; readonly loadOlder: () => void }
+  | { readonly _tag: 'Loading' }
+  | { readonly _tag: 'Failed'; readonly retry: () => void }
+
+/** RAC owns the bounded collection; the controller owns id-keyed measured anchoring. */
+export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
+  items, renderItem, history, boundary, empty, stateKey, scrollToBottomKey, ref, contentProps, ...props
+}: Omit<EmbraceScrollViewportProps, 'items' | 'children'> & {
+  readonly items: readonly T[]
+  readonly renderItem: (item: T) => React.ReactNode
+  readonly history: VirtualViewportHistory
+  readonly boundary: React.ReactNode
+  readonly empty: React.ReactNode
+  readonly ref?: React.Ref<VirtualViewportHandle>
+}) {
+  const store = React.useContext(ViewportStoreContext)
+  const state = stateKey === undefined ? undefined : store?.get(stateKey)
+  const [layout] = React.useState(() => new ListLayout())
+  const [unread, setUnread] = React.useState(state?.unread ?? false)
+  const [controller] = React.useState(() => new ScrollController({
+    layout,
+    initial: state?.anchor ?? (state !== undefined && !state.following
+      ? { _tag: 'Reading', entry: null, offset: 0, scrollTop: state.top }
+      : { _tag: 'Following' }),
+    setUnread,
+    save: anchor => {
+      if (stateKey !== undefined) store?.save(stateKey, {
+        anchor, top: anchor._tag === 'Reading' ? anchor.scrollTop : 0,
+        following: anchor._tag === 'Following', unread: unreadRef.current,
+      })
+    },
+  }))
+  const unreadRef = React.useRef(unread)
+  unreadRef.current = unread
+  const element = React.useRef<HTMLDivElement | null>(null)
+  const current = React.useRef(history)
+  current.current = history
+  const request = React.useRef<{ tag: VirtualViewportHistory['_tag']; first: string | undefined; called: boolean }>({
+    tag: history._tag, first: items[0]?.id, called: false,
+  })
+  if (request.current.tag !== history._tag || request.current.first !== items[0]?.id) {
+    request.current = { tag: history._tag, first: items[0]?.id, called: false }
+  }
+  const prefetch = React.useCallback((scrollUp = false) => {
+    const viewport = element.current
+    if (viewport === null || viewport.scrollTop > viewport.clientHeight * 1.5 || request.current.called) return
+    const source = current.current
+    if (source._tag === 'More' || source._tag === 'Failed' && scrollUp) {
+      request.current.called = true
+      if (source._tag === 'More') source.loadOlder()
+      else source.retry()
+    }
+  }, [])
+  const attach = React.useCallback((viewport: HTMLDivElement | null) => {
+    element.current = viewport
+    if (viewport === null) return
+    const cleanup = controller.attach(viewport)
+    let top = viewport.scrollTop
+    const onScroll = () => {
+      const up = viewport.scrollTop < top
+      top = viewport.scrollTop
+      prefetch(up)
+    }
+    const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) prefetch(true) }
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.target instanceof HTMLElement) || event.target.closest('input,textarea,[contenteditable="true"]')) return
+      if (event.key !== 'PageUp' && event.key !== 'Home' && event.key !== 'ArrowUp') return
+      // RAC's collection navigation would move focus instead of scrolling history.
+      event.preventDefault()
+      viewport.scrollTop = event.key === 'Home' ? 0 : viewport.scrollTop - (event.key === 'PageUp' ? viewport.clientHeight : geometryNumbers.scrollEndTolerance * 16)
+      prefetch(true)
+    }
+    viewport.addEventListener('scroll', onScroll, { passive: true })
+    viewport.addEventListener('wheel', onWheel, { passive: true })
+    viewport.addEventListener('keydown', onKey, true)
+    return () => {
+      cleanup?.()
+      viewport.removeEventListener('scroll', onScroll)
+      viewport.removeEventListener('wheel', onWheel)
+      viewport.removeEventListener('keydown', onKey, true)
+      element.current = null
+    }
+  }, [controller, prefetch])
+  const command = React.useRef(scrollToBottomKey)
+  React.useLayoutEffect(() => {
+    if (scrollToBottomKey !== undefined && command.current !== scrollToBottomKey) controller.jump()
+    command.current = scrollToBottomKey
+    controller.afterRowsChange(items)
+    prefetch()
+  }, [controller, items, history._tag, prefetch, scrollToBottomKey])
+  React.useImperativeHandle(ref, () => ({ jumpTo: controller.jumpTo }), [controller])
+  const collection = React.useMemo(() => [
+    ...((history._tag !== 'More' || items.length === 0) ? [{ id: '__fractal_history__', item: undefined }] : []),
+    ...items.map(item => ({ id: item.id, item })),
+  ], [items, history._tag])
+  return <div {...stylex.props(styles.frame)}>
+    <Virtualizer layout={layout} layoutOptions={measuredListLayoutOptions} shouldObserveItemSize>
+      <GridList {...props} ref={attach} items={collection} dependencies={[renderItem, boundary, empty, contentProps]} keyboardNavigationBehavior="tab" aria-busy={history._tag === 'Loading'} style={{ ...props.style, overflowAnchor: 'none' }}>
+        {row => <GridListItem id={row.id} textValue={row.id} {...stylex.props(styles.virtualRow)}>
+          <div data-embrace-entry-id={row.item?.id} {...contentProps}>
+            <ButtonContext.Provider value={null}>{row.item === undefined ? <>{boundary}{items.length === 0 ? empty : null}</> : renderItem(row.item)}</ButtonContext.Provider>
+          </div>
+        </GridListItem>}
+      </GridList>
+    </Virtualizer>
+    <Button onPress={controller.jump} hidden={!unread} {...stylex.props(styles.jump)}>New messages ↓</Button>
+  </div>
+}
+
 const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
+  virtualRow: { outlineStyle: 'none', display: 'flow-root', minWidth: 0 },
   // A visible jump control gets its own dock, never covering a reader's current line.
   jump: { flexShrink: 0, marginInline: 'auto', marginBlock: spaceVars.md, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
 })
