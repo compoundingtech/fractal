@@ -21,7 +21,7 @@ import { replyItems, turnBlocks, workTurn, type TurnBlock } from './turns-fixtur
 import { turnsGeometry as geometry } from './turns-tokens.stylex'
 
 const dimensions = {
-  T: [{ id: 'T1', description: 'Inputs are sender Cards; the owning seat replies in unnamed Prose.' }, { id: 'T2', description: 'Inputs align right in 75% bubbles; seat Prose aligns left.' }, { id: `T${3}`, description: 'Composition glyph slot and nesting-step gutter; names only when the sender changes.' }],
+  T: [{ id: 'T1', description: 'Inputs are sender Cards; the owning seat replies in unnamed Prose.' }, { id: 'T2', description: 'Inputs align right in 75% bubbles (full width below 640px); seat Prose aligns left.' }, { id: `T${3}`, description: 'Composition glyph slot and nesting-step gutter; names only when the sender changes.' }],
   K: [{ id: 'K1', description: 'One Card shape with kind word; verified is silent, Unverified is explicit.' }, { id: 'K2', description: 'Person accent rail, agent neutral rail, muted dashed relay / system rails.' }, { id: 'K3', description: 'Relay / system become expandable one-line summaries; person / agent stay cards.' }],
   M: [{ id: 'M1', description: 'Time in input header; a reserved 16px time / Copy row above each seat run, revealed on hover, focus or tap.' }, { id: 'M2', description: 'Time in the left first-line gutter; copy overlay top-right on reveal.' }, { id: 'M3', description: 'Time divider for inputs after ≥5 minutes or a day change; exact-time tooltip.' }, { id: 'M4', description: 'Time inline after the last line; copy overlay top-right on reveal.' }],
 } as const
@@ -51,6 +51,10 @@ function FocusRemountControl() {
   return <div data-control-remount data-generation={generation} onPointerDown={() => setGeneration(value => value + 1)}><UnstableCopy /></div>
 }
 
+// A six-segment chain and a 50-character leaf: the identity must absorb all narrowing while the metadata stays whole.
+const longIdentities = ['Fleet.Infrastructure.WorkspaceCoordinator.ReviewBridge.RetainedMirror.Review', 'Workspace.ReviewBridgeRetainedMirrorTypedChoicesCoordinator'] as const
+const controlMeta = (yields: boolean) => <span data-input-meta {...stylex.props(styles.inputMeta, yields && styles.inputMetaYields)}><span data-input-kind {...stylex.props(yields && styles.inputKindYields)}>Agent · Unverified</span><span data-meta-time><time>11:52 AM</time></span></span>
+
 /** Variant-only projection of production rows. No change to runtime facts or message bodies. */
 function Block({ block, previous, turn, kind, meta, marker = false }: Pick<ExploreArgs, 'turn' | 'kind' | 'meta'> & { block: TurnBlock; previous?: TurnBlock; marker?: boolean }) {
   const root = React.useRef<HTMLDivElement>(null)
@@ -79,7 +83,7 @@ function Block({ block, previous, turn, kind, meta, marker = false }: Pick<Explo
   }, [expanded, meta, block.id, block.sender, turn, kind])
   const time = <time data-turn-time dateTime={block.at} {...stylex.props(styles.time)}>{clock(block.at)}</time>
   const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, meta === 'M1' && styles.inlineCopy, meta === 'M1' && seat && styles.rowCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? `${copied ? 'Copied · ' : ''}${exact(block.at)}` : copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
-  const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span data-input-kind {...stylex.props(styles.inputKind)}>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time {...stylex.props(styles.inputFixed)}>{time}</span></> : null}</span>
+  const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{kind === 'K1' ? <span data-input-kind>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <>{copy}<span data-meta-time>{time}</span></> : null}</span>
   const content = seat
     ? <ThreadPrimitive.Unstable_MessageById messageId={block.id} components={answerComponents} />
     : <AgentMessage from={block.sender} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: block.text }} bodyStyles={[styles.unclampedBody]} subject={block.subject} variant={block.kind === 'Person' ? { _tag: 'Human', frame: { _tag: 'Card' } } : { _tag: 'Incoming' }} headerMeta={inputMeta} headerGlyph={turn === `T${3}` ? { _tag: 'Hidden' } : { _tag: 'Icon', name: glyphs[block.kind] }} frameStyles={[...(block.kind === 'Person' ? [styles.humanRail] : []), ...(turn === 'T2' ? [styles.bubbleFrame] : []), ...(kind === 'K2' && block.kind !== 'Person' ? [block.kind === 'Agent' ? styles.agentRail : styles.quietRail] : [])]} />
@@ -144,6 +148,9 @@ function Explorer(initialArgs: ExploreArgs) {
       <article data-control-header-wrap><header data-message-header {...stylex.props(styles.wrappedHeaderControl)}><span>From Workspace</span><span>Review · Small Talk</span></header><h2 data-message-subject {...stylex.props(styles.controlLine)}>Wrapped sender path</h2></article>
       <div data-control-identity-clip {...stylex.props(styles.identityClipControl)}><span {...stylex.props(styles.ellipsisLine)}>From <strong><span data-agent-id-trigger {...stylex.props(styles.atomicRun)}><span data-agent-segment="parent">Workspace</span>›<span data-agent-segment="leaf">Review</span></span></strong> · Small Talk</span></div>
       <span data-control-unicode-glyph>↪</span>
+      <div data-control-long-identities {...stylex.props(styles.longIdentityControl)}>{longIdentities.map(id => <AgentMessage key={id} from={id} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: 'Long identity.' }} headerMeta={controlMeta(false)} />)}</div>
+      <div data-control-meta-yields {...stylex.props(styles.longIdentityControl)}><AgentMessage from={longIdentities[0]} via={{ _tag: 'SmallTalk' }} body={{ _tag: 'Full', markdown: 'Metadata that yields.' }} headerMeta={controlMeta(true)} /></div>
+      <div data-control-copy-hit {...stylex.props(styles.block)}><div {...stylex.props(styles.seatMeta, styles.flatRow)}><Button data-copy aria-label="Copy hit-area control" {...stylex.props(styles.copy, styles.inlineCopy, styles.rowCopy)}><Icon name="copy" scale="status" /></Button></div><p {...stylex.props(styles.controlLine)}>Reply line under the Copy overhang.</p></div>
       <strong data-control-heavy-sender>Heavy sender</strong>
     </section> : null}
   </main>
@@ -173,7 +180,8 @@ const styles = stylex.create({
   block: { position: 'relative', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading },
   turnStart: { marginTop: s.xl },
   inputFrame: { paddingBlock: s.md, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, backgroundColor: surface.raised },
-  bubble: { alignSelf: 'end', maxWidth: '75%' }, senderGutter: { marginLeft: g.textColumn }, glyph: { position: 'absolute', right: '100%', top: s.md, width: g.icon, color: ink.fgMuted, textAlign: 'center' },
+  // Below 640px a 75% bubble leaves the header no room for the sender and its metadata, so bubbles take the lane width.
+  bubble: { alignSelf: 'end', maxWidth: { default: '75%', '@media (max-width: 640px)': '100%' } }, senderGutter: { marginLeft: g.textColumn }, glyph: { position: 'absolute', right: '100%', top: s.md, width: g.icon, color: ink.fgMuted, textAlign: 'center' },
   bubbleFrame: { borderRadius: r.lg },
   humanRail: { borderLeftWidth: g.focusRing, borderLeftColor: accent.primary }, agentRail: { borderLeftWidth: g.focusRing, borderLeftColor: ink.fgMuted }, quietRail: { borderLeftWidth: g.focusRing, borderLeftColor: ink.fgMuted, borderLeftStyle: 'dashed' },
   unclampedBody: { maxHeight: 'none', overflowY: 'visible' },
@@ -187,13 +195,18 @@ const styles = stylex.create({
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   // The seat row is one 16px meta line; Copy keeps a 24px hit area by overhanging it equally above and below.
   rowCopy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.controlSm, minHeight: g.controlSm, marginBlock: `calc((${t.metaLeading} - ${g.controlSm}) / 2)` },
-  // The meta cluster yields before the sender's identity leaf: the kind word truncates, Copy and time stay whole.
-  inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flex: '0 1 auto', minWidth: 0 },
-  inputKind: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  inputFixed: { flex: '0 0 auto', whiteSpace: 'nowrap' },
+  // Header metadata never yields: the kind word (Unverified is the only non-silent state), Copy and time keep their
+  // width, and only the sender's identity run narrows.
+  inputMeta: { marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: s.md, flex: '0 0 auto', minWidth: 'max-content' },
+  inputMetaYields: { flex: '0 1 auto', minWidth: 0 },
+  inputKindYields: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // The width of a card at a 440px viewport.
+  longIdentityControl: { width: '360px', maxWidth: '100%', display: 'flex', flexDirection: 'column', gap: s.md },
   // M1 reserves one 16px meta row above each seat run at every width. The row replaces the 8px block gap rather than
   // stacking on it, so a reply stays closer to its own trigger than to the next turn; the toolbar never overlays text.
-  seatMeta: { width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: t.metaLeading, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  // The row is layered above the reply so Copy's overhang stays hittable over the reply's first line box.
+  seatMeta: { position: 'relative', zIndex: 1, width: 'max-content', maxWidth: '100%', marginLeft: 'auto', height: t.metaLeading, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.canvas },
+  flatRow: { position: 'static', zIndex: 'auto' },
   seatRow: { marginTop: `calc(-1 * ${s.md})` },
   stackedRow: { height: g.toolRow },
   identityClipControl: { width: g.controlLg, maxWidth: '100%', fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap' },
@@ -277,12 +290,15 @@ function proximity(trigger: Element, reply: Element, nextTurn: Element) {
   const text = textExtent(reply)
   return { toTrigger: text.top - trigger.getBoundingClientRect().bottom, toNext: nextTurn.getBoundingClientRect().top - text.bottom }
 }
-/** A dotted identity must truncate inside its own run: leaf whole, no glyph outside the run, no clipping or ellipsis ancestor. */
+/** A dotted identity must narrow inside its own run: the leaf stays whole until every ancestor is folded into '…',
+ * no glyph sits outside the run, and no ancestor clips the run or lays an ellipsis over it. */
 function identityFaults(trigger: HTMLElement, boundary: Element) {
   const faults: string[] = []
   const run = trigger.getBoundingClientRect()
   const leaf = trigger.querySelector<HTMLElement>('[data-agent-segment="leaf"]')
-  if (leaf === null || leaf.scrollWidth > leaf.clientWidth) faults.push('leaf truncated')
+  const ancestorsShown = trigger.querySelector('[data-agent-segment="parent"]') !== null
+  if (leaf === null || (ancestorsShown && leaf.scrollWidth > leaf.clientWidth)) faults.push('leaf truncated')
+  if (trigger.scrollWidth > trigger.clientWidth) faults.push('run overflows')
   for (const segment of trigger.querySelectorAll('[data-agent-segment]')) {
     const box = segment.getBoundingClientRect()
     if (box.left < run.left - 0.5 || box.right > run.right + 0.5) faults.push('glyph outside run')
@@ -293,6 +309,33 @@ function identityFaults(trigger: HTMLElement, boundary: Element) {
     if (style.overflowX !== 'visible' && (run.left < clip.left - 0.5 || run.right > clip.right + 0.5)) faults.push('run clipped')
   }
   return faults
+}
+/** Header metadata never yields to the sender: the kind word is whole, and nothing renders past the card text edge. */
+function headerFaults(header: HTMLElement) {
+  const faults: string[] = []
+  const edge = header.getBoundingClientRect()
+  const kind = header.querySelector<HTMLElement>('[data-input-kind]')
+  if (kind !== null && (kind.clientWidth === 0 || kind.scrollWidth > kind.clientWidth)) faults.push('kind truncated')
+  for (const item of header.querySelectorAll<HTMLElement>('[data-input-kind], [data-meta-time], [data-agent-segment], [data-copy]')) {
+    const box = item.getBoundingClientRect()
+    if (box.width > 0 && (box.left < edge.left - 0.5 || box.right > edge.right + 0.5)) faults.push('item past the card text edge')
+  }
+  for (const trigger of header.querySelectorAll<HTMLElement>('[data-agent-id-trigger]')) faults.push(...identityFaults(trigger, header))
+  return faults
+}
+/** Hittable share of a control's box, sampled at pixel centres inside its rounded corners. */
+function hitArea(control: HTMLElement) {
+  control.scrollIntoView({ block: 'center' })
+  const box = control.getBoundingClientRect(), radius = parseFloat(getComputedStyle(control).borderTopLeftRadius) || 0
+  let total = 0, hit = 0
+  for (let y = 0.5; y < box.height; y++) for (let x = 0.5; x < box.width; x++) {
+    const dx = Math.max(radius - x, x - (box.width - radius), 0), dy = Math.max(radius - y, y - (box.height - radius), 0)
+    if (dx * dx + dy * dy > radius * radius) continue
+    total++
+    const target = control.ownerDocument.elementFromPoint(box.left + x, box.top + y)
+    if (target !== null && control.contains(target)) hit++
+  }
+  return { width: box.width, height: box.height, total, hit }
 }
 function reservedMetaHeight(block: HTMLElement) {
   const height = block.getBoundingClientRect().height
@@ -329,7 +372,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
         for (const glyph of header.querySelectorAll(':scope > span[aria-hidden="true"]')) await expect(glyph.querySelector('svg')).not.toBeNull()
         const subject = header.parentElement?.querySelector(':scope > [data-message-subject]')
         if (subject) await expect(headerCollisions(header, subject)).toEqual([])
-        for (const trigger of header.querySelectorAll<HTMLElement>('[data-agent-id-trigger]')) await expect(identityFaults(trigger, header)).toEqual([])
+        await expect(headerFaults(header as HTMLElement)).toEqual([])
       }
       const overlay = block.querySelector('[data-seat-meta-overlay]')
       if (overlay !== null) {
@@ -418,6 +461,21 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   const stacked = proximity(proximityControl.children[0]!, proximityControl.querySelector('[data-control-reply]')!, proximityControl.children[2]!)
   await expect(stacked.toTrigger).toBeGreaterThanOrEqual(stacked.toNext)
   for (const header of canvasElement.querySelectorAll('[data-lane] [data-message-header]')) await expect(header.querySelector('[title]')).toBeNull()
+  // A six-segment chain and a 50-character leaf in a 440-width card: only the identity narrows (ancestors fold into
+  // '…', the long leaf truncates last); the previous yielding metadata truncates the kind word.
+  for (const header of canvasElement.querySelectorAll<HTMLElement>('[data-control-long-identities] [data-message-header]')) await waitFor(() => expect(headerFaults(header)).toEqual([]))
+  await expect(Number(canvasElement.querySelector('[data-control-long-identities] [data-agent-id-trigger]')!.getAttribute('data-collapsed'))).toBeGreaterThan(0)
+  await expect(headerFaults(canvasElement.querySelector<HTMLElement>('[data-control-meta-yields] [data-message-header]')!)).toContain('kind truncated')
+  // M1 Copy is hittable across its whole 24px box; without the layered row the reply's line box takes the overhang.
+  for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
+    const rowCopy = lane.querySelector<HTMLElement>('[data-seat-meta-overlay] [data-copy]')
+    if (rowCopy === null) continue
+    const area = hitArea(rowCopy)
+    await expect([area.width, area.height]).toEqual([24, 24])
+    await expect(area.hit, 'every point of the M1 Copy box hits Copy').toBe(area.total)
+  }
+  const flatCopy = hitArea(canvasElement.querySelector<HTMLElement>('[data-control-copy-hit] [data-copy]')!)
+  await expect(flatCopy.hit).toBeLessThan(flatCopy.total)
   if (canvasElement.ownerDocument.defaultView!.innerWidth <= 440) {
     await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(canvasElement.ownerDocument.documentElement.clientWidth)
   }
@@ -426,7 +484,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
     for (const [index, block] of blocks.entries()) {
       const seatToolbar = block.querySelector('[data-seat-meta-overlay]')
-      const inFlow = seatToolbar !== null && getComputedStyle(seatToolbar).position === 'static'
+      const inFlow = seatToolbar !== null && getComputedStyle(seatToolbar).position !== 'absolute'
       await expect(reservedMetaHeight(block)).toBe(inFlow ? 16 : 0)
       if (lane.getAttribute('data-meta-variant') === 'M4') await expect(block.querySelectorAll('time[data-turn-time]')).toHaveLength(1)
       const next = blocks[index + 1]
