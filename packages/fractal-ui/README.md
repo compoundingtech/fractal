@@ -209,8 +209,9 @@ align right, and the open row keeps the hover wash with an accent underline so
 muted and warning ink stay at AA contrast.
 
 Neither table uses native `title` attributes. A clipped or abbreviated value
-(account caption, compact meter, reset, amount, drawer window reading, status
-and shortcut footer) is a focusable trigger built from `FullValueTooltip`: a
+(account caption, compact meter, reset, amount, drawer window reading, status,
+shortcut footer, the drawer's Usage, `$ / tok` and +N column headers, and the
+meter's narrow Δ header) is a focusable trigger built from `FullValueTooltip`: a
 static `role="img"` element (the role React Aria requires of a non-interactive
 tooltip trigger) whose visible text is `aria-hidden` and whose name comes from
 a mounted `VisuallyHidden` copy of the full value. A React Aria tooltip with the
@@ -225,8 +226,9 @@ keeps focus. Drawer sort controls are content-sized flex items 8px apart; at
 `NarrowFullValueTooltips` meter story and the Drawer S Priority stories assert
 that no non-empty `[title]` exists (React Aria's hidden form `<select>` carries
 an empty one), that the 200/240/320 sort controls keep 8px gaps, and that hover
-and then focus on a clipped value each show one `[role=tooltip]` with the full
-text.
+and then focus on a clipped value or abbreviated header each show one
+`[role=tooltip]` with the full text. Below 36rem only the meter's Δ trigger
+renders (the full More label is `display: none`), so the column is named once.
 
 The usage-meter Sort and +N buttons take their accessible names from their
 visible text plus hidden context ("Cycle usage Sort", "+1 more: show all

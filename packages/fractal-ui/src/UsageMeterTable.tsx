@@ -166,7 +166,7 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
     }} {...stylex.props(usageMeterGrid.table, styles.table)}>
       <TableHeader {...stylex.props(usageMeterGrid.header)}>
         {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting textValue={column.label} data-usage-meter-column={column.id} {...stylex.props(usageMeterGrid.column, styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
-          {({ sortDirection }) => <span {...stylex.props(styles.headerContent, (column.id === 'reset' || column.id === 'more') && styles.numericHeader)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === undefined ? null : <Icon name={sortDirection === 'ascending' ? 'send' : 'chevron-down'} size={10} />}</span></span>}
+          {({ sortDirection }) => <span {...stylex.props(styles.headerContent, (column.id === 'reset' || column.id === 'more') && styles.numericHeader)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><FullValueTooltip full={column.label} style={styles.narrowHeaderLabel} data={{ 'data-usage-meter-narrow-header': column.id }}>{column.narrowLabel}</FullValueTooltip></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === undefined ? null : <Icon name={sortDirection === 'ascending' ? 'send' : 'chevron-down'} size={10} />}</span></span>}
         </Column>)}
       </TableHeader>
       <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
@@ -248,9 +248,9 @@ const styles = stylex.create({
   moreButton: { display: 'inline-flex', alignItems: 'center', height: quotaGeometry.meterMoreButtonHeight, font: 'inherit', fontVariantNumeric: 'tabular-nums', color: ink.fgSoft, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, border: 0, padding: 0, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
   wideCount: { display: { default: 'inline', '@container (width < 20rem)': 'none' } },
   narrowCount: { display: { default: 'none', '@container (width < 20rem)': 'inline' } },
+  // Exactly one of the pair renders, so the column is named once: the full label, or the short label's tooltip trigger labelled with it.
   narrowHeaderLabel: { display: { default: 'none', '@container (width < 36rem)': 'inline' }, minWidth: 0, overflow: 'hidden' },
-  /** Stays the accessible column name when the container shows the short label. */
-  wideLabel: { position: { default: 'static', '@container (width < 36rem)': 'absolute' }, width: { default: 'auto', '@container (width < 36rem)': quotaGeometry.visuallyHiddenSize }, height: { default: 'auto', '@container (width < 36rem)': quotaGeometry.visuallyHiddenSize }, overflow: { default: 'visible', '@container (width < 36rem)': 'hidden' }, clipPath: { default: 'none', '@container (width < 36rem)': 'inset(50%)' } },
+  wideLabel: { display: { default: 'inline', '@container (width < 36rem)': 'none' } },
   empty: { display: 'block', padding: space.xl, color: ink.fgMuted },
   detail: { padding: space.lg, backgroundColor: surface.raised, borderTop: quotaGeometry.strongHair },
   detailHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: space.md },

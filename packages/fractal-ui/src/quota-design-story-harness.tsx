@@ -157,7 +157,7 @@ export const quotaPriorityPlay = async ({ canvasElement }: { canvasElement: HTML
   await expect(boxes[0]!.left).toBeGreaterThanOrEqual(bounds.left)
   await expect(boxes.at(-1)!.right).toBeLessThanOrEqual(bounds.right)
 }
-/** A clipped account name and an abbreviated reset each open exactly one tooltip with the full value on hover and on keyboard focus. */
+/** A clipped account name, an abbreviated reset and every abbreviated column header each open exactly one tooltip with the full value on hover and on keyboard focus. */
 export const quotaFullValuePlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaPriorityPlay({ canvasElement })
   const row = canvasElement.querySelector<HTMLElement>('[data-quota-row="unknown"]')!
@@ -166,6 +166,10 @@ export const quotaFullValuePlay = async ({ canvasElement }: { canvasElement: HTM
   await expectSingleFullValueTooltip(account, account.getAttribute('aria-label')!.replace(/^Open usage for /, ''))
   const reset = row.querySelector<HTMLElement>('[data-quota-cell="reset"] [data-full-value-trigger]')!
   await expectSingleFullValueTooltip(reset, reset.querySelector('[data-quota-full-value]')!.textContent!)
+  // Usage, $ / tok and +N abbreviate their column names; columns the container hides have no trigger to hover.
+  const headers = [...canvasElement.querySelectorAll<HTMLElement>('[data-quota-column] [data-full-value-trigger]')].filter(trigger => trigger.getClientRects().length > 0)
+  await expect(headers.map(trigger => trigger.closest<HTMLElement>('[data-quota-column]')!.dataset.quotaColumn)).toEqual(expect.arrayContaining(['primary', 'more']))
+  for (const trigger of headers) await expectSingleFullValueTooltip(trigger, trigger.querySelector('[data-quota-full-value]')!.textContent!)
   await expectNoNativeTitles(canvasElement.querySelector<HTMLElement>('[data-quota-drawer]')!)
   restFocus(canvasElement)
 }

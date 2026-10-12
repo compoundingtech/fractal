@@ -100,7 +100,6 @@ export const quotaGeometry = stylex.defineVars({
   meterTrackHeight: geometry.progressSm,
   compactMeterMinimumWidth: '8px',
   meterMoreButtonHeight: '18px',
-  visuallyHiddenSize: '1px',
   historyChartHeight: '48px',
   historyMinimumBarHeight: '1px',
   historyOutlineInset: '-1px',

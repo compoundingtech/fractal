@@ -55,8 +55,12 @@ test('headers expose every column and aria-sort follows the controlled sort prop
   const view = await mount()
   try {
     const headers = [...view.container.querySelectorAll('[role=columnheader]')]
-    const named = header => { const copy = header.cloneNode(true); copy.querySelectorAll('[aria-hidden=true]').forEach(node => node.remove()); return copy.textContent }
+    // Container queries do not run here; the narrow-label trigger only renders below 36rem, where the wide label is display:none.
+    const named = header => { const copy = header.cloneNode(true); copy.querySelectorAll('[aria-hidden=true], [data-usage-meter-narrow-header]').forEach(node => node.remove()); return copy.textContent }
     assert.deepEqual(headers.map(named), ['Account', 'Window', 'Reset', 'Next', 'More'])
+    const narrowMore = headers[4].querySelector('[data-usage-meter-narrow-header="more"]')
+    assert.equal(narrowMore.tabIndex, 0)
+    assert.equal(document.getElementById(narrowMore.getAttribute('aria-labelledby')).textContent, 'More', 'the short Δ header names its tooltip trigger with the full label')
     assert.equal(headers[1].getAttribute('aria-sort'), 'descending')
     assert.ok(headers[1].querySelector('svg'), 'descending sort uses the shared SVG glyph')
     assert.equal(headers[2].getAttribute('aria-sort'), 'none')

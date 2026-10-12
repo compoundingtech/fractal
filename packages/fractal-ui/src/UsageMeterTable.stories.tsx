@@ -146,7 +146,7 @@ export const NarrowDetailHistory: Story = { args: { width: 'narrow', selectedId:
 export const HistoryStates: Story = { render: args => <Frame scheme={args.scheme} width={args.width}>{(['loading', 'unavailable', 'empty', 'ready'] as const).map(state => <UsageMeterHistoryChart key={state} history={histories[state]} landmarkContext={state} />)}</Frame> }
 export const HourlyHistogram: Story = { render: args => <Frame scheme={args.scheme} width={args.width}><UsageMeterHistoryChart history={{ kind: 'ready', label: 'Merged per hour', text: '24h · max 8 · 23:00 partial', points: hourlyPoints, facts: [] }} /></Frame> }
 export const Empty: Story = { render: args => <Frame scheme={args.scheme} width={args.width}><UsageMeterTable rows={[]} status={{ kind: 'loading', text: statusText.loading }} sort={{ key: args.sortKey, direction: args.direction }} onSort={() => {}} onCycleSort={() => {}} onSelect={() => {}} onCloseDetail={() => {}} /></Frame> }
-/** A clipped reading and a history period each disclose their full value through one tooltip on hover and on keyboard focus; no native title remains. */
+/** A clipped reading, a history period and the abbreviated Δ column header each disclose their full value through one tooltip on hover and on keyboard focus; no native title remains. */
 export const NarrowFullValueTooltips: Story = {
   args: { width: 'narrow', selectedId: 'meter-north', history: 'ready' },
   play: async ({ canvasElement }) => {
@@ -162,6 +162,12 @@ export const NarrowFullValueTooltips: Story = {
     await expectSingleFullValueTooltip(reading.closest<HTMLElement>('[data-full-value-trigger]')!, '5h window · 72% · 3.6k / 5k')
     const open = dailyPoints.at(-1)!
     await expectSingleFullValueTooltip(table.querySelector<HTMLElement>(`[data-usage-meter-history-point="${open.id}"]`)!, `${open.label}: ${open.text} (open)`)
+    // Below 36rem the More header shows Δ; its trigger alone names the column, so the name is not doubled.
+    const moreHeader = table.querySelector<HTMLElement>('[data-usage-meter-column="more"]')!
+    await expect(moreHeader).toHaveAccessibleName('More')
+    const narrowMore = moreHeader.querySelector<HTMLElement>('[data-usage-meter-narrow-header="more"]')!
+    await expect(narrowMore.getClientRects().length).toBeGreaterThan(0)
+    await expectSingleFullValueTooltip(narrowMore, 'More')
     await expectNoNativeTitles(table)
   },
 }
