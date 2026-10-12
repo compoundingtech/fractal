@@ -2853,8 +2853,8 @@ export type PairedSession = typeof PairedSession.Type
 export type PairedSessionEncoded = typeof PairedSession.Encoded
 
 export const PairingChallenge = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))), "expires_at": Timestamp, "grant_expires_at": optionalKey(Schema.Never), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "kind": Schema.Literal("pairing-challenge"), "minimal_read_mode": optionalKey(Schema.Never), "pairing_id": Id, "person_root_fingerprint": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^sha256:[A-Za-z0-9_-]{43}$", "u")))), "policy_revision": optionalKey(Schema.Never), "principal": optionalKey(Schema.Never) }),
-  Schema.Struct({ "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))), "expires_at": Timestamp, "grant_expires_at": Timestamp, "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "kind": Schema.Literal("pairing-challenge"), "minimal_read_mode": AssistantMinimalReadMode, "pairing_id": Id, "person_root_fingerprint": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal })
+  Schema.Struct({ "grant_expires_at": optionalKey(Schema.Never), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "minimal_read_mode": optionalKey(Schema.Never), "policy_revision": optionalKey(Schema.Never), "principal": optionalKey(Schema.Never) }),
+  Schema.Struct({ "grant_expires_at": Timestamp, "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "minimal_read_mode": AssistantMinimalReadMode, "person_root_fingerprint": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal })
 ], { mode: "oneOf" }).annotate({ identifier: "PairingChallenge" }))()
 export type PairingChallenge = typeof PairingChallenge.Type
 export type PairingChallengeEncoded = typeof PairingChallenge.Encoded

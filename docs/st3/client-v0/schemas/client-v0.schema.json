@@ -2359,7 +2359,6 @@
       }
     },
     "PairingChallenge": {
-      "allOf": [],
       "oneOf": [
         { "properties": { "grant_kind": { "const": "person" }, "principal": false, "grant_id": false, "grant_expires_at": false, "policy_revision": false, "minimal_read_mode": false } },
         { "required": ["principal", "grant_kind", "grant_id", "grant_expires_at", "policy_revision", "minimal_read_mode"], "properties": { "principal": { "$ref": "#/$defs/AssistantPrincipal" }, "grant_kind": { "const": "assistant" }, "grant_id": { "$ref": "#/$defs/Id" }, "grant_expires_at": { "$ref": "#/$defs/Timestamp" }, "policy_revision": { "type": "integer", "minimum": 1 }, "minimal_read_mode": { "$ref": "#/$defs/AssistantMinimalReadMode" }, "person_root_fingerprint": false } }
