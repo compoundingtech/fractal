@@ -39,18 +39,26 @@ function AccountRow({ row, variant, width, scheme }: { row: UsageMeterRow; varia
 function Sidebar({ variant, width, scheme }: { variant: Variant; width: Args['sidebar']; scheme: Args['scheme'] }) {
   return <section data-sidebar={width} data-variant={variant} aria-label={`${variant} · ${width} sidebar`} {...stylex.props(styles.sidebar, width === 200 ? styles.width200 : width === 240 ? styles.width240 : styles.width320)}><h3 {...stylex.props(styles.heading)}>{width} · {variant}</h3><div {...stylex.props(styles.nav)}>Workspace / Sessions</div><header {...stylex.props(styles.caption)}>Accounts · primary · reset · next</header>{accounts.map(row => <AccountRow key={row.id} row={row} variant={variant} width={width} scheme={scheme} />)}</section>
 }
-function Explorer(initial: Args) {
-  const [, updateArgs] = useArgs<Args>()
+function Explorer(initial: Args & { onArgsChange?: (patch: Partial<Args>) => void }) {
   const [probeArgs, setProbeArgs] = React.useState(initial)
   const args = initial.probe ? probeArgs : initial
-  const update = (patch: Partial<Args>) => initial.probe ? setProbeArgs(current => ({ ...current, ...patch })) : updateArgs(patch)
+  const update = (patch: Partial<Args>) => initial.probe ? setProbeArgs(current => ({ ...current, ...patch })) : initial.onArgsChange?.(patch)
   return <main {...stylex.props(...baselineTheme, styles.root)}>
     <h1 {...stylex.props(styles.heading)}>Quota under pressure</h1><p {...stylex.props(styles.copy)}>Account first, then primary usage, then its reset. Secondary windows yield before those three. Every account stays on one line.</p>
     <div {...stylex.props(styles.controls)}>{variants.map(variant => <Button key={variant} aria-label={`Choose ${variant}`} aria-pressed={args.variant === variant} onPress={() => update({ variant, compare: false })} {...stylex.props(styles.button)}>{variant}</Button>)}{widths.map(sidebar => <Button key={sidebar} aria-label={`Sidebar ${sidebar}`} onPress={() => update({ sidebar, compare: false })} {...stylex.props(styles.button)}>{sidebar}</Button>)}<Button onPress={() => update({ compare: !args.compare })} {...stylex.props(styles.button)}>Compare all</Button><Button onPress={() => update({ scheme: args.scheme === 'dark' ? 'light' : 'dark', compare: false })} {...stylex.props(styles.button)}>Switch theme</Button><Button onPress={() => update({ viewport: args.viewport === 1440 ? 900 : 1440, compare: false })} {...stylex.props(styles.button)}>Switch host width</Button></div>
     <div data-matrix {...stylex.props(styles.matrix)}>{(args.compare ? [1440, 900] as const : [args.viewport]).flatMap(viewport => (args.compare ? ['dark', 'light'] as const : [args.scheme]).map(scheme => <section key={`${viewport}-${scheme}`} data-host={viewport} data-scheme={scheme} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.host, viewport === 1440 ? styles.host1440 : styles.host900)}><h2 {...stylex.props(styles.heading)}>{viewport} host · {scheme}</h2>{(args.compare ? variants : [args.variant]).map(variant => <div key={variant} {...stylex.props(styles.sidebars)}>{(args.compare ? widths : [args.sidebar]).map(width => <Sidebar key={width} variant={variant} width={width} scheme={scheme} />)}</div>)}</section>))}</div>
   </main>
 }
-const meta = { title: 'Fractal UI/Explore/QuotaPriority', component: Explorer, parameters: { layout: 'fullscreen' }, args: { variant: 'collapse', sidebar: 240, scheme: 'dark', viewport: 1440, compare: true, probe: false }, argTypes: { variant: { control: 'select', options: variants }, sidebar: { control: 'select', options: widths }, scheme: { control: 'select', options: ['light', 'dark'] }, viewport: { control: 'select', options: [1440, 900] }, probe: { table: { disable: true } } } } satisfies Meta<typeof Explorer>
+const meta = {
+  title: 'Fractal UI/Explore/QuotaPriority', component: Explorer,
+  render: function Render(args) {
+    const [, updateArgs] = useArgs<Args>()
+    return <Explorer {...args} onArgsChange={updateArgs} />
+  },
+  parameters: { layout: 'fullscreen' },
+  args: { variant: 'collapse', sidebar: 240, scheme: 'dark', viewport: 1440, compare: true, probe: false },
+  argTypes: { variant: { control: 'select', options: variants }, sidebar: { control: 'select', options: widths }, scheme: { control: 'select', options: ['light', 'dark'] }, viewport: { control: 'select', options: [1440, 900] }, probe: { table: { disable: true } }, onArgsChange: { table: { disable: true } } },
+} satisfies Meta<typeof Explorer>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Exploration: Story = {}
@@ -84,6 +92,18 @@ function assertRows(canvas: HTMLElement) {
 export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({ canvasElement, step }) => {
   const canvas = within(canvasElement)
   await step('Complete theme, host and sidebar matrix', async () => { await waitFor(() => expect(canvasElement.querySelectorAll('[data-sidebar]').length).toBe(36)); assertRows(canvasElement) })
+  await step('Reject missing higher priority and wrapping controls, restore', async () => {
+    const primary = canvasElement.querySelector<HTMLElement>('[data-priority="2"]')!
+    const parent = primary.parentElement!
+    const next = primary.nextSibling
+    primary.remove()
+    expect(() => assertRows(canvasElement)).toThrow()
+    parent.insertBefore(primary, next)
+    primary.style.whiteSpace = 'normal'
+    expect(() => assertRows(canvasElement)).toThrow()
+    primary.style.removeProperty('white-space')
+    assertRows(canvasElement)
+  })
   for (const variant of variants) for (const width of widths) await step(`${variant} at ${width} after controls rerender`, async () => {
     await userEvent.click(canvas.getByRole('button', { name: `Choose ${variant}` }))
     await userEvent.click(canvas.getByRole('button', { name: `Sidebar ${width}` }))
@@ -104,7 +124,8 @@ export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({
     expect(canvas.getAllByText('Unreported').length).toBeGreaterThan(0)
     await userEvent.click(canvas.getByRole('button', { name: 'Close usage details' }))
     await waitFor(() => expect(canvas.queryByRole('region', { name: 'Meadow research usage details' })).not.toBeInTheDocument()); assertRows(canvasElement)
-    await userEvent.click(canvas.getByRole('button', { name: 'Switch theme' })); await waitFor(() => expect(canvasElement.querySelector('[data-host]')?.getAttribute('data-scheme')).toBe('light')); assertRows(canvasElement)
+    const nextScheme = canvasElement.querySelector('[data-host]')?.getAttribute('data-scheme') === 'dark' ? 'light' : 'dark'
+    await userEvent.click(canvas.getByRole('button', { name: 'Switch theme' })); await waitFor(() => expect(canvasElement.querySelector('[data-host]')?.getAttribute('data-scheme')).toBe(nextScheme)); assertRows(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: 'Switch host width' })); await waitFor(() => expect(canvasElement.querySelector('[data-host]')?.getAttribute('data-host')).toBe('900')); assertRows(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: 'Compare all' })); await waitFor(() => expect(canvasElement.querySelectorAll('[data-sidebar]').length).toBe(36)); assertRows(canvasElement)
   })
