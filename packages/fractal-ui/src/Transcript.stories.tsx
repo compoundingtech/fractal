@@ -84,7 +84,7 @@ export const Expanded: Story = { args: { state: 'expanded' }, play: async ({ can
   await expect(canvas.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'false')
   const empty = canvasElement.querySelector('[data-tool-status="success"]:last-child')!
   await expect(empty.querySelector('button')).toBeNull()
-  await expect(empty).toHaveTextContent('No output')
+  await expect(empty).not.toHaveTextContent('No output')
   await userEvent.click(canvas.getByRole('button', { name: 'Open read tool detail' }))
   await expect(canvas.getByRole('region', { name: 'Opened tool detail' }).querySelector('pre')?.textContent).toBe(source)
 } }
@@ -109,7 +109,7 @@ export const NativeToolOutput: Story = { render: args => <main {...stylex.props(
   await expect(canvas.getAllByTestId('work-call-output')).toHaveLength(2)
   await expect(canvas.getAllByTestId('work-call-output')[0]).toHaveTextContent('String result retained.')
   await expect(canvas.queryByRole('button', { name: /empty output|non-text output/ })).toBeNull()
-  await expect(canvas.getAllByText(/No output/)).toHaveLength(2)
+  await expect(canvas.queryAllByText(/No output/)).toHaveLength(0)
 } }
 export const NativeToolOutputLight: Story = { ...NativeToolOutput, args: { scheme: 'light' } }
 export const Streaming: Story = { args: { state: 'streaming' }, play: async ({ canvasElement }) => {
@@ -186,7 +186,9 @@ export const SettledAnswerMeta: Story = { render: args => <AnswerMetadataStory s
   const footer = answers[0]!.querySelector('[data-testid="answer-meta"]')!
   const prose = answers[0]!.querySelector('[data-testid="markdown"]')!
   await expect(footer.getBoundingClientRect().top).toBeGreaterThanOrEqual(prose.getBoundingClientRect().bottom)
-  await expect(getComputedStyle(footer).opacity).toBe('1')
+  await expect(footer.getBoundingClientRect().height).toBe(0)
+  await userEvent.hover(answers[0]!)
+  await waitFor(() => expect(getComputedStyle(footer).opacity).toBe('1'))
   const clipboard = navigator.clipboard
   const original = Object.getOwnPropertyDescriptor(clipboard, 'writeText')
   let copied = ''
@@ -258,7 +260,8 @@ export const HasOlderWithLoad: Story = { args: { history: { _tag: 'HasOlder', on
   const canvas = within(canvasElement)
   loadEarlier.mockClear()
   await canvas.findByRole('button', { name: /Worked for 24s/ })
-  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
+  await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Load earlier messages')
+  await expect(canvas.getByTestId('history-boundary')).not.toHaveTextContent('Earlier messages not loaded')
   await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
   await expect(loadEarlier).toHaveBeenCalledTimes(1)
 } }
@@ -500,7 +503,7 @@ export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(sty
       await expect(raw).toHaveAttribute('aria-expanded', 'false')
       await userEvent.click(raw)
       await expect(raw).toHaveAttribute('aria-expanded', 'true')
-    } else await expect(row).toHaveTextContent('No output')
+    } else await expect(row).not.toHaveTextContent('No output')
   }
   await expect(within(work).getByRole('button', { name: 'Thinking' })).toBeVisible()
   await expect(work).toHaveTextContent('export const last = visibleRows.at(-1)')
