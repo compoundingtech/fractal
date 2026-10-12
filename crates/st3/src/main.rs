@@ -3589,7 +3589,7 @@ enum GhCommand {
     /// the close or merge, or the deadline, ends the watch. Watching
     /// it again keeps the watch and takes the new deadline.
     #[command(
-        after_help = "Examples:\n  st gh watch acme/garden#12\n  st gh watch https://github.com/acme/garden/pull/12 --until 4h"
+        after_help = "Examples:\n  st gh watch acme/garden#12\n  st gh watch https://github.com/acme/garden/pull/12 --until 4h\n  st gh watch acme/garden#12 --until none"
     )]
     Watch(GhWatchArgs),
     /// End this seat's watch on an issue or pull request.
@@ -3644,7 +3644,7 @@ struct GhOwnArgs {
 struct GhWatchArgs {
     /// OWNER/REPO#NUMBER, or the issue or pull request URL.
     thread: String,
-    /// End the watch at this time: a duration such as 4h, or an RFC 3339 time.
+    /// End after 14 days by default; use a duration such as 4h, an RFC 3339 time, or none for no deadline.
     #[arg(long)]
     until: Option<String>,
     #[arg(long = "as", env = "ST_AGENT")]
