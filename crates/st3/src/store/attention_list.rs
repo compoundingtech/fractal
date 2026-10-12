@@ -302,11 +302,6 @@ impl Store {
         }
     }
 
-    /// How many times the published attention rows changed (or were forgotten).
-    pub(crate) fn attention_list_revision(&self) -> u64 {
-        *self.smalltalk.attention_list.revision.borrow()
-    }
-
     /// Follows the revision of attention publications, so a stream that read an earlier one
     /// rereads the newer.
     #[cfg(test)]

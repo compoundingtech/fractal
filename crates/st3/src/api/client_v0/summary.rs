@@ -1,6 +1,7 @@
 //! Tiny current summary on the existing protocol. Native reads are authorized in
 //! one snapshot; the contract stays the same when the shared IVM source takes over.
 use super::*;
+use crate::store::summary_list::{SummaryInputs, SummaryShared};
 use st3_ui_model::missions::{Display, Word};
 
 pub(super) fn working(agent: &Value) -> bool {
@@ -33,8 +34,7 @@ pub(super) fn native(
 ) -> anyhow::Result<Vec<Value>> {
     let person = person_filter(session, request.person.as_deref())
         .map_err(|e| anyhow::anyhow!(e.message))?;
-    let store = &state.store;
-    let attention = store.attention_snapshot(person.as_deref(), now)?;
+    let attention = state.store.attention_snapshot(person.as_deref(), now)?;
     // What needs the person is what waits on their answer: an update asks nothing.
     let alerts = attention.iter().filter(|item| item.is_alert()).count();
     let gates = attention
@@ -42,6 +42,22 @@ pub(super) fn native(
         .filter(|item| item.kind == "human-gate")
         .filter_map(|item| item.mission.clone())
         .collect::<BTreeSet<_>>();
+    let shared = shared(state, session, request, snapshot, now, windows, commits)?;
+    Ok(vec![row(person.as_deref(), alerts, &gates, &shared)?])
+}
+
+/// What every selection's summary shares at `snapshot`: each mission and whether it is active,
+/// the working agents and the machine counts. No count here depends on the selected person.
+fn shared(
+    state: &AppState,
+    session: &ClientSession,
+    request: &CollectionSubscribe,
+    snapshot: &ClientSnapshot,
+    now: u128,
+    windows: Option<&collection_windows::Windows>,
+    commits: Option<u64>,
+) -> anyhow::Result<SummaryShared> {
+    let store = &state.store;
     let compute = || {
         let (missions, deadline) = store.client_summary_missions(now)?;
         let semantics = st3_ui_model::missions::adapt(
@@ -91,16 +107,19 @@ pub(super) fn native(
     } else {
         compute()?.0
     };
-    let active = missions
+    let missions = missions
         .first()
         .and_then(|v| v["missions"].as_array())
         .into_iter()
         .flatten()
-        .filter(|m| {
-            m["system"] != true
-                && (m["active"] == true || gates.contains(m["id"].as_str().unwrap_or_default()))
+        .map(|m| {
+            (
+                m["id"].as_str().unwrap_or_default().to_owned(),
+                m["system"] == true,
+                m["active"] == true,
+            )
         })
-        .count();
+        .collect();
     // A daemon's reads never fold the roster: count from its newest publication, and say which.
     let mut agents_as_of = None;
     let mut agents = if store.agent_roster_refresher_running() {
@@ -118,19 +137,78 @@ pub(super) fn native(
         client_agent_resources_cached(store, false, snapshot.store_index)?
     };
     overlay_agent_resources(store, &mut agents, &client_timestamp(now))?;
-    let working = agents.iter().filter(|agent| working(agent)).count();
+    let working_agents = agents.iter().filter(|agent| working(agent)).count();
     let machines = machine_summary_resources(state, snapshot, session)?;
-    let machine_counts = machine_counts(&machines, &agents, &client_host_id(&state.node), now);
-    let mut value = json!({"person_id":person,"alerts":alerts,"needs_you":alerts,"working_agents":working,"active_missions":active,"machines":machine_counts});
+    let machines = machine_counts(&machines, &agents, &client_host_id(&state.node), now);
+    Ok(SummaryShared {
+        cut: snapshot.store_index,
+        evaluated_at_unix_ms: now,
+        published_at_unix_ms: client_now_ms(),
+        missions,
+        working_agents,
+        machines,
+        agents_as_of,
+    })
+}
+
+/// One selection's summary row: what needs `person` (its `alerts`, and the missions of its
+/// human gates) beside the counts every selection shares.
+fn row(
+    person: Option<&str>,
+    alerts: usize,
+    gates: &BTreeSet<String>,
+    shared: &SummaryShared,
+) -> anyhow::Result<Value> {
+    // A mission waiting on the person's gate is active whatever its own word says.
+    let active = shared
+        .missions
+        .iter()
+        .filter(|(id, system, active)| !system && (*active || gates.contains(id)))
+        .count();
+    let mut value = json!({"person_id":person,"alerts":alerts,"needs_you":alerts,"working_agents":shared.working_agents,"active_missions":active,"machines":shared.machines});
     value["revision"] = json!(smallclaims::hash::canonical_hash(&value)?);
     value["id"] = json!("summary/current");
     value["kind"] = json!("summary");
-    value["updated_at"] = json!(client_timestamp(now));
+    value["updated_at"] = json!(client_timestamp(shared.evaluated_at_unix_ms));
     // Outside the revision: a newer roster with the same counts changes nothing a client shows.
-    if let Some(as_of) = agents_as_of {
-        value["agents_as_of"] = as_of;
+    if let Some(as_of) = &shared.agents_as_of {
+        value["agents_as_of"] = as_of.clone();
     }
-    Ok(vec![value])
+    Ok(value)
+}
+
+/// What needs `person` (every person, for none) in published attention rows, counted as from
+/// the attention items they were made of: the alerts, and the missions of the human gates.
+pub(super) fn published_attention_counts(
+    rows: &[Value],
+    person: Option<&str>,
+) -> (usize, BTreeSet<String>) {
+    let rows = rows
+        .iter()
+        .filter(|row| person.is_none_or(|person| row["person_id"] == person))
+        .collect::<Vec<_>>();
+    let alerts = rows.iter().filter(|row| row["alert"] == true).count();
+    let gates = rows
+        .iter()
+        .filter(|row| row["attention_kind"] == "human-gate")
+        .filter_map(|row| row["mission_id"].as_str().map(str::to_owned))
+        .collect();
+    (alerts, gates)
+}
+
+/// The row of `person` from the newest shared counts and attention publication, with the
+/// shared counts' cut and publication time: what the refresher publishes for that selection.
+/// `None` until both are published. Memory only: a window that opens a selection is served at
+/// once, before the refresher publishes it.
+pub(in crate::api) fn published_row(
+    store: &Store,
+    person: Option<&str>,
+) -> Option<(u64, u128, Value)> {
+    let (shared, _) = store.summary_shared()?;
+    let attention = store.newest_attention_list().1?;
+    let (alerts, gates) = published_attention_counts(&attention.rows, person);
+    let row = row(person, alerts, &gates, &shared).ok()?;
+    Some((shared.cut, shared.published_at_unix_ms, row))
 }
 
 pub(super) fn machine_counts(
@@ -185,67 +263,92 @@ pub(super) fn retain_timestamp(items: &mut [Value], previous: &BTreeMap<String, 
     }
 }
 
-/// How often a published summary row is computed again with nothing else changed: delivery
+/// How often the shared counts are computed again with nothing else changed: delivery
 /// staleness, machine recency and mission deadlines read the clock.
 const PUBLISHED_PERIOD_MS: u128 = 30_000;
 
-/// Publish the summary row of every selection a window read within `idle_ms`, each computed as
-/// a window would compute it, in its own short snapshot. Windows then serve these rows and never
-/// compute a summary themselves; each selection costs one computation per change, however many
-/// windows show it. A selection whose inputs (cut, attention, roster, clock period) are unchanged
-/// is not computed again. A selection that fails is not published, and its windows read for
-/// themselves; the others are unaffected. With `waiting_only`, only the selections a window is
-/// waiting for. Returns whether any selection's counts changed.
+/// Publish the summary row of every selection a window read within `idle_ms`. The counts no
+/// person changes are computed once for all of them, in one short snapshot, and again only when
+/// their inputs (cut, roster, clock period) change; each selection then counts what needs its
+/// person from the newest attention publication, in memory. As the daemon starts the shared
+/// counts are computed once with no selection, so the first window is served at once. If they
+/// cannot be computed the previous ones stay published; with none, every selection is not
+/// published and its windows read for themselves. With `waiting_only`, only the selections a
+/// window waits for, and the shared counts only if there are none yet. Returns whether any
+/// selection's counts changed.
 pub(in crate::api) fn refresh_published(
     state: &AppState,
     idle_ms: u64,
     waiting_only: bool,
 ) -> anyhow::Result<bool> {
-    let (generation, selections) = state.store.summary_selections(idle_ms, waiting_only);
-    let attention = state.store.attention_list_revision();
-    let roster = *state.store.subscribe_agent_roster().borrow();
-    let mut changed = false;
-    for (person, before) in selections {
-        let computed = state.store.read_snapshot(|index| {
-            let now = client_now_ms();
-            let inputs = crate::store::summary_list::SummaryInputs {
-                cut: index,
-                attention,
-                roster,
-                period: now / PUBLISHED_PERIOD_MS,
-            };
-            if before.as_ref() == Some(&inputs) {
-                return Ok(None);
-            }
-            // The selection alone decides the counts: a read-only local session passes any
-            // selected person through, and its terminal grants change no count.
-            let session = ClientSession::local(None).map_err(|error| anyhow::anyhow!(error.message))?;
-            let request: CollectionSubscribe = serde_json::from_value(json!({
-                "kind":"subscribe", "id":"summary", "collection":"summary", "limit":1, "person":person,
-            }))?;
-            let snapshot = client_snapshot_at(state, index);
-            let row = native(state, &session, &request, &snapshot, now, None, None)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("a summary computes one row"))?;
-            Ok(Some(crate::store::summary_list::SummaryRow {
-                cut: index,
-                published_at_unix_ms: client_now_ms(),
-                row,
-                inputs,
-            }))
-        });
-        changed |= match computed {
-            Ok(None) => false,
-            Ok(Some(row)) => state.store.publish_summary_row(generation, &person, Some(row)),
-            Err(error) => {
-                eprintln!("st3: the summary of {person:?} failed; its windows read it themselves: {error:#}");
-                state.store.publish_summary_row(generation, &person, None)
-            }
+    let store = &state.store;
+    let (generation, selections) = store.summary_selections(idle_ms, waiting_only);
+    let starting = store.start_summary_shared();
+    if selections.is_empty() && !starting {
+        return Ok(false);
+    }
+    let before = store.summary_shared();
+    let roster = *store.subscribe_agent_roster().borrow();
+    let computed = store.read_snapshot(|index| {
+        let now = client_now_ms();
+        let inputs = SummaryInputs {
+            cut: index,
+            roster,
+            period: now / PUBLISHED_PERIOD_MS,
         };
+        if before
+            .as_ref()
+            .is_some_and(|(_, held)| waiting_only || *held == inputs)
+        {
+            return Ok(None);
+        }
+        // No shared count depends on the session: a read-only local session reads them all.
+        let session = ClientSession::local(None).map_err(|error| anyhow::anyhow!(error.message))?;
+        let request: CollectionSubscribe = serde_json::from_value(json!({
+            "kind":"subscribe", "id":"summary", "collection":"summary", "limit":1,
+        }))?;
+        let snapshot = client_snapshot_at(state, index);
+        Ok(Some((shared(state, &session, &request, &snapshot, now, None, None)?, inputs)))
+    });
+    let shared = match computed {
+        Ok(None) => before.map(|(shared, _)| shared),
+        Ok(Some((shared, inputs))) => {
+            let shared = Arc::new(shared);
+            store.publish_summary_shared(generation, shared.clone(), inputs);
+            Some(shared)
+        }
+        Err(error) => {
+            eprintln!("st3: the summary's shared counts failed: {error:#}");
+            before.map(|(shared, _)| shared)
+        }
+    };
+    let mut changed = false;
+    let Some(shared) = shared else {
+        // Nothing to count from: every selection's windows read for themselves until there is.
+        for person in &selections {
+            changed |= store.publish_summary_row(generation, person, None);
+        }
+        if changed {
+            store.publish_collection_view("summary");
+        }
+        return Ok(changed);
+    };
+    // Before attention's first publication there is nothing to count a person's alerts from;
+    // its windows wait for it, as attention windows do.
+    let Some(attention) = store.newest_attention_list().1 else {
+        return Ok(false);
+    };
+    for person in &selections {
+        let (alerts, gates) = published_attention_counts(&attention.rows, person.as_deref());
+        let row = crate::store::summary_list::SummaryRow {
+            cut: shared.cut,
+            published_at_unix_ms: shared.published_at_unix_ms,
+            row: row(person.as_deref(), alerts, &gates, &shared)?,
+        };
+        changed |= store.publish_summary_row(generation, person, Some(row));
     }
     if changed {
-        state.store.publish_collection_view("summary");
+        store.publish_collection_view("summary");
     }
     Ok(changed)
 }

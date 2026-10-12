@@ -69,20 +69,22 @@ pub fn start_attention_list(state: &AppState) {
                     eprintln!("st3: pairing recheck for published views failed: {error:#}");
                 }
                 let mut results = Vec::new();
-                let waiting = |results: &mut Vec<_>| {
-                    if let Some(result) = refresh_waiting_summary(&summary_state) {
+                let waiting = |results: &mut Vec<_>, starting: bool| {
+                    if let Some(result) = refresh_waiting_summary(&summary_state, starting) {
                         results.push(("summary", result.map(|_| ())));
                     }
                 };
-                waiting(&mut results);
+                waiting(&mut results, false);
                 results.push(("attention", crate::performance::task("attention/refresh", || {
                     if attention { refresh_attention_list(&reader) } else { Ok(()) }
                 })));
-                waiting(&mut results);
+                // As the daemon starts, the counts every summary shares, once attention is
+                // published and before any window asks for a summary.
+                waiting(&mut results, true);
                 results.push(("glasses", crate::performance::task("person-views/refresh", || {
                     refresh_owner_list(&reader, OwnerView::Glasses)
                 })));
-                waiting(&mut results);
+                waiting(&mut results, false);
                 results.push(("arrangements", crate::performance::task("person-views/refresh", || {
                     refresh_owner_list(&reader, OwnerView::Arrangements)
                 })));
@@ -120,7 +122,7 @@ pub fn start_attention_list(state: &AppState) {
             loop {
                 let summary_state = state.clone();
                 let refreshed = if store.summary_selection_waiting() {
-                    tokio::task::spawn_blocking(move || refresh_waiting_summary(&summary_state)).await
+                    tokio::task::spawn_blocking(move || refresh_waiting_summary(&summary_state, false)).await
                 } else {
                     Ok(None)
                 };
@@ -174,10 +176,13 @@ pub fn start_attention_list(state: &AppState) {
     });
 }
 
-/// Compute the summary selections windows are waiting for, if any: a window that opens a new
-/// selection gets its row without waiting for a whole refresh.
-fn refresh_waiting_summary(state: &AppState) -> Option<anyhow::Result<bool>> {
-    state.store.summary_selection_waiting().then(|| {
+/// Publish the summary selections windows are waiting for, if any: a window that opens a new
+/// selection gets its row without waiting for a whole refresh. While `starting`, also the
+/// shared counts the daemon has not computed yet.
+fn refresh_waiting_summary(state: &AppState, starting: bool) -> Option<anyhow::Result<bool>> {
+    (state.store.summary_selection_waiting()
+        || starting && state.store.summary_shared_starting())
+    .then(|| {
         crate::performance::task("summary/refresh", || {
             super::client_v0::summary::refresh_published(
                 state,

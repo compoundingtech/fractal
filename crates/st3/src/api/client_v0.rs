@@ -598,9 +598,12 @@ async fn collection_items_with_windows(
                                     }
                                     Some(Some((cut, at, vec![row])))
                                 }
+                                // Not published yet: counted at once from the published
+                                // shared counts and attention rows, as the refresher will.
                                 PublishedSummary::Pending => {
                                     store.request_attention_list_refresh();
-                                    Some(None)
+                                    Some(summary::published_row(&store, person.as_deref())
+                                        .map(|(cut, at, row)| (cut, at, vec![row])))
                                 }
                                 // A selection it does not serve: this window reads its own.
                                 PublishedSummary::Unserved => None,

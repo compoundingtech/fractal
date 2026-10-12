@@ -179,12 +179,17 @@ async fn summary_windows_serve_the_published_row_of_their_selection() {
     state.store.start_attention_list_refresher().unwrap();
     let ada = ClientSession::local(Some("person/ada")).unwrap();
     let agent = ClientSession::local(Some("agent/garden/seed")).unwrap();
-    // Before its selection is published a window is refused, retryably, and names it.
+    // Before anything is published a window is refused, retryably, and names it.
     for session in [&ada, &agent] {
         let refused = summary_window(&state, session).await.unwrap_err();
         assert_eq!(refused.code, "summary-not-ready");
         assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
     }
+    // Shared counts alone count no person's alerts: windows wait for attention as well.
+    assert!(!summary::refresh_published(&state, 60_000, false).unwrap());
+    assert!(state.store.summary_shared().is_some());
+    assert_eq!(summary_window(&state, &ada).await.unwrap_err().code, "summary-not-ready");
+    crate::api::refresh_attention_list(&state.store).unwrap();
     assert!(summary::refresh_published(&state, 60_000, false).unwrap());
     let cut = state.store.index().unwrap();
     let counts = |row: &Value| {
@@ -203,27 +208,95 @@ async fn summary_windows_serve_the_published_row_of_their_selection() {
     assert_eq!(items[0]["needs_you"], 1, "Ada's own request");
     let (_, items, _) = summary_window(&state, &agent).await.unwrap();
     assert_eq!(items[0]["needs_you"], 2, "every person's");
-    // Equal counts publish nothing new; a new request for Ada does.
+    // Equal counts publish nothing new; a new request for Ada does, once attention has it.
     assert!(!summary::refresh_published(&state, 60_000, false).unwrap());
     custom(&state, "custom/garden/review/v1/ada-two", "person/ada");
+    crate::api::refresh_attention_list(&state.store).unwrap();
     assert!(summary::refresh_published(&state, 60_000, false).unwrap());
     let (_, items, _) = summary_window(&state, &ada).await.unwrap();
     assert_eq!(items[0]["needs_you"], 2);
     assert_eq!(counts(&items[0]), counts(&computed_summary(&state, &ada)));
-    // A selection a window waits for is computed alone, without the others' changes.
+    // A window that opens a new selection is served at once, from the published shared counts
+    // and attention rows, before the refresher publishes that selection.
     let robin = ClientSession::local(Some("person/robin")).unwrap();
-    assert_eq!(summary_window(&state, &robin).await.unwrap_err().code, "summary-not-ready");
-    custom(&state, "custom/garden/review/v1/ada-three", "person/ada");
-    assert!(state.store.summary_selection_waiting());
-    assert!(summary::refresh_published(&state, 60_000, true).unwrap());
-    assert!(!state.store.summary_selection_waiting());
-    let (_, items, _) = summary_window(&state, &robin).await.unwrap();
+    let (snapshot, items, _) = summary_window(&state, &robin).await.unwrap();
+    assert!(snapshot.published_at.is_some());
+    assert_eq!(snapshot.store_index, state.store.summary_shared().unwrap().0.cut);
     assert_eq!(counts(&items[0]), counts(&computed_summary(&state, &robin)));
+    assert!(state.store.summary_selection_waiting());
+    assert!(summary::refresh_published(&state, 60_000, true).unwrap(), "Robin's row is published");
+    assert!(!state.store.summary_selection_waiting());
+    // A waiting refresh computes no shared counts again: it only publishes the waiting rows.
+    custom(&state, "custom/garden/review/v1/ada-three", "person/ada");
+    crate::api::refresh_attention_list(&state.store).unwrap();
+    let held = state.store.summary_shared().unwrap().0;
+    assert!(!summary::refresh_published(&state, 60_000, true).unwrap());
+    assert!(Arc::ptr_eq(&held, &state.store.summary_shared().unwrap().0));
     let (_, items, _) = summary_window(&state, &ada).await.unwrap();
-    assert_eq!(items[0]["needs_you"], 2, "computed again only by a full refresh");
+    assert_eq!(items[0]["needs_you"], 2, "published again only by a full refresh");
     assert!(summary::refresh_published(&state, 60_000, false).unwrap());
     let (_, items, _) = summary_window(&state, &ada).await.unwrap();
     assert_eq!(items[0]["needs_you"], 3);
+    assert_eq!(counts(&items[0]), counts(&computed_summary(&state, &ada)));
+}
+
+/// The published counts of a selection are the counts its window would compute for itself:
+/// alerts and gated missions from the published attention rows equal those from the attention
+/// items, for each person and for every person, a gate's mission counted active once.
+#[test]
+fn published_attention_counts_are_the_native_counts() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "summary-counts");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    custom(&state, "custom/garden/review/v1/robin", "person/robin");
+    let now = client_now_ms();
+    let rows = crate::api::client_attention_resources_at(&state.store, None, false, now).unwrap();
+    let mut rows = rows;
+    // A human gate's row names its mission; an update is no alert.
+    rows.push(json!({"person_id":"person/ada","alert":true,"attention_kind":"human-gate",
+        "mission_id":"mission/orchard"}));
+    rows.push(json!({"person_id":"person/ada","alert":false,"attention_kind":"person-step"}));
+    for person in [None, Some("person/ada"), Some("person/robin"), Some("person/visitor")] {
+        let items = state.store.attention_snapshot(person, now).unwrap();
+        let native = (
+            items.iter().filter(|item| item.is_alert()).count(),
+            items.iter().filter(|item| item.kind == "human-gate")
+                .filter_map(|item| item.mission.clone()).collect::<BTreeSet<_>>(),
+        );
+        let published = summary::published_attention_counts(&rows[..rows.len() - 2], person);
+        assert_eq!(published, native, "{person:?}");
+    }
+    let (alerts, gates) = summary::published_attention_counts(&rows, Some("person/ada"));
+    assert_eq!(alerts, 2);
+    assert_eq!(gates, BTreeSet::from(["mission/orchard".to_owned()]));
+}
+
+/// As the daemon starts the refresher computes the counts every summary shares with no window
+/// reading, so the first window of any selection is served at once and never waits for them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_summary_window_of_any_selection_is_served_at_once() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "summary-start");
+    custom(&state, "custom/garden/review/v1/ada", "person/ada");
+    crate::api::start_attention_list(&state);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while state.store.summary_shared().is_none() || state.store.newest_attention_list().1.is_none() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for the start");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!state.store.summary_shared_starting());
+    for (session, person) in [("person/ada", None), ("agent/garden/seed", None),
+        ("agent/garden/seed", Some("person/robin"))]
+    {
+        let session = ClientSession::local(Some(session)).unwrap();
+        let (snapshot, items, _) = summary_window_for(&state, &session, person).await.unwrap();
+        assert!(snapshot.published_at.is_some());
+        let computed = computed_summary_for(&state, &session, person);
+        for field in ["person_id", "needs_you", "active_missions", "machines", "revision"] {
+            assert_eq!(items[0][field], computed[field], "{field}");
+        }
+    }
+    state.store.stop_attention_list_refresher();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -241,6 +314,7 @@ async fn odd_and_surplus_summary_selections_never_stop_the_others() {
     for person in ["not-a-person", "person/ada"] {
         assert!(summary_window_for(&state, &agent, Some(person)).await.is_err());
     }
+    crate::api::refresh_attention_list(&state.store).unwrap();
     summary::refresh_published(&state, 60_000, false).unwrap();
     for person in ["not-a-person", "person/ada"] {
         let (snapshot, items, _) = summary_window_for(&state, &agent, Some(person)).await.unwrap();
