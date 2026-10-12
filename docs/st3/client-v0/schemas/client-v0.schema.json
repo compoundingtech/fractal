@@ -2001,7 +2001,7 @@
       "type": "object", "required": ["type", "outcome"],
       "properties": {
         "type": {"enum": ["decision", "choice", "feedback", "update"]},
-        "outcome": {"enum": ["accept", "decline", "request_changes", "selected", "custom", "feedback", "read"]},
+        "outcome": {"enum": ["accept", "decline", "request_changes", "selected", "custom", "feedback", "read", "dismissed"]},
         "id": {"type": "string"},
         "label": {"type": "string"},
         "text": {"type": "string"}
