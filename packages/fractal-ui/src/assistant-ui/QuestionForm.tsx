@@ -5,6 +5,7 @@ import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as 
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import type { Answers, AnswerDraft, Preview, QuestionRequestView, QuestionVariant, QuestionView } from './question-model'
 import { compactQuestionAge } from './question-age'
+import { Icon } from './composition/Icons'
 export type * from './question-model'
 
 const OTHER = '__other'
@@ -105,14 +106,13 @@ export const QuestionForm = (props: QuestionFormProps) => {
   if (!pending(request)) return <QuestionSummary request={request} now={props.now} locale={props.locale} timeZone={props.timeZone} />
   const initialChoice = question?.options.find(option => draft[question.id]?.selected.includes(option.id))?.id ?? question?.options.find(option => option.recommended)?.id ?? question?.options[0]?.id
   const choices = question === undefined ? [] : [...question.options, ...(question.allowOther ? [{ id: OTHER, label: 'Other…' }] : [])]
-  return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
-    <header {...stylex.props(styles.header)}><span aria-hidden="true">{request.questions[0]?.kind === 'permission' ? '◇' : request.questions[0]?.kind === 'plan' ? '≡' : '?'}</span><strong {...stylex.props(styles.sender)}>{request.agentLabel}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span></header>
-    <div {...stylex.props(styles.meta)}>{[request.source, compactQuestionAge(Date.parse(request.askedAt), props.now, props.timeZone)].filter(Boolean).join(' · ')}</div>
+  return <section {...stylex.props(styles.card, props.variant === 'pinned' && styles.pinned)} data-fractal-card={props.variant === 'pinned' ? undefined : ''} data-question-variant={props.variant ?? 'transcript'} aria-label={`${title(request)} from ${request.agentLabel}`}>
+    <header data-question-header {...stylex.props(styles.header, styles.questionHeader)}><span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name="question" scale="status" /></span><strong {...stylex.props(styles.sender)}>{request.agentLabel}</strong><span {...stylex.props(styles.chip)}>{stateLabel(request)}</span><span {...stylex.props(styles.meta)}>{[request.source, compactQuestionAge(Date.parse(request.askedAt), props.now, props.timeZone)].filter(Boolean).join(' · ')}</span></header>
     {props.onJump !== undefined ? <Button {...stylex.props(styles.button)} onPress={props.onJump}>Show in thread</Button> : null}
     <div ref={root} onKeyDownCapture={keys} {...stylex.props(styles.body)}>
       {request.questions.length > 1 ? <nav aria-label="Questions" {...stylex.props(styles.header)}>{request.questions.map((q, index) => <Button key={q.id} {...stylex.props(styles.button)} aria-current={step === index ? 'step' : undefined} onPress={() => go(index)}>{q.header ?? `Q${index + 1}`}</Button>)}<Button {...stylex.props(styles.button)} onPress={() => go(request.questions.length)} aria-current={review ? 'step' : undefined}>Review</Button></nav> : null}
       {review ? <AnswerList request={request} answers={draft} /> : question !== undefined ? <>
-        <EmbraceMarkdownPreview markdown={question.prompt} />
+        <EmbraceMarkdownPreview markdown={question.prompt} tone="foreground" />
         {question.subject !== undefined ? <QuestionPreview preview={question.subject} /> : null}
         {question.kind === 'text' ? <TextField value={draft[question.id]?.other ?? ''} onChange={other => update(question, { other })} isDisabled={disabled} isRequired={question.required !== false}>
           <Label>Your answer</Label>
@@ -123,9 +123,9 @@ export const QuestionForm = (props: QuestionFormProps) => {
           update(question, { selected, ...(!selected.includes(OTHER) && draft[question.id]?.selected.includes(OTHER) ? { other: undefined } : {}) })
           if (addedOther) requestAnimationFrame(() => otherRef.current?.focus())
         }} isDisabled={request.state._tag === 'submitting'} isReadOnly={!request.answerable} isRequired={question.required === true} {...stylex.props(styles.body)}>
-          {choices.map((option, index) => <Checkbox key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true">{isSelected ? '☑' : '☐'} {index + 1}. </span><ChoiceLabel option={option} selected={isSelected} /></div>}</Checkbox>)}
+          {choices.map((option, index) => <Checkbox key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true"><Icon name={isSelected ? 'checkbox-checked' : 'checkbox'} scale="status" /> {index + 1}. </span><ChoiceLabel option={option} selected={isSelected} /></div>}</Checkbox>)}
         </CheckboxGroup> : <RadioGroup aria-label={question.prompt} value={draft[question.id]?.selected[0] ?? ''} onChange={id => { if (!disabled) choose(question, id) }} isDisabled={request.state._tag === 'submitting'} isReadOnly={!request.answerable} isRequired={question.required !== false} {...stylex.props(styles.body)}>
-          {choices.map((option, index) => <Radio key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true">{isSelected ? '●' : '○'} {index + 1}. </span><ChoiceLabel option={option} selected={isSelected} /></div>}</Radio>)}
+          {choices.map((option, index) => <Radio key={option.id} value={option.id} data-choice-id={option.id} autoFocus={props.autoFocus && option.id === initialChoice} onFocus={() => setFocused(option.id)} {...stylex.props(styles.option, 'tone' in option && option.tone === 'danger' && styles.danger)}>{({ isSelected, isFocusVisible }) => <div {...stylex.props(isSelected && styles.selected, isFocusVisible && styles.focus)}><span aria-hidden="true"><Icon name={isSelected ? 'radio-selected' : 'radio'} scale="status" /> {index + 1}. </span><ChoiceLabel option={option} selected={isSelected} /></div>}</Radio>)}
         </RadioGroup>}
         {focusedPreview !== undefined ? <QuestionPreview preview={focusedPreview} /> : null}
         {question.allowOther && draft[question.id]?.selected.includes(OTHER) ? <TextField value={draft[question.id]?.other ?? ''} onChange={other => update(question, { other })} isDisabled={disabled}><Label>Your answer</Label><TextArea ref={otherRef} {...stylex.props(styles.field)} /></TextField> : null}
@@ -138,7 +138,7 @@ export const QuestionForm = (props: QuestionFormProps) => {
     {request.state._tag === 'pending' && request.state.expiresAt !== undefined ? <p {...stylex.props(styles.meta)}>Answer deadline · {request.state.expiresAt}</p> : null}
     {props.composerTyping ? <p {...stylex.props(styles.meta)}>{props.composerRouting?._tag === 'ChatAboutQuestion' ? 'Your message goes to the agent as a note about this question' : 'delivered after the question is answered'}</p> : null}
     {!request.answerable ? <footer {...stylex.props(styles.header)}>{request.readOnlyReason ?? 'Answer this question in the terminal.'}<Button {...stylex.props(styles.button)} isDisabled={props.onOpenTerminal === undefined} onPress={props.onOpenTerminal}>Open terminal</Button></footer> : <footer {...stylex.props(styles.header)}>
-      <span {...stylex.props(styles.meta)}>1–9 pick · ↑↓ move · Space toggle · Enter next · ⌘/Ctrl Enter submit · Esc keeps your draft</span>
+      <span {...stylex.props(styles.meta)}>1–9 pick · Up/Down move · Space toggle · Enter next · Meta/Ctrl Enter submit · Esc keeps your draft</span>
       {props.onDecline !== undefined ? <Button {...stylex.props(styles.button)} isDisabled={disabled} onPress={props.onDecline}>Skip · ends the turn</Button> : null}
       {request.allowChatRedirect ? <Button {...stylex.props(styles.button)} isDisabled={disabled} onPress={props.onChat}>Chat about this</Button> : null}
       {request.questions.length > 1 && !review ? <Button {...stylex.props(styles.button)} isDisabled={disabled} onPress={advance}>Next</Button> : null}
@@ -156,7 +156,7 @@ const AnswerList = ({ request, answers }: { readonly request: QuestionRequestVie
   return <div key={q.id}><dt>{q.header ?? `Q${index + 1}`} · {q.prompt}</dt><dd>{answer === undefined ? 'Left open' : labels.join(', ') || (q.kind === 'multi' ? 'none' : 'Left open')}{answer?.autoSelected ? <span {...stylex.props(styles.meta)}> · auto-selected (timeout)</span> : null}{answer?.note ? <p>Note: {answer.note}</p> : null}{answer?.attachments?.map(attachment => <span key={attachment} {...stylex.props(styles.chip)}>{attachment}</span>)}</dd></div>
 })}</dl>
 
-const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}<div role="list" aria-label={`Original choices: ${q.prompt}`} {...stylex.props(styles.body)}>{q.options.map((option, index) => <div role="listitem" data-original-choice key={option.id} {...stylex.props(styles.option, styles.originalChoice)}><span aria-hidden="true">{q.kind === 'multi' ? '☐' : '○'} {index + 1}.</span><div><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div></div>)}</div></div>)}</>
+const OriginalQuestions = ({ request }: { readonly request: QuestionRequestView }) => <>{request.questions.map(q => <div key={q.id}><EmbraceMarkdownPreview markdown={q.prompt} />{q.subject !== undefined ? <QuestionPreview preview={q.subject} /> : null}<div role="list" aria-label={`Original choices: ${q.prompt}`} {...stylex.props(styles.body)}>{q.options.map((option, index) => <div role="listitem" data-original-choice key={option.id} {...stylex.props(styles.option, styles.originalChoice)}><span aria-hidden="true"><Icon name={q.kind === 'multi' ? 'checkbox' : 'radio'} scale="status" /> {index + 1}.</span><div><ChoiceLabel option={option} />{option.preview !== undefined ? <QuestionPreview preview={option.preview} /> : null}</div></div>)}</div></div>)}</>
 
 export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly request: QuestionRequestView; readonly now?: number; readonly locale?: string; readonly timeZone?: string }) => {
   const absoluteFormat = React.useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: 'full', timeStyle: 'long', timeZone }), [locale, timeZone])
@@ -174,7 +174,7 @@ export const QuestionSummary = ({ request, now, locale, timeZone }: { readonly r
     const absolute = Number.isFinite(answeredAt) ? absoluteFormat.format(answeredAt) : undefined
     return <section {...stylex.props(styles.summary)} aria-label="Question outcome">
       <Disclosure>{({ isExpanded }) => <>
-        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{age !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta, styles.summaryAge)}>{age}</time> : null}<span aria-hidden="true" {...stylex.props(styles.summaryChevron)}>{isExpanded ? '⌄' : '›'}</span></Button>
+        <Button slot="trigger" {...stylex.props(styles.summaryTrigger)}><span {...stylex.props(styles.summaryLabel)}>Answered{choice !== '' ? ` · ${choice}` : ''}</span>{age !== undefined ? <time title={absolute} dateTime={absolute === undefined ? undefined : new Date(answeredAt).toISOString()} {...stylex.props(styles.meta, styles.summaryAge)}>{age}</time> : null}<span aria-hidden="true" {...stylex.props(styles.summaryChevron)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span></Button>
         <DisclosurePanel>{isExpanded ? <><AnswerList request={request} answers={state.answers} />{answeredBy !== '' ? <p {...stylex.props(styles.meta)}>{answeredBy}</p> : null}<details><summary>Original questions</summary><OriginalQuestions request={request} /></details></> : null}</DisclosurePanel>
       </>}</Disclosure>
     </section>
@@ -192,18 +192,20 @@ export const NeedsYouBar = ({ requests, expanded, onToggle, transcriptVisibility
   const waiting = requests.filter(pending)
   const first = waiting[0]
   if (first === undefined || transcriptVisibility >= 0.6) return null
-  return <aside {...stylex.props(styles.card)} aria-label="Needs you"><Button {...stylex.props(styles.button, styles.dockButton)} aria-expanded={expanded} onPress={onToggle}><span {...stylex.props(styles.dockLabel)}>◌ {first.agentLabel} is waiting on you · {first.questions[0]?.prompt}{waiting.length > 1 ? ` · +${waiting.length - 1}` : ''}</span><span {...stylex.props(styles.dockAction)}>{expanded ? 'Hide' : 'Answer'}</span></Button>{expanded ? children : null}</aside>
+  return <aside data-fractal-card="" {...stylex.props(styles.card)} aria-label="Needs you"><Button {...stylex.props(styles.button, styles.dockButton)} aria-expanded={expanded} onPress={onToggle}><span aria-hidden="true" {...stylex.props(styles.glyph)}><Icon name="question" scale="status" /></span><span {...stylex.props(styles.dockLabel)}>{first.agentLabel} is waiting on you · {first.questions[0]?.prompt}{waiting.length > 1 ? ` · +${waiting.length - 1}` : ''}</span><span {...stylex.props(styles.dockAction)}>{expanded ? 'Hide' : 'Answer'}</span></Button>{expanded ? children : null}</aside>
 }
-export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <details key={request.id} {...stylex.props(styles.card)}><summary {...stylex.props(styles.inboxSummary)}>{request.agentLabel} · {request.questions[0]?.prompt}</summary><QuestionForm {...formProps?.(request.id)} request={request} variant="pinned" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} /></details>)}</section>
+export const NeedsYouInbox = ({ requests, onShowInThread, onOpenTerminal, formProps }: { readonly requests: readonly QuestionRequestView[]; readonly onShowInThread: (id: string) => void; readonly onOpenTerminal: (id: string) => void; readonly formProps?: (id: string) => Omit<QuestionFormProps, 'request' | 'variant' | 'onJump' | 'onOpenTerminal'> }) => <section aria-label="Needs you inbox" {...stylex.props(styles.body)}>{requests.filter(pending).map(request => <details data-fractal-card="" key={request.id} {...stylex.props(styles.card)}><summary {...stylex.props(styles.inboxSummary)}>{request.agentLabel} · {request.questions[0]?.prompt}</summary><QuestionForm {...formProps?.(request.id)} request={request} variant="pinned" onJump={() => onShowInThread(request.id)} onOpenTerminal={() => onOpenTerminal(request.id)} /></details>)}</section>
 
 const styles = stylex.create({
-  card: { padding: s.md, maxWidth: g.lane, width: '100%', boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.md, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
+  card: { paddingBlock: s.md, paddingInline: s.lg, maxWidth: g.lane, width: '100%', boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: statusVars.attention, borderRadius: r.md, backgroundColor: surfaceVars.raised, color: textVars.fg, minWidth: 0, overflowWrap: 'anywhere', fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   pinned: { padding: 0, borderWidth: 0, backgroundColor: 'transparent' },
   note: { alignSelf: 'flex-start', borderWidth: 0, backgroundColor: 'transparent', paddingInline: 0 },
   inboxSummary: { cursor: 'pointer', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' },
   summary: { paddingBlock: s.md, color: textVars.fg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: borderVars.borderStrong, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   body: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0 },
   header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md },
+  questionHeader: { minHeight: g.toolRow, gap: s.sm },
+  glyph: { width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: statusVars.attention },
   sender: { fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   summaryTrigger: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minHeight: g.toolRow, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
   summaryLabel: { flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
@@ -211,7 +213,7 @@ const styles = stylex.create({
   summaryAge: { flex: '0 0 auto', whiteSpace: 'nowrap', textAlign: 'right' },
   summaryChevron: { width: g.icon, flexShrink: 0, textAlign: 'right' },
   selectedDescription: { color: textVars.fgSoft },
-  chip: { color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, paddingInline: s.xs, paddingBlock: s.xs2, backgroundColor: surfaceVars.rowActive, borderRadius: r.sm },
+  chip: { color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.border, borderRadius: r.sm },
   button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   danger: { color: statusVars.dangerFg },
   option: { padding: s.xs, borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, cursor: 'pointer' },

@@ -8,6 +8,7 @@ export type IconName =
   | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
+  | 'person' | 'question' | 'radio' | 'radio-selected' | 'checkbox' | 'checkbox-checked' | 'arrow-right' | 'arrow-left'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   search: <><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></>,
@@ -37,14 +38,23 @@ const PATHS: Record<IconName, React.ReactNode> = {
   'pull-request': <><circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="13" r="1.5" /><path d="M4 4.5v7M12 11.5V6a3 3 0 0 0-3-3H7M9 1 7 3l2 2" /></>,
   'stop-circle': <><circle cx="8" cy="8" r="6" /><rect x="5" y="5" width="6" height="6" rx=".5" fill="currentColor" stroke="none" /></>,
   thought: <path d="M8 2.5c.45 2.75 1.75 4.05 4.5 4.5-2.75.45-4.05 1.75-4.5 4.5-.45-2.75-1.75-4.05-4.5-4.5 2.75-.45 4.05-1.75 4.5-4.5z" />,
+  person: <><circle cx="8" cy="5" r="2.5" /><path d="M2.5 14v-1a5.5 5.5 0 0 1 11 0v1" /></>,
+  question: <><circle cx="8" cy="8" r="6" /><path d="M6.5 5.5a1.6 1.6 0 1 1 2.4 1.4C8.2 7.3 8 7.7 8 8.5M8 11h.01" /></>,
+  radio: <circle cx="8" cy="8" r="5.5" />,
+  'radio-selected': <><circle cx="8" cy="8" r="5.5" /><circle cx="8" cy="8" r="2.5" fill="currentColor" stroke="none" /></>,
+  checkbox: <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />,
+  'checkbox-checked': <><rect x="2.5" y="2.5" width="11" height="11" rx="1.5" /><path d="M5 8 7 10 11 5.5" /></>,
+  'arrow-right': <path d="M2.5 8h11M9 3.5 13.5 8 9 12.5" />,
+  'arrow-left': <path d="M13.5 8h-11M7 3.5 2.5 8 7 12.5" />,
 }
 
 /** One 16px stroke icon set; stroke inherits currentColor, fill none. */
-export function Icon({ name, size, scale = 'normal', spinning = false, label }: { name: IconName; size?: number; scale?: 'normal' | 'status'; spinning?: boolean; label?: string }) {
+export function Icon({ name, size, scale = 'normal', spinning = false, label }: { name: IconName; size?: number; scale?: 'normal' | 'status' | 'disclosure'; spinning?: boolean; label?: string }) {
   return <svg
     width={size}
     height={size}
     viewBox="0 0 16 16"
+    data-icon={name}
     fill="none"
     stroke="currentColor"
     strokeWidth={1.5}
@@ -53,13 +63,14 @@ export function Icon({ name, size, scale = 'normal', spinning = false, label }: 
     aria-hidden={label === undefined ? true : undefined}
     role={label === undefined ? undefined : 'img'}
     aria-label={label}
-    {...stylex.props(styles.icon, scale === 'status' && styles.status, size !== undefined && styles.size(size), spinning && styles.spin)}
+    {...stylex.props(styles.icon, scale === 'status' && styles.status, scale === 'disclosure' && styles.disclosure, size !== undefined && styles.size(size), spinning && styles.spin)}
   >{PATHS[name]}</svg>
 }
 
 const styles = stylex.create({
   icon: { width: g.icon, height: g.icon, flexShrink: 0 },
   status: { width: g.status, height: g.status },
+  disclosure: { width: g.iconSm, height: g.iconSm },
   size: (size: number) => ({ width: size, height: size }),
   spin: { animationName: stylex.keyframes({ to: { transform: 'rotate(360deg)' } }), animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
 })

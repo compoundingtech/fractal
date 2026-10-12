@@ -15,12 +15,12 @@ import { FULL_SCREEN, navigationRef, ROOTS, type StackParams, type TabParams } f
 import { StoreProvider, useStore } from './store';
 import { parseDevLink, tabLabel, tabNamed, type Tab } from './tabs';
 import { theme } from './theme';
-import { HistoryScreen } from './screens/Agents';
+import { AgentsScreen, HistoryScreen } from './screens/Agents';
 import { ConversationScreen } from './screens/Conversation';
 import { FleetScreen, PairScreen } from './screens/Fleet';
 import { UsageDetailScreen, UsageScreen } from './screens/Usage';
-import { AttentionScreen, HomeScreen } from './screens/Home';
-import { LaunchScreen, MissionScreen, NewMissionScreen } from './screens/Missions';
+import { AttentionScreen, NowScreen } from './screens/Now';
+import { LaunchScreen, MissionScreen, MissionsScreen, NewMissionScreen } from './screens/Missions';
 import { TerminalScreen } from './screens/Terminal';
 import { GlassesScreen, SpaceScreen } from './screens/Glasses';
 import { ResourceScreen } from './screens/Resource';
@@ -55,11 +55,13 @@ const stackOptions: NativeStackNavigationOptions = {
 
 function TabStack({ tab }: { tab: Tab }) {
   return <Stack.Navigator screenOptions={stackOptions}>
-    {tab === 'Now' ? <Stack.Screen name="NowRoot" component={HomeScreen} options={{ title: 'Now' }} /> :
+    {tab === 'Now' ? <Stack.Screen name="NowRoot" component={NowScreen} options={{ title: 'Now' }} /> :
      tab === 'Resources' ? <Stack.Screen name="ResourcesRoot" component={SidebarScreen} options={{ title: 'Resources' }} /> :
      tab === 'Fleet' ? <Stack.Screen name="FleetRoot" component={FleetScreen} options={{ title: 'Fleet' }} /> :
      <Stack.Screen name="SpacesRoot" component={GlassesScreen} options={{ title: 'Spaces' }} />}
 
+    <Stack.Screen name="Agents" component={AgentsScreen} options={{ title: 'Agents' }} />
+    <Stack.Screen name="Missions" component={MissionsScreen} options={{ title: 'Missions' }} />
     <Stack.Screen name="Resource" component={ResourceScreen} options={{ title: 'Resource' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
     <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />

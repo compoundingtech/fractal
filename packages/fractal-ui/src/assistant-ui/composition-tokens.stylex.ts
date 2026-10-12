@@ -103,6 +103,8 @@ export const geometryVars = stylex.defineVars({
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
   toolIndent: '28px', gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
+  textColumn: '22px',
   sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
   /** Work rows: glyph slot · title · status word · disclosure slot · duration column. */
@@ -118,7 +120,6 @@ export const geometryVars = stylex.defineVars({
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
   emptyMark: '36px', avatar: '32px', fileMax: '192px', emptyHintMax: '288px',
-  avatarSm: '16px',
   compactEditorMin: '48px', progressSm: '4px', progressMd: '6px',
   specimenInset: { default: '16px', '@media (min-width: 48rem)': '28px' },
   familyColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 48rem)': 'repeat(2, minmax(0, 1fr))', '@media (min-width: 80rem)': 'repeat(3, minmax(0, 1fr))' },
