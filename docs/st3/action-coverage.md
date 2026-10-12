@@ -379,3 +379,17 @@ The sidebar's existing optional `resources.list` read is covered by
 `observed_resources::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix`
 (real Unix socket and arrangement filing), the daemon filter/fence and read-scope tests, and
 `sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing` (test backend navigation and explicit filing).
+
+The optional `inventory-collections` capability follows clients, usage, machines,
+devices, native sessions and terminal lists on the collection socket. The
+`collection_refresh_tests::*_inventory_*` real-socket tests cover source changes,
+frame schema and typed decoding, reconnect snapshots, invalid subscription
+filters/limits, active-device retirement and native filesystem/process events.
+
+The phone uses the same `collections.inventory` reads, covered by the real-socket
+tests above, while the screen displaying each inventory is focused. Its Node
+`inventoryFeed.test.mjs` checks the client layer: shared slots, selected usage
+periods, ordered updates, explicit refresh snapshots, reconnect, background and
+grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
+`collectionSocket.test.mjs` checks authentication and control-event delivery at
+the native bridge boundary; it does not claim an iOS simulator was driven.
