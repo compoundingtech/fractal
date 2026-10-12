@@ -216,6 +216,14 @@ The exported legacy Folio, Relay and Orbit palettes also avoid green: `good` is 
 
 The shared diff tint assertion identifies a token through its causal effect on both the row wash and gutter, letting the browser resolve CSS layers, specificity and conditional rules. It restores exact inline styles and verifies computed paint restoration after each probe. Every dark/light tint story also rejects the original neutral pre-tint paint and an equal-blue wash backed by an unrelated variable, then verifies the restored positive result.
 
+### Transcript turn exploration
+
+`fractal-ui-explore-transcript-turns--exploration` compares three turn structures, three input-kind cues and four time/copy placements. Every dimension has the shared controlled `VariantPicker` contract and a Compare toggle; selections are Storybook args, including dark/light and 1440/900 host lanes. Link to `/iframe.html?id=fractal-ui-explore-transcript-turns--exploration&args=turn:T1;kind:K1;meta:M2;scheme:light;width:900`.
+
+The explore-only projection reuses the incoming/human `AgentMessage` family, the production `Transcript` answer row and its Markdown renderer, and the `WorkLogV1` fold. It does not promote a variant into production. Input cards, chat alignment and sender-gutter language are alternatives; header, gutter, gap-divider and inline-trailing metadata all omit a footer. Hover, focus-within and touch tap reveal the same Copy/time affordances without another metadata tab stop. The fold retains a 22px nesting step, a rail and fixed disclosure/status columns.
+
+The screened fixture preserves four relay/reply cycles, inline code, repeated status, a signed person, titled agent mail, a system notice and a completed tool fold. Rejected screenshot lines are represented by synthetic equivalents; the cropped fourth reply is synthetic. The `MetaM1` through `MetaM4` plays measure block-height deltas and time ownership against the next block's rectangle. All plays reject a reserved-footer control, a next-input timestamp control, an unstyled token probe and a hover-only focus control. `AllStates` covers the full dimension matrix; dark/light and both host lanes remain selectable.
+
 ## Clean-room note
 
 The original kit's behavior references are listed below. The gated workbench/composer additions reuse our independently authored internal review route at `98a270d4e58a44e4c4625cf1956ad09dbabfc1a7`, with the reviewed tint cutover from `35b6922a1559b4b3bcd78b672cb6b707c5d1e108`; their host/runtime boundaries are adapted to this kit as described above. This provenance is not a claim that the later additions were authored without consulting our own source.
