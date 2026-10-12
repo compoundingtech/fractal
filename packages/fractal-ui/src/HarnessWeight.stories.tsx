@@ -3,6 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import { HarnessNotice } from './assistant-ui/composition/HarnessNotice'
+import { UnsupportedRecord } from './assistant-ui/composition/UnsupportedRecord'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
 import type { HarnessWeight } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -43,6 +44,24 @@ export const Dark: Story = {
   },
 }
 export const Light: Story = { ...Dark, args: { scheme: 'light' } }
+
+/** F2 marker stays a single quiet row; only Inspect reveals the capped diagnostic preview. */
+export const UnsupportedDark: Story = {
+  render: ({ scheme }) => <section data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><div {...stylex.props(styles.column)}>
+    <p {...stylex.props(styles.prose)}>The other transcript entries remain readable.</p>
+    <UnsupportedRecord item={{ _tag: 'Unsupported', id: 'unsupported/story', harness: 'omp', recordKind: 'model_usage', reason: 'unrecognized-record', at: '2026-01-15T12:30:00Z', inspect: { text: '{\n  \"token\": \"[redacted]\",\n  \"message\": \"capped preview…\"\n}', bytes: 8192, truncated: true } }} />
+  </div></section>,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const marker = within(canvas.getByTestId('unsupported-record'))
+    const trigger = marker.getByRole('button', { name: 'Inspect' })
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(trigger)
+    await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    await expect(marker.getByText('8,192 bytes · truncated')).toBeVisible()
+  },
+}
+export const UnsupportedLight: Story = { ...UnsupportedDark, args: { scheme: 'light' } }
 
 const styles = stylex.create({
   root: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(22rem, 1fr))', gap: s.section, minHeight: '100vh', padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
