@@ -963,7 +963,11 @@ pub fn run(context: Context) -> Result<()> {
                             Ok((rows, has_more)) => { ui.resource_sidebar.terminals = terminal_rows(rows); ui.resource_sidebar.terminals_has_more = has_more; },
                             Err(error) => ui.flash(format!("Could not load terminals: {error}")),
                         },
-                        InventoryRead::Clients(outcome) => model.clients = Some(outcome),
+                        InventoryRead::Clients(outcome) => match outcome {
+                            Ok(clients) => model.clients = Some(Ok(clients)),
+                            Err(error) if matches!(model.clients, Some(Ok(_))) => ui.flash(format!("Could not read clients again: {error}")),
+                            Err(error) => model.clients = Some(Err(error)),
+                        },
                         InventoryRead::Usage(hours, outcome) if hours == ui.usage_hours => match outcome {
                             Ok(period) => model.usage = Some(Ok(period)),
                             Err(error) if matches!(model.usage, Some(Ok(_))) => ui.flash(format!("Could not read usage again: {error}")),
