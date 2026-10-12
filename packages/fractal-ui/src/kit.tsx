@@ -121,7 +121,7 @@ export function MenuTrigger({ items, onAction, ariaLabel, children }: { items: r
   return <SurfaceMenuTrigger>{children}<SurfacePopover placement="bottom end"><Menu items={items} onAction={onAction} ariaLabel={ariaLabel} /></SurfacePopover></SurfaceMenuTrigger>
 }
 export function DialogBody({ title, children, close }: { title: string; children: React.ReactNode; close: () => void }) {
-  return <Aria.Dialog aria-label={title} className={`${focusClass}  p-5`}>
+  return <Aria.Dialog aria-label={title} className={`${focusClass} p-5`}>
     <Aria.Heading slot="title" className="font-display text-xl font-semibold">{title}</Aria.Heading>
     <Aria.Button slot="close" aria-label="Close" className={`${focusClass} absolute top-3 right-3 cursor-pointer text-muted data-[hovered]:text-ink`}><XCircleIcon /></Aria.Button>
     {children}
