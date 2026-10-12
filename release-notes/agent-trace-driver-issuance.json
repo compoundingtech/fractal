@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Provide managed native drivers with a lease-derived Agent Trace runtime file.",
+  "replay": {
+    "status": "none",
+    "detail": "Runtime trace issuance uses the current lease context; signed claims, replay admission and canonical projections are unchanged. Idle agents omit both why and issuance rather than inventing work context."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema migration, stored-claim rewrite or client schema change. The runtime file uses the Agent Trace runtime contract."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, claim-admission or authorization rule changes. Trace metadata does not grant authority or replace lease fencing."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Native driver children receive AGENT_TRACE_FILE pointing to agent-trace.json in their agent directory. Issuance is derived from a unique active lease; idle agents omit issuance and why. A launch without a known model omits model until the harness reports it. A seat without a recorded human principal has no trace file. Context reports retain the existing model identifier and add provider separately; provider or model changes publish immediately. The trace setting is outbound child environment only and is not required for native path resolution. Interrupted-ask healing removes AGENT_TRACE_FILE alongside managed driver handles while retaining the existing launcher identity."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption or database migration is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual trace-file creation or operator migration is required; the managed driver runtime supplies the file and child environment."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No durable data or authorization state is migrated, so no database recovery procedure changes. Runtime trace metadata is derived from the current managed execution context."
+  }
+}

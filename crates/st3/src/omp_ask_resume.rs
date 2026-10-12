@@ -96,7 +96,10 @@ fn healing_command(
         if name.starts_with("ST3_")
             || name.starts_with("ST2_")
             || (name.starts_with("ST_") && name != "ST_AGENT")
-            || matches!(name.as_ref(), "PTY_SESSION" | "PTY_ROOT" | "PTY_SESSION_DIR")
+            || matches!(
+                name.as_ref(),
+                "AGENT_TRACE_FILE" | "PTY_SESSION" | "PTY_ROOT" | "PTY_SESSION_DIR"
+            )
         {
             command.env_remove(key);
         }
@@ -269,6 +272,7 @@ mod tests {
         let handles = [
             "PTY_SESSION", "PTY_ROOT", "PTY_SESSION_DIR", "ST3_ENDPOINT", "ST3_NATIVE_CONTINUE_SESSION",
             "ST2_CHANNEL", "ST_HOOKS", "ST_OMP_CHANNEL_BIN", "ST_DRIVER_AGENT_DIR",
+            "ST_DRIVER_ROOT", "ST_DRIVER_SESSION_DIR", "ST_DRIVER_IDENTITY", "AGENT_TRACE_FILE",
         ];
         let keys = handles.into_iter().chain(["ST_AGENT", "HOME", "PATH"]).map(Into::into);
         let command = healing_command("omp", Path::new("/sessions"), "native-id", keys);

@@ -49,12 +49,14 @@ if [ -n "$ST_ADMISSION_TRACE" ]; then
   export STUB_HARNESS=omp
   exec "{node}" "{admission_host}" "$@"
 fi
+cat "$AGENT_TRACE_FILE" > "$RESUME_TEST_TRACE" || exit 1
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--resume" ]; then shift; resume="$1"; fi
   shift
 done
 {{
   printf '%s\n' '{{"type":"session","sessionId":"{id}","sessionFile":"'"$resume"'"}}'
+  printf '%s\n' '{{"type":"context","reading":{{"usedTokens":0,"windowTokens":100,"usedPercent":0,"model":"fixture-model","provider":"fixture-provider"}}}}'
   while [ -d "${{RESUME_TEST_STOP%/*}}" ] && [ ! -f "$RESUME_TEST_STOP" ]; do sleep 0.01; done
 }} | "$ST_OMP_CHANNEL_BIN" --endpoint "$ST3_ENDPOINT" driver omp-channel --identity "$ST_OMP_CHANNEL_IDENTITY" --catalog "$ST_DRIVER_ROOT"
 "#, bash=env!("ST3_FIXTURE_BASH"), node=fixture_node.display(), admission_host=admission_host.display())).unwrap();
@@ -143,6 +145,7 @@ agent "garden/worker" {{
         .env("HOME", root.path())
         .env("PATH", env!("ST3_FIXTURE_PATH"))
         .env("RESUME_TEST_STOP", &stop)
+        .env("RESUME_TEST_TRACE", root.path().join("provider-launch-trace.json"))
         .env("ST3_DRIVER_STATE_DIR", &drivers)
         .env("ST_AGENT", subject)
         .env("ST3_ENDPOINT", &socket)
@@ -173,6 +176,29 @@ agent "garden/worker" {{
     let binding = store
         .latest_claim(subject, Some("harness.session-file"))
         .unwrap();
+    let launch_trace: st3::agent_trace::Runtime = serde_json::from_slice(
+        &std::fs::read(root.path().join("provider-launch-trace.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(launch_trace.who.agent.as_str(), subject);
+    assert_eq!(launch_trace.who.principal.as_str(), "person/avery");
+    assert!(launch_trace.who.actor.is_none());
+    assert!(launch_trace.why.is_none());
+    assert!(launch_trace.how.issuance.is_none());
+    assert!(launch_trace.how.model.is_none(), "launch must not invent an unknown model");
+    let runtime_path = drivers
+        .join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
+        .join("observations/agent-trace.json");
+    let mut observed_route = None;
+    for _ in 0..200 {
+        let runtime: st3::agent_trace::Runtime =
+            serde_json::from_slice(&std::fs::read(&runtime_path).unwrap()).unwrap();
+        observed_route = runtime.how.model.map(|model| model.route.as_str().to_owned());
+        if observed_route.as_deref() == Some("fixture-provider/fixture-model") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(observed_route.as_deref(), Some("fixture-provider/fixture-model"));
     let admission_records = std::fs::read_dir(drivers.join("sessions/harness-admission"))
         .unwrap()
         .filter_map(Result::ok)

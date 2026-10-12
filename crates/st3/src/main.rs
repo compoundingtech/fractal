@@ -16337,6 +16337,13 @@ async fn post_work(
             }
         }
     })?;
+    if std::env::var("ST_AGENT").ok().as_deref() == Some(actor.as_str())
+        && let Some(path) = std::env::var_os("AGENT_TRACE_FILE")
+        && matches!(action, "claim" | "complete" | "fail" | "release" | "submit")
+    {
+        let incarnation = current_agent_incarnation(client, &actor).await?.unwrap_or_default();
+        refresh_agent_trace(client, &actor, &incarnation, Path::new(&path), None).await?;
+    }
     if json_output {
         print_value(&response, true)
     } else {
@@ -16356,6 +16363,155 @@ async fn post_work(
         }
         Ok(())
     }
+}
+
+fn agent_trace_path(subject: &str) -> Option<PathBuf> {
+    std::env::var_os("AGENT_TRACE_FILE").map(PathBuf::from).or_else(|| {
+        std::env::var_os(st_drivers::driver_paths::AGENT_DIR_ENV)
+            .map(|dir| PathBuf::from(dir).join("agent-trace.json"))
+    }).or_else(|| {
+        std::env::var_os("ST3_DRIVER_STATE_DIR").map(|root| {
+            PathBuf::from(root).join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
+                .join("observations").join("agent-trace.json")
+        })
+    })
+}
+
+fn trace_model_route(driver: &str, model: &str, provider: Option<&str>) -> Option<String> {
+    if model.contains('/') {
+        return Some(model.to_owned());
+    }
+    let provider = provider.or(match driver {
+        "claude" => Some("anthropic"),
+        "codex" => Some("openai"),
+        _ => None,
+    })?;
+    Some(format!("{provider}/{model}"))
+}
+
+fn trace_lease<'a>(work: &'a [StepRunView], subject: &str, incarnation: &str) -> Option<&'a StepRunView> {
+    let now = u128::from(st_drivers::message::now_ms());
+    let mut held = work.iter().filter(|step| {
+        work_claim_is_held_by(step, subject)
+            && step.claim_incarnation.as_deref() == Some(incarnation)
+            && step.claim_expires_at_unix_ms.is_some_and(|expires| expires > now)
+    });
+    let lease = held.next()?;
+    // There is no unique current step when a seat holds several claims.
+    held.next().is_none().then_some(lease)
+}
+
+async fn lock_agent_trace(path: &Path) -> Result<std::fs::File> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || st3::agent_trace::issuer::lock(&path)).await?
+}
+
+async fn trace_mission_name(client: &Client, lease: Option<&StepRunView>) -> Result<Option<String>> {
+    let Some(lease) = lease else { return Ok(None) };
+    let run: MissionRunView = client
+        .get(&format!("/v1/mission-runs/{}", urlencoding::encode(&lease.run)))
+        .await?;
+    Ok(Some(run.mission.strip_prefix("mission/").unwrap_or(&run.mission).to_owned()))
+}
+
+async fn initialize_agent_trace(
+    client: &Client,
+    subject: &str,
+    driver: &str,
+    incarnation: &str,
+    path: &Path,
+    argv: &[String],
+) -> Result<()> {
+    use st3::agent_trace::issuer;
+    let _lock = lock_agent_trace(path).await?;
+    let principal: Option<String> = client
+        .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject)))
+        .await?;
+    let Some(principal) = principal else {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        write_driver_log(subject, "agent trace omitted: the seat has no recorded human principal")?;
+        return Ok(());
+    };
+    let status: StatusResponse = client
+        .get(&format!("/v1/status?subject={}", urlencoding::encode(subject)))
+        .await?;
+    let declaration = status.subjects.iter()
+        .find(|seat| seat.subject == subject)
+        .and_then(|seat| seat.desired.as_ref())
+        .map(declaration_node).transpose()?;
+    let harness = declaration.as_ref().and_then(KdlNode::children)
+        .and_then(|body| body.get("harness")).and_then(KdlNode::children);
+    let declared = |name: &str| harness.and_then(|body| body.get(name))
+        .and_then(|node| node.get(0)).and_then(kdl::KdlValue::as_string).map(str::to_owned);
+    let argv_model = argv.windows(2).find(|pair| matches!(pair[0].as_str(), "--model" | "-m"))
+        .map(|pair| pair[1].clone())
+        .or_else(|| argv.iter().find_map(|arg| arg.strip_prefix("--model=").map(str::to_owned)));
+    let model_route = declared("model").or(argv_model)
+        .and_then(|model| trace_model_route(driver, &model, None));
+    let work: Vec<StepRunView> = client
+        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
+    let lease = trace_lease(&work, subject, incarnation);
+    let mission_name = trace_mission_name(client, lease).await?;
+    let facts = issuer::Facts {
+        agent: subject.into(),
+        principal,
+        incarnation: incarnation.into(),
+        harness_tool: driver.into(),
+        // No harness version is reported by the launch protocol.
+        harness_version: None,
+        model_route,
+        model_effort: declared("effort"),
+        session: std::env::var("PTY_SESSION").ok(),
+        host: Some(st_drivers::run::detect_host()),
+        worktree: Some(std::env::current_dir()?.display().to_string()),
+        mission_name,
+    };
+    issuer::write_atomic(path, &issuer::build(&facts, lease)?)
+}
+
+async fn refresh_agent_trace(
+    client: &Client,
+    subject: &str,
+    incarnation: &str,
+    path: &Path,
+    observed: Option<&st_drivers::harness_context::Observed>,
+) -> Result<Vec<StepRunView>> {
+    use st3::agent_trace::issuer;
+    let _lock = lock_agent_trace(path).await?;
+    let work: Vec<StepRunView> = client
+        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
+    // An event from a predecessor provider cannot restate its model or lease after restart.
+    if observed.is_some()
+        && current_agent_incarnation(client, subject).await?.as_deref() != Some(incarnation)
+    {
+        return Ok(work);
+    }
+    let raw = match fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(work),
+        Err(error) => return Err(error.into()),
+    };
+    let mut runtime: issuer::Runtime = serde_json::from_slice(&raw)?;
+    let lease = trace_lease(&work, subject, incarnation);
+    let mission_name = trace_mission_name(client, lease).await?;
+    issuer::update_lease(&mut runtime, subject, incarnation, lease, mission_name.as_deref(),
+        u128::from(st_drivers::message::now_ms()))?;
+    if let Some(observed) = observed
+        && let Some(model) = observed.model.as_deref()
+        && let Some(route) = trace_model_route(observed.harness.as_str(), model, observed.provider.as_deref())
+    {
+        // Context reports carry no effort; never restate a previous model's effort.
+        issuer::update_model(&mut runtime, &route, None)?;
+    }
+    // Avoid file churn for an unchanged lease and model.
+    if serde_json::to_vec(&runtime)? != raw {
+        issuer::write_atomic(path, &runtime)?;
+    }
+    Ok(work)
 }
 
 /// This machine's host documents, which a claim prints because they describe where the claimed
@@ -18142,6 +18298,8 @@ async fn run_st2_native_driver(
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
         ..NativeLoopState::default()
     };
+    initialize_agent_trace(client, subject, driver, &incarnation,
+        &paths.agent_dir.join("agent-trace.json"), &argv).await?;
     let task = spawn_st3_provider(
         driver,
         &paths,
@@ -19851,6 +20009,11 @@ async fn publish_harness_usage(
     observed: &st_drivers::harness_context::Observed,
     last_fingerprint: &mut Option<String>,
 ) -> Result<()> {
+    if let Some(path) = client.event.map(|(_, _, dir, _)| dir.join("agent-trace.json"))
+        .or_else(|| agent_trace_path(subject))
+    {
+        refresh_agent_trace(client.client, subject, incarnation, &path, Some(observed)).await?;
+    }
     // A context-window occupancy reading and cumulative session spend are
     // different measurements. Publish them as distinct durable records; never
     // manufacture response-token buckets from occupancy.
@@ -20579,6 +20742,12 @@ async fn run_pi_channel(
     let observation_paths = st_drivers::driver_paths::Paths::from_environment(identity, &|name| {
         std::env::var(name).ok()
     })?;
+    if let Some(paths) = observation_paths.as_ref()
+        && !paths.agent_dir.join("agent-trace.json").exists()
+    {
+        initialize_agent_trace(client, subject, driver, &incarnation,
+            &paths.agent_dir.join("agent-trace.json"), &[]).await?;
+    }
     let mut observer = if let Some(paths) = observation_paths
         && st_drivers::harness_events::enabled(&paths.agent_dir)
     {
@@ -21840,6 +22009,10 @@ async fn drive_codex_native(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
+    if matches!(start, ProviderStart::Launch(_, _)) {
+        initialize_agent_trace(client, subject, "codex", &incarnation,
+            &paths.agent_dir.join("agent-trace.json"), &argv).await?;
+    }
     let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
@@ -22464,9 +22637,12 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
 }
 
 async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
-    let work: Vec<StepRunView> = client
-        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject)))
-        .await?;
+    let work: Vec<StepRunView> = if let Some(path) = agent_trace_path(subject) {
+        let incarnation = current_agent_incarnation(client, subject).await?.unwrap_or_default();
+        refresh_agent_trace(client, subject, &incarnation, &path, None).await?
+    } else {
+        client.get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?
+    };
     // Most resident seats hold no work. Only a held claim needs the status reduction
     // that proves its harness incarnation is still live before renewing the lease.
     if !work.iter().any(|step| work_claim_is_held_by(step, subject)) {

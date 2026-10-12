@@ -169,7 +169,7 @@ const reading = context.find((frame) => frame.reading);
 assert.ok(reading, "a context frame must carry a `reading` object");
 // Every leg is always present, `null` where withheld — one absence convention on the wire, so the
 // Rust decoder never has to tell "absent" from "the harness said it does not know".
-for (const key of ["usedTokens", "windowTokens", "usedPercent", "model", "costUsd"]) {
+for (const key of ["usedTokens", "windowTokens", "usedPercent", "model", "provider", "costUsd"]) {
   assert.ok(key in reading.reading, `reading carries ${key}`);
 }
 
@@ -182,6 +182,7 @@ assert.strictEqual(known.reading.usedTokens, 23425, "pi's numerator is totalToke
 assert.strictEqual(known.reading.windowTokens, 4000);
 assert.strictEqual(known.reading.usedPercent, 585.625, "carried raw, never clamped");
 assert.strictEqual(known.reading.model, "fake-1");
+assert.strictEqual(known.reading.provider, "fakelab");
 
 // The cost hold, on the wire. `session_start` legitimately carries `costUsd: null` — the hold is
 // cleared on session replacement, so a fresh session does not restate its predecessor's cost — and

@@ -896,6 +896,11 @@ fn context_frame(frame: &Value) -> Option<ContextFrame> {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned),
+            provider: body
+                .get("provider")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
             cost_usd: body.get("costUsd").and_then(Value::as_f64),
             // pi and omp both withhold this in v1: obtaining it means summing every message's
             // usage, which is a producer-side accumulator whose correctness depends on having seen
@@ -1629,7 +1634,7 @@ mod tests {
         // Verbatim `ctx.getContextUsage()` on that event, as the extension forwards it.
         let frame = json!({"type": "context", "reading": {
             "usedTokens": 23425, "windowTokens": 4000, "usedPercent": 585.625,
-            "model": "fake-1", "costUsd": 0.070305
+            "model": "fake-1", "provider": "fakelab", "costUsd": 0.070305
         }});
 
         let record = record_after(&[frame], harness_context::Harness::Pi);
@@ -1652,6 +1657,7 @@ mod tests {
             "carried raw, never clamped"
         );
         assert_eq!(record.model.as_deref(), Some("fake-1"));
+        assert_eq!(record.provider.as_deref(), Some("fakelab"));
         assert_eq!(record.cost_usd, message_usage["cost"]["total"].as_f64());
         // Neither pi nor omp carries these in v1: a lifetime sum would need a producer-side
         // accumulator whose correctness depends on having seen every message, and neither reports

@@ -189,6 +189,58 @@ impl Drop for Daemon {
 }
 
 #[tokio::test]
+async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
+    use st3::agent_trace::issuer::{self, Facts};
+    let root = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(root.path());
+    daemon.declare();
+    daemon.start().await;
+    let opened = daemon.ok(&["work", "start", "Check trace lifecycle", "--as", ALDER]).await;
+    let step = opened["subject"].as_str().unwrap();
+    let path = root.path().join("agent-trace.json");
+    let runtime = issuer::build(&Facts {
+        agent: ALDER.into(),
+        principal: "person/gardener".into(),
+        incarnation: "alder-one".into(),
+        harness_tool: "omp".into(),
+        harness_version: None,
+        model_route: None,
+        model_effort: None,
+        session: None,
+        host: Some("example".into()),
+        worktree: None,
+        mission_name: None,
+    }, None).unwrap();
+    issuer::write_atomic(&path, &runtime).unwrap();
+    for action in ["claim", "complete"] {
+        let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+        command.env("HOME", root.path())
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
+            .env("ST_AGENT", ALDER)
+            .env("AGENT_TRACE_FILE", &path)
+            .arg("--endpoint").arg(daemon.socket())
+            .args(["--daemon-wait", "0", "--json", "work", action, step,
+                "--as", ALDER, "--incarnation", "alder-one",
+                "--summary", "Trace lifecycle checked", "--evidence", "file:trace"]);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let runtime: st3::agent_trace::Runtime =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let value = serde_json::to_value(&runtime).unwrap();
+        if action == "claim" {
+            assert_eq!(value["how"]["issuance"]["_tag"], "st-issued");
+            assert_eq!(value["how"]["issuance"]["step_run"], step);
+            assert!(value["why"]["mission"]["name"].is_string());
+            assert!(value["why"]["step"]["name"].is_string());
+        } else {
+            assert!(runtime.why.is_none(), "completion must not retain mission or step");
+            assert!(runtime.how.issuance.is_none(), "completion must not retain a lease");
+        }
+    }
+}
+
+#[tokio::test]
 async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
