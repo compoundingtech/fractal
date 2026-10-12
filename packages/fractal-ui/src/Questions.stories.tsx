@@ -430,6 +430,12 @@ export const AnsweredOriginalKeyboard: Story = { ...Answered, play: async ({ can
   await expect(canvas.getByText('Team inbox')).not.toBeVisible()
   await userEvent.keyboard('{Tab}')
   await expect(original).toHaveFocus()
+  const suppressKeyboard = (event: Event) => { event.preventDefault(); event.stopImmediatePropagation() }
+  original.addEventListener('keydown', suppressKeyboard, true)
+  try {
+    await userEvent.keyboard('{Enter}')
+    await expect((async () => { await expect(original.parentElement).toHaveAttribute('open') })()).rejects.toThrow()
+  } finally { original.removeEventListener('keydown', suppressKeyboard, true) }
   await userEvent.keyboard('{Enter}')
   await expect(original.parentElement).toHaveAttribute('open')
   await expect(canvas.getByText('Team inbox')).toBeVisible()
