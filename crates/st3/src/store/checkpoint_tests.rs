@@ -1953,7 +1953,10 @@ fn free_bytes(path: &Path) -> u64 {
     // SAFETY: `path` is NUL-terminated and `stat` is written before it is read.
     assert_eq!(unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) }, 0);
     let stat = unsafe { stat.assume_init() };
-    stat.f_bavail as u64 * stat.f_frsize as u64
+    // 32 bits on macOS, 64 on Linux.
+    #[allow(clippy::unnecessary_cast)]
+    let free = stat.f_bavail as u64 * stat.f_frsize as u64;
+    free
 }
 
 /// Run `work`, sampling the free space on `path`'s filesystem every 10 ms: its result and
