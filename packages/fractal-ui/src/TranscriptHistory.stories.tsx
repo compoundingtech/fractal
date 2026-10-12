@@ -63,7 +63,7 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
     else { setStart(value => Math.max(0, value - pageSize)); setPage({ _tag: 'Ready' }); setAction('prepend') }
     setRevision(value => value + 1)
   }
-  const history: TranscriptHistory = start === 0 ? { _tag: 'Complete' } : page._tag === 'Loading' ? { _tag: 'Loading' } : page._tag === 'Failed' ? { _tag: 'Failed', retry: failure === 'retry' ? () => {} : loadOlder } : { _tag: 'More', loadOlder }
+  const history: TranscriptHistory = start === 0 ? failure === 'start' ? { _tag: 'More', loadOlder: () => {} } : { _tag: 'Complete' } : page._tag === 'Loading' ? { _tag: 'Loading' } : page._tag === 'Failed' ? { _tag: 'Failed', retry: failure === 'retry' ? () => {} : loadOlder } : { _tag: 'More', loadOlder }
   const loaded = React.useMemo(() => turns.slice(start, end), [start, end])
   const messages = React.useMemo(() => loaded.flatMap(turn => [turn.prompt!, ...turn.items]), [loaded])
   // Like LiveCritiqueR2: selected negative controls change the real rendered tree or
@@ -84,7 +84,6 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
       if (failure === 'stale-jump' && action === 'prepend' && followKey !== undefined) handle.current?.jumpTo('history/50')
       if (failure === 'append-reading' && action === 'append') lane.scrollTop = lane.scrollHeight
       if (failure === 'append-following' && action === 'append') lane.scrollTop = 0
-      if (failure === 'start' && start === 0) lane.querySelector('[data-testid="history-start"]')?.remove()
       if (failure === 'dom-bound' && revision > 0) {
         const row = lane.querySelector('[data-testid="transcript-turn"]')
         if (row !== null) for (let index = 0; index < 250; index++) lane.append(row.cloneNode(true))
@@ -115,7 +114,173 @@ const meta = { title: 'Fractal UI/Transcript virtual history', component: PagedH
 export default meta
 type Story = StoryObj<typeof meta>
 
-async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }) {
+// Each detector has its own positive story and routes selected regressions directly
+// to that detector. An unrelated assertion in the full tour cannot mask a control.
+async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'pointer-retry') {
+  if (target === 'stale-jump') return exerciseNewerFollow({ canvasElement })
+  if (target === 'touch-latch' || target === 'touch-scroll-required') return exerciseTouchAtZero({ canvasElement })
+  const canvas = within(canvasElement)
+  const root = canvasElement.querySelector('main')!
+  const lane = await canvas.findByTestId('transcript-scroll')
+  const currentRow = (id: number) => lane.querySelector<HTMLElement>(`[data-embrace-entry-id="history/${id}"]`)
+  await waitFor(() => expect(lane.querySelector('[data-testid="transcript-turn"]')).not.toBeNull())
+  const settle = async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  }
+  const page = async (start: number) => {
+    await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+    await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+    await waitFor(() => expect(root).toHaveAttribute('data-start', String(start)))
+    await settle()
+  }
+  if (target === 'dom-bound') {
+    await userEvent.click(canvas.getByRole('button', { name: 'Apply selected regression' }))
+    await settle()
+    await expect(lane.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(120)
+    return
+  }
+  if (target === 'jump' || target === 'start') {
+    await userEvent.click(canvas.getByRole('button', { name: 'Jump to unloaded checkpoint 50' }))
+    for (const start of [200, 100, 0]) await page(start)
+    if (target === 'jump') {
+      await waitFor(() => expect(currentRow(50)).not.toBeNull())
+      const rect = currentRow(50)!.getBoundingClientRect(), viewport = lane.getBoundingClientRect()
+      await expect(rect.top).toBeGreaterThanOrEqual(viewport.top)
+      await expect(rect.top).toBeLessThan(viewport.bottom)
+    } else {
+      lane.focus()
+      await userEvent.keyboard('{Home}')
+      await expect(await canvas.findByTestId('history-start')).toHaveTextContent('Start of conversation')
+    }
+    return
+  }
+  if (target === 'empty-page' || target === 'empty-latch' || target === 'retry' || target === 'failed-auto-retry' || target === 'pointer-retry') {
+    if (target === 'retry' || target === 'failed-auto-retry' || target === 'pointer-retry') await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
+    lane.focus()
+    await userEvent.keyboard('{Home}')
+    await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+    await expect(lane.scrollTop).toBe(0)
+    await expect(canvas.getByRole('grid')).toHaveAttribute('aria-busy', 'true')
+    const requests = Number(root.getAttribute('data-requests'))
+    if (target === 'empty-page' || target === 'empty-latch') {
+      await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+      await settle()
+      if (target === 'empty-page') {
+        await expect(root).toHaveAttribute('data-page', 'Ready')
+        await expect(Number(root.getAttribute('data-requests'))).toBe(requests)
+      } else {
+        lane.focus()
+        await userEvent.keyboard('{PageDown}{PageDown}{PageDown}')
+        await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
+        await userEvent.keyboard('{Home}')
+        await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+        await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
+      }
+    } else {
+      await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+      await waitFor(() => expect(root).toHaveAttribute('data-page', 'Failed'))
+      if (target === 'failed-auto-retry') {
+        lane.focus()
+        await userEvent.keyboard('{Home}')
+        lane.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: -120 }))
+        lane.dispatchEvent(new Event('scroll'))
+        await settle()
+        await expect(root).toHaveAttribute('data-page', 'Failed')
+        await expect(Number(root.getAttribute('data-requests'))).toBe(requests)
+      } else {
+        const retry = canvas.getByTestId('history-retry')
+        if (target === 'pointer-retry') await userEvent.click(retry)
+        else {
+          lane.focus()
+          for (let index = 0; index < 60 && document.activeElement !== retry; index++) await userEvent.tab()
+          await expect(retry).toHaveFocus()
+          await userEvent.keyboard('{Enter}')
+        }
+        await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+        await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
+      }
+    }
+    return
+  }
+  if (target === 'append-following') {
+    lane.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 100000 }))
+    lane.scrollTop = lane.scrollHeight
+    lane.dispatchEvent(new Event('scroll'))
+    await settle()
+    await userEvent.click(canvas.getByRole('button', { name: 'Append turn' }))
+    await waitFor(() => expect(root).toHaveAttribute('data-end', '2401'))
+    await settle()
+    await waitFor(() => expect(lane.scrollHeight - lane.scrollTop - lane.clientHeight).toBeLessThanOrEqual(1))
+    return
+  }
+  await userEvent.click(canvas.getByRole('button', { name: 'Jump to loaded checkpoint 1300' }))
+  await waitFor(() => expect(currentRow(1300)).not.toBeNull())
+  await settle()
+  if (target === 'keyboard') {
+    lane.focus()
+    const top = lane.scrollTop
+    await userEvent.keyboard('{PageUp}')
+    await waitFor(() => expect(lane.scrollTop).toBeLessThan(top))
+    return
+  }
+  const top = currentRow(1300)!.getBoundingClientRect().top
+  if (target === 'resize' || target === 'theme') {
+    await userEvent.click(canvas.getByRole('button', { name: target === 'resize' ? 'Resize reading lane' : 'Switch reading theme' }))
+    await settle()
+    await expect(currentRow(1300)!.getBoundingClientRect().top - top).toBe(0)
+  } else if (target === 'prepend' || target === 'prepend-focus') {
+    await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
+    const focused = within(currentRow(1300)!).getByRole('button', { name: /Worked/ })
+    focused.focus({ preventScroll: true })
+    await page(200)
+    if (target === 'prepend') await expect(currentRow(1300)!.getBoundingClientRect().top - top).toBe(0)
+    else await expect(document.activeElement).toBe(focused)
+  } else if (target === 'fold') {
+    await userEvent.click(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }))
+    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'true')
+    const expanded = currentRow(1300)!.getBoundingClientRect().height
+    await userEvent.click(within(currentRow(1300)!).getByRole('button', { name: /Worked/ }))
+    await settle()
+    await expect(within(currentRow(1300)!).getByRole('button', { name: /Worked/ })).toHaveAttribute('aria-expanded', 'false')
+    await expect(currentRow(1300)!.getBoundingClientRect().height).toBeLessThan(expanded)
+  } else {
+    const held = within(currentRow(1300)!).getByRole('button', { name: /Worked/ })
+    held.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, buttons: 1 }))
+    try {
+      canvas.getByRole('button', { name: 'Append turn' }).click()
+      await waitFor(() => expect(root).toHaveAttribute('data-end', '2401'))
+      await settle()
+      if (target === 'unread') await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
+      else await expect(currentRow(1300)!.getBoundingClientRect().top - top).toBe(0)
+    } finally {
+      held.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, buttons: 0 }))
+    }
+  }
+}
+
+export const DomBoundProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'dom-bound') }
+export const PrependAnchorProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'prepend') }
+export const PrependFocusProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'prepend-focus') }
+export const ResizeAnchorProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'resize') }
+export const ThemeAnchorProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'theme') }
+export const EmptyPageProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'empty-page') }
+export const EmptyReentryProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'empty-latch') }
+export const FollowingAppendProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'append-following') }
+export const ReadingAppendProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'append-reading') }
+export const HeldUnreadProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'unread') }
+export const FoldProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'fold') }
+export const KeyboardProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'keyboard') }
+export const KeyboardRetryProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'retry') }
+export const PointerRetryProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'pointer-retry') }
+export const FailedNoAutoRetryProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'failed-auto-retry') }
+export const UnloadedJumpProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'jump') }
+export const StartMarkerProbe: Story = { play: ({ canvasElement }) => exerciseIsolated(canvasElement, 'start') }
+
+async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLElement; args: { failure?: Failure } }) {
+  if (args.failure !== undefined && args.failure !== 'none') {
+    await exerciseIsolated(canvasElement, args.failure)
+    return
+  }
   const canvas = within(canvasElement)
   const root = canvasElement.querySelector('main')!
   const lane = await canvas.findByTestId('transcript-scroll')
@@ -156,7 +321,7 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
     canvas.getByRole('button', { name: 'Append turn' }).click()
     await waitFor(() => expect(root).toHaveAttribute('data-end', '2402'))
     await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-    await expect(anchor.getBoundingClientRect().top - readingTop).toBe(0)
+    await expect(row(1300)!.getBoundingClientRect().top - readingTop).toBe(0)
     await expect(bottomGap()).toBeGreaterThan(lane.clientHeight)
     await expect(document.activeElement).toBe(heldReader)
     await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
@@ -218,6 +383,8 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
   await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+  await expect(lane.scrollTop).toBe(0)
+  await expect(canvas.getByRole('grid')).toHaveAttribute('aria-busy', 'true')
   await expect(Number(root.getAttribute('data-requests'))).toBe(Number(requestsBeforeEmpty) + 1)
   await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Failed'))
