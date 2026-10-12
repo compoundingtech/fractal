@@ -16320,8 +16320,8 @@ async fn post_work(
         )
         .await
     }.await;
-    let response = response.map_err(|error| {
-        if action == "claim" && let Some(outage) = st3::client::daemon_unreachable(&error)
+    let response = response.inspect_err(|error| {
+        if action == "claim" && let Some(outage) = st3::client::daemon_unreachable(error)
             && let Some(os_error) = outage.socket_os_error()
         {
             let receipt = st_drivers::work_claim_failure::Receipt {
@@ -16334,7 +16334,6 @@ async fn post_work(
                     serde_json::to_string(&receipt).expect("socket receipt serializes"));
             }
         }
-        error
     })?;
     if json_output {
         print_value(&response, true)
