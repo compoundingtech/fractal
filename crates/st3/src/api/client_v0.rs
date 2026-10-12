@@ -15975,7 +15975,7 @@ subscription "watch/source" {
                 snapshot_id: snapshot.id.clone(),
                 ..Default::default()
             },
-            parameters: json!({"to":"person/blair","content":body}),
+            parameters: json!({"to":"agent/worker","content":body}),
         };
         let sent = action(
             State(state.clone()),

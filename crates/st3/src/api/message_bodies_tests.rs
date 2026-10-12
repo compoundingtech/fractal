@@ -154,25 +154,39 @@ async fn a_client_reads_a_body_only_in_a_conversation_it_may_read() {
     let _ = ask_for(&state, "person/avery", &private).await.unwrap();
 }
 
+/// A message between two people. The daemon refuses to accept one now, so this writes the claim
+/// and its body file as a member that predates the rule would have, to test who may read it.
 fn send_between(state: &AppState, from: &str, to: &str, key: &str, content: &str) -> String {
-    accept_message_receipt(
-        state,
-        MessageSendRequest {
-            idempotency_key: key.into(),
-            from: from.into(),
-            to: to.into(),
-            content: content.into(),
-            title: None,
-            in_reply_to: None,
-            tags: Vec::new(),
-            attachments: Vec::new(),
-        },
-        None,
-        None,
-    )
-    .unwrap()
-    .message
-    .subject
+    let subject = format!("message/{key}");
+    let entry = crate::model::MessageAttachment {
+        sha256: hex::encode(Sha256::digest(content.as_bytes())),
+        media_type: message_body::MEDIA_TYPE.into(),
+        name: None,
+        size: content.len() as u64,
+        origin: client_host_id(&state.node),
+    };
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: subject.clone(),
+            kind: "message.sent".into(),
+            actor: Some(from.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(from)),
+                ("to".into(), json!(to)),
+                ("content".into(), json!(message_body::preview(content))),
+                ("status".into(), json!("sent")),
+                ("attachments".into(), json!([entry])),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        })
+        .unwrap();
+    message_body::bodies(&state.state_dir)
+        .put(from, &subject, content.as_bytes())
+        .unwrap();
+    subject
 }
 
 async fn ask_for(
