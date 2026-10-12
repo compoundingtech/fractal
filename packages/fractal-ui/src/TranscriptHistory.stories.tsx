@@ -28,7 +28,7 @@ function makeTurn(index: number): TranscriptTurn {
 }
 // Shared immutable fixtures, matching Transcript.stories' runtime-source/work-log pattern.
 const turns = Array.from({ length: total + 2 }, (_, index) => makeTurn(index))
-const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
+const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'empty-latch', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
 type Failure = typeof failures[number]
 type Page = { readonly _tag: 'Ready' } | { readonly _tag: 'Loading' } | { readonly _tag: 'Failed' }
 const styles = stylex.create({
@@ -51,7 +51,13 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
   const [switchedTheme, setSwitchedTheme] = React.useState(false)
   const [followKey, setFollowKey] = React.useState<string | undefined>(undefined)
   const effectiveScheme = switchedTheme ? scheme === 'dark' ? 'light' : 'dark' : scheme
-  const loadOlder = () => { setRequests(value => value + 1); setPage({ _tag: 'Loading' }); setAction('request'); setRevision(value => value + 1) }
+  const loadOlder = () => {
+    if (failure === 'empty-latch' && action === 'empty') return
+    setRequests(value => value + 1)
+    setPage({ _tag: 'Loading' })
+    setAction('request')
+    setRevision(value => value + 1)
+  }
   const deliver = () => {
     if (failNext) { setFailNext(false); setPage({ _tag: 'Failed' }); setAction('error') }
     else { setStart(value => Math.max(0, value - pageSize)); setPage({ _tag: 'Ready' }); setAction('prepend') }
@@ -143,13 +149,20 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
   const readingTop = anchor.getBoundingClientRect().top
   const heldReader = within(anchor).getByRole('button', { name: /Worked/ })
   heldReader.focus({ preventScroll: true })
-  await userEvent.click(canvas.getByRole('button', { name: 'Append turn' }))
-  await waitFor(() => expect(root).toHaveAttribute('data-end', '2402'))
-  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-  await expect(anchor.getBoundingClientRect().top - readingTop).toBe(0)
-  await expect(bottomGap()).toBeGreaterThan(lane.clientHeight)
-  await expect(document.activeElement).toBe(heldReader)
-  await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
+  // Hold a real row pointer down through the asynchronous host append: focus alone
+  // does not exercise the viewport's pointer-held pin.
+  heldReader.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0, buttons: 1, isPrimary: true }))
+  try {
+    canvas.getByRole('button', { name: 'Append turn' }).click()
+    await waitFor(() => expect(root).toHaveAttribute('data-end', '2402'))
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    await expect(anchor.getBoundingClientRect().top - readingTop).toBe(0)
+    await expect(bottomGap()).toBeGreaterThan(lane.clientHeight)
+    await expect(document.activeElement).toBe(heldReader)
+    await expect(canvas.getByRole('button', { name: /New messages/ })).toBeVisible()
+  } finally {
+    heldReader.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, button: 0, buttons: 0, isPrimary: true }))
+  }
 
   // Remeasure wrapping and theme without moving the current reading anchor.
   for (const name of ['Resize reading lane', 'Switch reading theme', 'Resize reading lane', 'Switch reading theme']) {
@@ -198,7 +211,14 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
   await expect(root).toHaveAttribute('data-start', '200')
   await expect(root).toHaveAttribute('data-requests', requestsBeforeEmpty!)
   await userEvent.click(canvas.getByRole('button', { name: 'Fail next page' }))
-  await userEvent.click(canvas.getByRole('button', { name: 'Request older page' }))
+  // Leaving and re-entering the boundary is new reading intent, not an automatic
+  // empty-page loop: it must re-arm fetching without the fixture request button.
+  lane.focus()
+  await userEvent.keyboard('{PageDown}')
+  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(0))
+  await userEvent.keyboard('{Home}')
+  await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+  await expect(Number(root.getAttribute('data-requests'))).toBe(Number(requestsBeforeEmpty) + 1)
   await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Failed'))
   await expect(await canvas.findByTestId('history-error')).toHaveTextContent('Earlier messages could not be loaded')
