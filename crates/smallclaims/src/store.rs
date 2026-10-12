@@ -46,6 +46,8 @@ mod receive_writer_tests;
 mod membership_query_tests;
 #[cfg(test)]
 mod repair_operation_tests;
+#[cfg(test)]
+mod schema_install_tests;
 mod binary_payloads;
 pub mod events;
 pub mod idempotency;
@@ -430,6 +432,9 @@ PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 
+-- Install the core objects with one durable commit, after the connection PRAGMAs.
+BEGIN IMMEDIATE;
+
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -716,6 +721,7 @@ ON checkpoint_claims(operation_id) WHERE operation_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS checkpoint_claims_operation_digest
 ON checkpoint_claims(operation_id, request_digest, id)
 WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL;
+COMMIT;
 "#;
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.

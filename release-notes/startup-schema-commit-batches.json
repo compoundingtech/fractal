@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Batch initial schema installation to reduce durable sync waits before the daemon serves requests",
+  "replay": {"status": "none", "detail": "No claim replay or projection rules change."},
+  "schema": {"status": "none", "detail": "The same tables, indexes, triggers and schema version are installed; only transaction boundaries change."},
+  "rules": {"status": "none", "detail": "Identity, signing, admission, startup readiness and request deadlines are unchanged. WAL and synchronous=FULL remain in use."},
+  "compatibility": {"status": "changed", "detail": "Core schema objects and the initial runtime DDL batches each commit together, reducing repeated durable syncs on first open. Independent migrations and backfills retain their boundaries."},
+  "downtime": {"status": "changed", "detail": "Cold startup performs fewer durable commits before binding listeners; no wait bound is increased and no retry is added."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "changed", "detail": "A failed schema chunk rolls back its new objects and preserves pre-existing data instead of retaining partial installation."}
+}

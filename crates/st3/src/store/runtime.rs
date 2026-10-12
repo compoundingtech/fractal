@@ -194,9 +194,14 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn create_schema(&self, connection: &Connection) -> Result<()> {
-        connection.execute_batch(SCHEMA)?;
-        connection.execute_batch(&RUNTIME_ID_INDEX)?;
-        connection.execute_batch(arrangements::SCHEMA)?;
+        // These DDL batches need one durable commit before the independent backfills.
+        {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(SCHEMA)?;
+            transaction.execute_batch(&RUNTIME_ID_INDEX)?;
+            transaction.execute_batch(arrangements::SCHEMA)?;
+            transaction.commit()?;
+        }
         connection.execute_batch(git_changes::SCHEMA)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
@@ -474,6 +479,139 @@ const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.person-directive-
 pub(crate) fn compatibility_digest(registry_digest: &str) -> String {
     canonical_hash(&(SHARED_PROJECTION_LAYOUT, registry_digest))
         .expect("projection compatibility identity serializes")
+}
+
+#[cfg(test)]
+mod schema_install_tests {
+    use super::*;
+
+    #[test]
+    fn failed_runtime_schema_install_rolls_back_its_ddl_and_preserves_existing_data() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(smallclaims::store::SCHEMA)
+            .unwrap();
+        // This damaged table fails after the runtime's early claim indexes were created.
+        connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('existing');").unwrap();
+        let error = SmalltalkRuntime::default()
+            .create_schema(&connection)
+            .unwrap_err();
+        assert!(error.to_string().contains("mission_id"), "{error:#}");
+        assert!(connection.is_autocommit());
+        assert_eq!(
+            connection
+                .query_row("SELECT id FROM mission_runs", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "existing"
+        );
+        assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')", [], |row| row.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn crashed_schema_chunks_recover_without_losing_existing_data() {
+        if std::env::var_os("ST3_SCHEMA_CRASH_PHASE").is_some() {
+            crash_during_schema_install_child();
+            unreachable!("the private child must exit at its crash point");
+        }
+        for phase in ["core", "runtime"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("schema.sqlite");
+            let marker = directory.path().join("crash-marker");
+            {
+                let connection = Connection::open(&path).unwrap();
+                connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved'); PRAGMA user_version=18;").unwrap();
+                if phase == "runtime" {
+                    connection
+                        .execute_batch(smallclaims::store::SCHEMA)
+                        .unwrap();
+                }
+            }
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::runtime::schema_install_tests::crashed_schema_chunks_recover_without_losing_existing_data",
+                    "--nocapture",
+                ])
+                .env("ST3_SCHEMA_CRASH_PATH", &path)
+                .env("ST3_SCHEMA_CRASH_MARKER", &marker)
+                .env("ST3_SCHEMA_CRASH_PHASE", phase)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{phase}: crash hook must run");
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), phase);
+            {
+                let connection = Connection::open(&path).unwrap();
+                let partial = if phase == "core" {
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IN ('meta','batches'))"
+                } else {
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')"
+                };
+                assert!(
+                    !connection
+                        .query_row(partial, [], |row| row.get::<_, bool>(0))
+                        .unwrap(),
+                    "{phase}: uncommitted DDL survived the process crash"
+                );
+            }
+            let recovered = Store::open(&path, "birch").unwrap();
+            let reader = recovered.readers.get();
+            assert_eq!(
+                reader
+                    .query_row("SELECT value FROM fixture_marker", [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "preserved"
+            );
+            assert_eq!(
+                reader
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                18
+            );
+            assert_eq!(
+                recovered
+                    .connection
+                    .write()
+                    .pragma_query_value(None, "synchronous", |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                2
+            );
+        }
+    }
+
+    fn crash_during_schema_install_child() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        let path = std::env::var_os("ST3_SCHEMA_CRASH_PATH").expect("private child database path");
+        let marker =
+            std::env::var_os("ST3_SCHEMA_CRASH_MARKER").expect("private child marker path");
+        let phase = std::env::var("ST3_SCHEMA_CRASH_PHASE").expect("private child phase");
+        let target = match phase.as_str() {
+            "core" => "claims",
+            "runtime" => "mission_runs",
+            _ => panic!("unknown private crash phase"),
+        };
+        let connection = Connection::open(path).unwrap();
+        let marked_phase = phase.clone();
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(context.action, AuthAction::CreateTable { table_name } if table_name == target) {
+                std::fs::write(&marker, &marked_phase).unwrap();
+                // SAFETY: this private child must exit without SQLite or Rust cleanup.
+                unsafe { libc::_exit(86) };
+            }
+            Authorization::Allow
+        }));
+        if phase == "core" {
+            connection
+                .execute_batch(smallclaims::store::SCHEMA)
+                .unwrap();
+        } else {
+            SmalltalkRuntime::default()
+                .create_schema(&connection)
+                .unwrap();
+        }
+        panic!("the crash point was not reached");
+    }
 }
 
 #[cfg(test)]
