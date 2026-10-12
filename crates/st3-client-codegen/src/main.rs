@@ -270,6 +270,8 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn terminal_screen(&self, terminal_id: &str) -> Result<Envelope<TerminalScreen>, ClientError> {{ self.terminal_screen_internal(terminal_id).await }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "agent-queue.get" {
@@ -406,6 +408,8 @@ fn swift_operation_methods(
                 out,
                 "    public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> {{ try await get(\"v1/client/agent-workspaces/\\(id)\") }}"
             )?;
+        } else if id == "message-body.get" {
+            writeln!(out, "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}")?;
         } else if id == "status-history.get" {
             writeln!(out, "    public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> {{ try await get(\"v1/client/status-history/\\(id)\") }}")?;
         } else if id == "agent-declaration.get" {
@@ -643,6 +647,7 @@ fn validate_surfaces(
         "AttentionBlocked",
         "AttentionTargetState",
         "DocumentContent",
+        "MessageBody",
         "AgentDeclaration",
         "AgentWorkspace",
         "StatusHistory",

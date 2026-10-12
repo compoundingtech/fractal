@@ -171,7 +171,8 @@ impl CardReads {
              CROSS JOIN claims INDEXED BY claims_subject_kind_index
                ON claims.subject=subjects.value
              JOIN batches ON batches.id=claims.batch_id
-             WHERE {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2"
+             WHERE {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2
+               AND {UNREPAIRED_CLAIM}"
         ))?;
         // Each subject is folded as soon as its rows end, so a chunk holds one subject's
         // history at a time, as a one-subject read does.
@@ -665,15 +666,15 @@ impl Store {
         // The statements of `agent_last_activity_at`, a chunk of agents at a time.
         let mut activity = connection.prepare_cached(
             "SELECT subjects.value,
-                    (SELECT accepted_at_unix_ms FROM claims
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_actor_activity_time_index
                      WHERE actor=subjects.value AND kind IN ('work.progress','work.submitted')
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1),
-                    (SELECT accepted_at_unix_ms FROM claims
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_from_activity_time_index
                      WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=subjects.value
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1),
-                    (SELECT accepted_at_unix_ms FROM claims
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1),
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_message_to_activity_time_index
                      WHERE kind='message.sent' AND json_extract(body, '$.fields.to')=subjects.value
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1)
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1)
              FROM json_each(?1) subjects",
         )?;
         let mut timeline = connection.prepare_cached(
@@ -683,11 +684,11 @@ impl Store {
                        AND json_extract(body, '$.fields.incarnation_id')=json_extract(pairs.value, '$[1]')
                        AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                        AND after_store_index<=?2 ORDER BY id DESC LIMIT 1),
-                    (SELECT accepted_at_unix_ms FROM claims
+                    (SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_timeline_activity_time_index
                      WHERE subject=json_extract(pairs.value, '$[0]') AND kind='harness.timeline'
                        AND json_extract(body, '$.fields.incarnation_id')=json_extract(pairs.value, '$[1]')
                        AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
-                       AND store_index<=?2 ORDER BY store_index DESC LIMIT 1)
+                       AND store_index<=?2 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1)
              FROM json_each(?1) pairs",
         )?;
         // `suspension::current` reads every suspend and resume request, at any index.
