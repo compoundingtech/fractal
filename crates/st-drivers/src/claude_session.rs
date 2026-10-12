@@ -1870,7 +1870,7 @@ pub fn observe_hook_event(event: &str, payload: &serde_json::Value) -> Option<Ob
             Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Unknown)
                 .with_reason("compaction"),
         ),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(Observation::new(
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => Some(Observation::new(
             Activity::Active,
             BlockedOn::None,
             InputBuffer::Unknown,

@@ -1,0 +1,88 @@
+//! The CLI's socket-connect failure receipt, carried by native tool output.
+//! Raw tool payloads remain redacted; only this bounded, typed observation is retained.
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const PREFIX: &str = "st-work-claim-socket-failure: ";
+pub const CODE: &str = "work-claim-socket-failed";
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Receipt {
+    pub actor: String,
+    pub step_run: String,
+    pub socket: String,
+    pub os_error: i32,
+    pub observed_at_unix_ms: u64,
+}
+
+impl Receipt {
+    pub fn valid(&self) -> bool {
+        let bounded = |text: &str| !text.is_empty() && text.len() <= 1024
+            && !text.chars().any(|ch| ch.is_control() || ch == '`');
+        self.actor.starts_with("agent/") && bounded(&self.actor)
+            && self.step_run.starts_with("step-run/") && bounded(&self.step_run)
+            && self.socket.starts_with('/') && bounded(&self.socket)
+            && matches!(self.os_error, libc::EPERM | libc::EACCES | libc::ENOENT | libc::ECONNREFUSED)
+            && self.observed_at_unix_ms > 0
+    }
+
+    pub fn reason(&self) -> String {
+        let cause = std::io::Error::from_raw_os_error(self.os_error);
+        format!("`{}` reported that `st work claim {}` could not connect to daemon Unix socket `{}`: {cause}. Inspect the seat's sandbox permissions and socket path; no claim request was sent.", self.actor, self.step_run, self.socket)
+    }
+}
+
+/// Only a failed native tool result is inspected, never assistant text or tool arguments.
+pub fn from_tool_result(body: &Value) -> Option<Receipt> {
+    if body["status"] != "error" { return None; }
+    fn find(value: &Value, depth: usize) -> Option<Receipt> {
+        if depth > 4 { return None; }
+        match value {
+            Value::String(text) => text.lines().find_map(|line| {
+                let encoded = line.strip_prefix(PREFIX)?;
+                if encoded.len() > 4096 { return None; }
+                let receipt: Receipt = serde_json::from_str(encoded).ok()?;
+                receipt.valid().then_some(receipt)
+            }),
+            Value::Array(parts) => parts.iter().find_map(|part| find(part, depth + 1)),
+            Value::Object(parts) => ["text", "content", "output"].iter()
+                .find_map(|key| parts.get(*key).and_then(|part| find(part, depth + 1))),
+            _ => None,
+        }
+    }
+    find(&body["content"], 0)
+}
+
+pub fn key(actor: &str, step: &str, attempt: u32, epoch: u32, incarnation: &str) -> String {
+    format!("work-claim-socket:{actor}:{step}:{attempt}:{epoch}:{incarnation}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn claim_socket_receipt_requires_failed_tool_and_bounded_typed_cli_output() {
+        let receipt = Receipt { actor: "agent/node.worker".into(),
+            step_run: "step-run/sample/work".into(), socket: "/tmp/st.sock".into(),
+            os_error: libc::EPERM, observed_at_unix_ms: 1234 };
+        let line = format!("{PREFIX}{}", serde_json::to_string(&receipt).unwrap());
+        let body = json!({"status":"error","content":[{"type":"text","text":line}]});
+        assert_eq!(from_tool_result(&body), Some(receipt.clone()));
+        for body in [
+            json!({"status":"success","content":line}),
+            json!({"status":"error","content":"Operation not permitted on the st socket"}),
+            json!({"status":"error","content":format!("quoted: {line}")}),
+            json!({"status":"error","arguments":line}),
+            json!({"status":"error","content":format!("{PREFIX}{{\"actor\":\"agent/node.worker\"}}")}),
+        ] { assert!(from_tool_result(&body).is_none()); }
+        let mut malformed = receipt.clone();
+        malformed.os_error = libc::EIO;
+        assert!(!malformed.valid());
+        malformed = receipt;
+        malformed.socket = "https://localhost/secret".into();
+        assert!(!malformed.valid());
+    }
+}

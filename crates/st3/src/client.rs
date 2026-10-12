@@ -167,6 +167,7 @@ pub struct DaemonUnreachable {
     waited: Option<Duration>,
     starting: bool,
     full_replay: bool,
+    socket_os_error: Option<i32>,
 }
 
 impl DaemonUnreachable {
@@ -178,6 +179,7 @@ impl DaemonUnreachable {
             waited: None,
             starting: false,
             full_replay: false,
+            socket_os_error: None,
         }
     }
 
@@ -189,6 +191,7 @@ impl DaemonUnreachable {
             waited: None,
             starting: false,
             full_replay: false,
+            socket_os_error: None,
         }
     }
 
@@ -209,7 +212,8 @@ impl DaemonUnreachable {
 
     fn connect_io(endpoint: impl Into<String>, error: &std::io::Error) -> Self {
         let endpoint = endpoint.into();
-        if let Some(outage) = Self::during_startup(Path::new(&endpoint)) {
+        if error.kind() != std::io::ErrorKind::PermissionDenied
+            && let Some(outage) = Self::during_startup(Path::new(&endpoint)) {
             return outage;
         }
         let reason = match error.kind() {
@@ -217,7 +221,9 @@ impl DaemonUnreachable {
             std::io::ErrorKind::ConnectionRefused => "connection refused".to_owned(),
             _ => error.to_string(),
         };
-        Self::connect(endpoint, reason)
+        let mut outage = Self::connect(endpoint, reason);
+        outage.socket_os_error = error.raw_os_error();
+        outage
     }
 
     fn after(mut self, waited: Duration) -> Self {
@@ -237,8 +243,17 @@ impl DaemonUnreachable {
         &self.endpoint
     }
 
+    pub fn socket_os_error(&self) -> Option<i32> { self.socket_os_error }
+
+    fn permission_denied(&self) -> bool {
+        matches!(self.socket_os_error, Some(libc::EPERM | libc::EACCES))
+    }
+
     /// A short present-tense summary without advice, for callers that say what they do next.
     pub fn summary(&self) -> String {
+        if self.permission_denied() {
+            return format!("access to the st daemon Unix socket {} was denied ({}); inspect sandbox permissions and the socket path. Nothing was sent", self.endpoint, self.reason);
+        }
         if self.starting {
             return self.reason.clone();
         }
@@ -521,6 +536,9 @@ impl Client {
                 }
                 Err(error) => error,
             };
+            if daemon_unreachable(&error).is_some_and(DaemonUnreachable::permission_denied) {
+                return Err(error);
+            }
             if let Some(retry) = &self.follow_retry
                 && method == "GET"
                 && daemon_did_not_answer(&error)
@@ -1568,6 +1586,20 @@ mod tests {
             follow_retry: None,
             follow_test: None,
         }
+    }
+
+    #[test]
+    fn claim_socket_permission_denial_is_not_a_restart_outage() {
+        for errno in [libc::EPERM, libc::EACCES] {
+            let outage = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(errno));
+            assert!(outage.permission_denied());
+            assert_eq!(outage.socket_os_error(), Some(errno));
+            assert!(outage.summary().contains("was denied"));
+            assert!(!outage.summary().contains("restarting"));
+        }
+        let outage = DaemonUnreachable::connect_io("/tmp/st.sock", &std::io::Error::from_raw_os_error(libc::ECONNREFUSED));
+        assert!(!outage.permission_denied());
+        assert_eq!(outage.phase(), OutagePhase::Connect);
     }
 
     #[cfg(target_os = "linux")]

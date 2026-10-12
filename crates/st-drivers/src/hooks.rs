@@ -177,6 +177,7 @@ pub fn claude_settings_registration() -> serde_json::Value {
             "PermissionRequest": observe("PermissionRequest"),
             "PreToolUse": observe("PreToolUse"),
             "PostToolUse": observe("PostToolUse"),
+            "PostToolUseFailure": observe("PostToolUseFailure"),
         },
         // The status-line payload is the ONLY Claude channel carrying a context window, so st2
         // occupies the slot to read it — and the slot is single-valued, with the winning

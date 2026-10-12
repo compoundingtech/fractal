@@ -4513,20 +4513,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .filter_map(|message| message_sent_at(&self.store, message).map(|at| (at, message)))
                 .collect::<Vec<_>>();
             attempts.sort_by_key(|(at, _)| *at);
+            let claim_failure = self.store.operation_claim(&st_drivers::work_claim_failure::key(
+                agent, &step.subject, step.attempt, step.readiness_epoch, incarnation))?;
             let acknowledged = work_wake_acknowledged(&attempts, harness.as_ref());
             let idle_unclaimed_deadline = harness
                 .as_ref()
                 .filter(|harness| acknowledged && matches!(harness.state.as_str(), "ready" | "idle"))
                 .and_then(|_| attempts.last())
                 .map(|(last, _)| last.saturating_add(WORK_WAKE_EXHAUST_GRACE_MS));
-            if acknowledged && idle_unclaimed_deadline.is_none_or(|due| now < due) {
+            if claim_failure.is_none() && acknowledged && idle_unclaimed_deadline.is_none_or(|due| now < due) {
                 if let Some(due) = idle_unclaimed_deadline {
                     smallclaims::touched::note_due(due);
                 }
                 continue;
             }
             let attempt_count = u32::try_from(attempts.len()).unwrap_or(u32::MAX);
-            let decision = if acknowledged {
+            let decision = if acknowledged || claim_failure.is_some() {
                 // A consumed wake is delivery proof, not a held work lease. Do not
                 // interrupt a working turn, but surface ready work left unclaimed
                 // after the assignee has returned idle. One fenced diagnostic;
@@ -4557,7 +4559,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.signal_changed();
                 }
                 WorkWakeDecision::Exhaust => {
-                    let reason = if acknowledged {
+                    let reason = if let Some(failure) = &claim_failure {
+                        failure.body["fields"]["reason"].as_str()
+                            .context("socket failure diagnostic has no reason")?.to_owned()
+                    } else if acknowledged {
                         format!("`{agent}` consumed a supported work wake but is idle with `{}` still unclaimed after the readiness grace", step.subject)
                     } else {
                         format!("`{agent}` did not start a turn or claim `{}` after {attempt_count} supported driver wake attempts", step.subject)
@@ -4565,7 +4570,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let diagnostic_key =
                         format!("work-wake-exhausted:{agent}:{tag_value}:{attempt_count}");
                     if self.store.operation_claim(&diagnostic_key)?.is_none() {
-                        let evidence = work_wake_attempt_evidence(&self.store, &attempts)?;
+                        let mut evidence = work_wake_attempt_evidence(&self.store, &attempts)?;
+                        if let Some(failure) = &claim_failure { evidence.push(failure.id.clone()); }
                         self.store.append_claim(&ClaimInput {
                             subject: agent.into(),
                             kind: "harness.diagnostic".into(),
@@ -4605,7 +4611,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             &episode,
                             &AttentionRequest {
                                 reviewer: agent.into(),
-                                title: "Ready work remains unclaimed after its wake".into(),
+                                title: if claim_failure.is_some() {
+                                    "Ready work cannot claim: daemon socket access failed"
+                                } else { "Ready work remains unclaimed after its wake" }.into(),
                                 reason: format!("{reason}. Inspect `{}` and [diagnostic `{}`](/v1/claims/by-id/{}); retry, revise or cancel the work.", step.subject, diagnostic.id, diagnostic.id),
                                 severity: "error".into(),
                                 targets: vec![agent.into(), step.subject.clone(), diagnostic.id],
@@ -38250,6 +38258,48 @@ mission "gated" state="ready" {
             seat.store.step_run(&subject).unwrap().unwrap().status,
             "ready"
         );
+    }
+
+    #[test]
+    fn claim_socket_failure_is_fenced_to_the_ready_epoch_and_names_the_observed_cause() {
+        let seat = SeatQueueFixture::new();
+        let run = seat.start("queued", "socket-failure-run");
+        let subject = SeatQueueFixture::step(&run, "work");
+        let step = seat.store.step_run(&subject).unwrap().unwrap();
+        let failure = |incarnation: &str, epoch: u32| {
+            seat.store.append_claim(&ClaimInput {
+                subject: SEAT.into(), kind: "harness.diagnostic".into(), actor: Some(SEAT.into()),
+                fields: BTreeMap::from([
+                    ("code".into(), st_drivers::work_claim_failure::CODE.into()),
+                    ("status".into(), "failed".into()), ("severity".into(), "error".into()),
+                    ("reason".into(), "st work claim could not connect to daemon Unix socket /tmp/st.sock: Operation not permitted (os error 1); inspect sandbox permissions and socket path".into()),
+                    ("incarnation_id".into(), incarnation.into()),
+                    ("step_run".into(), subject.clone().into()),
+                    ("attempt".into(), step.attempt.into()),
+                    ("readiness_epoch".into(), epoch.into()),
+                ]), evidence: vec![], expected_subject: None,
+                idempotency_key: Some(st_drivers::work_claim_failure::key(SEAT, &subject, step.attempt, epoch, incarnation)),
+            }).unwrap()
+        };
+        let faults = || seat.store.claims_for(SEAT, Some("harness.diagnostic")).unwrap()
+            .into_iter().filter(|claim| claim.body["fields"]["code"] == "work-wake-exhausted").collect::<Vec<_>>();
+        failure("old-seat", step.readiness_epoch);
+        failure("seat-one", step.readiness_epoch + 1);
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        assert!(faults().is_empty());
+        let current = failure("seat-one", step.readiness_epoch);
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        let raised = faults();
+        assert_eq!(raised.len(), 1);
+        assert!(raised[0].body["fields"]["reason"].as_str().unwrap().contains("Operation not permitted"));
+        assert!(raised[0].body["evidence"].as_array().unwrap().contains(&serde_json::json!(current.id)));
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        assert_eq!(faults().len(), 1);
+        assert_eq!(seat.store.messages(Some(SEAT), true).unwrap().len(), 1);
+        assert_eq!(seat.store.step_run(&subject).unwrap().unwrap().status, "ready");
+        seat.work(&subject, "claim", "socket-fixed-claim").unwrap();
+        seat.reconciler.reconcile_work_messages(SEAT, "seat-one", None).unwrap();
+        assert_eq!(faults().len(), 1, "a successful claim must not raise another fault");
     }
 
     #[test]

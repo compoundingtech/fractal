@@ -218,6 +218,8 @@ impl Writer {
             "unsupported harness timeline driver `{}`",
             self.driver
         );
+        let claim_failure = (entry_type == EntryType::ToolResult && final_entry)
+            .then(|| crate::work_claim_failure::from_tool_result(&body)).flatten();
         let source_id = pseudonym("source", &source_id);
         let (mut body, redacted_bytes, redacted_items, truncated_items) =
             normalize_body(entry_type, &source_id, body);
@@ -291,6 +293,13 @@ impl Writer {
             observed_at_unix_ms,
             source_id: Some(source_id.clone()),
         });
+        if let Some(receipt) = claim_failure {
+            push_notice(&mut record, &self.driver, &self.incarnation_id,
+                &format!("{source_id}:work-claim-socket"), EntryType::Error,
+                json!({"code": crate::work_claim_failure::CODE,
+                    "message": receipt.reason(), "retryable": false,
+                    "details": receipt}), observed_at_unix_ms);
+        }
         if redacted_bytes > 0 || redacted_items > 0 {
             push_notice(
                 &mut record,
@@ -512,7 +521,10 @@ pub fn observe_codex(writer: &mut Writer, message: &Value, thread_id: &str) -> R
                 .unwrap_or(item_type);
             writer.append(format!("{item_id}:call"), Role::Assistant, EntryType::ToolCall, json!({"call_id": item_id, "name": name, "arguments": item.get("arguments").or_else(|| item.get("input")).cloned().unwrap_or(Value::Null)}), true)?;
             if final_entry {
-                writer.append(format!("{item_id}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": item_id, "status": if item.get("error").is_some_and(|value| !value.is_null()) {"error"} else {"success"}, "media_type": "application/json", "content": item.get("output").or_else(|| item.get("result")).cloned().unwrap_or(Value::Null)}), true)?;
+                let failed = item.get("error").is_some_and(|value| !value.is_null())
+                    || item.get("exitCode").and_then(Value::as_i64).is_some_and(|code| code != 0)
+                    || item["status"] == "failed";
+                writer.append(format!("{item_id}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": item_id, "status": if failed {"error"} else {"success"}, "media_type": "application/json", "content": item.get("aggregatedOutput").or_else(|| item.get("output")).or_else(|| item.get("result")).cloned().unwrap_or(Value::Null)}), true)?;
             }
         }
         // Provider reasoning is deliberately never projected as conversation content. Its
@@ -549,9 +561,9 @@ pub fn observe_claude(writer: &mut Writer, event: &str, payload: &Value) -> Resu
             let call = payload.get("tool_use_id").and_then(Value::as_str).unwrap_or("unknown");
             writer.append(format!("claude:{session}:{call}:call"), Role::Assistant, EntryType::ToolCall, json!({"call_id": call, "name": payload.get("tool_name").and_then(Value::as_str).unwrap_or("unknown"), "arguments": payload.get("tool_input").cloned().unwrap_or(Value::Null)}), true)?;
         }
-        "PostToolUse" => {
+        "PostToolUse" | "PostToolUseFailure" => {
             let call = payload.get("tool_use_id").and_then(Value::as_str).unwrap_or("unknown");
-            writer.append(format!("claude:{session}:{call}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": call, "status": if payload.get("error").is_some_and(|value| !value.is_null()) {"error"} else {"success"}, "media_type": "application/json", "content": payload.get("tool_response").cloned().unwrap_or(Value::Null)}), true)?;
+            writer.append(format!("claude:{session}:{call}:result"), Role::Tool, EntryType::ToolResult, json!({"call_id": call, "status": if event == "PostToolUseFailure" || payload.get("error").is_some_and(|value| !value.is_null()) {"error"} else {"success"}, "media_type": "application/json", "content": payload.get("tool_response").or_else(|| payload.get("error")).cloned().unwrap_or(Value::Null)}), true)?;
         }
         "Stop" => writer.append(format!("claude:{session}:stop:{}", source_id(payload, "stop")), Role::System, EntryType::Status, json!({"status": "completed"}), true)?,
         "StopFailure" => writer.append(format!("claude:{session}:failure:{}", source_id(payload, "failure")), Role::System, EntryType::Error, json!({"code": "harness-error", "message": safe_summary(payload), "retryable": false, "details": {}}), true)?,
@@ -1454,6 +1466,47 @@ fn compact_to_bounds(record: &mut Record) -> Result<Vec<u8>> {
         record
             .operations
             .retain(|operation| operation.entry_id != entry_id);
+    }
+}
+
+#[cfg(test)]
+mod claim_socket_tests {
+    use super::*;
+
+    #[test]
+    fn native_failed_claim_socket_output_retains_cause_but_redacts_tool_payload() {
+        let receipt = crate::work_claim_failure::Receipt {
+            actor: "agent/node.worker".into(), step_run: "step-run/sample/work".into(),
+            socket: "/tmp/st.sock".into(), os_error: libc::EPERM, observed_at_unix_ms: 1234,
+        };
+        let output = format!("{}{}\nst: Operation not permitted (os error 1)\nprivate unrelated output",
+            crate::work_claim_failure::PREFIX, serde_json::to_string(&receipt).unwrap());
+        for driver in ["codex", "claude", "pi", "omp", "opencode"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut writer = Writer::new(root.path(), driver, "current");
+            let emit = |writer: &mut Writer| {
+                match driver {
+                    "codex" => observe_codex(writer, &json!({"method":"item/completed","params":{"item":{
+                        "type":"commandExecution","id":"claim-call","command":"st work claim",
+                        "exitCode":5,"status":"completed","aggregatedOutput":output,
+                    }}}), "thread-current"),
+                    "claude" => observe_claude(writer, "PostToolUseFailure", &json!({
+                        "session_id":"current","tool_use_id":"claim-call","error":output,
+                    })),
+                    _ => observe_channel_frame(writer, &json!({"type":"timeline","event":"tool_result","payload":{
+                        "toolCallId":"claim-call","isError":true,"content":[{"type":"text","text":output}],
+                    }})),
+                }.unwrap();
+            };
+            emit(&mut writer); emit(&mut writer);
+            let record = read(&timeline_path(root.path())).unwrap();
+            let failures = record.operations.iter().filter(|op|
+                op.entry_type == "error" && op.body["code"] == crate::work_claim_failure::CODE).collect::<Vec<_>>();
+            assert_eq!(failures.len(), 1, "{driver}");
+            assert_eq!(failures[0].body["details"], json!(receipt));
+            assert!(failures[0].body["message"].as_str().unwrap().contains("Operation not permitted"));
+            assert!(!serde_json::to_string(&record).unwrap().contains("private unrelated output"));
+        }
     }
 }
 

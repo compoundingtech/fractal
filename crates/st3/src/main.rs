@@ -16298,12 +16298,15 @@ async fn post_work(
 ) -> Result<()> {
     let actor = args.actor.context("a work action needs explicit --as")?;
     reject_foreign_agent_actor(&actor)?;
+    let subject = if args.subject.starts_with("step-run/") { args.subject.clone() }
+        else { format!("step-run/{}", args.subject) };
+    let response: Result<StepRunView> = async {
     let incarnation = match args.incarnation {
         Some(incarnation) => Some(incarnation),
         None => current_agent_incarnation(client, &actor).await?,
     };
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let response: StepRunView = client
+    client
         .post(
             &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
             &WorkRequest {
@@ -16315,7 +16318,24 @@ async fn post_work(
                 idempotency_key: format!("work:{action}:{}:{actor}:{nonce}", args.subject),
             },
         )
-        .await?;
+        .await
+    }.await;
+    let response = response.map_err(|error| {
+        if action == "claim" && let Some(outage) = st3::client::daemon_unreachable(&error)
+            && let Some(os_error) = outage.socket_os_error()
+        {
+            let receipt = st_drivers::work_claim_failure::Receipt {
+                actor: actor.clone(), step_run: subject.clone(),
+                socket: outage.endpoint().into(), os_error,
+                observed_at_unix_ms: st_drivers::message::now_ms(),
+            };
+            if receipt.valid() {
+                eprintln!("{}{}", st_drivers::work_claim_failure::PREFIX,
+                    serde_json::to_string(&receipt).expect("socket receipt serializes"));
+            }
+        }
+        error
+    })?;
     if json_output {
         print_value(&response, true)
     } else {
@@ -19530,23 +19550,12 @@ impl NativeObservations {
                 "harness-timeline" => {
                     let operation: st_drivers::harness_timeline::Operation =
                         serde_json::from_slice(&raw)?;
-
-                    let fields = timeline_claim_fields(operation, &event.runtime_incarnation);
-                    let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
+                    let claim = native_timeline_claim(client, subject,
+                        &event.runtime_incarnation, operation).await?;
                     let _: ClaimRecord = publisher
                         .post(
                             "/v1/claims",
-                            &ClaimInput {
-                                subject: subject.into(),
-                                kind: "harness.timeline".into(),
-                                actor: Some(subject.into()),
-                                fields,
-                                evidence: Vec::new(),
-                                expected_subject: None,
-                                idempotency_key: Some(format!(
-                                    "harness-timeline:{subject}:{digest}"
-                                )),
-                            },
+                            &claim,
                         )
                         .await?;
                 }
@@ -19598,6 +19607,11 @@ impl ObservationClient<'_> {
                 &slot,
                 &serde_json::to_value(&claim)?,
             )?)?;
+            // Diagnostics are retained graph facts, not local observation slots. Preserve
+            // their episode key; /harness-events replaces keys with its observation slot.
+            if claim.kind == "harness.diagnostic" {
+                return self.client.post(path, &claim).await;
+            }
             self.client
                 .post(
                     "/v1/harness-events",
@@ -20010,20 +20024,11 @@ async fn publish_harness_timeline(
         // Usage ownership is graph state, not a driver fact. Persist no placeholder/null owner
         // fields here; the client projection joins the exact desired owner run/generation/step at
         // its snapshot index and overwrites attribution on every explicit usage entry.
-        let fields = timeline_claim_fields(operation, incarnation);
-        let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
+        let claim = native_timeline_claim(client, subject, incarnation, operation).await?;
         let _: ClaimRecord = ObservationClient { client, event: None }
             .post(
                 "/v1/claims",
-                &ClaimInput {
-                    subject: subject.into(),
-                    kind: "harness.timeline".into(),
-                    actor: Some(subject.into()),
-                    fields,
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: Some(format!("harness-timeline:{subject}:{digest}")),
-                },
+                &claim,
             )
             .await?;
         published.insert(publication);
@@ -20043,6 +20048,60 @@ fn timeline_record_is_current(
     provider_incarnation: Option<&str>,
 ) -> bool {
     record.driver == driver && provider_incarnation == Some(record.incarnation_id.as_str())
+}
+
+/// Bind a reported failure to the current ready wake before promoting it to a diagnostic.
+/// The CLI cannot report through the socket it was denied; the native driver can.
+async fn native_timeline_claim(
+    client: &Client, subject: &str, incarnation: &str,
+    operation: st_drivers::harness_timeline::Operation,
+) -> Result<ClaimInput> {
+    let mut failure = None;
+    if operation.entry_type == "error"
+        && operation.body["code"] == st_drivers::work_claim_failure::CODE
+        && let Ok(receipt) = serde_json::from_value::<st_drivers::work_claim_failure::Receipt>(operation.body["details"].clone())
+        && receipt.valid() && receipt.actor == subject
+        && receipt.observed_at_unix_ms <= operation.observed_at_unix_ms
+    {
+        let work: Vec<StepRunView> = client.get(&format!(
+            "/v1/work?actor={}", urlencoding::encode(subject))).await?;
+        if let Some(step) = work.into_iter().find(|step| {
+            step.subject == receipt.step_run && step.status == "ready"
+                && step.wake.as_ref().is_some_and(|wake| {
+                    wake.incarnation_id == incarnation && wake.attempts > 0
+                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| receipt.observed_at_unix_ms as u128 >= sent)
+                })
+        }) {
+            failure = Some((receipt, step));
+        }
+    }
+    if let Some((receipt, step)) = failure {
+        return Ok(ClaimInput {
+            subject: subject.into(), kind: "harness.diagnostic".into(), actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("code".into(), st_drivers::work_claim_failure::CODE.into()),
+                ("status".into(), "failed".into()), ("severity".into(), "error".into()),
+                ("reason".into(), receipt.reason().into()),
+                ("incarnation_id".into(), incarnation.into()),
+                ("step_run".into(), step.subject.clone().into()),
+                ("attempt".into(), step.attempt.into()),
+                ("readiness_epoch".into(), step.readiness_epoch.into()),
+                ("socket".into(), receipt.socket.into()),
+                ("os_error".into(), receipt.os_error.into()),
+                ("observed_at_unix_ms".into(), receipt.observed_at_unix_ms.into()),
+                ("driver".into(), operation.driver.into()),
+                ("tool_result_entry".into(), operation.entry_id.into()),
+            ]), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(st_drivers::work_claim_failure::key(subject, &step.subject,
+                step.attempt, step.readiness_epoch, incarnation)),
+        });
+    }
+    let fields = timeline_claim_fields(operation, incarnation);
+    let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
+    Ok(ClaimInput { subject: subject.into(), kind: "harness.timeline".into(),
+        actor: Some(subject.into()), fields, evidence: Vec::new(), expected_subject: None,
+        idempotency_key: Some(format!("harness-timeline:{subject}:{digest}")),
+    })
 }
 
 fn timeline_claim_fields(
