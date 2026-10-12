@@ -331,7 +331,22 @@ async fn publish(
         work,
         operation,
     };
-    let response: Value = client.post("/v1/client/changes/mutate", &request).await?;
+    let response: Value = match client.post("/v1/client/changes/mutate", &request).await {
+        Ok(response) => response,
+        Err(error) => {
+            if let Some((_, _, _, details)) = st3::client::api_error_parts(&error)
+                && let Some(outcome) = details.get("outcome")
+            {
+                let rendered = serde_json::to_string_pretty(outcome)?;
+                if json {
+                    println!("{rendered}");
+                } else {
+                    eprintln!("{rendered}");
+                }
+            }
+            return Err(error);
+        }
+    };
     let value = response.get("value").unwrap_or(&response);
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);

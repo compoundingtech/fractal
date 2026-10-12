@@ -7,6 +7,10 @@ const ACTOR: &str = "agent/fixture/worker";
 const INCARNATION: &str = "fixture:one";
 
 fn runtime(store: &Store, incarnation: &str) {
+    runtime_for(store, ACTOR, incarnation);
+}
+
+fn runtime_for(store: &Store, actor: &str, incarnation: &str) {
     for (kind, fields) in [
         (
             "runtime.observed",
@@ -26,9 +30,9 @@ fn runtime(store: &Store, incarnation: &str) {
     ] {
         store
             .append_claim(&ClaimInput {
-                subject: ACTOR.into(),
+                subject: actor.into(),
                 kind: kind.into(),
-                actor: Some(ACTOR.into()),
+                actor: Some(actor.into()),
                 fields,
                 evidence: vec![],
                 expected_subject: None,
@@ -45,6 +49,7 @@ fn work_fixture() -> (Arc<Store>, WorkBinding) {
 mission "fixture-stage" state="ready" {
   goal "Exercise a bounded stage."
   step "build" { assigned-to "agent/fixture/worker"; goal "Build the source." }
+  step "other" { assigned-to "agent/fixture/other"; goal "Exercise another live worker." }
 }
 "#,
         "fixture-owner",
@@ -666,4 +671,80 @@ async fn create_refuses_historical_identity_and_incompatible_commit_range() {
             .refs
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn different_live_worker_cannot_change_state_and_deferred_is_typed() {
+    let fixture = GitFixture::new();
+    let (store, work) = work_fixture();
+    let other_actor = "agent/fixture/other";
+    let other_incarnation = "fixture:other";
+    let other_step = format!("{}/other", work.step.strip_suffix("/build").unwrap());
+    store.set_step_state(&other_step, "ready", None).unwrap();
+    runtime_for(&store, other_actor, other_incarnation);
+    store
+        .work_action(
+            &other_step,
+            "claim",
+            &WorkRequest {
+                actor: Some(other_actor.into()),
+                incarnation: Some(other_incarnation.into()),
+                summary: None,
+                reason: None,
+                evidence: vec![],
+                idempotency_key: "fixture-other-claim".into(),
+            },
+        )
+        .unwrap();
+    let other_work = store
+        .git_change_work_binding(other_actor, &other_step, other_incarnation)
+        .unwrap();
+    let entry = fixture.entry();
+    let created = entry
+        .mutate(
+            store.clone(),
+            ACTOR.into(),
+            fixture.request(
+                &work,
+                Operation::Create {
+                    source: fixture.source.clone(),
+                    base: fixture.base.clone(),
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .revision;
+    let operation = Operation::State {
+        id: fixture.id.clone(),
+        expected_current: created.oid.clone(),
+        state: State::Ready,
+        next: Some("build".into()),
+    };
+    let deferred = entry
+        .mutate(
+            store.clone(),
+            ACTOR.into(),
+            fixture.request(&work, operation.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(deferred.downcast_ref::<MutationFailure>(), Some(MutationFailure::Deferred { retry_after_ms }) if *retry_after_ms > 0)
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    let foreign = entry
+        .mutate(
+            store.clone(),
+            other_actor.into(),
+            fixture.request(&other_work, operation),
+        )
+        .await
+        .unwrap_err();
+    assert!(foreign.to_string().contains("current change owner"));
+    super::super::transport::validate_advertisement(
+        &fixture.repository.discover("origin").unwrap(),
+        &created,
+    )
+    .unwrap();
 }

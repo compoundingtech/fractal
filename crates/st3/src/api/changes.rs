@@ -206,6 +206,35 @@ pub(super) async fn work_binding(
     ))
 }
 
+fn mutation_error(error: anyhow::Error) -> ApiError {
+    use crate::changes::mutation::MutationFailure;
+    tracing::warn!(error=%error, "Git mutation refused or failed");
+    let outcome = error
+        .downcast_ref::<MutationFailure>()
+        .cloned()
+        .unwrap_or(MutationFailure::Refused);
+    let (status, code) = match &outcome {
+        MutationFailure::Refused => (StatusCode::BAD_REQUEST, "git_change_refused"),
+        MutationFailure::Busy { .. } => (StatusCode::CONFLICT, "git_change_busy"),
+        MutationFailure::Deferred { .. } => (StatusCode::TOO_MANY_REQUESTS, "git_change_deferred"),
+        MutationFailure::Unconfirmed { .. } => {
+            (StatusCode::BAD_GATEWAY, "git_publication_unconfirmed")
+        }
+        MutationFailure::PublishedNotIndexed { .. } => {
+            (StatusCode::CONFLICT, "git_published_not_indexed")
+        }
+    };
+    ApiError {
+        status,
+        code: code.into(),
+        message: outcome.to_string(),
+        details: Box::new(serde_json::Map::from_iter([(
+            "outcome".into(),
+            serde_json::to_value(outcome).expect("typed mutation outcome serializes"),
+        )])),
+    }
+}
+
 pub(super) async fn mutate(
     State(state): State<AppState>,
     Extension(session): Extension<client_v0::ClientSession>,
@@ -220,7 +249,7 @@ pub(super) async fn mutate(
     let published = entry
         .mutate(state.store.clone(), actor, request)
         .await
-        .map_err(|error| client_v0::validation(format!("{error:#}")))?;
+        .map_err(mutation_error)?;
     state.notify.notify_waiters();
     Ok(Json(
         serde_json::to_value(published).map_err(ApiError::internal)?,
@@ -431,5 +460,55 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(unavailable.code, "validation-failed");
+    }
+    #[test]
+    fn mutation_outcomes_keep_reconciliation_coordinates_and_hide_operator_details() {
+        use crate::changes::mutation::MutationFailure;
+        let record = "a".repeat(40);
+        let nonce = "b".repeat(32);
+        let id = format!("I{}", "c".repeat(40));
+        let uncertain = mutation_error(
+            MutationFailure::Unconfirmed {
+                change_id: id.clone(),
+                record_oid: record.clone(),
+                claim_nonce: Some(nonce.clone()),
+            }
+            .into(),
+        );
+        assert_eq!(uncertain.code, "git_publication_unconfirmed");
+        assert_eq!(uncertain.details["outcome"]["record_oid"], record);
+        assert_eq!(uncertain.details["outcome"]["claim_nonce"], nonce);
+        let indexed = mutation_error(
+            MutationFailure::PublishedNotIndexed {
+                change_id: id,
+                record_oid: record.clone(),
+                claim_nonce: None,
+            }
+            .into(),
+        );
+        assert_eq!(indexed.code, "git_published_not_indexed");
+        assert_eq!(indexed.details["outcome"]["record_oid"], record);
+        let busy = mutation_error(
+            MutationFailure::Busy {
+                retry_after_ms: None,
+            }
+            .into(),
+        );
+        assert_eq!(busy.status, StatusCode::CONFLICT);
+        let deferred = mutation_error(
+            MutationFailure::Deferred {
+                retry_after_ms: 9000,
+            }
+            .into(),
+        );
+        assert_eq!(deferred.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(deferred.details["outcome"]["retry_after_ms"], 9000);
+        let refused = mutation_error(anyhow::anyhow!(
+            "fixture-token /fixture/operator/private-path"
+        ));
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        let body = serde_json::to_string(&refused.details).unwrap();
+        assert!(!body.contains("fixture-token"));
+        assert!(!refused.message.contains("private-path"));
     }
 }

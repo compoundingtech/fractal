@@ -52,6 +52,46 @@ pub struct Published {
     pub transport: &'static str,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MutationFailure {
+    Refused,
+    Busy {
+        retry_after_ms: Option<u64>,
+    },
+    Deferred {
+        retry_after_ms: u64,
+    },
+    Unconfirmed {
+        change_id: String,
+        record_oid: String,
+        claim_nonce: Option<String>,
+    },
+    PublishedNotIndexed {
+        change_id: String,
+        record_oid: String,
+        claim_nonce: Option<String>,
+    },
+}
+impl std::fmt::Display for MutationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Refused => {
+                "Git change mutation refused; inspect state, pilot bounds and work authority"
+            }
+            Self::Busy { .. } => "Git publication or reader is in flight; retry explicitly",
+            Self::Deferred { .. } => "Git capacity read is deferred by the shared budget",
+            Self::Unconfirmed { .. } => {
+                "Git publication outcome is unconfirmed; reconcile this candidate before retrying"
+            }
+            Self::PublishedNotIndexed { .. } => {
+                "Git publication succeeded but local indexing failed; reconcile this record"
+            }
+        })
+    }
+}
+impl std::error::Error for MutationFailure {}
+
 impl Operation {
     pub fn validate(&self) -> Result<()> {
         match self {
@@ -223,7 +263,9 @@ impl Entry {
         let _publishing = self
             .publishing
             .try_lock()
-            .context("Git publication is in flight; retry explicitly or use the PR path")?;
+            .map_err(|_| MutationFailure::Busy {
+                retry_after_ms: None,
+            })?;
         // Voluntary release remains possible after the pilot closes.
         if !matches!(request.operation, Operation::Release { .. }) {
             pilot_started(self)?;
@@ -234,11 +276,14 @@ impl Entry {
                 observation,
                 managed_ref_count,
             } => (observation, managed_ref_count),
-            super::discovery::CapacityAdmission::Deferred { retry_after_ms } => anyhow::bail!(
-                "Git read budget deferred capacity check for {retry_after_ms} ms; use the PR path or retry explicitly"
-            ),
+            super::discovery::CapacityAdmission::Deferred { retry_after_ms } => {
+                return Err(MutationFailure::Deferred { retry_after_ms }.into());
+            }
             super::discovery::CapacityAdmission::InFlight => {
-                anyhow::bail!("Git reader is in flight; retry explicitly or use the PR path")
+                return Err(MutationFailure::Busy {
+                    retry_after_ms: None,
+                }
+                .into());
             }
         };
         let entry = self.clone();
@@ -282,7 +327,11 @@ impl Entry {
                             source_commit, source_tree, base_commit: base.clone(), trailer_status: TrailerStatus::Present,
                             state: State::Draft, next: None, depends_on: vec![], actor: actor.clone(), created_at: now.clone(), updated_at: now, claim: None, mirror: None })?
                     }
-                    Operation::State { state, next, .. } => repository.prepare_state(old.as_ref().unwrap(), &actor, state.clone(), next.clone())?,
+                    Operation::State { state, next, .. } => {
+                        let old = old.as_ref().unwrap();
+                        ensure!(old.record.actor == actor, "only the current change owner may change state or next lane");
+                        repository.prepare_state(old, &actor, state.clone(), next.clone())?
+                    },
                     Operation::Claim { lane, .. } => {
                         let old = old.as_ref().unwrap();
                         ensure!(old.record.next.as_deref() == Some(lane), "change is not waiting for this lane");
@@ -322,10 +371,27 @@ impl Entry {
                 Operation::Release { nonce, .. } => Some((actor.as_str(), nonce.as_str())),
                 _ => None,
             };
-            repository.publish_guarded(&entry.configuration.remote, old.as_ref(), &candidate, release,
-                &|| store.validate_git_change_work(&actor, &request.work))
-                .with_context(|| format!("Git publication outcome unconfirmed for {} candidate {}; inspect remote refs and work/nonce before retrying", candidate.record.change_id, candidate.oid))?;
-            store.index_git_change(&entry.configuration.name, &candidate).with_context(|| format!("Git publication {} succeeded but local indexing failed; inspect this exact record before retrying", candidate.oid))?;
+            let admitted = std::cell::Cell::new(false);
+            let guard = || {
+                store.validate_git_change_work(&actor, &request.work)?;
+                admitted.set(true);
+                Ok(())
+            };
+            if let Err(error) = repository.publish_guarded(&entry.configuration.remote, old.as_ref(), &candidate, release, &guard) {
+                if !admitted.get() { return Err(error); }
+                tracing::warn!(error=%error, repository=%entry.configuration.name, record=%candidate.oid, "Git publication outcome unconfirmed");
+                return Err(MutationFailure::Unconfirmed {
+                    change_id: candidate.record.change_id.clone(), record_oid: candidate.oid.clone(),
+                    claim_nonce: candidate.record.claim.as_ref().map(|claim| claim.nonce.clone()),
+                }.into());
+            }
+            if let Err(error) = store.index_git_change(&entry.configuration.name, &candidate) {
+                tracing::warn!(error=%error, repository=%entry.configuration.name, record=%candidate.oid, "Git publication succeeded without local index receipt");
+                return Err(MutationFailure::PublishedNotIndexed {
+                    change_id: candidate.record.change_id.clone(), record_oid: candidate.oid.clone(),
+                    claim_nonce: candidate.record.claim.as_ref().map(|claim| claim.nonce.clone()),
+                }.into());
+            }
             Ok(Published {
                 revision: candidate,
                 work: request.work,

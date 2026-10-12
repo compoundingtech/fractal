@@ -131,3 +131,27 @@ landing/composition receipts remain with the existing PR and curator path. It do
 not steal an expired claim, prune records, recover deleted refs, or amend sources.
 Those actions require their separate verified adapters and reviews. A failure can
 always continue through the existing PR path.
+
+State and next-lane publication is restricted to the actor in the current metadata
+record. Generation 1 assigns that actor to the authenticated creator; state edits
+preserve it. An accepted claim transfers scheduling ownership to its claimant,
+and voluntary release keeps that actor. Other live agents cannot flip the state
+or next marker using an unrelated work lease. Any live local agent may claim a
+ready change in build/review, independently of its step's role in this initial
+adapter; release remains restricted to its exact claimant/work/nonce. Lane-to-step
+role policy is a later adapter.
+
+Failures have typed outcomes. Refusal uses `git_change_refused` (400), busy uses
+`git_change_busy` (409, admission time unknown), and deferred uses
+`git_change_deferred` (429 with retry_after_ms). An unconfirmed attempted push
+returns change_id, candidate record_oid and the generated claim_nonce, with no
+ownership assumption. Confirmed publication whose local index write failed uses
+`git_published_not_indexed` and carries the same reconciliation coordinates. The
+CLI preserves these details, including in JSON output, while short client messages
+exclude operator paths and Git stderr; diagnostic details stay in daemon logs.
+
+A malformed, non-self-pointing evidence ref makes capacity admission fail closed;
+a shared repository writer can therefore stop scheduling in the pilot. Each
+mutation consumes a capacity read from the same six-per-minute budget as list/show
+and sync, so aggregate pilot throughput is at most six admitted remote operations
+a minute. Git metadata and the shared credential do not authorize a main update.
