@@ -37,14 +37,18 @@ export class ScrollController {
   private homeNavigation = false
   /** scrollTop when an older-navigation command began, until RAC moves the viewport. */
   private navigationTop: number | undefined
-  /** Content below the viewport top when older rows were inserted, until the anchor row mounts. */
-  private prependBottom: number | undefined
+  /**
+   * After older rows are inserted and before the anchor row mounts: the content
+   * below the viewport top at insertion, then `step` once that estimate is applied.
+   */
+  private prependBottom: number | 'step' | undefined
   private anchor: ReadingPosition | undefined
   private pendingAnchor: ReadingPosition | undefined
   private restoreFrame: number | undefined
   private firstKey: string | undefined
   private rows: readonly Row[] = []
   private rowKeys = new Set<string>()
+  private readonly rowIndex = new Map<string, number>()
   private readonly rowByTarget = new Map<string, string>()
   private geometry = { contentHeight: 0, viewportHeight: 0 }
   private pressed: ReadingPosition | undefined
@@ -359,11 +363,30 @@ export class ScrollController {
     if (this.prependBottom !== undefined) {
       if (key === undefined) this.prependBottom = undefined
       else if (mounted(key) === undefined) {
-        // RAC rebuilds only its requested rect: after an insert above the reader,
-        // an unmounted anchor keeps its pre-insert layout y. Only content above
-        // the reader changed, so the distance to the bottom stays exact until
-        // the anchor row mounts and DOM correction takes over.
-        element.scrollTop = element.scrollHeight - this.prependBottom
+        if (this.prependBottom !== 'step') {
+          // RAC rebuilds only its requested rect: after an insert above the reader,
+          // an unmounted anchor keeps its pre-insert layout y. Only content above
+          // the reader changed, so the distance to the bottom is the best estimate.
+          element.scrollTop = element.scrollHeight - this.prependBottom
+          this.prependBottom = 'step'
+          return
+        }
+        // Estimated sizes can still miss the row. Walk past the mounted rows
+        // toward it; each mutation re-enters here until the anchor row mounts.
+        const targetIndex = this.rowIndex.get(key)
+        if (targetIndex === undefined) return
+        let before: { index: number; bottom: number } | undefined
+        let after: { index: number; top: number } | undefined
+        for (const row of element.querySelectorAll<HTMLElement>('[data-embrace-entry-id]')) {
+          const index = this.rowIndex.get(row.dataset['embraceEntryId'] ?? '')
+          const rect = row.getBoundingClientRect()
+          if (index === undefined || rect.height === 0) continue
+          if (index < targetIndex && (before === undefined || index > before.index)) before = { index, bottom: rect.bottom }
+          if (index > targetIndex && (after === undefined || index < after.index)) after = { index, top: rect.top }
+        }
+        const viewport = element.getBoundingClientRect()
+        if (after === undefined && before !== undefined && before.bottom > viewport.top) element.scrollTop += before.bottom - viewport.top
+        else if (before === undefined && after !== undefined && after.top < viewport.bottom) element.scrollTop -= viewport.bottom - after.top
         return
       } else this.prependBottom = undefined
     }
@@ -400,9 +423,11 @@ export class ScrollController {
     this.firstKey = rows[0]?.id
     if (previous !== rows || previousLeading !== leadingKey) {
       this.rowKeys.clear()
+      this.rowIndex.clear()
       this.rowByTarget.clear()
-      for (const row of rows) {
+      for (const [index, row] of rows.entries()) {
         this.rowKeys.add(row.id)
+        this.rowIndex.set(row.id, index)
         for (const id of row.targetIds ?? []) this.rowByTarget.set(id, row.id)
       }
       if (leadingKey !== undefined) this.rowKeys.add(leadingKey)
