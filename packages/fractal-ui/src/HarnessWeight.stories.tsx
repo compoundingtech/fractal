@@ -10,7 +10,7 @@ import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 
-/** q106 pairing: the production HarnessNotice at both weights over the same eight fictional events. */
+/** q106 pairing: the production HarnessNotice at both weights over the same fictional events. */
 const variants: readonly { readonly weight: HarnessWeight; readonly name: string; readonly note: string }[] = [
   { weight: 'row', name: 'B1 · Quiet rows', note: 'Low interruption; longer payloads need deliberate disclosure.' },
   { weight: 'card', name: 'B2 · Compact cards', note: 'Clearest event boundaries; costs more vertical space.' },
@@ -35,7 +35,11 @@ export const Dark: Story = {
     const canvas = within(canvasElement)
     for (const weight of ['row', 'card']) {
       const column = within(canvas.getByTestId(`harness-weight-${weight}`))
-      await expect(column.getAllByTestId('harness-notice')).toHaveLength(8)
+      await expect(column.getAllByTestId('harness-notice')).toHaveLength(harnessWeightExamples.length)
+      const failedJob = column.getAllByTestId('harness-notice').find(node => node.dataset.itemId === 'weight/failed-job')!
+      await expect(within(failedJob).getByTestId('harness-kind')).toHaveTextContent('failed')
+      const completedJob = column.getAllByTestId('harness-notice').find(node => node.dataset.itemId === 'weight/job')!
+      await expect(getComputedStyle(within(failedJob).getByTestId('harness-kind')).color).not.toBe(getComputedStyle(within(completedJob).getByTestId('harness-kind')).color)
       await expect(column.queryByText(/<system-notice>|<irc|<task-result|## Goal/)).toBeNull()
     }
     const read = within(canvas.getByTestId('harness-weight-row')).getByRole('button', { name: 'Read summary' })
@@ -56,6 +60,8 @@ export const UnsupportedDark: Story = {
     const marker = within(canvas.getByTestId('unsupported-record'))
     const trigger = marker.getByRole('button', { name: 'Inspect' })
     await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    await expect(marker.getByText(/capped preview/)).not.toBeVisible()
+    await expect(marker.getByText('8,192 bytes · truncated')).not.toBeVisible()
     await userEvent.click(trigger)
     await expect(trigger).toHaveAttribute('aria-expanded', 'true')
     await expect(marker.getByText('8,192 bytes · truncated')).toBeVisible()

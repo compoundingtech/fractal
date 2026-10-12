@@ -290,6 +290,7 @@ interface BlockClassification {
   readonly markers: readonly ConversationItem[]
   readonly primary?: ConversationItem
   readonly native: boolean
+  readonly fallback?: boolean
 }
 /** Block visibility and vocabulary are authoritative whenever native blocks exist. */
 const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassification => {
@@ -304,6 +305,7 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
   const markers: ConversationItem[] = []
   let primary: ConversationItem | undefined
   let selected = false
+  let fallback = false
   for (const [index, block] of (blocks ?? []).entries()) {
     if (block.visibility === 'internal' || block.visibility === 'hidden-by-harness' || blockRole(block.kind) === 'bookkeeping') continue
     const role = blockRole(block.kind)
@@ -319,7 +321,7 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     const meaning = block.view !== undefined && isKnownView(block.view) ? viewMeaning(block.view, ctx) : undefined
     if (meaning?._tag === 'Drop') continue
     if (meaning?._tag === 'Item') { if (!selected) { primary = meaning.item; selected = true }; continue }
-    if (meaning?._tag === 'Tool') { if (!selected) selected = true; continue }
+    if (meaning?._tag === 'Tool') { if (!selected) { selected = true; fallback = entry.type !== 'content' }; continue }
     if (role === 'typed') {
       const parsed = entry.type === 'content' ? q101OmpEnvelopeStopgap({ id: entry.id, at, role: 'system', text }) : undefined
       if (parsed === undefined) marker('missing-view')
@@ -328,7 +330,7 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     }
     if (selected) continue
     selected = true
-    if (entry.type !== 'content') continue
+    if (entry.type !== 'content') { fallback = true; continue }
     if (role === 'reasoning') primary = { _tag: 'Reasoning', id: entry.id, at, text: text.startsWith('[reasoning]\n') ? text.slice(12) : text, streaming: !entry.final }
     else if (entry.role === 'system') primary = q101OmpEnvelopeStopgap({ id: entry.id, at, role: 'system', text })
       ?? { _tag: 'Event', id: entry.id, at, kind: 'harness-message', title: 'Harness message', text: ompNoticeExcerpt(text), sender: { kind: 'harness', label: harness }, data: {} }
@@ -340,7 +342,7 @@ const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassif
     if (raw?.visibility === 'internal' || raw?.visibility === 'hidden-by-harness' || block.kind === 'source_record') continue
     markers.push(unsupported(`${entry.id}#${block.blockId ?? `dropped-${index}`}`, harness, block.kind ?? 'unknown', 'undecodable-block', block.raw, at))
   }
-  return { markers, ...(primary === undefined ? {} : { primary: { ...primary, ...facts } }), native: true }
+  return { markers, ...(primary === undefined ? {} : { primary: { ...primary, ...facts } }), native: true, fallback }
 }
 
 /** Convenience for fixtures and one-shot reads, using the same fold as live chunks. */
@@ -711,7 +713,11 @@ export class LiveTimeline {
       if (entry.type === 'tool_result') {
         const projected = this.cached({ entry, result: undefined, active: true })
         // A joined result still emits its own unsupported blocks at its entry position.
-        items.push(...(this.callFor(entry) === undefined ? projected : projected.filter(item => item._tag === 'Unsupported')))
+        const owner = this.callFor(entry)
+        const call = owner === undefined ? undefined : this.ordered[owner]
+        const classification = call === undefined || call.type === 'truncation' ? undefined : this.cache.get(call.id)?.classified ?? blockItems(call)
+        const visibleCall = classification !== undefined && (!classification.native || classification.fallback || classification.primary?._tag === 'ToolCall')
+        items.push(...(visibleCall ? projected.filter(item => item._tag === 'Unsupported') : projected))
         continue
       }
       if (entry.type === 'tool_call')
@@ -779,11 +785,15 @@ export class LiveTimeline {
       return hit.items
     const classified = hit?.entry === entry ? hit.classified : blockItems(entry)
     let item: ConversationItem | undefined
-    if (entry.type === 'tool_result') item = joinResult({ call: undefined, entry })
-    else if (entry.type === 'content' && classified.native) item = classified.primary
-    else {
-      const own = itemOf({ entry, sessionActive: active })
-      item = result !== undefined && own._tag === 'ToolCall' ? joinResult({ call: own, entry: result }) : own
+    if (entry.type === 'tool_result') {
+      if (!classified.native || classified.fallback) item = joinResult({ call: undefined, entry })
+      else item = classified.primary
+    } else {
+      const own = classified.native && !classified.fallback ? classified.primary : itemOf({ entry, sessionActive: active })
+      const resultClassification = result === undefined ? undefined : blockItems(result)
+      item = result !== undefined && own?._tag === 'ToolCall'
+        && (!resultClassification?.native || resultClassification.fallback)
+        ? joinResult({ call: own, entry: result }) : own
     }
     if (item?._tag === 'Text' && item.id !== id) item = { ...item, id }
     const items = [...classified.markers, ...(item === undefined ? [] : [item])]

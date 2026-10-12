@@ -15,6 +15,49 @@ describe('native closed transcript boundary', () => {
   it('hides internal tool starts', () => {
     expect(project(entry([block('status', { visibility: 'internal', view: { type: 'tool_start', call_id: 'call/a', tool: 'bash', started_at: '2026-10-12T12:00:00Z' } })]))).toEqual([])
   })
+  it.each(['internal', 'hidden-by-harness'])('hides %s native tool invocations', visibility => {
+    expect(project(entry([], { type: 'tool_call', role: 'assistant', body: {
+      call_id: 'call/hidden', name: 'bash', arguments: { command: 'INTERNAL_ONLY_COMMAND' },
+      blocks: [block('tool_invocation', { visibility })],
+    } }))).toEqual([])
+  })
+  it.each(['internal', 'hidden-by-harness'])('hides %s orphan native tool results', visibility => {
+    expect(project(entry([], { type: 'tool_result', role: 'tool', body: {
+      call_id: 'call/hidden', content: 'INTERNAL_ONLY_OUTPUT', media_type: 'text/plain', status: 'success',
+      blocks: [block('tool_output', { visibility })],
+    } }))).toEqual([])
+  })
+  it.each(['internal', 'hidden-by-harness'])('does not join %s result payloads into visible calls', visibility => {
+    const timeline = new LiveTimeline()
+    timeline.apply(frame([
+      entry([], { type: 'tool_call', role: 'assistant', body: { call_id: 'call/joined', name: 'bash', arguments: { command: 'visible command' }, blocks: [block('tool_invocation')] } }),
+      entry([], { id: 'result', sequence: 2, type: 'tool_result', role: 'tool', body: { call_id: 'call/joined', content: 'INTERNAL_ONLY_OUTPUT', media_type: 'text/plain', status: 'success', blocks: [block('tool_output', { visibility })] } }),
+    ]))
+    const items = timeline.project().items
+    expect(items).toMatchObject([{ _tag: 'ToolCall', input: { command: 'visible command' } }])
+    expect(items[0]).not.toHaveProperty('result')
+    expect(JSON.stringify(items)).not.toContain('INTERNAL_ONLY_OUTPUT')
+  })
+  it.each(['internal', 'hidden-by-harness'])('hides %s non-content message and status bodies', visibility => {
+    for (const type of ['message', 'status']) {
+      expect(project(entry([], { type, body: { message_id: 'message/hidden', title: 'INTERNAL_ONLY_MESSAGE', status: 'completed', detail: 'INTERNAL_ONLY_STATUS', blocks: [block(type === 'message' ? 'text' : 'status', { visibility })] } }))).toEqual([])
+    }
+  })
+  it('retains visible tool fallback and mixed unsupported markers', () => {
+    const items = project(entry([], { type: 'tool_call', role: 'assistant', body: {
+      call_id: 'call/mixed', name: 'bash', arguments: { command: 'visible command' },
+      blocks: [block('tool_invocation', { visibility: 'internal' }), block('future-tool'), block('tool_invocation')],
+    } }))
+    expect(items).toMatchObject([{ _tag: 'Unsupported', recordKind: 'future-tool' }, { _tag: 'ToolCall', input: { command: 'visible command' } }])
+  })
+  it('retains visible results as orphans when their invocation is hidden', () => {
+    const timeline = new LiveTimeline()
+    timeline.apply(frame([
+      entry([], { type: 'tool_call', role: 'assistant', body: { call_id: 'call/mixed', name: 'bash', arguments: { command: 'INTERNAL_ONLY_COMMAND' }, blocks: [block('tool_invocation', { visibility: 'internal' })] } }),
+      entry([], { id: 'visible-result', sequence: 2, type: 'tool_result', role: 'tool', body: { call_id: 'call/mixed', content: 'Visible output', media_type: 'text/plain', status: 'success', blocks: [block('tool_output')] } }),
+    ]))
+    expect(timeline.project().items).toMatchObject([{ _tag: 'ToolCall', callSeen: false, result: { content: 'Visible output' } }])
+  })
   it.each([
     [{ id: 'Impl2239-2', state: 'completed', duration_ms: 15 }, 'completed'],
     [{ id: 'process/1', name: 'Supervised process', state: 'failed', exit_code: 1 }, 'failed'],

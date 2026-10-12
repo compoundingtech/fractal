@@ -138,7 +138,7 @@ for (const scheme of ['dark', 'light']) test(`curated ${scheme} harness cards di
 })
 
 // q106: the Fractal/Explore comparison renders the production component at both weights.
-for (const scheme of ['dark', 'light']) test(`q106 ${scheme} comparison renders all eight kinds at row and card weight without transport syntax`, async () => {
+for (const scheme of ['dark', 'light']) test(`q106 ${scheme} comparison renders all specimens at row and card weight without transport syntax`, async () => {
   const container = document.createElement('div'); document.body.append(container)
   const root = createRoot(container)
   try {
@@ -146,7 +146,7 @@ for (const scheme of ['dark', 'light']) test(`q106 ${scheme} comparison renders 
     assert.equal(container.querySelector('[data-scheme]').dataset.scheme, scheme)
     const kinds = [...new Set(harnessWeightExamples.map(item => item.notice._tag))].sort()
     assert.deepEqual(kinds, ['BackgroundJob', 'Compaction', 'Delivery', 'Interjection', 'Irc', 'SkillInvocation', 'SubagentResult'])
-    assert.equal(harnessWeightExamples.length, 8)
+    assert.equal(harnessWeightExamples.length, 9)
     const transport = /<\/?(system-notice|irc|task-result|skill|output)\b|\[omp compaction\]|## Goal|"overall_correctness"/
     const collapsedText = column => { const copy = column.cloneNode(true); for (const hidden of copy.querySelectorAll('[hidden]')) hidden.remove(); return copy.textContent }
     const classes = {}
@@ -160,6 +160,10 @@ for (const scheme of ['dark', 'light']) test(`q106 ${scheme} comparison renders 
       for (const panel of column.querySelectorAll('[data-testid=harness-panel]')) assert.ok(panel.closest('[hidden]'), 'collapsed panel is hidden')
       assert.ok(column.querySelector('[data-item-id="weight/interjection"]').textContent.includes('Interjection'))
       assert.ok(column.querySelector('[data-item-id="weight/result"]').textContent.includes('completed'))
+      const failedJob = column.querySelector('[data-item-id="weight/failed-job"] [data-testid=harness-kind]')
+      const completedJob = column.querySelector('[data-item-id="weight/job"] [data-testid=harness-kind]')
+      assert.equal(failedJob.textContent, 'failed')
+      assert.notEqual(failedJob.className, completedJob.className)
       classes[weight] = notices[0].className
     }
     assert.notEqual(classes.row, classes.card)
