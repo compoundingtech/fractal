@@ -21,14 +21,47 @@ fn st3() -> &'static str {
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
 
-/// A port for a node's listener. It comes from below every ephemeral range (Linux hands out
-/// 32768-60999 and macOS 49152-65535 to outgoing connections), so it is still free when a
-/// stopped node starts again.
+/// Reserve the port across independently executed tests, including when a node is stopped.
+/// Never unlink these files: a second inode would create a second reservation for the same port.
+fn reserve_port(directory: &Path, port: u16) -> Option<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join(port.to_string()))
+        .unwrap();
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(error) => panic!("reserve fleet fixture port {port}: {error}"),
+    }
+}
+
+/// A port for a node's listener, below the ephemeral ranges used for outgoing connections.
+/// Keep a cross-process reservation for the whole test process: merely checking bind then
+/// closing the socket races another fixture's allocation, both before start and during restart.
 fn free_port() -> u16 {
+    use std::os::unix::fs::DirBuilderExt as _;
     use std::sync::atomic::{AtomicU16, Ordering};
+    use std::sync::{Mutex, OnceLock};
     const LOW: u16 = 20_000;
     const SPAN: u16 = 12_000;
     static NEXT: AtomicU16 = AtomicU16::new(0);
+    static RESERVED: OnceLock<Mutex<Vec<fs::File>>> = OnceLock::new();
+    // All nextest processes on this host must use the same directory, rather than their own
+    // fixture roots. The UID separates users; mode 0700 keeps the lock domain private.
+    let directory = std::env::temp_dir().join(format!("st3-fleet-test-ports-{}", unsafe {
+        libc::geteuid()
+    }));
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("create fleet fixture port reservation directory: {error}"),
+    }
     let mut seed = [0_u8; 2];
     getrandom::fill(&mut seed).unwrap();
     let _ = NEXT.compare_exchange(
@@ -37,22 +70,59 @@ fn free_port() -> u16 {
         Ordering::AcqRel,
         Ordering::Acquire,
     );
-    loop {
+    for _ in 0..SPAN {
         let port = LOW + NEXT.fetch_add(1, Ordering::AcqRel) % SPAN;
+        let Some(reservation) = reserve_port(&directory, port) else {
+            continue;
+        };
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            RESERVED
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .push(reservation);
             return port;
         }
     }
+    panic!("no unreserved fleet fixture port in {LOW}..{}", LOW + SPAN);
+}
+
+#[test]
+fn fixture_port_reservation_excludes_other_processes_until_released() {
+    const PROBE: &str = "ST3_FLEET_PORT_RESERVATION_PROBE";
+    if let Some(directory) = std::env::var_os(PROBE) {
+        assert!(reserve_port(Path::new(&directory), 20_001).is_none());
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let reservation = reserve_port(directory.path(), 20_001).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "fleet::fixture_port_reservation_excludes_other_processes_until_released",
+            "--nocapture",
+        ])
+        .env(PROBE, directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    drop(reservation);
+    assert!(reserve_port(directory.path(), 20_001).is_some());
 }
 
 /// One isolated node: its own directories, daemon, and replication worker.
-struct Node {
+pub(super) struct Node {
     name: String,
     root: PathBuf,
     /// The st3 executable this node runs; an older release for compatibility tests.
     binary: PathBuf,
-    port: u16,
-    env: Vec<(String, String)>,
+    pub(super) port: u16,
+    pub(super) env: Vec<(String, String)>,
     daemon: Option<Child>,
     worker: Option<Child>,
     /// Every argument list this test passed to an st3 process on this node.
@@ -60,7 +130,7 @@ struct Node {
 }
 
 impl Node {
-    fn new(parent: &Path, name: &str) -> Self {
+    pub(super) fn new(parent: &Path, name: &str) -> Self {
         Self::named(parent, name, name)
     }
 
@@ -162,7 +232,7 @@ impl Node {
         serde_json::from_str(&self.st_ok(&all)).unwrap()
     }
 
-    fn logs(&self) -> String {
+    pub(super) fn logs(&self) -> String {
         [
             "daemon.log",
             "daemon.stderr.log",
@@ -183,7 +253,7 @@ impl Node {
         .join("\n")
     }
 
-    async fn start(&mut self) {
+    pub(super) async fn start(&mut self) {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
         let up: Vec<&str> = if self.binary == Path::new(st3()) {
@@ -285,7 +355,7 @@ impl Node {
     }
 
     /// Configure this node as a config-peer fleet node, the way the running fleet is today.
-    fn legacy_config(&self, fleet_id: &str, secret: &Path, peers: &[(&str, u16)]) {
+    pub(super) fn legacy_config(&self, fleet_id: &str, secret: &Path, peers: &[(&str, u16)]) {
         let mut config = format!(
             "node = \"{}\"\nperson = \"{PERSON}\"\nfleet_id = \"{fleet_id}\"\nshared_secret_file = \"{}\"\npeer_listen = \"127.0.0.1:{}\"\n",
             self.name,
@@ -402,7 +472,7 @@ impl Node {
         }
     }
 
-    async fn note(&self, text: &str) -> String {
+    pub(super) async fn note(&self, text: &str) -> String {
         self.note_as(text, PERSON).await
     }
 
@@ -484,7 +554,12 @@ where
     panic!("timed out waiting until {what}");
 }
 
-async fn wait_for_notes(node: &Node, expected: &BTreeSet<String>, seconds: u64, nodes: &[&Node]) {
+pub(super) async fn wait_for_notes(
+    node: &Node,
+    expected: &BTreeSet<String>,
+    seconds: u64,
+    nodes: &[&Node],
+) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     loop {
         let notes = node.notes().await;

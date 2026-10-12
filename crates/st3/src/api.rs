@@ -215,7 +215,7 @@ struct ClientPageCursor {
 }
 
 fn signal_changed(state: &AppState) {
-    crate::performance::record_wake("api", None);
+    crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::Api, None);
     state.notify.notify_one();
     signal_visible_change(state);
 }
@@ -239,7 +239,7 @@ pub(crate) fn signal_message_changed(state: &AppState, kind: &str, work_wake: bo
 
 /// [`signal_changed`] for a claim, counting the wake under the claim's kind.
 fn signal_claim_changed(state: &AppState, kind: &str) {
-    crate::performance::record_wake("api", Some(kind));
+    crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::Api, Some(kind));
     state.notify.notify_one();
     signal_visible_change(state);
 }
@@ -967,7 +967,15 @@ async fn response_envelope_unbounded(
         .into_response();
     }
     let started = Instant::now();
-    let request_method = request.method().clone();
+    let client_request = request.uri().path().starts_with("/v1/client/");
+    let request_id = if client_request {
+        crate::relay_trace::current().map_or_else(
+            || format!("request/{}", new_request_id()),
+            |trace| trace.id().to_owned(),
+        )
+    } else {
+        new_request_id()
+    };
     let request_path = request.uri().path().to_owned();
     let request_query = request.uri().query().map(str::to_owned);
     let long_poll = request_query.as_deref().is_some_and(asks_to_wait);
@@ -982,11 +990,35 @@ async fn response_envelope_unbounded(
         .get::<crate::profile::Caller>()
         .map(|caller| caller.0.clone())
         .unwrap_or_else(|| "(tcp)".into());
+    let request_method = request.method().clone();
+    let client_class = crate::otel_client_class::ClientClass::from_header(
+        request
+            .headers()
+            .get(client_presence::CLIENT_HEADER)
+            .and_then(|value| value.to_str().ok()),
+    );
+    // The OTel server span exists only while trace export is on; the disabled path
+    // constructs nothing (st2's O11Y-R02 gate).
+    let otel = request_trace(
+        &request_method,
+        &request_route,
+        client_class,
+        request.headers(),
+        &request_id,
+    );
+    if let Some(server) = otel.as_ref()
+        && request.headers().contains_key(axum::http::header::UPGRADE)
+    {
+        use opentelemetry::trace::TraceContextExt as _;
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        request.extensions_mut().insert(crate::otel::UpgradeContext(
+            Some(server.context().span().span_context().clone()),
+        ));
+    }
     let profile = crate::profile::Op::start(
         format!("{} {request_route}", request.method()),
         Some(caller.clone()),
     );
-    let client_request = request.uri().path().starts_with("/v1/client/");
     let observation_report = request_route == "/v1/client/observations";
     // These point readers admit snapshot metadata inside their pinned read before
     // formatting it. Authentication still runs here; their response extension
@@ -1032,24 +1064,40 @@ async fn response_envelope_unbounded(
         let admission_queue = profile.as_ref().map(|op| op.wall_span("admission/queue"));
         let mut diagnostic_queue =
             crate::relay_trace::span(crate::relay_trace::Phase::AdmissionQueue);
+        let admission_enqueued = Instant::now();
+        let server_trace = otel.clone();
         let admitted = crate::api::read_deadline::spawn_blocking(move || {
             diagnostic_queue.finish(crate::relay_trace::Outcome::Completed);
             drop(admission_queue);
+            let queue_ms = admission_enqueued.elapsed().as_millis() as i64;
+            let _server = server_trace.as_ref().map(|span| span.enter());
             let _entered = crate::profile::enter(auth_profile.as_ref());
             let authentication_span = crate::profile::span("admission/authenticate");
+            let authenticate_started = Instant::now();
             let authentication =
                 crate::relay_trace::result(crate::relay_trace::Phase::Authenticate, || {
                     client_v0::authenticate(&auth_state, &auth_request, transport)
                 });
+            let authenticate_ms = authenticate_started.elapsed().as_millis() as i64;
             drop(authentication_span);
             let snapshot = (!defer_detail_snapshot && !observation_report).then(|| {
                 let snapshot_span = crate::profile::span("admission/snapshot");
+                let snapshot_started = Instant::now();
                 let snapshot = crate::relay_trace::work(crate::relay_trace::Phase::Snapshot, || {
                     client_request_snapshot(&auth_state, cursor_snapshot.flatten())
                 });
+                let snapshot_ms = snapshot_started.elapsed().as_millis() as i64;
                 drop(snapshot_span);
-                snapshot
+                (snapshot, snapshot_ms)
             });
+            let (snapshot, snapshot_ms) = snapshot.unzip();
+            if let Some(server) = server_trace.as_ref() {
+                server.record("st.admission.queue_ms", queue_ms);
+                server.record("st.admission.authenticate_ms", authenticate_ms);
+                if let Some(snapshot_ms) = snapshot_ms {
+                    server.record("st.admission.snapshot_ms", snapshot_ms);
+                }
+            }
             (authentication, snapshot)
         })
         .await;
@@ -1074,7 +1122,17 @@ async fn response_envelope_unbounded(
         // handler on a blocking thread so a busy projection or replication pass cannot
         // occupy an async worker needed to accept another call. Read workers are admitted
         // before taking store locks; nested work reuses the handler's reader.
-        (None, Ok(_)) if request_path == "/v1/health" || observation_report => next.run(request).await,
+        (None, Ok(_)) if request_path == "/v1/health" || observation_report => {
+            let handler_started = Instant::now();
+            let response = next.run(request).await;
+            if let Some(server) = otel.as_ref() {
+                server.record(
+                    "st.handler.duration_ms",
+                    handler_started.elapsed().as_millis() as i64,
+                );
+            }
+            response
+        }
         (None, Ok(_)) => {
             let runtime = tokio::runtime::Handle::current();
             let handler_profile = profile.clone();
@@ -1083,16 +1141,27 @@ async fn response_envelope_unbounded(
             let handler_queue = profile.as_ref().map(|op| op.wall_span("handler/queue"));
             let mut diagnostic_queue =
                 crate::relay_trace::span(crate::relay_trace::Phase::HandlerQueue);
+            let handler_enqueued = Instant::now();
+            let server_trace = otel.clone();
             let forwarded_handler = request_path == crate::peer::CLIENT_READ_FORWARD_PATH;
             let remote = served_remote.clone();
-            match crate::api::read_deadline::spawn_handler(move || {
+            let roster_trace = (request_route == "/v1/client/agents").then(|| server_trace.clone()).flatten();
+            match crate::api::read_deadline::spawn_handler(roster_trace, move || {
                 diagnostic_queue.finish(crate::relay_trace::Outcome::Completed);
                 drop(handler_queue);
+                let queue_ms = handler_enqueued.elapsed().as_millis() as i64;
+                let _server = server_trace.as_ref().map(|span| span.enter());
+                let writer_wait = server_trace.as_ref().map(|_| {
+                    Arc::new(smallclaims::sqlite::telemetry::WriterWait::default())
+                });
+                let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait.clone());
                 if let Some(profile) = &handler_profile {
                     profile.queued();
                 }
                 let _entered = crate::profile::enter(handler_profile.as_ref());
-                crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
+                let handler_started = Instant::now();
+                let response =
+                    crate::performance::with_cpu(Some(&cpu_kind), Some(&cpu_client), || {
                     let mut diagnostic_handler =
                         crate::relay_trace::span(crate::relay_trace::Phase::Handler);
                     let response = runtime.block_on(track_remote_reads(remote, crate::api::read_deadline::handler(async move {
@@ -1119,7 +1188,18 @@ async fn response_envelope_unbounded(
                         crate::relay_trace::Outcome::Failed
                     });
                     response
-                })
+                });
+                if let Some(server) = server_trace.as_ref() {
+                    server.record("st.handler.queue_ms", queue_ms);
+                    server.record(
+                        "st.handler.duration_ms",
+                        handler_started.elapsed().as_millis() as i64,
+                    );
+                    if let Some(writer_wait) = writer_wait.as_ref() {
+                        crate::otel::record_writer_wait(server, writer_wait.totals());
+                    }
+                }
+                response
             })
             .await
             {
@@ -1150,6 +1230,15 @@ async fn response_envelope_unbounded(
         if let Some(profile) = profile {
             profile.finish();
         }
+        crate::otel::record_http_request_duration(
+            request_method.as_str(),
+            &request_route,
+            client_class,
+            response.status(),
+            started.elapsed(),
+        );
+        // A 101 upgrade ends the server span here; the WebSocket stream never holds it.
+        finish_request_trace(otel, response.status());
         return response;
     }
     let enveloping = Instant::now();
@@ -1162,76 +1251,87 @@ async fn response_envelope_unbounded(
         .extensions
         .remove::<ClientSnapshot>()
         .or(client_snapshot);
-    let raw = match to_bytes(body, usize::MAX).await {
-        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|error| {
-            json!({
-                "code": "invalid-server-json",
+    let bytes = to_bytes(body, usize::MAX).await;
+    let serialize = || {
+        let raw = match bytes {
+            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|error| {
+                json!({
+                    "code": "invalid-server-json",
+                    "message": error.to_string(),
+                })
+            }),
+            Err(error) => json!({
+                "code": "response-read-failed",
                 "message": error.to_string(),
+            }),
+        };
+        let store_index = if client_request {
+            client_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.store_index)
+                .unwrap_or_default()
+        } else {
+            // index() is an atomic load. Health must not queue behind blocking
+            // handlers just to decorate its response.
+            state.store.index().unwrap_or_default()
+        };
+        let envelope = if observation_report && status.is_success() {
+            // Local diagnostic acceptance, never a graph snapshot fence or action receipt.
+            json!({"api_version": CLIENT_API_VERSION, "request_id": request_id, "value": raw})
+        } else if client_request && status.is_success() {
+            json!({
+                "api_version": CLIENT_API_VERSION,
+                "request_id": request_id,
+                "snapshot": client_snapshot.expect("a successful client request has a snapshot"),
+                "value": raw,
             })
-        }),
-        Err(error) => json!({
-            "code": "response-read-failed",
-            "message": error.to_string(),
-        }),
+        } else if client_request {
+            client_error_envelope(status, &raw, &request_id)
+        } else if status.is_success() {
+            json!({
+                "api_version": "st3.v1",
+                "request_id": request_id,
+                "snapshot_host": state.node,
+                "store_index": store_index,
+                "value": raw,
+            })
+        } else {
+            json!({
+                "api_version": "st3.v1",
+                "request_id": request_id,
+                "snapshot_host": state.node,
+                "store_index": store_index,
+                "code": raw.get("code").and_then(Value::as_str).unwrap_or("request-failed"),
+                "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
+                "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
+            })
+        };
+        let body = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
+        (envelope, body)
     };
-    let store_index = if client_request {
-        client_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.store_index)
-            .unwrap_or_default()
-    } else {
-        // index() is an atomic load. Health must not queue behind blocking
-        // handlers just to decorate its response.
-        state.store.index().unwrap_or_default()
-    };
-    let request_id = if client_request {
-        crate::relay_trace::current().map_or_else(
-            || format!("request/{}", new_request_id()),
-            |trace| trace.id().to_owned(),
-        )
-    } else {
-        new_request_id()
+    // The agents roster's response parse, envelope and encoding are its serialization phase,
+    // attributed to the request's existing server span.
+    let (envelope, body) = match otel.as_ref().filter(|_| request_route == "/v1/client/agents") {
+        Some(server) => {
+            let _server = server.enter();
+            crate::otel::roster_scope(|| crate::otel::roster_phase("serialization", serialize))
+        }
+        None => serialize(),
     };
     if let Some(trace) = crate::relay_trace::current() {
         trace.response(&request_id);
     }
-    let envelope = if observation_report && status.is_success() {
-        // Local diagnostic acceptance, never a graph snapshot fence or action receipt.
-        json!({"api_version": CLIENT_API_VERSION, "request_id": request_id, "value": raw})
-    } else if client_request && status.is_success() {
-        json!({
-            "api_version": CLIENT_API_VERSION,
-            "request_id": request_id,
-            "snapshot": client_snapshot.expect("a successful client request has a snapshot"),
-            "value": raw,
-        })
-    } else if client_request {
-        client_error_envelope(status, &raw, &request_id)
-    } else if status.is_success() {
-        json!({
-            "api_version": "st3.v1",
-            "request_id": request_id,
-            "snapshot_host": state.node,
-            "store_index": store_index,
-            "value": raw,
-        })
-    } else {
-        json!({
-            "api_version": "st3.v1",
-            "request_id": request_id,
-            "snapshot_host": state.node,
-            "store_index": store_index,
-            "code": raw.get("code").and_then(Value::as_str).unwrap_or("request-failed"),
-            "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
-            "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-        })
-    };
-    let body = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
     diagnostic_envelope.finish(if status.is_success() {
         crate::relay_trace::Outcome::Completed
     } else {
         crate::relay_trace::Outcome::Failed
     });
+    if let Some(server) = otel.as_ref()
+        && let Some(items) = envelope["value"]["items"].as_array()
+    {
+        server.record("st.page.rows", items.len() as i64);
+        server.record("st.page.bytes", body.len() as i64);
+    }
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     record_request_latency(
         &request_method,
@@ -1245,6 +1345,14 @@ async fn response_envelope_unbounded(
             remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
         },
     );
+    crate::otel::record_http_request_duration(
+        request_method.as_str(),
+        &request_route,
+        client_class,
+        status,
+        started.elapsed(),
+    );
+    finish_request_trace(otel, status);
     if let Some(profile) = profile {
         profile.enveloped(enveloping.elapsed(), body.len());
         profile.finish();
@@ -1253,6 +1361,80 @@ async fn response_envelope_unbounded(
 }
 
 static REQUEST_LATENCY: OnceLock<Mutex<request_latency::Meter>> = OnceLock::new();
+/// The request's OTel server span: named `METHOD {route}`, a local root unless the caller
+/// sent a valid W3C `traceparent`/`tracestate`, which HTTP requests and WebSocket
+/// upgrades carry alike. `None` whenever trace export is off, so that path allocates
+/// nothing. Phase durations land on this one span as numeric attributes
+/// (`st.admission.queue_ms`, `st.admission.authenticate_ms`, `st.admission.snapshot_ms`,
+/// `st.handler.queue_ms`, `st.handler.duration_ms`) instead of child spans: at
+/// saturation five children per request priced in well above the O11Y-R18 CPU budget,
+/// and a single span keeps the same phase visibility.
+fn request_trace(
+    method: &axum::http::Method,
+    route: &str,
+    client_class: crate::otel_client_class::ClientClass,
+    headers: &axum::http::HeaderMap,
+    request_id: &str,
+) -> Option<tracing::Span> {
+    if !crate::otel::export_enabled() {
+        return None;
+    }
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let span_name = format!("{} {route}", method.as_str());
+    let span = tracing::info_span!(
+        target: "st3::http",
+        "http server request",
+        "otel.name" = span_name.as_str(),
+        "otel.kind" = "server",
+        "span.label" = route,
+        "http.request.method" = method.as_str(),
+        "http.route" = route,
+        "st3.client.class" = client_class.as_str(),
+        "st.request.id" = request_id,
+        "http.response.status_code" = tracing::field::Empty,
+        "st.parent.sampled" = tracing::field::Empty,
+        "st.admission.queue_ms" = tracing::field::Empty,
+        "st.admission.authenticate_ms" = tracing::field::Empty,
+        "st.admission.snapshot_ms" = tracing::field::Empty,
+        "st.handler.queue_ms" = tracing::field::Empty,
+        "st.handler.duration_ms" = tracing::field::Empty,
+        "st.roster.mode" = tracing::field::Empty,
+        "st.roster.cards" = tracing::field::Empty,
+        "st.page.rows" = tracing::field::Empty,
+        "st.page.bytes" = tracing::field::Empty,
+        "st.writer.wait_ms" = tracing::field::Empty,
+        "st.writer.ops" = tracing::field::Empty,
+    );
+    let remote = crate::otel::extract_remote_context(headers);
+    let parent = remote.span();
+    let context = parent.span_context();
+    if context.is_valid() {
+        span.record(
+            "st.parent.sampled",
+            context.is_sampled() && context.trace_state().get("st").is_none(),
+        );
+    }
+    span.set_parent(remote);
+    Some(span)
+}
+
+/// Record the response status, mark server faults (5xx, or a handler panic surfaced as a
+/// 500) as span errors — a 4xx is the caller's, not the server's — and end the server
+/// span by dropping its last handle.
+fn finish_request_trace(server: Option<tracing::Span>, status: axum::http::StatusCode) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let Some(server) = server else {
+        return;
+    };
+    server.record("http.response.status_code", i64::from(status.as_u16()));
+    if status.is_server_error() {
+        server.set_status(opentelemetry::trace::Status::error(format!(
+            "HTTP {status}"
+        )));
+    }
+}
+
 
 fn request_latency() -> &'static Mutex<request_latency::Meter> {
     REQUEST_LATENCY.get_or_init(|| Mutex::new(request_latency::Meter::default()))
@@ -1268,8 +1450,13 @@ fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
+/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+pub(crate) fn request_latency_target_windows() -> Value {
+    request_latency().lock().unwrap().targets_only(Instant::now())
+}
+
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
-fn request_latency_windows() -> Value {
+pub(crate) fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 
@@ -2275,6 +2462,7 @@ fn client_work_values(
                 "readiness_epoch": work.readiness_epoch,
                 "claimant": work.claimant,
                 "claim_incarnation": work.claim_incarnation,
+                "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
@@ -2401,69 +2589,74 @@ fn client_agent_page_refs(store: &Store, history: bool, index: u64) -> anyhow::R
 
 fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> anyhow::Result<Vec<Value>> {
     let connection = store.readers.get();
-    let mut subjects = connection
-        .prepare_cached(crate::store::RANGE_SUBJECTS)?
-        .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
-            row.get::<_, String>(0)
-        })?
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if !history {
-        subjects = store.current_view_candidates(&connection, subjects, index, true)?;
-    }
-    let names = subjects.iter().cloned().collect::<Vec<_>>();
-    let desired = store
-        .desired_subjects_named(&names)?
-        .into_iter()
-        .map(|desired| (desired.subject.clone(), desired))
-        .collect::<BTreeMap<_, _>>();
-    let queues = store.agent_work_queues()?;
-    let steps = queues
-        .values()
-        .flat_map(|queue| {
-            queue
-                .current_work_ids
-                .iter()
-                .chain(queue.next_work_id.iter())
-                .chain(queue.upcoming_work_ids.iter())
-                .cloned()
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let labels = store.step_labels(&steps)?;
-    let label = |id: &String| {
-        labels.get(id).map(|step| json!({
-        "id":id, "mission_id":step.mission, "mission_run_id":step.run,
-        "path":step.path, "title":step.title, "goal":step.goal,
-        "state":client_work_state(&step.status), "since":client_timestamp(step.updated_at_unix_ms),
-    }))
-    };
-    let mut refs = subjects.into_iter().map(|id| {
-        let declaration = desired.get(&id);
-        let name = crate::model::effective_agent_name(&id, declaration.map(|d| &d.desired));
-        let queue = queues.get(&id).cloned().unwrap_or_default();
-        let mut reference = json!({
-            "id":id, "name":name,
-            "host_id":declaration.and_then(|d| d.member.as_ref()).map(|m| client_host_id(&m.host)),
-            "current_work_ids":queue.current_work_ids, "active_work_count":queue.active_work_count,
-            "next_work_id":queue.next_work_id, "upcoming_work_ids":queue.upcoming_work_ids,
-            "queued_work_count":queue.queued_work_count,
-            "current_work":queue.current_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
-            "next_work":queue.next_work_id.as_ref().and_then(label),
-            "upcoming_work":queue.upcoming_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
-        });
-        if let Some(lifecycle) = crate::model::declared_agent_lifecycle(declaration.map(|d| &d.desired)) {
-            reference["lifecycle"] = json!(lifecycle);
+    let (subjects, desired) = crate::otel::roster_phase("membership", || -> anyhow::Result<_> {
+        let mut subjects = connection
+            .prepare_cached(crate::store::RANGE_SUBJECTS)?
+            .query_map(rusqlite::params![index, "agent/", "agent0"], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if !history {
+            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
         }
-        reference
-    }).collect::<Vec<_>>();
-    refs.sort_by(|a, b| {
-        a["name"]
-            .as_str()
-            .cmp(&b["name"].as_str())
-            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
-    });
-    Ok(refs)
+        let names = subjects.iter().cloned().collect::<Vec<_>>();
+        let desired = store
+            .desired_subjects_named(&names)?
+            .into_iter()
+            .map(|desired| (desired.subject.clone(), desired))
+            .collect::<BTreeMap<_, _>>();
+        Ok((subjects, desired))
+    })?;
+    crate::otel::roster_phase("queue_selection", || -> anyhow::Result<Vec<Value>> {
+        let queues = store.agent_work_queues()?;
+        let steps = queues
+            .values()
+            .flat_map(|queue| {
+                queue
+                    .current_work_ids
+                    .iter()
+                    .chain(queue.next_work_id.iter())
+                    .chain(queue.upcoming_work_ids.iter())
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let labels = store.step_labels(&steps)?;
+        let label = |id: &String| {
+            labels.get(id).map(|step| json!({
+            "id":id, "mission_id":step.mission, "mission_run_id":step.run,
+            "path":step.path, "title":step.title, "goal":step.goal,
+            "state":client_work_state(&step.status), "since":client_timestamp(step.updated_at_unix_ms),
+        }))
+        };
+        let mut refs = subjects.into_iter().map(|id| {
+            let declaration = desired.get(&id);
+            let name = crate::model::effective_agent_name(&id, declaration.map(|d| &d.desired));
+            let queue = queues.get(&id).cloned().unwrap_or_default();
+            let mut reference = json!({
+                "id":id, "name":name,
+                "host_id":declaration.and_then(|d| d.member.as_ref()).map(|m| client_host_id(&m.host)),
+                "current_work_ids":queue.current_work_ids, "active_work_count":queue.active_work_count,
+                "next_work_id":queue.next_work_id, "upcoming_work_ids":queue.upcoming_work_ids,
+                "queued_work_count":queue.queued_work_count,
+                "current_work":queue.current_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
+                "next_work":queue.next_work_id.as_ref().and_then(label),
+                "upcoming_work":queue.upcoming_work_ids.iter().filter_map(label).collect::<Vec<_>>(),
+            });
+            if let Some(lifecycle) = crate::model::declared_agent_lifecycle(declaration.map(|d| &d.desired)) {
+                reference["lifecycle"] = json!(lifecycle);
+            }
+            reference
+        }).collect::<Vec<_>>();
+        refs.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .cmp(&b["name"].as_str())
+                .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+        });
+        Ok(refs)
+    })
 }
 
 fn client_agent_cards_for_page(
@@ -2553,56 +2746,61 @@ fn client_agent_cards_from_cached(
 }
 
 fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow::Result<()> {
-    let subjects = items
-        .iter()
-        .filter_map(|item| item["id"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    let observations = store.agent_todo_observations_for(&subjects, index)?;
-    for item in items {
-        let claims = observations.get(item["id"].as_str().unwrap_or_default());
-        item["todo"] = client_v0::agent_todo_value(
-            claims.and_then(|claims| claims.get("harness.todo.observed")),
-            claims.and_then(|claims| claims.get("harness.session-file")),
-            item["incarnation_id"].as_str(),
-        );
-    }
-    Ok(())
+    crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
+        let subjects = items
+            .iter()
+            .filter_map(|item| item["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let observations = store.agent_todo_observations_for(&subjects, index)?;
+        for item in items {
+            let claims = observations.get(item["id"].as_str().unwrap_or_default());
+            item["todo"] = client_v0::agent_todo_value(
+                claims.and_then(|claims| claims.get("harness.todo.observed")),
+                claims.and_then(|claims| claims.get("harness.session-file")),
+                item["incarnation_id"].as_str(),
+            );
+        }
+        Ok(())
+    })
 }
 
+/// Live presentation of already folded cards: freshness, delivery presence and subagents.
 fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
-    let local_host = client_host_id(store.origin());
-    for item in items.iter_mut() {
-        if item.get("updated_at").and_then(Value::as_str) == Some("") {
-            item["updated_at"] = Value::String(at.to_owned());
-        }
-        let source = item
-            .as_object_mut()
-            .unwrap()
-            .remove("_status_source")
-            .unwrap_or(Value::Null);
-        let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
-        // Freshness is approximate presentation. Use the card's already reduced observation;
-        // querying diagnostic and local-observation history here made every read grow with it.
-        let observation = match harness {
-            None => "missing",
-            Some(harness)
-                if client_now_ms().saturating_sub(harness.observed_at_unix_ms) > 90_000 =>
-            {
-                "stale"
+    crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
+        let local_host = client_host_id(store.origin());
+        for item in items.iter_mut() {
+            if item.get("updated_at").and_then(Value::as_str) == Some("") {
+                item["updated_at"] = Value::String(at.to_owned());
             }
-            Some(_) => "current",
-        };
-        item["observation"] = json!(observation);
-        if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle" | "working")) {
-            item["harness_state"] = json!("indeterminate");
-            if item["state"] == "running" {
-                item["state"] = json!("waiting");
+            let source = item
+                .as_object_mut()
+                .unwrap()
+                .remove("_status_source")
+                .unwrap_or(Value::Null);
+            let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
+            // Freshness is approximate presentation. Use the card's already reduced observation;
+            // querying diagnostic and local-observation history here made every read grow with it.
+            let observation = match harness {
+                None => "missing",
+                Some(harness)
+                    if client_now_ms().saturating_sub(harness.observed_at_unix_ms) > 90_000 =>
+                {
+                    "stale"
+                }
+                Some(_) => "current",
+            };
+            item["observation"] = json!(observation);
+            if observation == "stale" && matches!(item["harness_state"].as_str(), Some("ready" | "idle" | "working")) {
+                item["harness_state"] = json!("indeterminate");
+                if item["state"] == "running" {
+                    item["state"] = json!("waiting");
+                }
             }
+            overlay_delivery_presence(item, &local_host);
         }
-        overlay_delivery_presence(item, &local_host);
-    }
-    overlay_subagents(store, items)?;
-    Ok(())
+        overlay_subagents(store, items)?;
+        Ok(())
+    })
 }
 
 /// A seat's latest suspend or resume as client-v0 shows it.
@@ -2715,18 +2913,20 @@ pub(crate) fn agent_queue_metadata(
     store: &Store,
     subjects: &BTreeSet<String>,
 ) -> anyhow::Result<Vec<Value>> {
-    let queues = store.agent_work_queues()?;
-    let steps = queues.values().flat_map(|queue| {
-        queue.current_work_ids.iter().chain(queue.next_work_id.iter())
-            .chain(queue.upcoming_work_ids.iter()).cloned()
-    }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-    let labels = store.step_labels(&steps)?;
-    let empty = crate::store::AgentWorkQueue::default();
-    Ok(subjects.iter().map(|subject| {
-        let mut fields = agent_queue_fields(queues.get(subject).unwrap_or(&empty), &labels);
-        fields["id"] = json!(subject);
-        fields
-    }).collect())
+    crate::otel::roster_phase("queue_selection", || -> anyhow::Result<Vec<Value>> {
+        let queues = store.agent_work_queues()?;
+        let steps = queues.values().flat_map(|queue| {
+            queue.current_work_ids.iter().chain(queue.next_work_id.iter())
+                .chain(queue.upcoming_work_ids.iter()).cloned()
+        }).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        let labels = store.step_labels(&steps)?;
+        let empty = crate::store::AgentWorkQueue::default();
+        Ok(subjects.iter().map(|subject| {
+            let mut fields = agent_queue_fields(queues.get(subject).unwrap_or(&empty), &labels);
+            fields["id"] = json!(subject);
+            fields
+        }).collect())
+    })
 }
 
 #[cfg(test)]
@@ -2745,9 +2945,9 @@ fn client_agent_resources_selected(
     snapshot_index: u64,
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = store.agent_card_status_at(
+    let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
         changed.map(|(subjects, _)| subjects), snapshot_index, history,
-    )?;
+    ))?;
     client_agent_resources_from_status(store, history, snapshot_index, changed, status)
 }
 
@@ -2777,11 +2977,51 @@ fn client_agent_resources_from_status(
                 .any(|item| item["id"].as_str() == Some(subject.as_str()))
         })
     });
-    let work_queues = if retain_queues {
-        BTreeMap::new()
-    } else {
-        store.agent_work_queues()?
-    };
+    let queues = crate::otel::roster_phase("queue_selection", || -> anyhow::Result<_> {
+        let queues = if retain_queues {
+            BTreeMap::new()
+        } else {
+            store.agent_work_queues()?
+        };
+        let queued_steps = queues
+            .values()
+            .flat_map(|queue| {
+                queue
+                    .current_work_ids
+                    .iter()
+                    .chain(queue.next_work_id.iter())
+                    .chain(queue.upcoming_work_ids.iter())
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let labels = store.step_labels(&queued_steps)?;
+        Ok(CardQueues {
+            retained: changed.filter(|_| retain_queues).map(|(_, previous)| previous),
+            queues,
+            labels,
+        })
+    })?;
+    crate::otel::roster_phase("card_presentation", || {
+        client_agent_cards_presented(store, history, snapshot_index, status, &queues)
+    })
+}
+
+/// Queue fields for folded cards: retained from unchanged previous cards, or freshly selected.
+struct CardQueues<'a> {
+    retained: Option<&'a [Value]>,
+    queues: BTreeMap<String, crate::store::AgentWorkQueue>,
+    labels: BTreeMap<String, crate::store::StepLabel>,
+}
+
+fn client_agent_cards_presented(
+    store: &Store,
+    history: bool,
+    snapshot_index: u64,
+    status: StatusResponse,
+    queues: &CardQueues<'_>,
+) -> anyhow::Result<Vec<Value>> {
     let agent_subjects = status
         .subjects
         .iter()
@@ -2824,20 +3064,6 @@ fn client_agent_resources_from_status(
             .filter_map(|subject| subject.actual_claim.as_deref())
             .collect::<Vec<_>>(),
     );
-    let queued_steps = work_queues
-        .values()
-        .flat_map(|queue| {
-            queue
-                .current_work_ids
-                .iter()
-                .chain(queue.next_work_id.iter())
-                .chain(queue.upcoming_work_ids.iter())
-                .cloned()
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let step_labels = store.step_labels(&queued_steps)?;
     let mut agents = status
         .subjects
         .into_iter()
@@ -3001,7 +3227,7 @@ fn client_agent_resources_from_status(
                 .clone()
                 .or_else(|| subject.claims.last().cloned())
                 .unwrap_or_else(|| format!("agent/{}", subject.subject));
-            let queue = work_queues
+            let queue = queues.queues
                 .get(&subject.subject)
                 .cloned()
                 .unwrap_or_default();
@@ -3056,12 +3282,12 @@ fn client_agent_resources_from_status(
             if let Some(lifecycle) = crate::model::declared_agent_lifecycle(subject.desired.as_ref()) {
                 value["lifecycle"] = json!(lifecycle);
             }
-            if let Some((_, previous)) = changed.filter(|_| retain_queues)
+            if let Some(previous) = queues.retained
                 && let Some(old) = previous.iter().find(|item| item["id"] == value["id"]) {
                 for field in AGENT_QUEUE_FIELDS {
                     value[field] = old[field].clone();
                 }
-            } else if let Value::Object(fields) = agent_queue_fields(&queue, &step_labels) {
+            } else if let Value::Object(fields) = agent_queue_fields(&queue, &queues.labels) {
                 value.as_object_mut().unwrap().extend(fields);
             }
             Ok((name, value))
@@ -4585,17 +4811,23 @@ async fn client_agents(
     }
     // A warm request never queues behind a cold projection. Drop the probe's SQLite
     // snapshot before waiting, then recheck all cache fences in the admitted snapshot.
+    let requested = snapshot.store_index;
+    let fresh = query.fresh;
     for admitted in [false, true] {
         let admission = if admitted {
-            Some(state.store.admit_agent_resources().await)
+            Some(state.store.admit_agent_resources("http").await)
         } else {
             None
         };
         let reader = state.clone();
         let snapshot = snapshot.clone();
         let query = query.clone();
-        let result = blocking_store(move || {
+        let filtered = query.status.is_some();
+        let result = blocking_roster(move || {
             let _admission = admission;
+            if let Some(admission) = &_admission {
+                admission.enter_worker();
+            }
             reader.store.clone().read_snapshot(|index| {
                 let snapshot = if query.cursor.is_some() {
                     snapshot
@@ -4608,6 +4840,12 @@ async fn client_agents(
             })
         }).await??;
         if let Some(page) = result {
+            let path = match (filtered, admitted) {
+                (true, _) => "filtered_full",
+                (false, true) => "exact_cold",
+                (false, false) => "exact_warm",
+            };
+            crate::otel::record_roster_read(path, requested, Some(page.0.0.store_index), fresh);
             return Ok(page);
         }
     }
@@ -4625,10 +4863,13 @@ async fn client_agents_published(
     query: ClientListQuery,
 ) -> Result<ClientPageResponse, ApiError> {
     state.store.note_agent_roster_read();
+    let requested = snapshot.store_index;
     if query.cursor.is_some() {
         let reader = state.clone();
-        return blocking_store(move || Ok(client_agents_published_continuation(&reader, snapshot, &query)))
-            .await?;
+        return blocking_roster(move || {
+            Ok(client_agents_published_continuation(&reader, snapshot, &query))
+        })
+        .await?;
     }
     let fresh = query.fresh;
     if fresh {
@@ -4639,13 +4880,14 @@ async fn client_agents_published(
     let reader = state.clone();
     let history = query.history;
     let built = Instant::now();
-    let page = blocking_store(move || Ok(client_agents_published_page(&reader, &query))).await;
+    let page = blocking_roster(move || Ok(client_agents_published_page(&reader, &query, requested))).await;
     if fresh {
         record_roster_stage(request_latency::RosterStage::FreshPage, built.elapsed());
     }
     match page?? {
         Some(page) => Ok(page),
         None => {
+            crate::otel::record_roster_read("not_ready", requested, None, fresh);
             if history {
                 state.store.request_agent_roster_history();
             } else {
@@ -4673,14 +4915,19 @@ const AGENT_ROSTER_WARM_CHUNK: usize = 250;
 /// they depend on arrives, so the folds that follow at one cut read them instead of the log.
 fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     let subjects = store.read_snapshot(|index| {
-        Ok(store.readers.get()
-            .prepare_cached(crate::store::RANGE_SUBJECTS)?
-            .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?)
+        let connection = store.readers.get();
+        crate::otel::roster_phase("membership", || -> anyhow::Result<Vec<String>> {
+            Ok(connection
+                .prepare_cached(crate::store::RANGE_SUBJECTS)?
+                .query_map(rusqlite::params![index, "agent/", "agent0"], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
     })?;
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
-        store.read_snapshot(|index| store.agent_card_status_at(Some(&names), index, false).map(drop))?;
+        store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
+            store.agent_card_status_at(Some(&names), index, false).map(drop)
+        }))?;
     }
     Ok(())
 }
@@ -4781,9 +5028,11 @@ fn roster_snapshot(state: &AppState, cut: u64, published_at_unix_ms: u128) -> Cl
 }
 
 /// A first page of the newest published roster, under the snapshot it was folded at.
+/// `requested` is the request's own cut, recorded beside the publication cut it was served.
 fn client_agents_published_page(
     state: &AppState,
     query: &ClientListQuery,
+    requested: u64,
 ) -> Result<Option<ClientPageResponse>, ApiError> {
     let store = &state.store;
     let current = store.index().map_err(ApiError::internal)?;
@@ -4799,6 +5048,7 @@ fn client_agents_published_page(
             return Ok(None);
         };
         store.request_agent_roster_refresh();
+        crate::otel::record_roster_read("published_head", requested, Some(index), query.fresh);
         let snapshot = roster_snapshot(state, index, published_at);
         let mut page = client_page_read(state, &snapshot, "agents", (*refs).clone(), query, true)?;
         page.items = client_agent_cards_from_cached(
@@ -4816,6 +5066,8 @@ fn client_agents_published_page(
         }
     }
     let snapshot = roster_snapshot(state, index, published_at);
+    let path = if query.status.is_some() { "filtered_full" } else { "published_complete" };
+    crate::otel::record_roster_read(path, requested, Some(index), query.fresh);
     if let Some(status) = query.status.as_deref() {
         let mut cards = (*cards).clone();
         overlay_agent_resources(store, &mut cards, &snapshot.created_at)
@@ -4826,13 +5078,13 @@ fn client_agents_published_page(
     }
     // Continuations keep the same membership, order and queue metadata as the exact path's
     // refs, and read their cards from this same publication.
-    let refs = cards.iter().map(|card| {
+    let refs = crate::otel::roster_phase("membership", || cards.iter().map(|card| {
         let mut reference = serde_json::Map::new();
         for field in ["id", "name", "host_id"].into_iter().chain(AGENT_QUEUE_FIELDS) {
             reference.insert(field.to_owned(), card[field].clone());
         }
         Value::Object(reference)
-    }).collect();
+    }).collect::<Vec<_>>());
     let mut page = client_page_read(state, &snapshot, "agents", refs, query, true)?;
     page.items = client_agent_cards_from_cached(
         store, page_cards(&cards, &page.items), &page.items, &snapshot.created_at,
@@ -4850,6 +5102,9 @@ fn client_agents_published_continuation(
     let store = &state.store;
     let mut page = client_page_read(state, &snapshot, "agents", Vec::new(), query, true)?;
     let published = store.published_agent_roster_at(snapshot.store_index, query.history);
+    let path = if query.status.is_some() { "filtered_full" } else { "published_complete" };
+    let served = published.as_ref().map(|_| snapshot.store_index);
+    crate::otel::record_roster_read(path, snapshot.store_index, served, query.fresh);
     let snapshot = match &published {
         Some((_, published_at)) => roster_snapshot(state, snapshot.store_index, *published_at),
         None => snapshot,
@@ -5667,6 +5922,29 @@ async fn client_history_detail(
         .ok_or_else(|| ApiError::not_found(format!("history `{id}` does not exist")))
 }
 
+/// A roster operation on a blocking worker. Its submission-to-start wait is recorded apart
+/// from its execution, and its reader timing is attributed, only when `traced`.
+fn roster_worker<T>(traced: bool, submitted: Option<Instant>, seed: Option<crate::otel::RosterAttributes>, work: impl FnOnce() -> T) -> T {
+    if !traced {
+        return work();
+    }
+    crate::otel::roster_scope(|| {
+        crate::otel::seed_roster_attributes(seed);
+        crate::otel::roster_worker_started(submitted);
+        work()
+    })
+}
+
+/// [`blocking_store`] for an HTTP roster read: worker queue wait, then the attributed read.
+async fn blocking_roster<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let submitted = crate::otel::export_enabled().then(Instant::now);
+    blocking_store(move || roster_worker(true, submitted, None, operation)).await
+}
+
 async fn blocking_store<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
@@ -5674,7 +5952,11 @@ where
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     crate::api::read_deadline::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
         crate::performance::with_charged(cpu_kind, operation)
     })
@@ -5690,7 +5972,11 @@ where
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     crate::api::read_deadline::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
         crate::performance::with_charged(cpu_kind, operation)
     })
@@ -5708,7 +5994,11 @@ where
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     crate::api::read_deadline::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
         crate::performance::with_charged(cpu_kind, operation)
     })
@@ -5810,27 +6100,38 @@ pub fn start_agent_roster(state: &AppState) {
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
-            let mut admission = store.admit_agent_resources().await;
+            let mut admission = store.admit_agent_resources("refresher").await;
             let first = std::mem::take(&mut head);
             if !first {
-                record_roster_stage(request_latency::RosterStage::RefreshAdmission, started.elapsed());
+                record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
             }
             let reader = store.clone();
+            let mut warm_attributes = None;
             if first {
                 // Warm without admission: nothing is published, and no reader folds.
                 drop(admission);
                 let reader = store.clone();
-                match tokio::task::spawn_blocking(move || {
-                    crate::performance::task("roster/warm", || warm_agent_roster(&reader))
-                }).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => eprintln!("st3: agents roster warm-up failed: {error:#}"),
+                let submitted = crate::otel::export_enabled().then(Instant::now);
+                match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
+                    roster_worker(true, submitted, None, || {
+                        let result = crate::performance::task("roster/warm", || warm_agent_roster(&reader));
+                        (result, crate::otel::take_roster_attributes())
+                    })
+                })).await {
+                    Ok((result, attributes)) => {
+                        warm_attributes = attributes;
+                        if let Err(error) = result {
+                            eprintln!("st3: agents roster warm-up failed: {error:#}");
+                        }
+                    }
                     Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
                 }
-                admission = store.admit_agent_resources().await;
+                admission = store.admit_agent_resources("refresher").await;
             }
-            let refreshed = tokio::task::spawn_blocking(move || {
+            let submitted = crate::otel::export_enabled().then(Instant::now);
+            let refreshed = tokio::task::spawn_blocking(move || roster_worker(true, submitted, warm_attributes, || {
                 let _admission = admission;
+                _admission.enter_worker();
                 // The first fold publishes only what windows and first pages show; the rest
                 // follows at once.
                 crate::performance::task("roster/refresh", || if first {
@@ -5853,7 +6154,7 @@ pub fn start_agent_roster(state: &AppState) {
                     }, folded.elapsed());
                     refreshed
                 })
-            })
+            }))
             .await;
             match refreshed {
                 Ok(Ok(())) => {}
@@ -6485,7 +6786,11 @@ async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, Api
         st_runtime::priority_report(&observations)
     });
     let token = crate::resource::github_auth().await;
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
     let mut report = crate::api::read_deadline::spawn_blocking(move || {
+        // Sealing this node's batches writes through the store's writer, so the request's
+        // writer accounting must follow the job off the runtime thread.
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         // This node's claims are signed as their batches are sealed; seal and judge them so
         // the signature counts cover everything written so far.
         state.store.replication_snapshot().map_err(ApiError::internal)?;
@@ -7191,6 +7496,15 @@ fn doctor_report_with_operation_drift(
     drift: &anyhow::Result<Vec<String>>,
 ) -> Result<Json<DoctorReport>, ApiError> {
     let mut checks = Vec::new();
+    let auto = state.store.latest_claim(&format!("daemon/{}", state.node), Some("daemon.started"))
+        .map_err(ApiError::internal)?
+        .is_some_and(|claim| claim.body.pointer("/fields/features/harness_access_auto").and_then(Value::as_u64) == Some(1));
+    let access_mode = if auto { "auto" } else { "bypass" };
+    checks.push(DoctorCheck {
+        name: "harness-access-mode".into(), status: "pass".into(),
+        message: format!("{access_mode}: managed provider permissions; auto is not a security boundary: it reduces accidents, it does not isolate seats; real sandboxing is separate later work; legacy authored options remain authoritative"),
+    });
+
     match state.store.index() {
         Ok(index) => checks.push(DoctorCheck {
             name: "claim-store".into(),
@@ -8261,7 +8575,39 @@ async fn replication_receive(
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
         let projection = if new_data || was_deferred {
-            admitted_projection_result(store.project_replication_backlog_unless_catching_up())?
+            use opentelemetry::trace::{Span as _, TraceContextExt as _};
+            use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+            let receive = crate::otel::export_enabled().then(|| {
+                tracing::Span::current().context().span().span_context().clone()
+            });
+            let mut span = crate::otel::stage_root(
+                "st.replication.projection", "receive", receive,
+            );
+            let result = admitted_projection_result(
+                store.project_replication_backlog_unless_catching_up(),
+            );
+            if let Some(span) = span.as_mut() {
+                span.set_attribute(opentelemetry::KeyValue::new(
+                    "st.replication.peer", request.peer.clone(),
+                ));
+                span.set_attribute(opentelemetry::KeyValue::new(
+                    "st.replication.moved_envelopes", receipt.received as i64,
+                ));
+                span.set_attribute(opentelemetry::KeyValue::new(
+                    "st.replication.outcome",
+                    match &result {
+                        Ok(Some(true)) => "projected",
+                        Ok(Some(false)) => "unchanged",
+                        Ok(None) => "deferred",
+                        Err(_) => "error",
+                    },
+                ));
+                if result.is_err() {
+                    span.set_status(opentelemetry::trace::Status::error("projection failed"));
+                }
+                span.end();
+            }
+            result?
         } else {
             Some(true)
         };
@@ -8292,7 +8638,7 @@ async fn replication_receive(
     .await?;
     if response.changed {
         if reconcile_changed {
-            crate::performance::record_wake("replication receive", None);
+            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::ReplicationReceive, None);
             state.notify.notify_one();
         }
         state
@@ -8914,14 +9260,6 @@ async fn start_planning_session(
         "You are the durable {} planner for launch {id}. Use `st documents get` for each immutable document reference below. Write one Markdown mission and one complete version 2 KDL mission. The KDL mission ID must be `{mission_id}` and its state must be ready. You can submit named variants with `st launch submit {id} --variant NAME --markdown FILE --kdl KDL_FILE`. Use temporary files outside the workspace, and remove them after submission. Do not change the workspace. Do not publish or run the mission. Stay available for revision messages until approval or cancellation.\n\n{references}",
         planner_config.provider
     );
-    let arguments = match planner_config.provider.as_str() {
-        "codex" => vec![
-            "--dangerously-bypass-approvals-and-sandbox".into(),
-            "--dangerously-bypass-hook-trust".into(),
-        ],
-        "claude" => vec!["--permission-mode".into(), "bypassPermissions".into()],
-        _ => Vec::new(),
-    };
     let planner = quick_agent(
         &state,
         QuickAgentRequest {
@@ -8929,7 +9267,7 @@ async fn start_planning_session(
             worktree: request.workspace.clone(),
             model: planner_config.model.clone(),
             effort: planner_config.effort.clone(),
-            arguments,
+            arguments: Vec::new(),
             expected_subject,
             idempotency_key: format!("{}:planner", request.idempotency_key),
         },
@@ -11665,9 +12003,24 @@ async fn get_usage(
         .await
         .ok()
         .flatten();
-    if let Some(Ok(config)) = reloaded
-        && let Some(policy) = crate::store::LimitsPolicy::from_config(&config)
+    let policy = reloaded
+        .as_ref()
+        .and_then(|reloaded| reloaded.as_ref().ok())
+        .and_then(|config| crate::store::LimitsPolicy::from_config(config).map(|policy| (config, policy)));
+    // A reading older than the limits cadence is the last known one, not the current one.
+    let fresh_ms = policy
+        .as_ref()
+        .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |(_, policy)| policy.fresh_ms);
+    let now = client_now_ms() as u64;
+    for (row, limit) in report["limits"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .zip(&limits)
     {
+        row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
+    }
+    if let Some((config, policy)) = policy {
         for (row, limit) in report["limits"]
             .as_array_mut()
             .into_iter()
@@ -14343,6 +14696,7 @@ async fn set_mission_run_report(
             &actor,
             request.report_to.as_deref(),
             request.stalled_after_ms,
+            request.report_stalls,
             request.report_completed,
             &request.idempotency_key,
         )
@@ -17538,6 +17892,41 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    }
+
+    #[tokio::test]
+    async fn the_usage_report_marks_only_old_limits_readings_stale() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let now = client_now_ms() as u64;
+        for (seat, account, measured) in [
+            ("agent/example.old", "ada/claude-1", now - 60 * 3_600_000),
+            ("agent/example.live", "ada/claude-2", now - 10_000),
+        ] {
+            let (status, body) = json_request(
+                app.clone(),
+                "/v1/claims",
+                json!({"subject": seat, "kind": "harness.limits", "actor": seat,
+                    "fields": {"driver": "claude", "account_ref": account, "weekly_percent": 84.0,
+                        "measured_at_unix_ms": measured},
+                    "evidence": [], "idempotency_key": format!("limits-{seat}")}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (_, report) = get_request(app, "/v1/usage").await;
+        let stale = |name: &str| {
+            report["limits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|limit| limit["account_ref"] == name)
+                .unwrap_or_else(|| panic!("{name} missing in {report}"))["stale"]
+                .clone()
+        };
+        assert_eq!(stale("ada/claude-1"), true);
+        assert_eq!(stale("ada/claude-2"), false);
     }
 
     #[tokio::test]
@@ -20983,8 +21372,8 @@ mission "unrequested/work" state="ready" { goal "Do unrelated work." }
         assert!(matches!(
             &planner_launch,
             crate::model::LaunchSpec::Argv(arguments)
-                if arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
-                    && arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
+                if !arguments.iter().any(|argument| argument == "--dangerously-bypass-approvals-and-sandbox")
+                    && !arguments.iter().any(|argument| argument == "--dangerously-bypass-hook-trust")
         ));
         assert!(store.mission_spec("planned/work", None).unwrap().is_none());
         assert!(store.active_mission_runs().unwrap().is_empty());
@@ -23662,6 +24051,55 @@ mission "wake" state="ready" {
         assert_eq!(old_cold, 12);
     }
 
+    #[test]
+    fn faults_and_nudges_on_runs_and_steps_refold_only_the_cards_they_reach() {
+        let fixture = roster_claims_fixture();
+        let store = &fixture.store;
+        for history in [false, true] {
+            checked_agent_cache(store, history, store.index().unwrap());
+        }
+        let (run, step) = (&fixture.runs[1], &fixture.runs[2].steps[3]);
+        roster_fixture_work(&fixture, 23, "claim", "fault-fixture-claim");
+        for history in [false, true] {
+            checked_agent_cache(store, history, store.index().unwrap());
+        }
+        let append = |subject: &str, kind: &str, actor: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        let failure = |subject: &str, episode: &str| json!({
+            "condition": "observed", "episode": episode, "incarnation": null,
+            "reason": "Fixture fault.", "reviewer": "person/test", "severity": "warning",
+            "source_revision": null, "targets": [subject], "title": "A fixture fault",
+        });
+        for (label, subject, kind, actor, fields) in [
+            ("run fault", run.subject.as_str(), "operational.failure", "agent/st3/reconciler",
+                failure(&run.subject, "fixture-run-fault")),
+            ("step fault", step.subject.as_str(), "operational.failure", "agent/st3/reconciler",
+                failure(&step.subject, "fixture-step-fault")),
+            ("nudge", step.subject.as_str(), "work.nudged", "daemon/runtime", json!({
+                "agent": fixture.subjects[23], "attempt": 1, "idle_since_unix_ms": "1",
+                "message": "message/fixture", "reason": "quiet", "waits": [],
+            })),
+            ("report-to", run.subject.as_str(), "mission-run.report-to", "person/test",
+                json!({"report_to": "agent/node.roster-00"})),
+            ("eval verdict", run.subject.as_str(), "eval.verdict", "agent/st3/reconciler",
+                json!({"verdict": "pass", "reason": "Fixture verdict."})),
+        ] {
+            append(subject, kind, actor, fields);
+            let refolded = store.agent_resources_refolded_cards_for_test();
+            for history in [false, true] {
+                checked_agent_cache(store, history, store.index().unwrap());
+            }
+            let refolded = store.agent_resources_refolded_cards_for_test() - refolded;
+            // Run 1 owns ten agents; step 2/3's holder is one. Never all sixty, in either view.
+            assert!(refolded <= 2 * 11, "{label} refolded {refolded} cards");
+        }
+    }
+
     fn roster_fixture_person_claim(store: &Store, subject: &str, kind: &str, fields: Value) {
         store.append_claim(&ClaimInput {
             subject: subject.into(), kind: kind.into(), actor: Some("person/test".into()),
@@ -24051,7 +24489,7 @@ mission "wake" state="ready" {
             Query(ClientListQuery::default()),
         ).await.unwrap();
         assert_eq!(cold.items.len(), 1);
-        let admission = state.store.admit_agent_resources().await;
+        let admission = state.store.admit_agent_resources("other").await;
         let started = Instant::now();
         let (_, Json(warm)) = tokio::time::timeout(
             Duration::from_secs(2),
@@ -24379,6 +24817,81 @@ mission "wake" state="ready" {
             timed("refresh", &|| refresh_agent_roster(&store, false).unwrap());
             println!("roster backlog {backlog}: chunked because {reason:?}; cards refolded {}",
                 store.agent_resources_refolded_cards_for_test() - refolded);
+        }
+    }
+
+    /// What one refresh costs after one claim of each kind that moves cards, on a disposable
+    /// store copy opened in place: claims copied from `ST_ROSTER_KIND_CLAIMS` (a JSON array of
+    /// `{label, subject, kind, actor, fields}`), and bursts of `harness.observed` on that many
+    /// agents at once. Each prints the fold time, cards refolded and where the time went.
+    #[test]
+    #[ignore = "roster refresh timing by claim kind; set ST_ROSTER_BACKLOG_STORE and ST_ROSTER_KIND_CLAIMS"]
+    fn agent_roster_refresh_by_claim_kind_timing_on_a_store_copy() {
+        let (Some(database), Some(claims)) = (
+            std::env::var_os("ST_ROSTER_BACKLOG_STORE").map(PathBuf::from),
+            std::env::var_os("ST_ROSTER_KIND_CLAIMS").map(PathBuf::from),
+        ) else {
+            return;
+        };
+        let claims: Vec<Value> = serde_json::from_slice(&fs::read(claims).unwrap()).unwrap();
+        let rounds = std::env::var("ST_ROSTER_KIND_ROUNDS").map_or(5, |n| n.parse().unwrap());
+        smallclaims::profile::init_from_env();
+        let store = Store::open(&database, "bench-host").unwrap();
+        refresh_agent_roster(&store, false).unwrap();
+        let agents = store.read_snapshot(|index| Ok(client_agent_page_refs(&store, false, index)?
+            .iter().filter_map(|card| card["id"].as_str().map(str::to_owned)).collect::<Vec<_>>()))
+            .unwrap();
+        println!("roster kinds agents={}", agents.len());
+        let task_ms = || {
+            let performance = smallclaims::performance::snapshot();
+            performance["requests"].as_array().into_iter().flatten()
+                .filter_map(|row| Some((row["kind"].as_str()?.to_owned(), row["total_ms"].as_f64()?)))
+                .filter(|(kind, _)| kind.starts_with("roster/"))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let append = |subject: &str, kind: &str, actor: Option<&str>, fields: &Value| {
+            store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: actor.map(str::to_owned),
+                fields: serde_json::from_value(fields.clone()).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).map(drop)
+        };
+        let timed = |label: &str| {
+            let before = (smallclaims::sqlite::work::total(), task_ms(),
+                store.agent_resources_refolded_cards_for_test());
+            let started = Instant::now();
+            smallclaims::profile::task("roster-kind-timing", || refresh_agent_roster(&store, false).unwrap());
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            let after = task_ms();
+            let tasks = after.iter().filter_map(|(kind, total)| {
+                let spent = total - before.1.get(kind).copied().unwrap_or(0.0);
+                (spent >= 1.0).then(|| format!("{}={spent:.0}", kind.trim_start_matches("roster/")))
+            }).collect::<Vec<_>>().join(" ");
+            println!("roster kind {label}: {ms:.1} ms; cards refolded {}; {tasks}; vm_steps={}",
+                store.agent_resources_refolded_cards_for_test() - before.2,
+                (smallclaims::sqlite::work::total() - before.0).vm_steps);
+        };
+        for round in 0..rounds {
+            append(&format!("custom/kind-timing/{round}"), "custom.test.marker", None, &json!({})).unwrap();
+            timed("no card");
+            for burst in [1, 10, 25] {
+                for (n, agent) in agents.iter().cycle().skip(round * 7).take(burst.min(agents.len())).enumerate() {
+                    append(agent, "harness.observed", None, &json!({
+                        "state": if (round + n) % 2 == 0 { "working" } else { "idle" },
+                        "driver": "codex", "incarnation_id": format!("kind-timing-{round}-{n}"),
+                    })).unwrap();
+                }
+                timed(&format!("harness.observed x{burst}"));
+            }
+            for claim in &claims {
+                let label = claim["label"].as_str().unwrap();
+                match append(claim["subject"].as_str().unwrap(), claim["kind"].as_str().unwrap(),
+                    claim["actor"].as_str(), &claim["fields"])
+                {
+                    Ok(()) => timed(label),
+                    Err(error) => println!("roster kind {label}: append refused: {error:#}"),
+                }
+            }
         }
     }
 

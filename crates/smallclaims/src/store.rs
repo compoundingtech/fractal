@@ -70,7 +70,7 @@ pub use checkpoint::{
     CHECKPOINT_MANIFEST_PAGE_LIMIT, CheckpointManifest, CheckpointManifestCursor,
     CheckpointManifestPage, CheckpointManifestRequest, CheckpointPlanRequest, CheckpointPlanView,
     CheckpointProof, ClaimTombstone, DropCount, DropPlan, EnvelopeKey, EnvelopeTombstone,
-    SealedSet, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
+    SealedSet, StoreCopy, checkpoint_cut, checkpoint_name, drop_digest, newest_due_cut,
     verify_checkpoint_manifest,
 };
 pub use checkpoint_agreement::write_time;
@@ -4939,9 +4939,11 @@ impl Store {
             .connection
             .clone()
             .expect("the pin holds its connection");
+        let timing = crate::sqlite::ReaderTiming::start();
         connection.execute_batch("BEGIN")?;
         // The first read starts the snapshot; every later read in `read` sees the same one.
         let index = current_index(&connection)?;
+        drop(timing);
         live.snapshot_started(&connection);
         crate::sqlite::push_pinned_reader(key, connection);
         pinned.registered = true;
@@ -6568,6 +6570,7 @@ impl Store {
         // their own projection pass will take those up without keeping this one alive forever.
         let target = self.index()?;
         let mut chunked = false;
+        let mut processed = 0_u64;
         loop {
             let mut connection = self.connection.write();
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
@@ -6597,15 +6600,15 @@ impl Store {
                 .optional()?
                 .flatten()
                 .unwrap_or(0);
-            let through = transaction
+            let (through, count) = transaction
                 .query_row(
-                    "SELECT MAX(store_index) FROM (
+                    "SELECT MAX(store_index), COUNT(*) FROM (
                 SELECT store_index FROM claims WHERE store_index>?1 AND store_index<=?2
                 ORDER BY store_index LIMIT ?3)",
                     params![frontier, target, PROJECTION_CHUNK_CLAIMS as i64],
-                    |row| row.get::<_, Option<u64>>(0),
-                )?
-                .unwrap_or(target.max(frontier));
+                    |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, u64>(1)?)),
+                )?;
+            let through = through.unwrap_or(target.max(frontier));
             progress(ProjectionProgress {
                 phase: "project-incremental",
                 frontier,
@@ -6720,11 +6723,14 @@ impl Store {
                     params![through, now_ms().to_string()],
                 )?;
                     transaction.commit()?;
+                    if !replayed {
+                        processed += count;
+                    }
                     progress(ProjectionProgress {
                         phase: "projection-committed",
                         frontier: through,
                         target,
-                        processed: None,
+                        processed: (!replayed).then_some(processed),
                         total: None,
                     });
                     // Snapshot while admission is excluded by the writer. Admission marks

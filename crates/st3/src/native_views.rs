@@ -249,7 +249,7 @@ pub(crate) fn tool_call_view(tool: &str, args: &Value) -> Value {
     out
 }
 
-fn job(value: &Value, completed: bool) -> Value {
+fn job(value: &Value, require_state: bool) -> Value {
     let mut out = json!({});
     fields(
         &mut out,
@@ -269,8 +269,8 @@ fn job(value: &Value, completed: bool) -> Value {
             ("output_bytes", "outputBytes"),
         ],
     );
-    if completed && out.get("state").is_none() {
-        out["state"] = json!("completed");
+    if require_state && out.get("state").is_none() {
+        out["state"] = json!("unknown");
     }
     out
 }
@@ -283,6 +283,7 @@ fn answer(value: &Value) -> Value {
         &[
             ("question", "question"),
             ("custom", "custom"),
+            ("custom", "customInput"),
             ("note", "note"),
         ],
     );
@@ -357,7 +358,9 @@ pub(crate) fn tool_output_view(
             })
         }
         "ask" => {
-            out["answers"] = if details.get("answers").is_some_and(Value::is_array) {
+            out["answers"] = if details.get("results").is_some_and(Value::is_array) {
+                rows(details, "results", answer)
+            } else if details.get("answers").is_some_and(Value::is_array) {
                 rows(details, "answers", answer)
             } else if details.get("question").is_some() {
                 json!([answer(details)])
@@ -726,6 +729,59 @@ mod tests {
     }
 
     #[test]
+    fn batched_ask_answers_keep_selections_and_custom_input() {
+        let details = json!({
+            "results": [
+                {"id":"db","question":"Which database should the prototype use?",
+                 "options":["SQLite","Postgres","In-memory"],"multi":false,
+                 "selectedOptions":["SQLite"],"note":"prefer zero-ops for the demo"},
+                {"id":"features","question":"Which features ship?",
+                 "options":["Auth","Search","Export","Sharing"],"multi":true,
+                 "selectedOptions":["Auth","Export"]},
+                {"id":"deploy","question":"Where do we deploy?",
+                 "options":["Fly.io","Vercel"],"multi":false,"selectedOptions":[],
+                 "customInput":"Cloudflare Workers","custom":"legacy fallback"}
+            ],
+            "answers": [{"question":"Ignored fallback","selected":["legacy"]}]
+        });
+        let view = tool_output_view("ask", "a", false, Some(&details));
+        let answers = view["answers"].as_array().unwrap();
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[0]["selected"], json!(["SQLite"]));
+        assert_eq!(answers[0]["note"], "prefer zero-ops for the demo");
+        assert_eq!(answers[1]["selected"], json!(["Auth", "Export"]));
+        assert_eq!(answers[2]["selected"], json!([]));
+        assert_eq!(answers[2]["custom"], "Cloudflare Workers");
+        assert!(answers.iter().all(|answer| answer.get("id").is_none()));
+        let fallback = tool_output_view(
+            "ask",
+            "a",
+            false,
+            Some(&json!({"answers":[{"question":"Which?","selected":["A"],"custom":"Other"}]})),
+        );
+        assert_eq!(fallback["answers"][0]["custom"], "Other");
+        assert_eq!(fallback["answers"][0]["selected"], json!(["A"]));
+    }
+
+    #[test]
+    fn completion_job_states_are_unknown_unless_explicit() {
+        for (custom_type, key) in [("async-result", "jobs"), ("launch-completion", "daemons")] {
+            for state in [None, Some("cancelled"), Some("failed"), Some("failed (exit 2)")] {
+                let mut native_job = json!({"jobId":"j","durationMs":123});
+                if let Some(state) = state {
+                    native_job["state"] = json!(state);
+                }
+                let mut record = json!({"type":"custom_message","customType":custom_type,"details":{}});
+                record["details"][key] = json!([native_job]);
+                let (_, view, _) = omp_record_view(&record).unwrap();
+                assert_eq!(view["jobs"][0]["state"], state.unwrap_or("unknown"));
+            }
+        }
+        let hub = tool_output_view("hub", "h", false, Some(&json!({"jobs":[{"jobId":"j"}]})));
+        assert!(hub["jobs"][0].get("state").is_none());
+    }
+
+    #[test]
     fn record_views_parse_extensions_bookkeeping_and_visibility() {
         let cases = [
             (
@@ -784,6 +840,9 @@ mod tests {
             let (actual, view, visibility) = omp_record_view(&record).unwrap();
             assert_eq!(actual, kind);
             assert_eq!(view["type"], view_type);
+            if record["customType"] == "async-result" {
+                assert_eq!(view["jobs"][0]["state"], "unknown");
+            }
             assert_eq!(
                 visibility,
                 if view_type == "tool_start" {

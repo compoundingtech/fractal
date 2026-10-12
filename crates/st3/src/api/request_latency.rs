@@ -307,6 +307,16 @@ impl Meter {
 
     /// Every target's windows, then every path's that has a sample in its last hour.
     pub(super) fn windows(&mut self, now: Instant) -> Value {
+        let rows = self.target_rows(now);
+        json!({"targets": rows, "paths": self.path_rows(now)})
+    }
+
+    /// Only the targets' windows: what the collector gets, without every path's snapshot.
+    pub(super) fn targets_only(&mut self, now: Instant) -> Value {
+        json!({"targets": self.target_rows(now)})
+    }
+
+    fn target_rows(&mut self, now: Instant) -> Vec<Value> {
         let targets = crate::slo::targets();
         let empty = smallclaims::windows::Series::default();
         let mut rows = targets
@@ -335,6 +345,21 @@ impl Meter {
             })
             .collect::<Vec<_>>();
         rows.extend(crate::slo::store_report(self.cpu.snapshot(now)));
+        let wall = crate::api::client_now_ms() as u64;
+        for latency in targets.latency.iter().filter(|t| t.paths.iter().any(|p| p.starts_with("client/ios/"))) {
+            let windows = self.client_windows(wall, &latency.name, false);
+            rows.push(json!({"name":latency.name,"about":latency.about,"p99_ms":latency.p99_ms,
+                "population":"client-observed-latencies", "windows":windows}));
+        }
+        for share in &targets.share {
+            rows.push(json!({"name":share.name,"about":share.about,"min_percent":share.min_percent,
+                "population":"client-observed-foreground-ms","windows":self.client_windows(wall,&share.name,true)}));
+        }
+        rows
+    }
+
+    fn path_rows(&self, now: Instant) -> Vec<Value> {
+        let targets = crate::slo::targets();
         let mut paths = self
             .paths
             .iter()
@@ -348,15 +373,6 @@ impl Meter {
             })
             .collect::<Vec<_>>();
         let wall = crate::api::client_now_ms() as u64;
-        for latency in targets.latency.iter().filter(|t| t.paths.iter().any(|p| p.starts_with("client/ios/"))) {
-            let windows = self.client_windows(wall, &latency.name, false);
-            rows.push(json!({"name":latency.name,"about":latency.about,"p99_ms":latency.p99_ms,
-                "population":"client-observed-latencies", "windows":windows}));
-        }
-        for share in &targets.share {
-            rows.push(json!({"name":share.name,"about":share.about,"min_percent":share.min_percent,
-                "population":"client-observed-foreground-ms","windows":self.client_windows(wall,&share.name,true)}));
-        }
         for ((target,carrier,path),series) in &self.client_intervals {
             let share = target == "ios-live-share";
             paths.push(json!({"path":format!("client/ios/{}", target.strip_prefix("ios-").unwrap_or(target)),
@@ -364,7 +380,7 @@ impl Meter {
                 "population":if share {"client-observed-foreground-ms"} else {"client-observed-latencies"},
                 "windows":series.snapshot(wall,share)}));
         }
-        json!({"targets": rows, "paths": paths})
+        paths
     }
 
     pub(super) fn can_report(&self, now_ms: u64, samples: &[super::client_observations::Validated]) -> bool {
