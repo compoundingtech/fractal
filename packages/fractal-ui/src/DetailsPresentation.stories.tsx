@@ -124,7 +124,7 @@ export const NarrowValueColumns:Story={
   render:function Render({scheme}){
     const inputs=detailsStoryInputs('busy')
     const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
-    const overview={...inputs.overview,status:'Awaiting attribution',machine:'Observed host',harness:'Claude Code',model:'Reported model',since:'Awaiting report',age:'Awaiting report'}
+    const overview={...inputs.overview,status:'Awaiting attribution',machine:'Observed host',harness:'Claude Code',model:'Reported model',since:'Awaiting report',age:'Awaiting report',mission:'Review retained observations',durations:[{label:'Managed-session elapsed',value:'Awaiting attribution'}]}
     return <div role="main" aria-label="Narrow Details comparison" {...stylex.props(styles.comparison,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{[240,320].map(width=><div key={width} data-details-narrow-width={width} {...stylex.props(styles.frame(width))}><DetailsLabelContext.Provider value={`${width}px `}><DetailsPane {...inputs} overview={overview} state="busy" variants={{overview:'O3',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}}/></DetailsLabelContext.Provider></div>)}</ThemePortal></div>
   },
   play:async({canvasElement})=>{
@@ -148,6 +148,29 @@ export const NarrowValueColumns:Story={
       const spendRow=spendRows[0];requireContract(spendRow,'Missing spend layout control');const columns=spendRow.style.gridTemplateColumns
       try{spendRow.style.gridTemplateColumns='minmax(0, 1fr) 30px';await rejectsControl('Narrow values did not stack at a readable width',()=>assertStacked(spendRow))}finally{spendRow.style.gridTemplateColumns=columns}
       assertStacked(spendRow)
+      const descriptions=[...pane.querySelectorAll<HTMLElement>('[data-details-description-row]')];requireContract(descriptions.length===2,'Missing narrow mission/duration rows')
+      const assertDescription=(row:HTMLElement)=>{
+        const [label,value]=[...row.children];requireContract(label instanceof HTMLElement&&value instanceof HTMLElement,'Missing narrow description label/value')
+        const a=label.getBoundingClientRect(),b=value.getBoundingClientRect()
+        requireContract(b.top>=a.bottom-0.5&&b.width>=120&&getComputedStyle(value).overflowWrap!=='anywhere','Narrow mission/duration values did not stack at a readable width')
+      }
+      for(const row of descriptions)assertDescription(row)
+      const description=descriptions[0];requireContract(description,'Missing description layout control');const direction=description.style.flexDirection
+      try{description.style.flexDirection='row';await rejectsControl('Narrow mission/duration values did not stack at a readable width',()=>assertDescription(description))}finally{description.style.flexDirection=direction}
+      assertDescription(description)
+      const rows=[...pane.querySelectorAll<HTMLElement>('[data-testid="taste-agent-row"]')];requireContract(rows.length===2,'Missing production subagent rows')
+      for(const row of rows){
+        const button=row.querySelector<HTMLButtonElement>(':scope > button'),title=row.querySelector('[data-row-column="title-text"]')?.textContent?.trim(),location=row.querySelector('[data-row-field="host"]')?.textContent?.trim();requireContract(button&&title&&location,'Missing production row name fields')
+        const assertRowName=()=>requireContract(within(row).queryByRole('button',{name:name=>name.includes(title)&&name.includes(location)})===button,'Subagent row name omits its visible title or location')
+        const assertOneTitle=()=>requireContract(button.innerText.split(title).length===2,'Subagent current work repeats its painted title')
+        assertRowName();assertOneTitle()
+        button.setAttribute('aria-label',`${title}, 0 unread`)
+        try{await rejectsControl('Subagent row name omits its visible title or location',assertRowName)}finally{button.removeAttribute('aria-label')}
+        assertRowName()
+        const duplicate=button.ownerDocument.createElement('span');duplicate.textContent=title;button.append(duplicate)
+        try{await rejectsControl('Subagent current work repeats its painted title',assertOneTitle)}finally{duplicate.remove()}
+        assertOneTitle()
+      }
     }
   },
 }

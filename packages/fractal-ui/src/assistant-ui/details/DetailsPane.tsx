@@ -71,8 +71,8 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
       if(stacked===wasStacked)return
       wasStacked=stacked
       pane.dataset.detailsStacked=String(stacked)
-      if(stacked){pane.style.setProperty('--details-overview-columns','minmax(0, 1fr)');pane.style.setProperty('--details-spend-columns','minmax(0, 1fr)');pane.style.setProperty('--details-value-align','left')}
-      else{pane.style.removeProperty('--details-overview-columns');pane.style.removeProperty('--details-spend-columns');pane.style.removeProperty('--details-value-align')}
+      if(stacked){pane.style.setProperty('--details-overview-columns','minmax(0, 1fr)');pane.style.setProperty('--details-spend-columns','minmax(0, 1fr)');pane.style.setProperty('--details-value-align','left');pane.style.setProperty('--details-description-direction','column');pane.style.setProperty('--details-description-align','stretch');pane.style.setProperty('--details-label-max-width','100%')}
+      else{pane.style.removeProperty('--details-overview-columns');pane.style.removeProperty('--details-spend-columns');pane.style.removeProperty('--details-value-align');pane.style.removeProperty('--details-description-direction');pane.style.removeProperty('--details-description-align');pane.style.removeProperty('--details-label-max-width')}
     }
     measure()
     const observer=new ResizeObserver(measure)
@@ -170,8 +170,8 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
           </>}
         </>}
         </>}
-        {(pending?pendingOverview.mission:overview.mission)!==undefined&&<div data-details-overview-line aria-hidden={pending||undefined} {...stylex.props(styles.line)}>{pending?<span inert {...stylex.props(styles.pendingText)}>Current mission · {pendingOverview.mission}</span>:<><span {...stylex.props(styles.shortLabel)}>Mission</span><TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{overview.mission}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{overview.mission}</Tooltip></TooltipTrigger></>}</div>}
-        {(pending?pendingOverview.durations:overview.durations)?.map(duration=><div key={duration.label} data-details-overview-line aria-hidden={pending||undefined} {...stylex.props(styles.line)}>{pending?<span inert {...stylex.props(styles.pendingText)}>{duration.label} · {duration.value}</span>:<><TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger><OverviewValue label={duration.label} value={duration.value}/></>}</div>)}
+        {(pending?pendingOverview.mission:overview.mission)!==undefined&&<div data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(styles.line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.pendingText)}>Mission</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{pendingOverview.mission}</span></>:<><span {...stylex.props(styles.shortLabel)}>Mission</span><TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{overview.mission}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{overview.mission}</Tooltip></TooltipTrigger></>}</div>}
+        {(pending?pendingOverview.durations:overview.durations)?.map(duration=><div key={duration.label} data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(styles.line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<><TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger><OverviewValue label={duration.label} value={duration.value}/></>}</div>)}
       </div>
     </Section>
     {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
@@ -196,7 +196,7 @@ const styles=stylex.create({
   bandActions:{display:'inline-flex',alignItems:'center',gap:s.xs2,minWidth:0},
   name:{fontSize:t.bodySize,fontWeight:t.weightMedium},
   shortLabel:{flexShrink:0,color:tx.fgMuted},
-  durationLabel:{maxWidth:'45%',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  durationLabel:{maxWidth:'var(--details-label-max-width, 45%)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
   overviewValue:{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,color:tx.fgMuted,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
   overviewTooltip:{maxWidth:g.tooltipMax,padding:s.md,backgroundColor:sf.raised,color:tx.fg,borderRadius:r.sm,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
   iconButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0,width:g.controlSm,height:g.controlSm,padding:s.zero,borderWidth:0,borderRadius:r.sm,backgroundColor:sf.transparent,color:tx.fgMuted,cursor:'pointer',':hover':{backgroundColor:sf.rowHover,color:tx.fg},':focus-visible':{outline:`2px solid ${ac.primary}`}},
@@ -212,6 +212,7 @@ const styles=stylex.create({
   checkBox:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:g.icon,height:g.icon,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},
   overview:{display:'flex',flexDirection:'column',gap:s.xs,paddingBlock:s.sm,minWidth:0},
   line:{display:'flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,minWidth:0,whiteSpace:'nowrap',overflow:'hidden'},
+  descriptionLine:{flexDirection:'var(--details-description-direction, row)',alignItems:'var(--details-description-align, center)'},
   grid:{display:'grid',gridTemplateColumns:`var(--details-overview-columns, minmax(90px, 1fr) minmax(${g.detailsValueMin}, 1fr))`,gap:s.xs,margin:s.zero},
   muted:{color:tx.fgMuted,overflowWrap:'normal'},
   value:{display:'flex',margin:s.zero,minWidth:0,overflow:'hidden',whiteSpace:'normal',overflowWrap:'normal'},
