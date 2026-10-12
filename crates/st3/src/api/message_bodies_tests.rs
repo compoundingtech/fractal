@@ -637,3 +637,67 @@ async fn a_body_is_named_while_its_message_exists_and_only_then() {
     assert!(message_body::body_is_named(&state.store, &file(subject.trim_start_matches("message/"))));
     assert!(!message_body::body_is_named(&state.store, &file("no-such-message")));
 }
+
+#[test]
+fn the_judge_and_the_reader_take_the_same_body_entry() {
+    use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, fields_signing_bytes};
+    let store = Store::open_memory("node").unwrap();
+    let body = text(60 * 1024);
+    let preview = message_body::preview(&body);
+    let hash = hex::encode(Sha256::digest(body.as_bytes()));
+    let valid = json!({"sha256": hash, "media_type": "text/plain", "size": body.len(),
+        "origin": "host/node"});
+    // Entries a reader discards, ahead of the valid one: a judge that took the first
+    // text/plain entry would verify against one body and the reader would show another.
+    let decoys = [
+        json!({"sha256": "f".repeat(63), "media_type": "text/plain", "size": 5, "origin": "host/node"}),
+        json!({"sha256": "e".repeat(64), "media_type": "text/plain", "size": 5, "origin": "elsewhere"}),
+        json!({"sha256": "d".repeat(64), "media_type": "text/plain", "size": 0, "origin": "host/node"}),
+    ];
+    let mut entries = decoys.to_vec();
+    entries.push(valid);
+    let input = ClaimInput {
+        subject: "message/two-entries".into(),
+        kind: "message.sent".into(),
+        actor: Some("person/alex".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("person/alex")),
+            ("to".into(), json!("agent/worker")),
+            ("content".into(), json!(preview)),
+            ("status".into(), json!("sent")),
+            ("attachments".into(), json!(entries)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("two-entries".into()),
+    };
+    let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+    let mut signature = ClaimSignature::sign(&key, "", "person/alex", None, vec![], client_now_ms() as u64);
+    signature.format = Some(FIELDS_FORMAT.into());
+    signature.signed_fields = SIGNED_LONG_MESSAGE_FIELDS.iter().map(|name| (*name).to_owned()).collect();
+    let mut signed = input.fields.clone();
+    signed.insert("body_sha256".into(), json!(hash));
+    signed.insert("body_bytes".into(), json!(body.len()));
+    signature.signature = key.sign(&fields_signing_bytes(
+        &input.subject,
+        &input.kind,
+        input.actor.as_deref(),
+        &serde_json::to_value(&signed).unwrap(),
+        &signature.signed_fields,
+        &signature.signer,
+        None,
+        &signature.key,
+        &signature.chain,
+        &signature.nonce,
+        signature.signed_at_unix_ms,
+    ));
+    let (record, _) = store.append_signed_message(&input, &signature).unwrap();
+    store.recheck_claim_verdicts().unwrap();
+    // The reader takes the valid entry, and the judge verified the signature against it.
+    let view = store.message("message/two-entries").unwrap().unwrap();
+    assert_eq!(view.body_attachment().unwrap().sha256, hash);
+    assert_ne!(
+        store.claim_verdict(&record.id).unwrap().reason(),
+        Some("the signature does not match the claim")
+    );
+}

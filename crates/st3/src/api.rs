@@ -13143,7 +13143,13 @@ fn accept_message_receipt_with_upload_owner(
         ApiError::bad(error)
     })?;
     if let Some(staged) = staged {
-        staged.commit().map_err(ApiError::internal)?;
+        // The claim is in. If the text cannot be put in place, the message exists with its
+        // preview: say so as an unconfirmed send, which a repeat of the same send finishes.
+        staged.commit().map_err(|error| {
+            ApiError::internal(anyhow::anyhow!(
+                "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
+            ))
+        })?;
     }
     // A concurrent sender may have accepted this key first with the same canonical input.
     // Return its accepted classification, rather than this attempt's speculative tags.
