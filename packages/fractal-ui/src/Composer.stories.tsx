@@ -431,7 +431,8 @@ export const EffortSupported: Story = {
     await userEvent.click(picker)
     const high = await page.findByRole('menuitemradio', { name: 'High' })
     await expect(page.getByRole('menuitemradio', { name: 'Medium' })).toHaveAttribute('aria-checked', 'true')
-    await expect(within(page.getByRole('menu', { name: 'Select effort: Medium' })).getByText('Default')).toBeVisible()
+    // The menu enters from opacity 0, so visibility settles once the entry animation ends.
+    await waitFor(() => expect(within(page.getByRole('menu', { name: 'Select effort: Medium' })).getByText('Default')).toBeVisible())
     await expect(page.getByRole('menuitemcheckbox', { name: 'Keep for next messages' })).toHaveAttribute('aria-checked', 'false')
     // Frame budget: one choice commits the value subtree exactly once without dropping frames.
     const engine = developmentMeasurements?.createMeasurementEngine()
