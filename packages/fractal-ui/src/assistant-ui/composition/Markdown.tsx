@@ -29,7 +29,7 @@ export type MarkdownImageOpener = (src: string) => void
 export interface MarkdownImageOptions { readonly resolveImage?: MarkdownImageResolver; readonly onLoadImage?: MarkdownImageOpener }
 const NO_IMAGE_OPTIONS: MarkdownImageOptions = {}
 export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_IMAGE_OPTIONS)
-/** `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted instead of lifting to the primary ink. */
+/** `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes. */
 export interface MarkdownProps { text: string; streaming?: boolean; tone?: 'default' | 'muted'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
 const REMARK_PLUGINS = [remarkGfm]
@@ -193,7 +193,7 @@ function MarkdownStrong({ children }: React.ComponentProps<'strong'>) {
   return <strong {...stylex.props(styles.strong, React.useContext(MutedTone) && styles.strongMuted)}><InlineText>{children}</InlineText></strong>
 }
 function MarkdownQuote({ children }: React.ComponentProps<'blockquote'>) {
-  return <blockquote {...stylex.props(styles.blockquote, React.useContext(InListItem) && styles.itemBlock)}><InListItem.Provider value={false}>{children}</InListItem.Provider></blockquote>
+  return <blockquote {...stylex.props(styles.blockquote, React.useContext(InListItem) && styles.itemBlock)}><InListItem.Provider value={false}><MutedTone.Provider value>{children}</MutedTone.Provider></InListItem.Provider></blockquote>
 }
 function MarkdownList({ ordered, start, children }: { readonly ordered: boolean; readonly start?: number; readonly children?: React.ReactNode }) {
   const depth = React.useContext(ListDepth)

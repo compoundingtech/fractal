@@ -38,9 +38,9 @@ const calls: readonly WorkLogCall[] = [
 ]
 const work: WorkLogTurn = { calls, running: true, failed: false, interrupted: false, durationMs: undefined, startedAt: at }
 const richText = [
-  'The release plan keeps three checks in order.',
+  'The release plan keeps **three checks** in order.',
   '- Confirm the retained snapshot\n  - Compare each identity\n  - Record the reviewed hash\n- Publish the summary',
-  '> Hold the release if any identity changes during review.',
+  '> Hold the release if **any identity** changes during review.',
   '```ts\nexport const releaseGate = (changed: number) => changed === 0\n```',
   '1. Confirm the retained snapshot.\n\n   Record the reviewed hash beside it.\n\n2. Publish the summary.',
 ].join('\n\n')
@@ -58,7 +58,7 @@ const turns = (splitRun: boolean): readonly TranscriptTurn[] => [
   // The split restores a header Copy that only covers the first block: later blocks lose the shared sender.
   { id: 'hierarchy/run-turn', items: run, work: idle, senderCaptions: splitRun ? { [run[0]!.id]: caption } : Object.fromEntries(run.map(item => [item.id, caption])) },
 ]
-const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'fold-scroll', 'answer-footer', 'markdown-margin', 'loose-list', 'run-copy', 'prose-run'] as const
+const failures = ['none', 'fold-indent', 'rail', 'chevron-x', 'status-end', 'word-clip', 'title-wrap', 'thinking-row', 'fold-scroll', 'answer-footer', 'markdown-margin', 'loose-list', 'quote-strong', 'run-copy', 'copy-reject', 'prose-run'] as const
 type Failure = typeof failures[number]
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
@@ -85,6 +85,9 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none' }: { sche
     if (failure === 'answer-footer') element('[data-item-id="hierarchy/rich"] [data-testid="message-header"]').style.order = '1'
     if (failure === 'markdown-margin') (element('[data-item-id="hierarchy/rich"] [data-testid="markdown"]').lastElementChild as HTMLElement).style.marginBlockEnd = '10px'
     if (failure === 'loose-list') element('[data-item-id="hierarchy/rich"] ol > li > p + p').style.marginBlockStart = '0'
+    // Quoted strong text lifts to the unquoted strong ink, as it did before quotes set the muted tone.
+    if (failure === 'quote-strong') element('[data-item-id="hierarchy/rich"] blockquote strong').style.color = getComputedStyle(element('[data-item-id="hierarchy/rich"] p > strong')).color
+    if (failure === 'copy-reject') element('[data-item-id="hierarchy/run-1"] [aria-label="Copy answer"]').dataset.copied = 'true'
     if (failure === 'prose-run') { const header = element('[data-item-id="hierarchy/run-1"] [data-testid="message-header"]'); element('[data-item-id="hierarchy/run-2"]').prepend(header.cloneNode(true)) }
   }, [failure, revision])
   return <main ref={root} data-revision={revision} {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' && lightTheme)}>
@@ -205,6 +208,8 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(getComputedStyle(quote).borderInlineStartWidth).toBe('2px')
   await expect(getComputedStyle(quote).paddingInlineStart).toBe('12px')
   await expect(getComputedStyle(quote.querySelector('p')!).color).toBe(getComputedStyle(header).color)
+  await expect(getComputedStyle(quote.querySelector('strong')!).color).toBe(getComputedStyle(quote.querySelector('p')!).color)
+  await expect(getComputedStyle(quote.querySelector('strong')!).color).not.toBe(getComputedStyle(blocks[0]!.querySelector('strong')!).color)
   const code = within(markdown).getByTestId('markdown-code-block')
   await expect(getComputedStyle(code).borderTopLeftRadius).toBe('6px')
   await expect(getComputedStyle(code.querySelector('code')!).fontSize).toBe('12px')
@@ -220,16 +225,32 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(items[1]!.getBoundingClientRect().top - items[0]!.getBoundingClientRect().bottom).toBeCloseTo(2, 1)
   await expect(loose.getBoundingClientRect().bottom).toBeCloseTo(items[1]!.querySelector('p')!.getBoundingClientRect().bottom, 1)
 
-  // Prose run: the single header Copy takes every block of the run, joined by a blank line.
+  // Prose run: the single header Copy takes every block of the run, joined by a blank line. A rejected
+  // write is handled (no unhandled rejection, no copied state); a successful one sets data-copied.
   const runBlocks = run.map(item => canvasElement.querySelector<HTMLElement>(`[data-item-id="${item.id}"]`)!)
+  const runCopy = within(runBlocks[0]!).getByRole('button', { name: 'Copy answer' })
   const clipboard = navigator.clipboard
   const original = Object.getOwnPropertyDescriptor(clipboard, 'writeText')
-  let copied = ''
-  Object.defineProperty(clipboard, 'writeText', { configurable: true, value: async (text: string) => { copied = text } })
+  const unhandled: unknown[] = []
+  const record = (event: PromiseRejectionEvent) => unhandled.push(event.reason)
+  let copied = '', attempts = 0
+  window.addEventListener('unhandledrejection', record)
   try {
-    await userEvent.click(within(runBlocks[0]!).getByRole('button', { name: 'Copy answer' }))
+    Object.defineProperty(clipboard, 'writeText', { configurable: true, value: async () => { attempts++; throw new DOMException('Clipboard permission denied', 'NotAllowedError') } })
+    await userEvent.click(runCopy)
+    await waitFor(() => expect(attempts).toBe(1))
+    // The package lib is ES2022 (no Promise.withResolvers). Two frames let a stray rejection surface.
+    for (let frame = 0; frame < 2; frame++) await new Promise(resolve => requestAnimationFrame(resolve))
+    await expect(unhandled).toEqual([])
+    await expect(runCopy).not.toHaveAttribute('data-copied')
+    Object.defineProperty(clipboard, 'writeText', { configurable: true, value: async (text: string) => { copied = text } })
+    await userEvent.click(runCopy)
     await waitFor(() => expect(copied).toBe(run.map(item => item.text).join('\n\n')))
-  } finally { if (original === undefined) delete (clipboard as unknown as Record<string, unknown>)['writeText']; else Object.defineProperty(clipboard, 'writeText', original) }
+    await waitFor(() => expect(runCopy).toHaveAttribute('data-copied', 'true'))
+  } finally {
+    window.removeEventListener('unhandledrejection', record)
+    if (original === undefined) delete (clipboard as unknown as Record<string, unknown>)['writeText']; else Object.defineProperty(clipboard, 'writeText', original)
+  }
 
   // Prose run: one sender line with the time, then the following blocks without a header.
   await expect(within(runBlocks[0]!).getByTestId('message-sender')).toHaveTextContent(caption)

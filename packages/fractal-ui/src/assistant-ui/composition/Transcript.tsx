@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
+import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
 import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
@@ -99,14 +99,43 @@ export function AgentMessage({ item, senderLine, continuation = false }: { reado
   const header = !continuation && (senderLine !== undefined || !streaming)
   const runText = React.useContext(RunCopyText)
   const [hovered, setHovered] = React.useState(false)
-  const copyStyle = stylex.props(styles.copy, hovered && styles.copyVisible)
   return <MessagePrimitive.Root data-testid="agent-message" data-item-id={item.id} data-item-kind={item._tag} data-run-continuation={continuation || undefined} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} {...stylex.props(styles.answer)}>
     {header && <div data-testid="message-header" {...stylex.props(styles.answerHeader)}>
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
-      {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...copyStyle}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <Button aria-label="Copy answer" onPress={() => void navigator.clipboard.writeText(runText)} {...copyStyle}><Icon name="copy" size={12} /></Button>}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{new Date(completed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</span>}
+      {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy, hovered && styles.copyVisible)}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <RunCopy text={runText} visible={hovered} />}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{new Date(completed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</span>}
     </div>}
     {item._tag === 'Text' ? <Markdown text={item.text} streaming={item.streaming} /> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
   </MessagePrimitive.Root>
+}
+/**
+ * ActionBarPrimitive.Copy for a whole prose run: it writes the run text instead of this message's own text.
+ * Like the primitive, the write starts inside the press; a missing API, sync throw or rejection is swallowed;
+ * success sets the message's `isCopied` (`data-copied`) for 3s, cleared on unmount.
+ */
+function RunCopy({ text, visible }: { readonly text: string; readonly visible: boolean }) {
+  const aui = useAui()
+  const isCopied = useAuiState(state => state.message.isCopied)
+  const timer = React.useRef<{ readonly id: number; readonly reset: (value: boolean) => void } | undefined>(undefined)
+  React.useEffect(() => () => {
+    if (timer.current === undefined) return
+    window.clearTimeout(timer.current.id)
+    timer.current.reset(false)
+    timer.current = undefined
+  }, [aui])
+  const copy = () => {
+    let write: Promise<void>
+    try {
+      if (typeof navigator === 'undefined' || !navigator.clipboard) return
+      write = navigator.clipboard.writeText(text)
+    } catch { return }
+    const setCopied = aui.message.setIsCopied
+    write.then(() => {
+      if (timer.current !== undefined) window.clearTimeout(timer.current.id)
+      setCopied(true)
+      timer.current = { id: window.setTimeout(() => { timer.current = undefined; setCopied(false) }, 3000), reset: setCopied }
+    }, () => {})
+  }
+  return <Button aria-label="Copy answer" data-copied={isCopied ? 'true' : undefined} onPress={copy} {...stylex.props(styles.copy, visible && styles.copyVisible)}><Icon name="copy" size={12} /></Button>
 }
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. */
 export function ToolDetailPreview({ call, onOpen }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void }) {
