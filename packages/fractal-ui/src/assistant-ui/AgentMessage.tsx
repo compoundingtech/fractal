@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Disclosure, DisclosurePanel, Focusable, VisuallyHidden } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, VisuallyHidden } from 'react-aria-components'
 import { Tooltip } from './composition/Controls'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import { Icon, type IconName } from './composition/Icons'
@@ -54,7 +54,7 @@ export const AgentIdHierarchy = ({ id, tooltip = false }: { readonly id: string;
   if (!id.includes('.')) return <span data-agent-id={id}>{id}</span>
   const path = <span aria-hidden="true" {...stylex.props(styles.agentPath)}>{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span>
   if (!tooltip) return <span data-agent-id={id}>{path}<VisuallyHidden>{id}</VisuallyHidden></span>
-  return <span data-agent-id={id}><Tooltip label={id}><Focusable><span tabIndex={0} role="img" aria-labelledby={nameId} data-agent-id-trigger {...stylex.props(styles.agentTrigger)}>{path}</span></Focusable></Tooltip><VisuallyHidden id={nameId}>{id}</VisuallyHidden></span>
+  return <span data-agent-id={id}><Tooltip label={id}><Button aria-labelledby={nameId} data-agent-id-trigger {...stylex.props(styles.agentTrigger)}>{path}</Button></Tooltip><VisuallyHidden id={nameId}>{id}</VisuallyHidden></span>
 }
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
@@ -102,7 +102,7 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
   return <MessageFrame variant={variant} frameStyles={frameStyles} label={variant._tag === 'Outgoing' ? `Message to ${to ?? ''}` : `Message from ${from}`} subject={subject} header={<>
     {headerGlyph?._tag !== 'Hidden' ? <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name={headerGlyph?._tag === 'Icon' ? headerGlyph.name : variant._tag === 'Human' ? 'person' : 'message'} scale="status" /></span> : null}
     <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span><strong {...stylex.props(styles.sender)}>{counterpart !== undefined ? <AgentIdHierarchy id={counterpart} tooltip /> : null}</strong>{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta)}> → <AgentIdHierarchy id={to} tooltip /></span> : null}{via !== undefined ? <span {...stylex.props(styles.meta)}> · <span>{({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span></span> : null}</span>
-    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <Tooltip label={`Reply to ${replyTo}`}><Focusable><span tabIndex={0} role="img" aria-label={`Reply to ${replyTo}`} {...stylex.props(styles.meta, styles.agentTrigger)}><Icon name="arrow-left" scale="status" /></span></Focusable></Tooltip> : null}
+    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <Tooltip label={`Reply to ${replyTo}`}><Button aria-label={`Reply to ${replyTo}`} {...stylex.props(styles.agentTrigger, styles.meta)}><Icon name="arrow-left" scale="status" /></Button></Tooltip> : null}
     {delivery?._tag === 'BroadcastCopy' ? <span {...stylex.props(styles.chip)}>broadcast · {delivery.recipients} seats</span> : arrivedWhileWorking ? <span {...stylex.props(styles.chip)}>arrived while working</span> : null}
     {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label={`Copy id`} {...stylex.props(styles.headerAction, styles.copy)} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}
     {id !== undefined && (onCopyId === undefined || onCopy !== undefined) ? <span {...stylex.props(styles.visuallyHidden)}>message/<AgentIdHierarchy id={id} /></span> : null}
@@ -194,7 +194,7 @@ const styles = stylex.create({
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   counterpart: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   agentPath: { display: 'inline-flex', alignItems: 'center', flexWrap: 'nowrap', whiteSpace: 'nowrap', verticalAlign: 'top', maxWidth: '100%' },
-  agentTrigger: { display: 'inline-flex', alignItems: 'center', maxWidth: '100%', verticalAlign: 'top', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid' } },
+  agentTrigger: { display: 'inline-flex', alignItems: 'center', maxWidth: '100%', verticalAlign: 'top', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: 'inherit', font: 'inherit', cursor: 'default', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid' } },
   direction: { flex: '0 0 auto', width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
   sender: { color: textVars.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium },
   time: { marginLeft: 'auto', flex: '0 0 auto', whiteSpace: 'nowrap', textAlign: 'right' },
