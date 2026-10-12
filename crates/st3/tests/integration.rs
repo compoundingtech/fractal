@@ -94,6 +94,7 @@ mod recorder_report;
 mod revision_seats;
 mod seat_queue_perf;
 mod startup_readiness;
+mod stui_slo_history;
 mod subagent_publisher;
 mod subagents_seat;
 mod terminal_attach;
