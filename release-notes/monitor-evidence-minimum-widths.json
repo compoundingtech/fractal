@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Usage-monitor tables reserve width for window labels, meter bars, readings and reported reset counts at narrow sidebar sizes. Account captions yield space first while their full identity stays accessible and in detail. Sort direction remains visible. Shared history charts use a consistent 8px inset and a clearer loading placeholder.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Display facts and callbacks are unchanged. Long account captions can truncate when evidence columns need the remaining width; full accessible names and keyboard-opened details are preserved." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

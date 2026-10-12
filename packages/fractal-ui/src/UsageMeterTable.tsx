@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Cell, Column, Row, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
@@ -16,19 +17,21 @@ export type UsageMeterTableComponentProps = UsageMeterTableProps & {
     flexGrow?: number
     flexShrink?: number
   }>
-  /** Reports whether the comparison column is shown (container inline size at least 15rem), so callers can rank the folded +N. Pass a stable callback. */
+  /** Reports whether the comparison column is shown (container inline size at least 20rem), so callers can rank the folded +N. Pass a stable callback. */
   readonly onComparisonVisibilityChange?: (visible: boolean) => void
+  /** Undefined keeps the inline toolbar; null waits for the host's shared header to mount. */
+  readonly toolbarTarget?: HTMLElement | null
 }
 
-/** Container width at which the comparison column is shown; mirrors the `@container (width < 15rem)` styles. */
-const comparisonMinRem = 15
+/** Container width at which the comparison column is shown; mirrors the `@container (width < 20rem)` styles. */
+const comparisonMinRem = 20
 
 const columns: readonly { readonly id: UsageMeterSortKey; readonly label: string; readonly narrowLabel?: string }[] = [
-  { id: 'account', label: 'Acct' },
-  { id: 'governing', label: 'Window gov', narrowLabel: 'gov' },
-  { id: 'reset', label: 'Reset', narrowLabel: 'rst' },
-  { id: 'comparison', label: 'Comparison', narrowLabel: 'nxt' },
-  { id: 'more', label: 'More', narrowLabel: '+N' },
+  { id: 'account', label: 'Account' },
+  { id: 'governing', label: 'Window' },
+  { id: 'reset', label: 'Reset' },
+  { id: 'comparison', label: 'Next' },
+  { id: 'more', label: 'More', narrowLabel: 'Δ' },
 ]
 const isSortKey = (key: string | number): key is UsageMeterSortKey => columns.some(column => column.id === key)
 const resetEvidence = (row: UsageMeterRow): string =>
@@ -37,7 +40,7 @@ const resetEvidence = (row: UsageMeterRow): string =>
 const Meter = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCell; readonly stale: boolean; readonly compact?: boolean }) => <div data-usage-meter-tone={meter.tone} {...stylex.props(styles.meter, compact && styles.compactMeter)}>
   <span title={meter.label} {...stylex.props(styles.windowLabel, compact && styles.compactWindow)}>{meter.label}</span>
   <div {...stylex.props(styles.meterReading, compact && styles.compactReading)}>
-    {meter.fraction !== undefined && meter.tone !== 'unknown' && <span aria-hidden="true" data-usage-meter-bar {...stylex.props(styles.track, stale && styles.staleBar)}>
+    {meter.fraction !== undefined && meter.tone !== 'unknown' && <span aria-hidden="true" data-usage-meter-bar {...stylex.props(styles.track, stale && styles.staleBar, compact && styles.compactTrack)}>
       <span {...stylex.props(styles.fill, meter.tone === 'warning' && styles.warningFill, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerFill, styles.fraction(meter.fraction))} />
     </span>}
     <span title={meter.text} {...stylex.props(styles.reading, meter.tone === 'warning' && styles.warningText, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerText, stale && styles.staleText)}>{meter.text}</span>
@@ -53,6 +56,7 @@ export const UsageMeterHistoryChart = ({ history }: { readonly history: UsageMet
   if (history.kind !== 'ready') return <section aria-label={history.label} data-usage-meter-history={history.kind} {...stylex.props(styles.history)}>
     <h4 {...stylex.props(styles.title)}>{history.label}</h4>
     <p role={history.kind === 'unavailable' ? 'alert' : 'status'} {...stylex.props(styles.staleText)}>{history.text}</p>
+    {history.kind === 'loading' && <div aria-hidden="true" data-usage-meter-history-skeleton {...stylex.props(styles.bars, styles.historySkeleton)} />}
   </section>
   const max = Math.max(0, ...history.points.flatMap(point => point.value === undefined ? [] : [point.value]))
   const first = history.points[0]
@@ -68,9 +72,9 @@ export const UsageMeterHistoryChart = ({ history }: { readonly history: UsageMet
             : <span aria-hidden="true" {...stylex.props(styles.bar, point.partial && styles.partialBar, styles.barHeight(max === 0 ? 0 : point.value / max))} />}
         </li>)}
       </ol>
-      <p aria-hidden="true" {...stylex.props(styles.axis)}><span>{first?.label}</span><span>{last?.label}</span></p>
+      <p aria-hidden="true" data-usage-meter-history-axis {...stylex.props(styles.axis)}><span>{first?.label}</span><span>{last?.label}</span></p>
     </>}
-    <Facts facts={history.facts} />
+    <div data-usage-meter-history-facts {...stylex.props(styles.historyFacts)}><Facts facts={history.facts} /></div>
   </section>
 }
 
@@ -94,7 +98,7 @@ export const UsageMeterRowDetail = ({ row, history, onClose }: { readonly row: U
 </section>
 
 /** Controlled, stable-id monitor. Keyboard shortcuts are scoped to this focus surface. */
-export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCycleSort, selectedId, onSelect, onCloseDetail, history, onComparisonVisibilityChange, style }: UsageMeterTableComponentProps): React.ReactElement => {
+export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCycleSort, selectedId, onSelect, onCloseDetail, history, onComparisonVisibilityChange, toolbarTarget, style }: UsageMeterTableComponentProps): React.ReactElement => {
   const selected = rows.find(row => row.id === selectedId)
   const observeComparison = React.useCallback((element: HTMLElement | null) => {
     if (element === null || onComparisonVisibilityChange === undefined) return
@@ -113,18 +117,20 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
   }, [onComparisonVisibilityChange])
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.key !== 's') return
-    if (!event.currentTarget.contains(event.currentTarget.ownerDocument.activeElement)) return
+    const active = event.currentTarget.ownerDocument.activeElement
+    if (!event.currentTarget.contains(active) && !toolbarTarget?.contains(active)) return
     const target = event.target
     if (!(target instanceof Element) || target.closest('input, textarea, [contenteditable]:not([contenteditable="false"]), [role="textbox"]') !== null) return
     event.preventDefault()
     event.stopPropagation()
     onCycleSort()
   }
+  const toolbar = <header onKeyDownCapture={onKeyDown} {...stylex.props(styles.toolbar, toolbarTarget !== undefined && styles.hostedToolbar)}>
+    <p role="status" title={observation.text} data-usage-meter-status={observation.kind} {...stylex.props(styles.statusText, toolbarTarget !== undefined && styles.hostedStatus, observation.kind !== 'current' && styles.staleText)}>{observation.text}</p>
+    <Button onPress={onCycleSort} aria-label="Cycle usage sort" aria-keyshortcuts="s" {...stylex.props(styles.button)}>Sort <kbd {...stylex.props(styles.shortcut)}>s</kbd></Button>
+  </header>
   return <section ref={observeComparison} aria-label="Usage monitor" tabIndex={0} onKeyDownCapture={onKeyDown} data-usage-meter-table {...stylex.props(styles.root, style)}>
-    <header {...stylex.props(styles.toolbar)}>
-      <p role="status" data-usage-meter-status={observation.kind} {...stylex.props(styles.statusText, observation.kind !== 'current' && styles.staleText)}>{observation.text}</p>
-      <Button onPress={onCycleSort} aria-label="Cycle usage sort" aria-keyshortcuts="s" {...stylex.props(styles.button)}>Sort <kbd {...stylex.props(styles.shortcut)}>s</kbd></Button>
-    </header>
+    {toolbarTarget === undefined ? toolbar : toolbarTarget === null ? null : createPortal(toolbar, toolbarTarget)}
     <Table aria-label="Usage meters" selectionMode="single" selectionBehavior="replace" disallowEmptySelection selectedKeys={selected === undefined ? [] : [selected.id]} onSelectionChange={keys => {
       if (keys === 'all') return
       const id = keys.values().next().value
@@ -142,7 +148,7 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
           const accountEvidence = `${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note === undefined ? '' : ` · ${row.note}`}`
           const resetDescription = resetEvidence(row)
           return <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
-          <Cell textValue={accountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={accountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}><span aria-hidden="true">{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}>{row.compactIdentity}</span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{accountEvidence}</span></VisuallyHidden></span></Cell>
+          <Cell textValue={accountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={accountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}><span aria-hidden="true">{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}><span data-usage-meter-account-prefix {...stylex.props(styles.compactPrefix)}><span dir="ltr">{row.compactIdentity.prefix}</span></span><span data-usage-meter-account-name {...stylex.props(styles.compactAccount)}>{row.compactIdentity.account}</span></span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}> !</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{accountEvidence}</span></VisuallyHidden></span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
           <Cell textValue={resetDescription} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={resetDescription} {...stylex.props(styles.reset)}><span aria-hidden="true">{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}> ↺{row.resetCount}</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{resetDescription}</span></VisuallyHidden></span></Cell>
           <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
@@ -159,34 +165,40 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
 const styles = stylex.create({
   root: { containerType: 'inline-size', minWidth: 0, width: '100%', color: ink.fg, backgroundColor: surface.canvas, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   toolbar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: space.md, padding: space.md },
+  hostedToolbar: { flex: 1, minWidth: 0, padding: 0, gap: space.xs, fontSize: type.denseSize },
+  hostedStatus: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   statusText: { margin: 0, minWidth: 0, overflowWrap: 'anywhere', color: ink.fgSoft },
   button: { display: 'inline-flex', alignItems: 'center', gap: space.sm, flexShrink: 0, color: ink.fgSoft, backgroundColor: { default: surface.controlFill, ':hover': surface.rowHover, ':active': surface.rowActive }, border: `1px solid ${border.borderStrong}`, borderRadius: radius.keyboard, padding: `${space.xs} ${space.sm}`, font: 'inherit', cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '2px' },
   shortcut: { color: ink.fgMuted, fontFamily: type.fontMono, fontSize: type.denseSize },
   table: { textAlign: 'start', fontFamily: type.fontMono, fontSize: type.denseSize },
-  header: { zIndex: 1, color: ink.fgMuted, fontSize: type.denseSize, fontWeight: type.weightRegular, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
+  header: { zIndex: 1, color: ink.fgMuted, fontSize: '10px', fontWeight: type.weightRegular, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   headerContent: { display: 'flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap', overflow: 'hidden' },
   sortIndicator: { display: { default: 'inline-block', ':empty': 'none' }, flexShrink: 0, color: ink.fgSoft },
-  accountColumn: { width: { default: '25%', '@container (width < 15rem)': '41%' } },
-  governingColumn: { width: { default: '23%', '@container (width < 15rem)': '30%' } },
-  resetColumn: { width: '20%' },
-  comparisonColumn: { width: '23%', display: { default: 'table-cell', '@container (width < 15rem)': 'none' } },
-  moreColumn: { width: '9%' },
+  // Protect evidence columns first; the account retains its full accessible name and detail.
+  accountColumn: { width: 'auto' },
+  governingColumn: { width: '84px' },
+  resetColumn: { width: '56px' },
+  comparisonColumn: { width: '84px', display: { default: 'table-cell', '@container (width < 20rem)': 'none' } },
+  moreColumn: { width: '26px' },
   row: { backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   selectedRow: { backgroundColor: surface.rowActive },
   cell: { outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
   accountLabel: { color: ink.fg },
   fullIdentity: { display: { default: 'inline', '@container (width < 36rem)': 'none' } },
-  compactIdentity: { display: { default: 'none', '@container (width < 36rem)': 'inline' } },
+  compactIdentity: { display: { default: 'none', '@container (width < 36rem)': 'flex' }, maxWidth: '100%', whiteSpace: 'nowrap', overflow: 'hidden' },
+  compactPrefix: { flexBasis: 0, flexGrow: 1, flexShrink: 1, minWidth: 0, maxWidth: 'max-content', overflow: 'hidden', textOverflow: 'ellipsis', direction: 'rtl', textAlign: 'left' },
+  compactAccount: { flexShrink: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', direction: 'ltr' },
   identity: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   note: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   meter: { minWidth: 0 },
-  compactMeter: { display: 'flex', alignItems: 'center', gap: 0, whiteSpace: 'nowrap' },
-  compactWindow: { flexShrink: 1, minWidth: 0, maxWidth: '5ch' },
-  compactReading: { flex: 1, gap: 0, minWidth: 'min-content' },
+  compactMeter: { display: 'flex', alignItems: 'center', gap: '2px', whiteSpace: 'nowrap' },
+  compactWindow: { flexShrink: 0, minWidth: 0, maxWidth: '5ch' },
+  compactReading: { flex: 1, gap: '2px', minWidth: 0 },
   windowLabel: { display: 'block', color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meterReading: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0 },
   reading: { flexShrink: 0, color: ink.fgSoft, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   track: { display: 'block', flexBasis: '56px', flexGrow: 1, flexShrink: 1, minWidth: 0, maxWidth: '72px', height: '4px', overflow: 'hidden', borderRadius: radius.full, backgroundColor: border.borderStrong },
+  compactTrack: { minWidth: '8px' },
   fill: { display: 'block', height: '100%', backgroundColor: status.done },
   fraction: (fraction: number) => ({ width: `${fraction * 100}%` }),
   warningFill: { backgroundColor: status.attention },
@@ -197,8 +209,8 @@ const styles = stylex.create({
   staleBar: { opacity: 0.4 },
   reset: { margin: 0, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   moreButton: { display: 'inline-flex', alignItems: 'center', height: '18px', font: 'inherit', fontVariantNumeric: 'tabular-nums', color: ink.fgSoft, backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, border: 0, padding: 0, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${accent.primary}` }, outlineOffset: '-2px' },
-  wideCount: { display: { default: 'inline', '@container (width < 15rem)': 'none' } },
-  narrowCount: { display: { default: 'none', '@container (width < 15rem)': 'inline' } },
+  wideCount: { display: { default: 'inline', '@container (width < 20rem)': 'none' } },
+  narrowCount: { display: { default: 'none', '@container (width < 20rem)': 'inline' } },
   narrowHeaderLabel: { display: { default: 'none', '@container (width < 36rem)': 'inline' }, minWidth: 0, overflow: 'hidden' },
   /** Stays the accessible column name when the container shows the short label. */
   wideLabel: { position: { default: 'static', '@container (width < 36rem)': 'absolute' }, width: { default: 'auto', '@container (width < 36rem)': '1px' }, height: { default: 'auto', '@container (width < 36rem)': '1px' }, overflow: { default: 'visible', '@container (width < 36rem)': 'hidden' }, clipPath: { default: 'none', '@container (width < 36rem)': 'inset(50%)' } },
@@ -210,7 +222,9 @@ const styles = stylex.create({
   facts: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', gap: `${space.xs} ${space.md}`, marginBlock: space.md },
   factLabel: { color: ink.fgMuted, overflowWrap: 'anywhere' },
   factValue: { margin: 0, color: ink.fgSoft, overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
-  history: { paddingBlock: space.sm, borderTop: `1px solid ${border.border}`, marginBlockStart: space.md },
+  history: { paddingBlock: space.sm, paddingInline: 8, borderTop: `1px solid ${border.border}`, marginBlockStart: space.md },
+  historySkeleton: { backgroundColor: border.borderStrong, borderRadius: radius.keyboard },
+  historyFacts: { minWidth: 0 },
   bars: { display: 'flex', alignItems: 'flex-end', gap: '1px', blockSize: '48px', margin: 0, padding: 0, listStyle: 'none', borderBottom: `1px solid ${border.borderStrong}` },
   slot: { display: 'flex', alignItems: 'flex-end', flexBasis: 0, flexGrow: 1, flexShrink: 1, minWidth: 0, blockSize: '100%' },
   bar: { display: 'block', inlineSize: '100%', minBlockSize: '1px', backgroundColor: accent.primary },

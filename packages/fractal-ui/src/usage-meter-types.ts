@@ -23,8 +23,8 @@ export interface UsageMeterRow {
   readonly id: string
   readonly label: string
   readonly identity: string
-  /** Caller-owned, distinguishable compact caption; canonical identity remains in detail. */
-  readonly compactIdentity?: string
+  /** Caller-owned caption parts; shrink the provider prefix before the account name. Canonical identity stays accessible and in detail. */
+  readonly compactIdentity?: { readonly prefix: string; readonly account: string }
   readonly governing: UsageMeterCell
   readonly comparison?: UsageMeterCell
   readonly reset: string

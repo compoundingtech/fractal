@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Sidebar monitor drawers open at a compact height of at most 240px while keeping user-chosen sizes. Usage tables show readable account names and word headers; narrow views keep the all-windows count visible and fold the next window into that count. Full names and evidence remain available by keyboard and on hover. Charts show a body placeholder while loading and inset their supporting facts by 8px.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Existing saved monitor heights are preserved; resetting restores the compact default. Compact display captions now separate provider prefixes from account names so only the prefix shrinks first; all callers are migrated. Callbacks and persisted state are unchanged." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

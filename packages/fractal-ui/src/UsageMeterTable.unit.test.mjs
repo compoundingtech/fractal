@@ -56,7 +56,7 @@ test('headers expose every column and aria-sort follows the controlled sort prop
   try {
     const headers = [...view.container.querySelectorAll('[role=columnheader]')]
     const named = header => { const copy = header.cloneNode(true); copy.querySelectorAll('[aria-hidden=true]').forEach(node => node.remove()); return copy.textContent }
-    assert.deepEqual(headers.map(named), ['Acct', 'Window gov', 'Reset', 'Comparison', 'More'])
+    assert.deepEqual(headers.map(named), ['Account', 'Window', 'Reset', 'Next', 'More'])
     assert.equal(headers[1].getAttribute('aria-sort'), 'descending')
     assert.match(headers[1].textContent, /↓/)
     assert.equal(headers[2].getAttribute('aria-sort'), 'none')
@@ -90,6 +90,20 @@ test('meters keep unknown bar-free, exhaustion text, reported zero resets and st
     const counts = [...alpha.querySelectorAll('button span')].map(span => span.textContent)
     assert.deepEqual(counts, ['+1', '+2'], 'narrow +N folds the comparison into omitted windows')
     assert.deepEqual([...beta.querySelectorAll('button span')].map(span => span.textContent), ['+0', '+0'])
+  } finally { await view.dispose() }
+})
+
+test('narrow evidence keeps the complete window, exhaustion bar and reported reset count', async () => {
+  const supplied = { ...rows[0], governing: { label: 'Mon', text: '100%!', fraction: 1, tone: 'exhausted' }, reset: '13h', resetCount: 0 }
+  const view = await mount({ rows: [supplied] })
+  try {
+    const row = rowOf(view.container, supplied.id)
+    const meter = row.querySelector('[data-usage-meter-tone="exhausted"]')
+    assert.equal(meter.firstElementChild.textContent, 'Mon')
+    assert.equal(meter.lastElementChild.lastElementChild.textContent, '100%!')
+    assert.ok(meter.querySelector('[data-usage-meter-bar]'))
+    assert.match(row.textContent, /13h ↺0/)
+    assert.match(view.container.querySelector('[aria-sort="descending"]').textContent, /↓/)
   } finally { await view.dispose() }
 })
 
@@ -137,16 +151,16 @@ test('s cycles sort only inside the focused monitor and never from editable targ
   } finally { outside.remove(); await view.dispose() }
 })
 
-test('comparison visibility reports the 15rem container threshold once per change', async () => {
+test('comparison visibility reports the 20rem container threshold once per change', async () => {
   const visibility = []
   const onComparisonVisibilityChange = visible => visibility.push(visible)
   const view = await mount({ onComparisonVisibilityChange })
   try {
     const monitor = view.container.querySelector('[data-usage-meter-table]')
-    await resize(monitor, 239)
-    await resize(monitor, 200)
+    await resize(monitor, 319)
     await resize(monitor, 240)
     await resize(monitor, 320)
+    await resize(monitor, 400)
     assert.deepEqual(visibility, [false, true])
     await view.render({ onComparisonVisibilityChange, sort: { key: 'more', direction: 'ascending' } })
     await resize(monitor, 900)
@@ -174,6 +188,11 @@ test('detail history draws supplied periods: unmeasured gaps, measured zeroes, o
     assert.equal(slots[3].dataset.partial, 'true')
     assert.notEqual(slots[3].firstElementChild.className, slots[0].firstElementChild.className, 'open periods carry a distinct style')
     assert.notEqual(slots[2].firstElementChild.className, slots[1].firstElementChild.className)
+    assert.ok(chart.querySelector('[data-usage-meter-history-facts]'))
+    await view.render({ selectedId: 'row-a', history: { kind: 'loading', label: 'Period history', text: 'Loading history' } })
+    const loading = view.container.querySelector('[data-usage-meter-history="loading"]')
+    assert.equal(loading.querySelector('[data-usage-meter-history-skeleton]').getAttribute('aria-hidden'), 'true')
+    assert.equal(loading.querySelectorAll('[data-usage-meter-history-point]').length, 0, 'loading placeholder is never fabricated data')
     await view.render({ selectedId: 'row-a', history: { kind: 'unavailable', label: 'Period history', text: 'History unavailable: HTTP 502' } })
     const failed = view.container.querySelector('[data-usage-meter-history="unavailable"]')
     assert.equal(failed.querySelector('[role=alert]').textContent, 'History unavailable: HTTP 502')
@@ -218,13 +237,13 @@ test('dense rows keep one titled account/provider caption and preserve meter/res
   } finally { await view.dispose() }
 })
 
-test('caller-owned compact captions keep suffix-only identities distinct and canonical detail intact', async () => {
-  const north = { ...rows[0], id: 'shared-north', identity: 'sample-provider/shared-workspace-north', compactIdentity: 'sp:…north' }
-  const south = { ...rows[0], id: 'shared-south', identity: 'sample-provider/shared-workspace-south', compactIdentity: 'sp:…south' }
+test('caller-owned compact captions preserve account names and canonical detail', async () => {
+  const north = { ...rows[0], id: 'shared-north', identity: 'sample-provider/shared-workspace-north', compactIdentity: { prefix: 'sp/', account: 'shared-workspace-north' } }
+  const south = { ...rows[0], id: 'shared-south', identity: 'sample-provider/shared-workspace-south', compactIdentity: { prefix: 'sp/', account: 'shared-workspace-south' } }
   const view = await mount({ rows: [north, south] })
   try {
     const compact = [...view.container.querySelectorAll('[data-usage-meter-identity="compact"]')]
-    assert.deepEqual(compact.map(node => node.textContent), ['sp:…north', 'sp:…south'])
+    assert.deepEqual(compact.map(node => node.textContent), ['sp/shared-workspace-north', 'sp/shared-workspace-south'])
     assert.equal(new Set(compact.map(node => node.textContent)).size, 2)
     assert.ok(rowOf(view.container, north.id).querySelector('[data-usage-meter-account]').title.includes(north.identity))
     await view.render({ selectedId: north.id })
@@ -233,10 +252,10 @@ test('caller-owned compact captions keep suffix-only identities distinct and can
 })
 
 test('narrow usage meter captions, headings and reset evidence have complete accessible disclosures', async () => {
-  const supplied = { ...rows[0], identity: 'example-provider/shared-workspace-distinguishing-suffix', compactIdentity: 'ep:…uffix', resetAt: '2030-05-03T12:00:00Z' }
+  const supplied = { ...rows[0], identity: 'example-provider/shared-workspace-distinguishing-suffix', compactIdentity: { prefix: 'ep/', account: 'shared-workspace-distinguishing-suffix' }, resetAt: '2030-05-03T12:00:00Z' }
   const view = await mount({ rows: [supplied] })
   try {
-    assert.deepEqual([...view.container.querySelectorAll('[data-usage-meter-column] [title]')].map(label => label.title), ['Acct', 'Window gov', 'Reset', 'Comparison', 'More'])
+    assert.deepEqual([...view.container.querySelectorAll('[data-usage-meter-column] [title]')].map(label => label.title), ['Account', 'Window', 'Reset', 'Next', 'More'])
     const cells = rowOf(view.container, supplied.id).querySelectorAll('[role="rowheader"], [role="gridcell"]')
     const account = cells[0].firstElementChild, reset = cells[2].firstElementChild
     assert.ok(account.title.includes(supplied.identity))

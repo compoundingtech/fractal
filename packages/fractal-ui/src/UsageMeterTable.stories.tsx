@@ -56,12 +56,20 @@ const rows: readonly UsageMeterRow[] = [
 
 const denseRows: readonly UsageMeterRow[] = Array.from({ length: 11 }, (_, index): UsageMeterRow => ({
   id: `fictional-account-${index + 1}`, label: `Account ${index + 1}`, identity: `provider-${index % 3 + 1}/account-${index + 1}`,
-  compactIdentity: `p${index % 3 + 1}:…nt-${String(index + 1).padStart(2, '0')}`,
+  compactIdentity: { prefix: `p${index % 3 + 1}/`, account: `account-${index + 1}` },
   governing: { label: '5h', text: `${95 - index * 7}%`, fraction: (95 - index * 7) / 100, tone: index < 3 ? 'critical' : index < 5 ? 'warning' : 'ok' },
   comparison: { label: '1w', text: `${70 - index * 5}%`, fraction: (70 - index * 5) / 100, tone: index < 3 ? 'warning' : 'ok' },
   reset: '2h', ...(index % 3 === 0 ? { resetCount: index % 4 } : {}), omitted: index % 3, stale: false,
   detail: { facts: [{ label: 'Provider', value: `Provider ${index % 3 + 1}` }], windows: [], resets: [] },
 }))
+
+const narrowEvidenceRows: readonly UsageMeterRow[] = [{
+  id: 'fictional-evidence', label: 'Example account', identity: 'provider/example-account',
+  compactIdentity: { prefix: 'ep/', account: 'example-account' },
+  governing: { label: 'Mon', text: '100%!', fraction: 1, tone: 'exhausted' },
+  reset: '13h', resetCount: 0, omitted: 2, stale: false,
+  detail: { facts: [{ label: 'Observed', value: 'Fictional evidence' }], windows: [], resets: [] },
+}]
 
 const sortKeys: readonly UsageMeterSortKey[] = ['governing', 'reset', 'account', 'comparison', 'more']
 type Width = 'wide' | 'narrow'
@@ -125,6 +133,8 @@ export const Light: Story = { args: { scheme: 'light' } }
 export const Narrow: Story = { args: { width: 'narrow' } }
 export const DenseEleven: Story = { args: { width: 'narrow' }, render: args => <Controlled {...args} displayRows={denseRows} /> }
 export const DenseElevenLight: Story = { ...DenseEleven, args: { width: 'narrow', scheme: 'light' } }
+export const NarrowEvidence: Story = { args: { width: 'narrow' }, render: args => <Controlled {...args} displayRows={narrowEvidenceRows} /> }
+export const NarrowEvidenceLight: Story = { ...NarrowEvidence, args: { width: 'narrow', scheme: 'light' } }
 export const Detail: Story = { args: { selectedId: 'meter-north' } }
 export const NarrowDetail: Story = { args: { width: 'narrow', selectedId: 'meter-meadow', status: 'unreachable' } }
 export const DetailHistory: Story = { args: { selectedId: 'meter-north', history: 'ready' } }
@@ -135,7 +145,7 @@ export const Empty: Story = { render: args => <Frame scheme={args.scheme} width=
 
 const styles = stylex.create({
   frame: { width: '720px', maxWidth: '100%', backgroundColor: surface.canvas, color: ink.fg, padding: s.md },
-  narrow: { width: '320px' },
+  narrow: { width: '240px', padding: 0 },
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl, padding: s.xl },
   caption: { fontFamily: t.fontSans, fontSize: t.metaSize, margin: `${s.md} 0` },
 })
