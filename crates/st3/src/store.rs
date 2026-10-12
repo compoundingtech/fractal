@@ -6965,6 +6965,9 @@ impl Store {
                 if let Some(claimant) = dropped_claimant(old, status) {
                     fields["claimant"] = Value::String(claimant.into());
                 }
+                if let Some(reason) = blocked_reason {
+                    fields["reason"] = Value::String(reason.into());
+                }
                 append_claim_tx(
                     &transaction,
                     &self.origin,
@@ -19074,6 +19077,9 @@ fn adopt_declared_mission_revision_tx(
             if let Some(claimant) = dropped_claimant(old, status) {
                 fields["claimant"] = Value::String(claimant.into());
             }
+            if let Some(reason) = blocked_reason {
+                fields["reason"] = Value::String(reason.into());
+            }
             let claim = append_claim_tx(
                 transaction,
                 origin,
@@ -29965,7 +29971,7 @@ fn reconcile_carried_step_tx(
     transaction
         .execute(
             "UPDATE step_runs SET status=?2, attempt=?3, worker_reported=?4,
-                    blocked_reason=CASE WHEN status=?2 THEN blocked_reason ELSE NULL END,
+                    blocked_reason=CASE WHEN status=?2 THEN blocked_reason ELSE ?9 END,
                     not_before_unix_ms=CASE WHEN status=?2 THEN not_before_unix_ms ELSE NULL END,
                     lease_owner=?6, lease_incarnation=?7, lease_expires_at_unix_ms=?8,
                     updated_at_unix_ms=?5
@@ -29981,6 +29987,7 @@ fn reconcile_carried_step_tx(
                 lease("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
                     .map(|expiry| expiry.to_string()),
+                fields.get("reason").and_then(Value::as_str),
             ],
         )
         .map_err(internal)?;
@@ -30741,7 +30748,7 @@ fn project_run_generation_created(
             .execute(
                 "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported, blocked_reason, not_before_unix_ms, readiness_epoch, created_at_unix_ms, updated_at_unix_ms, constraints, lease_owner, lease_incarnation, lease_expires_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, ?18, ?19, ?20, ?21)",
-                params![subject, run_id, generation_id, step.path, step.definition_hash, status, attempt, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, worker_reported, matching_predecessor.and_then(|old| old.blocked_reason.as_deref()), matching_predecessor.and_then(|old| old.not_before_unix_ms).map(|value| value.to_string()), carried.map(|old| old.readiness_epoch).unwrap_or(0), claim.accepted_at_unix_ms.to_string(), constraints, carried_lease("claimant"), carried_lease("claim_incarnation"), carried_lease("claim_expires_at_unix_ms")],
+                params![subject, run_id, generation_id, step.path, step.definition_hash, status, attempt, assignee, serde_json::to_string(&available_to).map_err(internal)?, agentless, title, goals, worker_reported, carried_fields.and_then(|fields| fields.get("reason")).and_then(Value::as_str).or_else(|| matching_predecessor.and_then(|old| old.blocked_reason.as_deref())), matching_predecessor.and_then(|old| old.not_before_unix_ms).map(|value| value.to_string()), carried.map(|old| old.readiness_epoch).unwrap_or(0), claim.accepted_at_unix_ms.to_string(), constraints, carried_lease("claimant"), carried_lease("claim_incarnation"), carried_lease("claim_expires_at_unix_ms")],
             )
             .map_err(internal)?;
     }
@@ -53233,6 +53240,60 @@ version 2
             .unwrap();
         assert_eq!(submitted.subject, carried.subject);
         assert_eq!(submitted.status, "verifying");
+    }
+
+    #[test]
+    fn a_revision_carries_the_reason_a_step_is_blocked_to_every_replica() {
+        let store = Store::open_memory("node").unwrap();
+        publish_carry(&store, CARRY_SOURCE, "carry-blocked-one");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "carry".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/requester".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "carry-blocked-run".into(),
+            })
+            .unwrap();
+        let step = |run: &MissionRunView, path: &str| {
+            run.steps
+                .iter()
+                .find(|step| step.step == path)
+                .unwrap()
+                .clone()
+        };
+        let old = step(&run, "work").subject;
+        let reason = "no eligible agent is present in the desired graph: `agent/worker`";
+        store.set_step_state(&old, "blocked", Some(reason)).unwrap();
+        let revised = publish_carry(
+            &store,
+            &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+            "carry-blocked-two",
+        );
+
+        let adopted = store
+            .adopt_mission_revision(
+                &run.id,
+                &revised,
+                "person/requester",
+                "the blocked step keeps its reason",
+                "carry-blocked-revision",
+            )
+            .unwrap();
+
+        let carried = step(&adopted, "work");
+        assert_ne!(carried.subject, old);
+        assert_eq!(carried.status, "blocked");
+        assert_eq!(carried.blocked_reason.as_deref(), Some(reason));
+        let target = Store::open_memory("target").unwrap();
+        target
+            .import_replication("node", &store.export_replication(0).unwrap())
+            .unwrap();
+        let replicated = target.step_run(&carried.subject).unwrap().unwrap();
+        assert_eq!(replicated.status, "blocked");
+        assert_eq!(replicated.blocked_reason.as_deref(), Some(reason));
     }
 
     #[test]

@@ -7998,6 +7998,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .blocked_reason
                             .as_deref()
                             .is_some_and(|reason| reason.starts_with("step baseline `"));
+                    // A blocked step that names no blocker, holds no claim and waits on no ask
+                    // is a lost reason, for example a revision that carried it without one.
+                    // Nothing else will move it, so recompute it like a pending step.
+                    let unexplained_blocked = view.status == "blocked"
+                        && view.blocked_reason.is_none()
+                        && view.blockers.is_empty()
+                        && view.claimant.is_none();
                     let ready_missing_agent = view.status == "ready"
                         && !view.agentless
                         && view.claimant.is_none()
@@ -8006,6 +8013,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .as_deref()
                             .is_some_and(|a| a.starts_with("person/"))
                         && self.ready_step_binding_missing(run, view)?;
+                    if unexplained_blocked {
+                        // Waiting on a dependency is pending. The pending pass then makes it
+                        // ready, or blocks it again with the reason it names.
+                        changed |= self.store.set_step_state(&view.subject, "pending", None)?;
+                        return Ok(changed);
+                    }
                     if view.status == "pending"
                         || assignment_blocked
                         || baseline_blocked
@@ -36519,6 +36532,245 @@ mission "wake" state="ready" {
                 idempotency_key: Some("closed-wake-evidence".into()),
             })
             .unwrap();
+    }
+
+    /// A revision once carried a blocked step without its reason. Nothing recomputes a blocked
+    /// step that names no blocker, so it stayed blocked behind a finished predecessor. It is now
+    /// recomputed, and the seat is told when it becomes ready.
+    #[tokio::test]
+    async fn a_blocked_step_that_names_no_blocker_is_recomputed_and_its_seat_woken() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "pair" state="ready" {
+  goal "Do the work, then prove it."
+  step "worker" { assigned-to "agent/node.worker" }
+  step "proof" {
+    assigned-to "agent/node.worker"
+    depends-on { step "worker" completed }
+  }
+}
+"#,
+            "unnamed-blocker-source",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "pair".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "unnamed-blocker-run".into(),
+            })
+            .unwrap();
+        let desired = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: desired.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("worker-one".into()),
+        });
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime,
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let step = |path: &str| {
+            run.steps
+                .iter()
+                .find(|step| step.step == path)
+                .unwrap()
+                .subject
+                .clone()
+        };
+        let (first, second) = (step("worker"), step("proof"));
+        store.set_step_state(&first, "completed", None).unwrap();
+        store.set_step_state(&second, "blocked", None).unwrap();
+        assert_eq!(store.step_run(&second).unwrap().unwrap().status, "blocked");
+        reconciler.reconcile_once().unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "harness.observed".into(),
+                actor: Some(desired.subject.clone()),
+                fields: BTreeMap::from([
+                    ("state".into(), Value::String("ready".into())),
+                    ("driver".into(), Value::String("codex".into())),
+                    ("incarnation_id".into(), Value::String("worker-one".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("unnamed-blocker-ready".into()),
+            })
+            .unwrap();
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let proof = store.step_run(&second).unwrap().unwrap();
+        assert_eq!(proof.status, "ready", "{proof:?}");
+        assert!(proof.blocked_reason.is_none(), "{proof:?}");
+        let wakes = store.messages(Some(&desired.subject), true).unwrap();
+        assert!(
+            wakes
+                .iter()
+                .any(|message| message.tags.iter().any(|tag| tag.contains(&second))),
+            "{wakes:?}"
+        );
+    }
+
+    /// One seat holds both steps of a run. Whatever ends the seat's claim on the first step,
+    /// the second must be recomputed and its seat told within one pass, never left `blocked`
+    /// with no reason.
+    async fn second_step_of_one_seat_after(ending: &str) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+mission "pair" state="ready" {
+  goal "Do the work, then prove it."
+  step "worker" { assigned-to "agent/node.worker" }
+  step "proof" {
+    assigned-to "agent/node.worker"
+    depends-on { step "worker" terminal }
+  }
+}
+"#,
+            &format!("pair-source-{ending}"),
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "pair".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: format!("pair-run-{ending}"),
+            })
+            .unwrap();
+        let desired = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: desired.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("worker-one".into()),
+        });
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime,
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let observe = |state: &str, key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: desired.subject.clone(),
+                    kind: "harness.observed".into(),
+                    actor: Some(desired.subject.clone()),
+                    fields: BTreeMap::from([
+                        ("state".into(), Value::String(state.into())),
+                        ("driver".into(), Value::String("codex".into())),
+                        ("incarnation_id".into(), Value::String("worker-one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("{key}-{ending}")),
+                })
+                .unwrap();
+        };
+        reconciler.reconcile_once().unwrap();
+        observe("ready", "pair-ready");
+        reconciler.reconcile_once().unwrap();
+        let step = |path: &str| {
+            run.steps
+                .iter()
+                .find(|step| step.step == path)
+                .unwrap()
+                .subject
+                .clone()
+        };
+        let (first, second) = (step("worker"), step("proof"));
+        let first_wake = store.messages(Some(&desired.subject), true).unwrap();
+        assert_eq!(first_wake.len(), 1, "{first_wake:?}");
+        let request = |key: &str| crate::model::WorkRequest {
+            actor: Some(desired.subject.clone()),
+            incarnation: Some("worker-one".into()),
+            summary: None,
+            reason: Some("handing it back".into()),
+            evidence: Vec::new(),
+            idempotency_key: format!("{key}-{ending}"),
+        };
+        observe("working", "pair-working");
+        store.work_action(&first, "claim", &request("claim")).unwrap();
+        store.work_action(&first, ending, &request("end")).unwrap();
+        observe("ready", "pair-idle");
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let first_view = store.step_run(&first).unwrap().unwrap();
+        let second_view = store.step_run(&second).unwrap().unwrap();
+        let wakes = store.messages(Some(&desired.subject), true).unwrap();
+        let tagged = |step: &str| {
+            wakes
+                .iter()
+                .filter(|message| message.tags.iter().any(|tag| tag.contains(step)))
+                .count()
+        };
+        // A released step is ready again and the seat is told about it; a step that ended is
+        // followed by the second step. Either way a blocked step names what blocks it.
+        for view in [&first_view, &second_view] {
+            assert!(
+                view.status != "blocked" || view.blocked_reason.is_some() || !view.blockers.is_empty(),
+                "{} is blocked with no reason: {view:?}",
+                view.subject
+            );
+        }
+        if ending == "release" {
+            assert_eq!(first_view.status, "ready", "{first_view:?}");
+            assert_eq!(second_view.status, "pending", "{second_view:?}");
+            assert_eq!(tagged(&first), 2, "{wakes:?}");
+        } else if ending == "fail" {
+            // A failed step fails the run, and the step behind it says why it will not run.
+            assert_eq!(second_view.status, "cancelled", "{second_view:?}");
+            assert_eq!(second_view.blocked_reason.as_deref(), Some("another step failed"));
+        } else {
+            assert_eq!(second_view.status, "ready", "{second_view:?}");
+            assert_eq!(tagged(&second), 1, "{wakes:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_seats_second_step_is_ready_and_woken_once_the_first_completes() {
+        second_step_of_one_seat_after("complete").await;
+    }
+
+    #[tokio::test]
+    async fn a_seats_second_step_says_why_it_will_not_run_once_the_first_fails() {
+        second_step_of_one_seat_after("fail").await;
+    }
+
+    #[tokio::test]
+    async fn a_released_step_is_woken_again_and_its_successor_stays_pending() {
+        second_step_of_one_seat_after("release").await;
     }
 
     /// One wake message whose close fails does not hold back the agent's next wake.

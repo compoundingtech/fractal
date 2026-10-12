@@ -2714,6 +2714,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("source_generation", reference()),
             ("definition_hash", string()),
             ("status", string()),
+            ("reason", string()),
             ("attempt", integer()),
             ("worker_reported", boolean()),
             ("claimant", reference()),

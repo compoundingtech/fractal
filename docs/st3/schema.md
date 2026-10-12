@@ -3,7 +3,7 @@
 This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
-Digest: `f1d5590ca6f60b03e3697eb5feaab2c1a060e6b02c01b331e53db74f4b62e12a`
+Digest: `2e854ce9223ce399a7f24d48d50cd032764e32a19352e0d5becb1ee08de774c8`
 Storage version: `18`
 Storage digest: `d11a3e5db57db0a0bd6a9b27474cdd93958a401b3a6482b62aea3595530dbcef`
 
@@ -178,7 +178,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `sekret.changed` | `sekret` | `system-only` | `append` | `local` | `at_unix_ms!:integer`, `caller:subject-reference(agent|person)`, `change!:string`, `detail:object`, `person!:subject-reference(person)`, `profile:string`, `seq!:integer` |  |
 | `sekret.exited` | `sekret` | `system-only` | `append` | `local` | `at_unix_ms!:integer`, `call!:integer`, `caller:subject-reference(agent|person)`, `error:string`, `exit_code:integer`, `person!:subject-reference(person)`, `profile:string`, `seq!:integer`, `signal:integer` |  |
 | `sekret.refused` | `sekret` | `system-only` | `append` | `local` | `argv:array`, `at_unix_ms!:integer`, `caller:subject-reference(agent|person)`, `person!:subject-reference(person)`, `profile:string`, `reason!:string`, `seq!:integer` |  |
-| `step-run.carried` | `step-run` | `system-only` | `once` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `definition_hash:string`, `source:subject-reference`, `source_generation:subject-reference`, `source_step_run:subject-reference`, `status:string`, `worker_reported:boolean` | `step` |
+| `step-run.carried` | `step-run` | `system-only` | `once` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `definition_hash:string`, `reason:string`, `source:subject-reference`, `source_generation:subject-reference`, `source_step_run:subject-reference`, `status:string`, `worker_reported:boolean` | `step` |
 | `step-run.retried` | `step-run` | `system-only` | `append` | `durable` | `attempt:integer`, `goals:array`, `not_before_unix_ms:integer`, `reason:string`, `status:string` | `step` |
 | `step-run.state` | `step-run` | `system-only` | `state-transition` | `durable` | `attempt:integer`, `readiness_epoch:integer`, `reason:string`, `status:string` | `step` |
 | `subagent.appeared` | `agent` | `same-subject-actor` | `append` | `durable` | `description:string`, `driver!:string`, `incarnation_id!:string`, `lease_expires_at_unix_ms!:integer`, `session_id:string`, `started_at_unix_ms:integer`, `step_run:subject-reference(step-run)`, `subagent_id!:string`, `subagent_type:string` |  |
