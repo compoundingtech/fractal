@@ -18,7 +18,7 @@ const hydrated = decodeProjectionCache(encoded, gateway, now + 1000);
 assert.equal(hydrated?.actor, 'person/one');
 assert.equal(hydrated?.storeIndex, 42);
 assert.equal(hydrated?.data.sessions[0].id, 'session/1');
-// Rows keep what st joined into them, so a cached Control or Chat tab draws without a work list.
+// Rows keep what st joined into them, so the cached Resources lists draws without a work list.
 assert.equal(hydrated?.data.missions[0].run_details[0].steps[0].path, 'build');
 assert.equal(hydrated?.data.agents[0].next_work.path, 'ship');
 assert.equal(hydrateProjectionForPairedDevice(encoded, gateway, false, now), null);
@@ -47,3 +47,17 @@ const tailnet = 'http://100.64.0.1:4102';
 const tailnetCache = encodeProjectionCache(tailnet, 'person/one', 'host/example-linux', 42, data, now);
 assert.ok(tailnetCache);
 assert.equal(decodeProjectionCache(tailnetCache, tailnet, now)?.gateway, tailnet);
+
+// The fixed Spaces tab and Resources folders survive an offline restart on the paired gateway.
+const workspace = {
+  glasses: [{ kind: 'glass', id: 'glass/person/one/main', body: { version: 1, name: 'Main', groups: [] } }],
+  arrangements: [{ kind: 'arrangement', id: 'arrangement/person/one/sidebar', body: { folders: { first: { name: { value: 'First' } } }, placements: {} } }],
+};
+const withWorkspace = encodeProjectionCache(gateway, 'person/one', 'host/example-linux', 42, data, now, [], workspace);
+assert.deepEqual(hydrateProjectionForPairedDevice(withWorkspace, gateway, true, now)?.workspace, workspace);
+assert.equal(hydrateProjectionForPairedDevice(withWorkspace, 'https://other.invalid', true, now), null);
+assert.equal(hydrateProjectionForPairedDevice(withWorkspace, gateway, false, now), null);
+assert.equal(decodeProjectionCache(withWorkspace.replace('"kind":"glass"', '"kind":"agent"'), gateway, now), null);
+const oldCache = JSON.parse(encoded); delete oldCache.workspace;
+assert.deepEqual(decodeProjectionCache(JSON.stringify(oldCache), gateway, now)?.workspace, { glasses: [], arrangements: [] });
+assert.equal(decodeProjectionCache(JSON.stringify({ ...oldCache, workspace: { glasses: 'invalid', arrangements: [] } }), gateway, now), null);

@@ -1000,7 +1000,9 @@ requesting changes, a custom choice, or feedback. A reply in words alone does no
 decision or a choice; `answer-required` lists the answer IDs. Feedback also accepts a plain
 `--summary`, so older clients can still send it. The `work.person-done` claim records the typed
 answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decline`,
-`request_changes`, `selected`, `custom` or `feedback`. The resumed origin step lists it in
+`request_changes`, `selected`, `custom`, `feedback` or `dismissed`. `--answer dismiss` (with an optional
+`--text` reason) sets any decision or choice aside without answering it: the asker is told the person
+dismissed it, and a request that defines its own `dismiss` answer keeps that meaning. The resumed origin step lists it in
 `person_answers` with the ask, respondent, time and summary; a person ask's own step does too,
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for

@@ -48,9 +48,9 @@ function useLists(): GlassLists {
 }
 
 function Notes() {
-  const { glassesGranted, glassesIssue } = useStore();
+  const { glassesGranted, glassesIssue, status } = useStore();
   return <>
-    {!glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in stui appear here once it does.</Note> : null}
+    {status === 'online' && !glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in stui appear here once it does.</Note> : null}
     {glassesIssue ? <Note tone="fault">{glassesIssue}</Note> : null}
   </>;
 }
@@ -87,6 +87,7 @@ export function SpaceScreen({ route, navigation }: RootScreen<'Space'>) {
   return <Screen>
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingVertical: 8, paddingBottom: 32 }}>
+      <StatusLine />
       <Notes />
       {!glass ? <Empty text="This space is gone." /> : null}
       {glass?.body && panes.length > 1 ? <SpaceMap layout={glass.body.layout} titles={panes.map(pane => pane.tabs[0]?.title ?? '')} /> : null}
