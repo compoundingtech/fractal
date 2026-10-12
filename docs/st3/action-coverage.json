@@ -903,6 +903,30 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st evidence put",
+      "description": "Import a signed full/test or explicitly unsigned degraded observation as an immutable notes ref",
+      "tests": [
+        "crates/st3/tests/git_evidence.rs::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier"
+      ],
+      "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
+    },
+    {
+      "command": "st evidence show",
+      "description": "Print the in-toto observation without asserting signature trust",
+      "tests": [
+        "crates/st3/tests/git_evidence.rs::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier"
+      ],
+      "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
+    },
+    {
+      "command": "st evidence verify",
+      "description": "Verify signature tier or require accepted-base policy evidence without a daemon",
+      "tests": [
+        "crates/st3/tests/git_evidence.rs::put_show_verify_work_offline_for_tests_review_and_explicit_degraded_tier"
+      ],
+      "verification": "real offline CLI with throwaway SSH keys and Git objects; accepted-base policy regression"
+    },
+    {
       "command": "st fleet create",
       "description": "Found a new fleet with this machine as its first member (the anchor)",
       "tests": [
@@ -2595,6 +2619,13 @@
         "crates/stui/src/ui/glass.rs::glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g"
       ],
       "verification": "local palette/reducer; resulting daemon effects are listed separately"
+    },
+    {
+      "action": "ToggleTerminalFallback",
+      "tests": [
+        "crates/stui/src/ui/glass.rs::terminal_fallback_defaults_on_and_the_palette_changes_it_locally"
+      ],
+      "verification": "device-local route preference; no daemon mutation, restart fence not applicable"
     },
     {
       "action": "Name",
