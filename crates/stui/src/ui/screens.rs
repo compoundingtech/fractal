@@ -435,7 +435,8 @@ fn structured_request(
         card.section("choose one", None, inner);
     }
     for (index, answer) in request.answers.iter().enumerate() {
-        let chosen = drafts.answering == Some(index);
+        let chosen = drafts.answering == Some(index)
+            || drafts.needs_words.as_deref() == Some(answer.label.as_str());
         // A radio row: the dot says it is a choice, the filled one is the choice, and the chosen
         // row is lifted off the card so it cannot be missed.
         let fill = |style: Style| {
@@ -519,8 +520,18 @@ fn structured_request(
             ("esc", "Cancel", Hit::Escape, theme::OVERLAY1),
         ]);
     } else if drafts.answering.is_some() {
+        // An option that needs the person's words opens a box for them instead of sending.
+        let needs_words = drafts
+            .answering
+            .and_then(|index| request.answers.get(index))
+            .is_some_and(|answer| answer.outcome.as_deref() == Some("request_changes"));
         card.buttons(&[
-            ("enter", "Send this answer", Hit::Enter, theme::ACCENT),
+            (
+                "enter",
+                if needs_words { "Write your words" } else { "Send this answer" },
+                Hit::Enter,
+                theme::ACCENT,
+            ),
             ("↑↓", "Another", Hit::Key('a'), theme::OVERLAY1),
             ("esc", "Not now", Hit::Escape, theme::OVERLAY1),
         ]);

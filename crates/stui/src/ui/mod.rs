@@ -2656,7 +2656,7 @@ impl Ui {
         };
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
-        // rows from the conversation and never more than half of the pane.
+        // rows from the conversation and never more than three fifths of the pane.
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
@@ -2665,7 +2665,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize / 2).max(1)));
+        band.truncate(room.min((area.height as usize * 3 / 5).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -3667,6 +3667,20 @@ impl Ui {
         }
     }
 
+    /// An answer that asks for changes needs them in words: open the box for them at once, with
+    /// the answer remembered, so a person who chose it can type (Nathan, 2026-10-12: "it says it
+    /// needs my words but I can't type anywhere"). False for an answer that needs none.
+    fn ask_for_words(&mut self, answer: &st3_client::RequestAnswerOption) -> bool {
+        if answer.outcome.as_deref() != Some("request_changes") {
+            return false;
+        }
+        self.changes_answer = Some(answer.id.clone());
+        self.answering = None;
+        self.editing = true;
+        self.flash(format!("“{}”: write the changes, then Enter", answer.label));
+        true
+    }
+
     fn answer_key(&mut self, key: KeyEvent) -> bool {
         let Some(index) = self.answering else {
             return false;
@@ -3686,10 +3700,7 @@ impl Ui {
                     return true;
                 };
                 // Requesting changes needs the changes in words: write them, then Enter sends both.
-                if answer.outcome.as_deref() == Some("request_changes") {
-                    self.changes_answer = Some(answer.id.clone());
-                    self.editing = true;
-                    self.flash(format!("“{}”: write the changes, then Enter", answer.label));
+                if self.ask_for_words(answer) {
                     return true;
                 }
                 if self.live {
@@ -6064,7 +6075,15 @@ impl Ui {
                 }
             }
             Hit::Help => self.help = !self.help,
-            Hit::Answer(index) => self.answering = Some(index),
+            Hit::Answer(index) => {
+                self.answering = Some(index);
+                // A click chooses; one that needs words opens its box too, ready to type in.
+                if let Some((_, request)) = self.structured_request()
+                    && let Some(answer) = request.answers.get(index)
+                {
+                    self.ask_for_words(answer);
+                }
+            }
             Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Alert(id, AlertTap::Answer(answer)) => self.answer_alert(&id, &answer),
             Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
@@ -7880,6 +7899,18 @@ mod tests {
             ui.flash
         );
         assert!(ui.effects.is_empty());
+        // Choosing it with a click opens the box for the words at once, and the person can type
+        // (Nathan, 2026-10-12: "it says it needs my words but I can't type anywhere").
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!ui.editing);
+        ui.click(Hit::Answer(0));
+        assert!(ui.editing, "a click on an answer that needs words opens its box");
+        for letter in "keep the brief".chars() {
+            ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+        }
+        assert_eq!(ui.conversation_state.drafts["attention/decide"], "keep the brief");
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("in your own words") && screen.contains("◉ Follow the brief"), "{screen}");
     }
 
     #[test]
