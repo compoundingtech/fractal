@@ -433,15 +433,24 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     let viewportHeight = viewport.clientHeight
     let keyboardFrame: number | undefined
     let draggingScrollbar = false
-    const onPointerDown = (event: PointerEvent) => { draggingScrollbar = event.target === viewport }
+    let freshTouch = false
+    const onPointerDown = (event: PointerEvent) => {
+      draggingScrollbar = event.target === viewport && event.pointerType !== 'touch'
+      if (event.pointerType === 'touch') freshTouch = true
+    }
+    const onTouchStart = () => { freshTouch = true }
     const onPointerUp = () => { draggingScrollbar = false }
+    const onScrollEnd = () => { freshTouch = false }
     const onScroll = () => {
       const up = viewport.scrollTop < top
       top = viewport.scrollTop
       const geometryChanged = contentHeight !== viewport.scrollHeight || viewportHeight !== viewport.clientHeight
       contentHeight = viewport.scrollHeight
       viewportHeight = viewport.clientHeight
-      prefetch(up, up && draggingScrollbar, !geometryChanged)
+      const touchScroll = up && freshTouch && !geometryChanged
+      prefetch(up, up && draggingScrollbar && !geometryChanged || touchScroll, !geometryChanged)
+      // A swipe authorizes one new request, not every inertial scroll event.
+      if (touchScroll) freshTouch = false
     }
     const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) prefetch(true, true) }
     const onKey = (event: KeyboardEvent) => {
@@ -456,6 +465,8 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
       })
     }
     viewport.addEventListener('scroll', onScroll, { passive: true })
+    viewport.addEventListener('scrollend', onScrollEnd, { passive: true })
+    viewport.addEventListener('touchstart', onTouchStart, { passive: true })
     viewport.addEventListener('wheel', onWheel, { passive: true })
     viewport.addEventListener('keydown', onKey)
     viewport.addEventListener('pointerdown', onPointerDown)
@@ -464,6 +475,8 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     return () => {
       cleanup?.()
       viewport.removeEventListener('scroll', onScroll)
+      viewport.removeEventListener('scrollend', onScrollEnd)
+      viewport.removeEventListener('touchstart', onTouchStart)
       viewport.removeEventListener('wheel', onWheel)
       viewport.removeEventListener('keydown', onKey)
       viewport.removeEventListener('pointerdown', onPointerDown)

@@ -28,7 +28,7 @@ function makeTurn(index: number): TranscriptTurn {
 }
 // Shared immutable fixtures, matching Transcript.stories' runtime-source/work-log pattern.
 const turns = Array.from({ length: total + 2 }, (_, index) => makeTurn(index))
-const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'empty-latch', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
+const failures = ['none', 'dom-bound', 'prepend', 'prepend-focus', 'resize', 'theme', 'empty-page', 'empty-latch', 'touch-latch', 'unread', 'stale-jump', 'append-following', 'append-reading', 'fold', 'keyboard', 'retry', 'jump', 'start'] as const
 type Failure = typeof failures[number]
 type Page = { readonly _tag: 'Ready' } | { readonly _tag: 'Loading' } | { readonly _tag: 'Failed' }
 const styles = stylex.create({
@@ -106,7 +106,7 @@ function PagedHistory({ scheme = 'dark', narrow = false, failure = 'none' }: { s
       <button type="button" onClick={() => { if (failure !== 'jump') handle.current?.jumpTo('history/50') }}>Jump to unloaded checkpoint 50</button>
       <button type="button" onClick={() => handle.current?.jumpTo('history/1300')}>Jump to loaded checkpoint 1300</button>
     </div>
-    <section aria-label="Paged conversation" {...stylex.props(styles.frame)} onKeyDownCapture={event => { if (failure === 'keyboard' && (event.key === 'Home' || event.key === 'PageUp')) { event.preventDefault(); event.stopPropagation() } }} onClickCapture={event => { if (failure === 'fold' && (event.target as Element).closest('[data-testid="work-log"]')) { event.preventDefault(); event.stopPropagation() } }}>
+    <section aria-label="Paged conversation" {...stylex.props(styles.frame)} onTouchStartCapture={event => { if (failure === 'touch-latch') event.stopPropagation() }} onPointerDownCapture={event => { if (failure === 'touch-latch' && event.pointerType === 'touch') event.stopPropagation() }} onKeyDownCapture={event => { if (failure === 'keyboard' && (event.key === 'Home' || event.key === 'PageUp')) { event.preventDefault(); event.stopPropagation() } }} onClickCapture={event => { if (failure === 'fold' && (event.target as Element).closest('[data-testid="work-log"]')) { event.preventDefault(); event.stopPropagation() } }}>
       <EmbraceRuntimeProvider options={{ messages, onNew: async () => {} }}><Transcript ref={handle} scrollToBottomKey={followKey} title="Checkpoint review" turns={loaded} history={history} sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} /></EmbraceRuntimeProvider>
     </section>
   </main>
@@ -214,8 +214,8 @@ async function exerciseHistory({ canvasElement }: { canvasElement: HTMLElement }
   // Leaving and re-entering the boundary is new reading intent, not an automatic
   // empty-page loop: it must re-arm fetching without the fixture request button.
   lane.focus()
-  await userEvent.keyboard('{PageDown}')
-  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(0))
+  await userEvent.keyboard('{PageDown}{PageDown}{PageDown}')
+  await waitFor(() => expect(lane.scrollTop).toBeGreaterThan(lane.clientHeight * 1.5))
   await userEvent.keyboard('{Home}')
   await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
   await expect(Number(root.getAttribute('data-requests'))).toBe(Number(requestsBeforeEmpty) + 1)
@@ -271,6 +271,52 @@ export const NewerFollowDark1440: Story = { play: exerciseNewerFollow }
 export const NewerFollowLight1440: Story = { args: { scheme: 'light' }, play: exerciseNewerFollow }
 export const NewerFollowDark440: Story = { args: { narrow: true }, play: exerciseNewerFollow }
 export const NewerFollowLight440: Story = { args: { scheme: 'light', narrow: true }, play: exerciseNewerFollow }
+
+async function exerciseTouchRearm({ canvasElement }: { canvasElement: HTMLElement }) {
+  const canvas = within(canvasElement)
+  const root = canvasElement.querySelector('main')!
+  const lane = await canvas.findByTestId('transcript-scroll')
+  await waitFor(() => expect(lane.querySelector('[data-testid="transcript-turn"]')).not.toBeNull())
+  lane.focus()
+  await userEvent.keyboard('{Home}')
+  await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+  const requests = Number(root.getAttribute('data-requests'))
+  await userEvent.click(canvas.getByRole('button', { name: 'Deliver empty page' }))
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  await expect(root).toHaveAttribute('data-page', 'Ready')
+
+  // Layout/measurement-driven scrolls inside the boundary are not fresh input.
+  // Simulate that movement separately from the touch gesture that follows.
+  lane.scrollTop = 32
+  lane.dispatchEvent(new Event('scroll'))
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  lane.scrollTop = 16
+  lane.dispatchEvent(new Event('scroll'))
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+  await expect(root).toHaveAttribute('data-page', 'Ready')
+  await expect(Number(root.getAttribute('data-requests'))).toBe(requests)
+  await expect(lane.scrollTop).toBeLessThan(lane.clientHeight * 1.5)
+
+  // Touch begins without leaving the fetch boundary. Its upward scroll must
+  // re-arm the empty-page gate; a permanent touch latch fails this assertion.
+  lane.dispatchEvent(new Event('touchstart', { bubbles: true }))
+  lane.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', pointerId: 2, isPrimary: true, buttons: 1 }))
+  lane.scrollTop = 0
+  lane.dispatchEvent(new Event('scroll'))
+  try {
+    await waitFor(() => expect(root).toHaveAttribute('data-page', 'Loading'))
+    await expect(Number(root.getAttribute('data-requests'))).toBe(requests + 1)
+    await userEvent.click(canvas.getByRole('button', { name: 'Deliver older page' }))
+    await waitFor(() => expect(root).toHaveAttribute('data-start', '200'))
+  } finally {
+    lane.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch', pointerId: 2, isPrimary: true, buttons: 0 }))
+    lane.dispatchEvent(new Event('touchend', { bubbles: true }))
+  }
+}
+export const TouchRearmDark1440: Story = { play: exerciseTouchRearm }
+export const TouchRearmLight1440: Story = { args: { scheme: 'light' }, play: exerciseTouchRearm }
+export const TouchRearmDark440: Story = { args: { narrow: true }, play: exerciseTouchRearm }
+export const TouchRearmLight440: Story = { args: { scheme: 'light', narrow: true }, play: exerciseTouchRearm }
 function HistoryStates({ scheme = 'dark', narrow = false }: { scheme?: Scheme; narrow?: boolean }) {
   const [requested, setRequested] = React.useState(false)
   const [retried, setRetried] = React.useState(false)
