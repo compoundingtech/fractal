@@ -22,8 +22,8 @@ const placementChoices: readonly Choice[] = [
 const widthChoices: readonly Choice[] = [{ id: '240', label: 'W1', description: '240 px: compact sidebar; every row stays on one line.' }, { id: '320', label: 'W2', description: '320 px: default-width sidebar.' }]
 const scenarioChoices: readonly Choice[] = scenarios.map(state => {
   const fixture = workspaces[state]
-  const meaning = fixture.reporting === 'unreported' ? `${fixture.harness} does not report subagents, so the count is unknown, never 0.` : 'Counts include running and waiting subagents, never finished or failed ones.'
-  return { id: state, description: `${fixture.label}: ${activeCountName(fixture)}. ${meaning}${fixture.sample ? ' Sample: st does not report these child states until #2288.' : ''}` }
+  const summary = fixture.reporting === 'unreported' ? `${fixture.harness} does not report subagents, so the count is unknown, never 0.` : `${activeCountName(fixture)}. Counts include running and waiting subagents, never finished or failed ones.`
+  return { id: state, description: `${fixture.label}: ${summary}${fixture.sample ? ' Sample: st does not report these child states until #2288.' : ''}` }
 })
 /** One picker row per dimension: short IDs, then a one-line description of the current pick. */
 function Picker({ label, choices, value, onChange }: { label: string; choices: readonly Choice[]; value: string; onChange: (id: string) => void }) {
@@ -57,10 +57,31 @@ function Fit({ width, children }: { width: number; children: React.ReactNode }) 
     <div {...stylex.props(styles.previewRow, scale < 1 && styles.zoom(String(scale)))}>{children}</div>
   </div>
 }
-function Explorer(initial: SwitchingArgs & { probe: boolean; onUpdate?: (patch: Partial<SwitchingArgs>) => void }) {
-  const [local, updateLocal] = React.useState(initial)
-  const args = initial.probe ? local : initial
-  const update = (patch: Partial<SwitchingArgs>) => initial.probe ? updateLocal(current => ({ ...current, ...patch })) : initial.onUpdate!(patch)
+const argKeys = ['switcher', 'placement', 'sidebarWidth', 'state', 'compare', 'allLanes', 'scheme', 'width', 'focusRequest', 'focusLane'] as const satisfies readonly (keyof SwitchingArgs)[]
+/** Storybook's `args` URL syntax; also the identity used to recognise Storybook echoing an update back. */
+const argsLine = (args: SwitchingArgs) => argKeys.map(key => `${key}:${typeof args[key] === 'boolean' ? `!${args[key]}` : args[key]}`).join(';')
+function Explorer({ probe, onUpdate, ...incoming }: SwitchingArgs & { probe: boolean; onUpdate?: (next: SwitchingArgs) => void }) {
+  // Every press renders from React state in its own commit, so a count press selects the seat and focuses its switcher before the frame ends.
+  // Storybook args and the URL follow for sharing; their round trip is async and slow on the first update after load.
+  const [args, setArgs] = React.useState<SwitchingArgs>(incoming)
+  const sent = React.useRef<string[]>([])
+  const incomingLine = argsLine(incoming)
+  React.useLayoutEffect(() => {
+    const echo = sent.current.indexOf(incomingLine)
+    if (echo >= 0) {
+      sent.current.splice(0, echo + 1)
+      return
+    }
+    // A change from the Controls panel or the URL, not an echo of a press.
+    setArgs(current => argsLine(current) === incomingLine ? current : incoming)
+  }, [incomingLine])
+  const update = (patch: Partial<SwitchingArgs>) => {
+    const next = { ...args, ...patch }
+    setArgs(next)
+    if (probe || onUpdate === undefined) return
+    sent.current.push(argsLine(next))
+    onUpdate(next)
+  }
   const schemes = args.allLanes ? ['dark', 'light'] as const : [args.scheme]
   const widths = args.allLanes ? [1440, 900] as const : [args.width]
   const switchers = args.compare ? variants : [args.switcher]
@@ -94,11 +115,10 @@ const meta = {
   render: args => {
     const [, updateArgs] = useArgs<SwitchingArgs>()
     // Picks live in the story args and the URL, so every combination is a shareable link, also from the bare iframe.
-    const update = (patch: Partial<SwitchingArgs>) => {
-      updateArgs(patch)
-      const next = { ...args, ...patch }
+    const update = (next: SwitchingArgs) => {
+      updateArgs(next)
       const url = new URL(window.location.href)
-      url.searchParams.set('args', Object.entries(next).filter(([key]) => key !== 'onUpdate' && key !== 'probe').map(([key, value]) => `${key}:${typeof value === 'boolean' ? `!${value}` : value}`).join(';'))
+      url.searchParams.set('args', argsLine(next))
       window.history.replaceState(window.history.state, '', url)
     }
     return <Explorer {...args} onUpdate={update} />
@@ -155,8 +175,14 @@ function overflowCues(toggle: HTMLElement, beyond: readonly Agent[]): boolean {
   return cue('failed', failed) && cue('needs-you', waiting) && (toggle.textContent ?? '').endsWith(alertWords(beyond).map(words => `, ${words}`).join(''))
 }
 const currentLane = (canvasElement: HTMLElement) => canvasElement.querySelector<HTMLElement>('[data-switching-lane]')!
+const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
 export const SubagentSwitchingProbe: Story = { args: { probe: true, state: 'many', width: 900 }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  // D1: the first count press after load lands on the selected tab by the next frame; no polling.
+  await userEvent.click(within(currentLane(canvasElement)).getByRole('button', { name: activeCountName(workspaces.running) }))
+  await nextFrame()
+  await expect(currentLane(canvasElement)).toHaveAttribute('data-state', 'running')
+  await expect(selectedTabFocused(currentLane(canvasElement))).toBe(true)
   for (const switcher of variants) {
     await userEvent.click(canvas.getByRole('button', { name: switcher }))
     await waitFor(() => expect(currentLane(canvasElement)).toHaveAttribute('data-variant', switcher))
@@ -272,7 +298,8 @@ export const SubagentSwitchingProbe: Story = { args: { probe: true, state: 'many
   lane = currentLane(canvasElement)
   const manyCount = () => within(currentLane(canvasElement)).getByRole('button', { name: activeCountName(workspaces.many) })
   await userEvent.click(manyCount())
-  await waitFor(() => expect(selectedTabFocused(currentLane(canvasElement))).toBe(true))
+  await nextFrame()
+  await expect(selectedTabFocused(currentLane(canvasElement))).toBe(true)
   await userEvent.keyboard('{ArrowRight}')
   await waitFor(() => expect(currentLane(canvasElement)).toHaveAttribute('data-active', 'child-1'))
   await expect(selectedTabFocused(currentLane(canvasElement))).toBe(true)

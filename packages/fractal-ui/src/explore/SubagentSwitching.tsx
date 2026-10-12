@@ -84,7 +84,7 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
    */
   const consumed = React.useRef(0)
   const focusTarget = React.useCallback((node: HTMLElement | null) => {
-    if (node === null || !focused || consumed.current === focusRequest) return
+    if (!(node instanceof HTMLElement) || !focused || consumed.current === focusRequest) return
     consumed.current = focusRequest
     node.focus()
   }, [focused, focusRequest])
