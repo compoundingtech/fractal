@@ -55,7 +55,10 @@ export const QuestionForm = (props: QuestionFormProps) => {
   const update = (q: QuestionView, patch: Partial<AnswerDraft>) => props.onDraftChange?.({ ...draft, [q.id]: { ...(draft[q.id] ?? { selected: [] }), ...patch } })
   const submit = (next = draft) => {
     if (!disabled && request.questions.every(q => q.required === false || answered(q, next[q.id]))) {
-      const answers = Object.fromEntries(request.questions.flatMap(q => next[q.id] !== undefined ? [[q.id, next[q.id]]] : q.kind === 'multi' ? [[q.id, { selected: [] }]] : []))
+      const answers: Answers = Object.fromEntries(request.questions.flatMap(q => {
+        const answer = next[q.id]
+        return answer !== undefined ? [[q.id, answer]] : q.kind === 'multi' ? [[q.id, { selected: [] }]] : []
+      }))
       props.onSubmit?.(answers)
     }
   }
