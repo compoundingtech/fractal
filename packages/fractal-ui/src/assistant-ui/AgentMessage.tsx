@@ -48,13 +48,13 @@ export interface AgentMessageProps {
 
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels.
  * The path is one non-wrapping run that containers truncate. With `tooltip`, the run is one focus stop
- * whose content names it: hidden dots join the visible parts, so the name is the full identity and
- * contains the visible text; the kit tooltip shows that identity on hover and keyboard focus. */
+ * whose content names it: zero-size inline dots join the visible parts, so the computed name is the
+ * full identity and contains the visible text; the kit tooltip shows that identity on hover and keyboard focus. */
 export const AgentIdHierarchy = ({ id, tooltip = false }: { readonly id: string; readonly tooltip?: boolean }) => {
   if (!id.includes('.')) return <span data-agent-id={id}>{id}</span>
   const parts = id.split('.')
   if (!tooltip) return <span data-agent-id={id}><span aria-hidden="true" {...stylex.props(styles.agentPath)}>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></span>
-  return <span data-agent-id={id}><Tooltip label={id}><Button data-agent-id-trigger {...stylex.props(styles.agentTrigger)}><span {...stylex.props(styles.agentPath)}>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? <><Icon name="chevron-right" scale="disclosure" /><VisuallyHidden>.</VisuallyHidden></> : null}{part}</React.Fragment>)}</span></Button></Tooltip></span>
+  return <span data-agent-id={id}><Tooltip label={id}><Button data-agent-id-trigger {...stylex.props(styles.agentTrigger)}><span {...stylex.props(styles.agentRun)}>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? <><span aria-hidden="true" {...stylex.props(styles.agentChevron)}><Icon name="chevron-right" scale="disclosure" /></span><span {...stylex.props(styles.agentDot)}>.</span></> : null}{part}</React.Fragment>)}</span></Button></Tooltip></span>
 }
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
@@ -195,6 +195,9 @@ const styles = stylex.create({
   counterpart: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   agentPath: { display: 'inline-flex', alignItems: 'center', flexWrap: 'nowrap', whiteSpace: 'nowrap', verticalAlign: 'top', maxWidth: '100%' },
   agentTrigger: { display: 'inline-flex', alignItems: 'center', maxWidth: '100%', verticalAlign: 'top', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: 'inherit', font: 'inherit', cursor: 'default', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid' } },
+  agentRun: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  agentChevron: { display: 'inline-flex', verticalAlign: 'middle' },
+  agentDot: { fontSize: 0 },
   direction: { flex: '0 0 auto', width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
   sender: { color: textVars.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium },
   time: { marginLeft: 'auto', flex: '0 0 auto', whiteSpace: 'nowrap', textAlign: 'right' },
