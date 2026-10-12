@@ -3,7 +3,7 @@
   "summary": "Checkpoint trimming preserves envelope-sealing progress and drains tombstoned rows even when the initial chunk budget expires",
   "replay": {
     "status": "changed",
-    "detail": "The first sealing pass after each open searches retained, untombstoned claims for missing source envelopes and rewinds only to the first affected batch. Recovery then commits its cursor in existing 64-batch chunks and resumes after restart. Daemon startup restores all signing credentials before writes and activates retained history after both API listeners bind. No graph projection replay is added."
+    "detail": "The first sealing pass after each open searches retained, untombstoned claims for missing source envelopes and rewinds only to the first affected batch. Recovery then commits its cursor in existing 64-batch chunks and resumes after restart. Daemon startup restores all signing credentials before writes and activates retained history after both API listeners bind. No graph projection replay is added. Existing unsigned member envelopes are signed in pages of at most 64 with signatures prepared off the writer and writer loans released between pages."
   },
   "schema": {
     "status": "none",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "Normal daemon restart. Missing-envelope search and history sealing run after both API listeners bind; a store without skipped claims preserves its saved cursor and performs no recovery chunks."
+    "detail": "Normal daemon restart. Missing-envelope search and history sealing run after both API listeners bind; a store without skipped claims preserves its saved cursor and performs no recovery chunks. The first reader search may take about eight seconds on a million-batch store; concurrent sealing requests wait for it. Read requests retain their normal cancellation/deadline and pairing writes retain their acknowledgement semantics."
   },
   "manual": {
     "status": "none",

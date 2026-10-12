@@ -732,7 +732,7 @@ pub struct Store {
     pub committed_index: Arc<AtomicU64>,
     pub seeded_batch_rowid: AtomicI64,
     /// Check older writers' skipped batches once per open, before the first sealing pass.
-    sealing_recovery: Mutex<bool>,
+    sealing_recovery: tokio::sync::Mutex<bool>,
     pub replica_generation: AtomicU64,
     pub replication_snapshot: Mutex<Option<Arc<ReplicationSnapshot>>>,
     /// Held while one thread builds the next replication snapshot, so concurrent callers reuse
@@ -980,7 +980,7 @@ impl Store {
             readers,
             committed_index,
             seeded_batch_rowid: AtomicI64::new(seeded_batch_rowid),
-            sealing_recovery: Mutex::new(true),
+            sealing_recovery: tokio::sync::Mutex::new(true),
             replica_generation: AtomicU64::new(0),
             replication_snapshot: Mutex::new(None),
             replication_snapshot_build: Mutex::new(()),
@@ -1822,10 +1822,82 @@ impl Store {
     /// people and agents must have been restored before this operation.
     pub fn complete_replication_activation(&self) -> Result<usize> {
         self.replication_snapshot()?;
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        let signed = self.sign_own_envelopes_tx(&transaction, None)?;
-        transaction.commit()?;
+        self.sign_retained_own_envelopes()
+    }
+
+    fn sign_retained_own_envelopes(&self) -> Result<usize> {
+        const SIGN_CHUNK_ENVELOPES: usize = 64;
+        let Some(key) = self
+            .member_key
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return Ok(0);
+        };
+        let Some(fleet_id) = fleet_meta(&self.readers.get(), "fleet_id")? else {
+            return Ok(0);
+        };
+        let target: u64 = self.readers.get().query_row(
+            "SELECT COALESCE(MAX(sequence),0) FROM replica_envelopes WHERE writer=?1",
+            [&self.origin],
+            |row| row.get(0),
+        )?;
+        let mut after = (0_u64, String::new());
+        let mut signed = 0;
+        loop {
+            let page = self.readers.get().prepare(
+                "SELECT sequence,envelope_hash FROM replica_envelopes AS envelopes
+                 WHERE writer=?1 AND (sequence,envelope_hash)>(?2,?3) AND sequence<=?4
+                   AND NOT EXISTS(SELECT 1 FROM replica_envelope_signatures AS signatures
+                     WHERE signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
+                       AND signatures.envelope_hash=envelopes.envelope_hash AND signatures.member_key=?5)
+                 ORDER BY sequence,envelope_hash LIMIT ?6",
+            )?.query_map(params![self.origin,after.0,after.1,target,key.public(),SIGN_CHUNK_ENVELOPES],
+                |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?)))?
+              .collect::<Result<Vec<_>,_>>()?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            after = last.clone();
+            // Prepare signatures off the writer. The insert checks that each exact envelope
+            // still exists, because checkpoint trimming can remove it after the reader pass.
+            let prepared: Vec<_> = page
+                .iter()
+                .map(|(sequence, hash)| {
+                    (
+                        *sequence,
+                        hash,
+                        key.sign(&crate::fleet::envelope_signature_message(
+                            &fleet_id,
+                            &self.origin,
+                            *sequence,
+                            hash,
+                        )),
+                    )
+                })
+                .collect();
+            let mut connection = self.connection.write();
+            let transaction = connection.transaction()?;
+            for (sequence, hash, signature) in prepared {
+                signed += transaction.execute(
+                    "INSERT OR IGNORE INTO replica_envelope_signatures(
+                         writer,sequence,envelope_hash,member_key,signature,stored_at_unix_ms)
+                     SELECT ?1,?2,?3,?4,?5,?6 WHERE EXISTS(SELECT 1 FROM replica_envelopes
+                         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
+                    params![
+                        self.origin,
+                        sequence,
+                        hash,
+                        key.public(),
+                        signature,
+                        now_ms().to_string()
+                    ],
+                )?;
+            }
+            transaction.commit()?;
+            // Dropping this loan between pages lets queued API writes commit next.
+        }
         Ok(signed)
     }
 
@@ -5526,10 +5598,7 @@ impl Store {
     }
 
     fn recover_sealing_frontier(&self) -> Result<()> {
-        let mut pending = self
-            .sealing_recovery
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut pending = crate::read_budget::lock(&self.sealing_recovery)?;
         if !*pending {
             return Ok(());
         }

@@ -774,7 +774,7 @@ fn credential_loading_leaves_many_skipped_batches_for_resumable_history_activati
         let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
         store.load_member_key(Some(key.clone())).unwrap();
         // The pre-bind credential path neither scans history nor signs source envelopes.
-        assert!(*store.sealing_recovery.lock().unwrap());
+        assert!(*store.sealing_recovery.blocking_lock());
         assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 400);
         assert_eq!(
             store
@@ -858,4 +858,102 @@ fn upgrading_again_recovers_a_batch_skipped_by_a_downgraded_writer() {
     assert_eq!(store.seeded_batch_rowid.load(Ordering::Acquire), 0);
     store.seal_local_batches().unwrap();
     assert_eq!(store.readers.get().query_row("SELECT COUNT(*) FROM replica_envelopes e JOIN batches b ON b.id=e.batch_id WHERE b.rowid=1", [], |r| r.get::<_,u64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn signing_an_unsigned_backlog_releases_the_writer_between_pages() {
+    let store = node("cedar");
+    for i in 0..256 {
+        recovery_note(&store, &format!("note/unsigned-{i}"));
+    }
+    store.seal_local_batches().unwrap();
+    let key = Arc::new(MemberKey::generate().unwrap().0);
+    store.load_member_key(Some(key.clone())).unwrap();
+    let (entered, waiting) = mpsc::sync_channel(1);
+    let (resume, resumed) = mpsc::sync_channel(1);
+    let gate = Mutex::new(Some((entered, resumed)));
+    {
+        let connection = store.connection.write();
+        connection
+            .create_scalar_function("signature_gate", 0, FunctionFlags::SQLITE_UTF8, move |_| {
+                if let Some((entered, resumed)) = gate.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                    resumed.recv().unwrap();
+                }
+                Ok(0)
+            })
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER signature_gate BEFORE INSERT ON replica_envelope_signatures
+            BEGIN SELECT signature_gate(); END;",
+            )
+            .unwrap();
+    }
+    let signing_store = store.clone();
+    let signing =
+        std::thread::spawn(move || signing_store.complete_replication_activation().unwrap());
+    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (done, ack) = mpsc::sync_channel(1);
+    let (observed, prefix) = mpsc::sync_channel(1);
+    store.connection.send(WriterJob::Batched {
+        enqueued: Instant::now(),
+        profile: None,
+        wait: None,
+        done,
+        run: Box::new(move |tx| {
+            observed
+                .send(
+                    tx.query_row(
+                        "SELECT COUNT(*) FROM replica_envelope_signatures",
+                        [],
+                        |r| r.get::<_, usize>(0),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            tx.execute(
+                "INSERT INTO meta(key,value) VALUES('signing-fairness','committed')",
+                [],
+            )
+            .unwrap();
+            true
+        }),
+    });
+    resume.send(()).unwrap();
+    let result = ack.recv_timeout(Duration::from_secs(5));
+    let signed = signing.join().unwrap();
+    result.unwrap().unwrap();
+    assert_eq!(prefix.recv().unwrap(), 64);
+    assert_eq!(signed, 256);
+    assert_eq!(store.sign_retained_own_envelopes().unwrap(), 0);
+}
+
+#[test]
+fn a_read_cancelled_while_waiting_for_the_recovery_search_releases_its_worker() {
+    let store = node("cedar");
+    let held = store.sealing_recovery.blocking_lock();
+    let budget = crate::read_budget::ReadBudget::new("/recovery-wait", Duration::from_secs(30));
+    let worker_budget = budget.clone();
+    let reading = store.clone();
+    let (started, ready) = mpsc::sync_channel(1);
+    let (done, result) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        crate::read_budget::with(Some(worker_budget), || {
+            started.send(()).unwrap();
+            done.send(
+                reading
+                    .recover_sealing_frontier()
+                    .map_err(|e| e.to_string()),
+            )
+            .unwrap();
+        });
+    });
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    budget.cancel();
+    let cancelled = result.recv_timeout(Duration::from_secs(1));
+    drop(held);
+    worker.join().unwrap();
+    assert!(cancelled.unwrap().unwrap_err().contains("deadline"));
+    assert!(*store.sealing_recovery.blocking_lock());
 }
