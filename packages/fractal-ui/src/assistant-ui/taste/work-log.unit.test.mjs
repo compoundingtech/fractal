@@ -105,3 +105,10 @@ test('a run keeps its own source as the readable command, unless the failure nam
   assert.equal(readableCommand(run({ i: 'No source' }, 'boom')), undefined)
   assert.equal(workLogTurnFromItems([{ _tag: 'ToolCall', id: 'tool/read', callId: 'call/read', name: 'read', input: { command: 'not a run' }, status: 'success', callSeen: true, at }], { kindFor: () => 'read', running: false, failed: false, interrupted: false }).calls[0].command, undefined)
 })
+test('only observed runs contribute to the command count when orphan results are present', () => {
+  const items = [true, false].map((callSeen, index) => ({ _tag: 'ToolCall', id: `run-${index}`, callId: `run-${index}`, name: 'bash', input: {}, status: 'success', callSeen, at, result: { content: 'Completed', at } }))
+  const work = workLogTurnFromItems(items, { kindFor: () => 'run', running: false, failed: false, interrupted: false, completeHistory: true })
+  assert.equal(work.commands, 1)
+  assert.equal(work.calls[0].countedAsCommand, true)
+  assert.equal(work.calls[1].countedAsCommand, false)
+})

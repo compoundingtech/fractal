@@ -11,6 +11,8 @@ import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 import { QuestionForm, QuestionSummary, NeedsYouBar, NeedsYouInbox } from './assistant-ui/QuestionForm'
 import { questionRequest } from './question-fixtures'
+import { AgentMessage, OutgoingMessageRow } from './assistant-ui/AgentMessage'
+import { agentMessage, broadcastMessage } from './agent-message-fixtures'
 
 /** q106 pairing: the production HarnessNotice at both weights over the same eight fictional events. */
 const variants: readonly { readonly weight: HarnessWeight; readonly name: string; readonly note: string }[] = [
@@ -29,6 +31,10 @@ export function HarnessWeightComparison({ scheme = 'dark' }: { readonly scheme?:
         <div data-component-name="QuestionSummary" data-weight-class="row"><QuestionSummary ariaLabel={`Question outcome · ${variant.name}`} request={{ ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: 'a moment ago' } }} /></div>
         <div data-component-name="NeedsYouBar" data-weight-class="shell"><NeedsYouBar ariaLabel={`Needs you · ${variant.name}`} requests={[questionRequest]} expanded={false} onToggle={fn()} /></div>
         <div data-component-name="NeedsYouInbox" data-weight-class="shell"><NeedsYouInbox ariaLabel={`Needs you inbox · ${variant.name}`} requests={[questionRequest]} onShowInThread={fn()} onOpenTerminal={fn()} /></div>
+      </section>
+      <section aria-label={`Messages specimens · ${variant.name}`} {...stylex.props(styles.list)}>
+        <div data-component-name="AgentMessage" data-weight-class="card"><AgentMessage {...agentMessage} /></div>
+        <div data-component-name="OutgoingMessageRow" data-weight-class="row"><OutgoingMessageRow {...broadcastMessage} /></div>
       </section>
     </section>)}
   </section>
@@ -53,6 +59,13 @@ export const Dark: Story = {
       await expect(within(specimens.querySelector('[data-component-name="QuestionSummary"]') as HTMLElement).getByRole('button', { name: /Answered.*This thread/ })).toHaveAttribute('aria-expanded', 'false')
       await expect(within(specimens.querySelector('[data-component-name="NeedsYouBar"]') as HTMLElement).getByRole('button', { name: /is waiting on you/ })).toHaveAttribute('aria-expanded', 'false')
       await expect(within(specimens.querySelector('[data-component-name="NeedsYouInbox"]') as HTMLElement).getByRole('region', { name: /^Needs you inbox ·/ }).querySelector('details')).not.toHaveAttribute('open')
+      for (const [name, weightClass] of [['AgentMessage', 'card'], ['OutgoingMessageRow', 'row']] as const) {
+        await expect(canvas.getByTestId(`harness-weight-${weight}`).querySelector(`[data-component-name="${name}"]`)).toHaveAttribute('data-weight-class', weightClass)
+      }
+      await expect(specimens.querySelector('[data-component-name="AgentMessage"] article')).toHaveAttribute('data-harness-weight', 'card')
+      const outgoing = specimens.querySelector('[data-component-name="OutgoingMessageRow"] [data-work-kind="messages-sent"]') as HTMLElement
+      await expect(outgoing).toHaveAttribute('data-harness-weight', 'row')
+      await expect(within(outgoing).getByRole('button')).toHaveAttribute('aria-expanded', 'false')
     }
     const read = within(canvas.getByTestId('harness-weight-row')).getByRole('button', { name: 'Read summary' })
     await userEvent.click(read)

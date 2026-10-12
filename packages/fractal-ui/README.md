@@ -32,6 +32,7 @@ Stories:
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
 - **Fractal UI / Questions**: harness-neutral read-only and answerable questions, all settled outcomes, attention surfaces, and keyboard/negative-control stories at 440 and 1440 pixels in both schemes. Drafts and callbacks are host-owned; the terminal hand-off is explicit.
+- **Fractal UI / Agent Messages**: promoted incoming messages and folded outgoing sends, with via chips, parent/child identifiers, per-recipient receipts, bounded long-message disclosure, and source-preview transitions. State-specific plays include the quoted-message and file-path negative controls.
 
 ### Harness questions
 
@@ -56,6 +57,28 @@ The ratified question Card uses an attention hairline, 8/12 padding and a 24-hig
 The generic `EmbraceToolCall`/`EmbraceToolItem` seam is explicitly read-only: its `ReadOnlyToolQuestion` type cannot carry a web-answer capability. Singular `{question, options}` and batched `{questions}` arguments keep their options; structured result `details.results`/flat `selectedOptions` facts render `QuestionSummary`. Calls that closed without recorded answer facts use `unrecorded`, not an invented answer. Live adapters supply richer typed requests and the terminal callback.
 
 The ACH model is retained with small display extensions: `autoSelected` records per-question timeout picks; `answered.where` labels terminal/web provenance; `chat-redirected` represents the catalog outcome; `unrecorded` keeps archived missing-result facts honest. Optional `variant` defaults to transcript; `composerTyping` labels held composer text; `onAttach` hands real selected files to the host instead of implementing upload/storage in the kit.
+
+### Agent messages
+
+`AgentMessage` has a public tagged `variant`: `Incoming` (default), `Outgoing`, or `Human`, with pure sender, recipient, optional channel and tagged body props. Input headers are 16-high at 12/16, with a medium-weight 14/20 subject four below and body four below the subject, or two below a header without a subject. There is no footer. Incoming uses a raised Card with padding 8/12; Human defaults to an accent rail, and its optional tagged `frame: { _tag: 'Card' }` selects the recommended Card. One shared SVG glyph occupies the leading 16-unit slot (C22). Input body ink is foreground (C27). `headerMeta` replaces native copy/time, `headerGlyph` selects a kit icon or explicitly hides it, and `frameStyles` lets compositions adapt the native frame without wrapping a Card in another Card (C21).
+
+The host owns fetching, copying and reply navigation. `onCopy` copies the message; if absent, the existing id-copy callback supplies the single header action instead. Short body regions add no synthetic Tab stop. Long complete messages render only a bounded excerpt until disclosed; a fetched long body opens immediately while retaining focus on its load action. Large expanded regions retain labelled, keyboard-focusable scrolling. Markdown parsing/highlighting is capped at 16,000 characters; larger incoming and outgoing bodies render as literal plain text, never an unbounded Markdown tree. Missing full-body access has an explicit keyboard-reachable reason.
+
+Large plain-text bodies mount one 16,000-character page at a time. Previous/Next controls remain focusable at boundaries with an accessible unavailable reason, so paging never transfers keyboard focus or mounts the full multi-megabyte body.
+
+`OutgoingMessageRow` is one folded 24-high WorkRow per send (E27/C9), including broadcasts. Its header reads `To` plus the known recipient/count, a bounded excerpt and receipt-count summary. Broadcast count uses the reported total, otherwise listed recipient facts; with neither it says only “Broadcast”. Expansion mounts the shared OpenedBody shape, two below the row at its text column, with hairline/radius 6/padding 8/12. Recipient chips, reported failures and the optional subject live there; repeated `Re:` prefixes normalize to one. Missing receipts are omitted. No strong rail or clock row is added; the reported timestamp remains a title. Failed chips stay keyboard-reachable, and expand/collapse retains trigger focus.
+
+These components replace the incoming `HarnessNotice` Irc/Delivery presentations and outgoing peer-message/file-change presentations in application adapters. The kit does not parse message envelopes or resolve recipient receipts.
+
+`TranscriptTurn.outgoingMessages` maps host-normalized sends to their underlying work-call ids. The production work log replaces each mapped shell row with its quiet outgoing block and counts it as a message, not a command. Parsing transport envelopes stays outside the kit. The transcript story exercises the folded shell-send replacement; display-hidden reminder routing through “Show system events” belongs to HarnessMarker, not these message surfaces. All variants inherit the nearest Fractal composition theme. The transcript's existing `UserMessage` adopts the exported `Human` variant during grammar adoption after the stacks merge, not in this message-kit change.
+
+The hierarchy and composition stories cover Incoming, Human rail/Card, folded outgoing sends and nested Markdown at 440/1440 in both schemes. Plays reject letter avatars, missing SVG glyphs, nested Cards, old footer/gaps, extra Tab stops, old Markdown margins/indents/rails and soft input ink. Markdown follows C16: sibling rhythm 8, no first/last outer margins, outer list indent 22 and nested indent 20 with a hairline/open-circle marker. Only block quotes use the strong neutral rail. The q106 comparison keeps B1/B2 and pending promotion decisions unchanged.
+
+Message cards and story roots use only composition palette, type, spacing, radius and geometry tokens. Headers establish medium-weight shared UI typography; metadata, tags and plain-text output use the shared meta/dense scales rather than inheriting page defaults.
+
+The file-tool negative control is an existing legacy component, so its own subtree receives the existing legacy dark theme without changing the composition-themed message root. Its production Markdown contrast is checked against 4.5:1, with the prior white-on-white pair as a failing control and a scoped axe check.
+
+Command subtraction uses the projected `countedAsCommand` fact, not merely the run kind: orphan results never contributed to the command count and must not remove an unrelated observed command. Custom work-log owners supply that fact only when the call contributed to their count.
 
 ## Families
 
