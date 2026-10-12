@@ -6573,6 +6573,29 @@ mod tests {
     }
 
     #[test]
+    fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![
+            alert_prompt("attention/one", agent),
+            alert_prompt("attention/two", agent),
+        ]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        let shown = screen(&ui);
+        let lines: Vec<&str> = shown.lines().collect();
+        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ hide")).expect(&shown);
+        let rule = lines.iter().position(|line| line.contains("┄┄┄┄")).expect(&shown);
+        let input = lines.iter().position(|line| line.contains("Message Atlas Builder")).expect(&shown);
+        assert!(title < rule && rule < input, "{shown}");
+        // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
+        let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
+        assert!(barred >= 6, "{shown}");
+        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
+        assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
+    }
+
+    #[test]
     fn ctrl_h_opens_home_and_closes_it_again() {
         let mut ui = glass();
         ctrl(&mut ui, 'h');
