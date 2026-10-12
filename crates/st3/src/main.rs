@@ -16341,8 +16341,7 @@ async fn post_work(
         && let Some(path) = std::env::var_os("AGENT_TRACE_FILE")
         && matches!(action, "claim" | "complete" | "fail" | "release" | "submit")
     {
-        let incarnation = current_agent_incarnation(client, &actor).await?.unwrap_or_default();
-        refresh_agent_trace(client, &actor, &incarnation, Path::new(&path), None).await?;
+        refresh_agent_trace(client, &actor, Path::new(&path), None, None).await?;
     }
     if json_output {
         print_value(&response, true)
@@ -16425,6 +16424,10 @@ async fn initialize_agent_trace(
 ) -> Result<()> {
     use st3::agent_trace::issuer;
     let _lock = lock_agent_trace(path).await?;
+    anyhow::ensure!(
+        current_agent_incarnation(client, subject).await?.as_deref() == Some(incarnation),
+        "the runtime changed before agent trace issuance",
+    );
     let principal: Option<String> = client
         .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject)))
         .await?;
@@ -16492,20 +16495,21 @@ async fn trace_launch_facts(
 async fn refresh_agent_trace(
     client: &Client,
     subject: &str,
-    incarnation: &str,
     path: &Path,
+    source_incarnation: Option<&str>,
     observed: Option<&st_drivers::harness_context::Observed>,
 ) -> Result<Vec<StepRunView>> {
     use st3::agent_trace::issuer;
     let _lock = lock_agent_trace(path).await?;
     let work: Vec<StepRunView> = client
         .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
+    let current_incarnation = current_agent_incarnation(client, subject).await?;
     // An event from a predecessor provider cannot restate its model or lease after restart.
-    if observed.is_some()
-        && current_agent_incarnation(client, subject).await?.as_deref() != Some(incarnation)
+    if source_incarnation.is_some_and(|source| current_incarnation.as_deref() != Some(source))
     {
         return Ok(work);
     }
+    let incarnation = current_incarnation.as_deref().unwrap_or_default();
     let principal: Option<String> = client
         .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject))).await?;
     let Some(principal) = principal else {
@@ -16522,6 +16526,9 @@ async fn refresh_agent_trace(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    if raw.is_none() && incarnation.is_empty() {
+        return Ok(work);
+    }
     let lease = trace_lease(&work, subject, incarnation);
     let mission_name = trace_mission_name(client, lease).await?;
     let mut runtime = if let Some(raw) = raw.as_ref() {
@@ -20049,7 +20056,7 @@ async fn publish_harness_usage(
     if let Some(path) = client.event.map(|(_, _, dir, _)| dir.join("agent-trace.json"))
         .or_else(|| agent_trace_path(subject))
     {
-        refresh_agent_trace(client.client, subject, incarnation, &path, Some(observed)).await?;
+        refresh_agent_trace(client.client, subject, &path, Some(incarnation), Some(observed)).await?;
     }
     // A context-window occupancy reading and cumulative session spend are
     // different measurements. Publish them as distinct durable records; never
@@ -22675,8 +22682,7 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
 
 async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
     let work: Vec<StepRunView> = if let Some(path) = agent_trace_path(subject) {
-        let incarnation = current_agent_incarnation(client, subject).await?.unwrap_or_default();
-        refresh_agent_trace(client, subject, &incarnation, &path, None).await?
+        refresh_agent_trace(client, subject, &path, None, None).await?
     } else {
         client.get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?
     };
