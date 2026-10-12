@@ -541,6 +541,11 @@ mod tests {
         source.pragma_update(None, "query_only", true).unwrap();
         let root = tempfile::tempdir().unwrap();
         let mut scratch = Connection::open(root.path().join("facts.db")).unwrap();
+        // Match the native writer's WAL/FULL settings; DELETE-journal commits do not
+        // measure the supported bootstrap path's writer loans.
+        scratch
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .unwrap();
         scratch.execute_batch("CREATE TABLE claims(id TEXT,subject TEXT,kind TEXT,origin TEXT,body TEXT,accepted_at_unix_ms TEXT,batch_id TEXT,store_index INTEGER);
             CREATE INDEX claims_batch_index ON claims(batch_id,store_index);
             CREATE TABLE batches(id TEXT,origin TEXT,replica_sequence INTEGER);
@@ -613,7 +618,45 @@ mod tests {
     fn publication_facts_census_bootstrap() {
         let path = std::env::var_os("APPLY_RESTART_CENSUS_SCRATCH")
             .expect("private matching-row scratch path");
-        let mut connection = Connection::open(path).unwrap();
+        // Repeated probes must start from source rows, not a previously completed cursor.
+        // Copy only the matching-row fixture, retaining its existing source indexes.
+        let root = tempfile::tempdir().unwrap();
+        let mut connection = Connection::open(root.path().join("facts.db")).unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .unwrap();
+        let uri = format!("file:{}?mode=ro", std::path::Path::new(&path).display());
+        connection
+            .execute("ATTACH DATABASE ?1 AS census", [uri])
+            .unwrap();
+        let copy_started = std::time::Instant::now();
+        let schemas = connection.prepare("SELECT sql FROM census.sqlite_schema
+            WHERE type IN ('table','index') AND sql IS NOT NULL AND tbl_name IN
+                ('claims','batches','replica_records','local_observations','projection_digest_repaired_claims')
+            ORDER BY type='index'").unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        for sql in schemas {
+            connection.execute_batch(&sql).unwrap();
+        }
+        let tx = connection.transaction().unwrap();
+        for table in [
+            "claims",
+            "batches",
+            "replica_records",
+            "local_observations",
+            "projection_digest_repaired_claims",
+        ] {
+            tx.execute_batch(&format!(
+                "INSERT INTO main.{table} SELECT * FROM census.{table}"
+            ))
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        connection.execute_batch("DETACH DATABASE census").unwrap();
+        println!(
+            "publication census matching_fixture_copy_seconds={}",
+            copy_started.elapsed().as_secs_f64()
+        );
         let source_version: String = connection
             .query_row("SELECT sqlite_version()", [], |row| row.get(0))
             .unwrap();
