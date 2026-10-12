@@ -183,13 +183,35 @@ pub(crate) fn measurements(repo: &Path, produced: &[Produced]) -> Result<Vec<Val
                 .parse::<i64>()?
                 .checked_mul(1000)
                 .context("issuance time overflow")?;
-            let elapsed = issued
-                .checked_sub(start)
-                .filter(|value| *value >= 0)
-                .context("re-attestation issuance precedes degraded completion")?;
-            samples
-                .push(serde_json::json!({"record":result.record,"prior":id,"elapsed_ms":elapsed}));
+            let elapsed = elapsed_ms(start, issued);
+            samples.push(serde_json::json!({
+                "record":result.record,
+                "prior":id,
+                "elapsed_ms":elapsed,
+                "skewed":elapsed.is_none()
+            }));
         }
     }
     Ok(samples)
+}
+
+/// Milliseconds from the degraded completion to the signed note, or `None` when
+/// the observer clock reads earlier than GitHub's completion time. The record is
+/// already written by then, so a skewed clock marks the sample instead of failing
+/// a valid observation.
+fn elapsed_ms(start: i64, issued: i64) -> Option<i64> {
+    issued.checked_sub(start).filter(|value| *value >= 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::elapsed_ms;
+
+    #[test]
+    fn clock_skew_marks_the_sample_instead_of_failing() {
+        assert_eq!(elapsed_ms(1_000, 4_500), Some(3_500));
+        assert_eq!(elapsed_ms(1_000, 1_000), Some(0));
+        assert_eq!(elapsed_ms(5_000, 1_000), None);
+        assert_eq!(elapsed_ms(i64::MIN, 1), None);
+    }
 }

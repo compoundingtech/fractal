@@ -44,3 +44,11 @@ The batch's `re_attestation_elapsed_ms` is the maximum new sample, or null when
 none exists. Replays contribute no new samples. Full-trust share and signing
 latency keep their existing fresh-record denominators. Production aggregation,
 risk-class deadlines and their enforcing policy remain separate work.
+
+A predecessor's conclusion may be failed. A passing rerun still links to it: the
+link says the rerun re-checks the same tree, not that the verdict is the same.
+Consumers must read the new record's own result, never infer it from the link.
+If the observer clock reads earlier than the degraded completion, the sample has
+`elapsed_ms` null and `skewed` true; the signed record stays valid and the sample
+is left out of `re_attestation_elapsed_ms`. That value is a measurement only, not
+a policy input, until deadlines and the production controller are decided.
