@@ -13,10 +13,10 @@ import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
   type Draft, type DraftToken, type MentionToken, type SerializedDraft, type SlashCommand,
 } from './embrace-composer/draft'
-import { imageSubmitBlock, type ComposerAvailability, type ComposerImage, type ComposerRecipientReadout, type ComposerReply } from './embrace-composer/send'
+import { composerImagePolicy, imageSubmitBlock, type ComposerAvailability, type ComposerImage, type ComposerImagePolicy, type ComposerRecipientReadout, type ComposerReply } from './embrace-composer/send'
 import {
-  ComposerAttachImage, ComposerAvailabilityNotice, ComposerImageIntakeContext, ComposerImageTray, ComposerRecipientControl, ComposerReplyChip, ComposerSubjectField,
-  useComposerImageIntake, type ComposerImageIntake,
+  ComposerAttachImage, ComposerAvailabilityNotice, ComposerImageIntakeContext, ComposerImageTray, ComposerRecipientControl, ComposerReplyChip, ComposerSessionAnnouncement, ComposerSubjectField,
+  sessionChangeNote, useComposerImageIntake, type ComposerImageIntake,
 } from './embrace-composer/SendSurface'
 
 export interface EmbraceComposerProps {
@@ -74,6 +74,8 @@ export interface EmbraceComposerProps {
   readonly onRemoveImage?: (id: string) => void
   /** Retries the runtime's retained File; never re-uploads a completed native reference. */
   readonly onRetryImage?: (id: string) => void
+  /** Limits the attachments adapter declares; defaults to st's four PNG, JPEG, GIF or WebP images of 10 MiB. */
+  readonly imagePolicy?: ComposerImagePolicy
   /** Send availability; anything but Ready keeps the draft editable and blocks submit. */
   readonly availability?: ComposerAvailability
   /** Reply context for an authoritative incoming mail row. */
@@ -177,7 +179,7 @@ const groupPreviewLimit = 4
 export function EmbraceComposer(props: EmbraceComposerProps) {
   const runtimeText = useAuiState(state => state.composer.text)
   const threadDisabled = useAuiState(state => state.thread.isDisabled)
-  const intake = useComposerImageIntake(props.images?.length ?? 0, props.disabledReason !== undefined || threadDisabled)
+  const intake = useComposerImageIntake(props.images?.length ?? 0, props.disabledReason !== undefined || threadDisabled, props.imagePolicy ?? composerImagePolicy)
   const root = React.useRef<HTMLDivElement>(null)
   const [wrapped, setWrapped] = React.useState(false)
   const [cramped, setCramped] = React.useState(false)
@@ -279,6 +281,7 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   }
   return <CompactComposerContext.Provider value={densityContext}><ComposerImageIntakeContext.Provider value={intake}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
     {(props.plainText ?? props.variant === 'C1') || props.input !== undefined ? <PlainComposer {...composerProps} /> : <TokenComposer {...composerProps} />}
+    {props.recipient !== undefined ? <ComposerSessionAnnouncement recipient={props.recipient} /> : null}
   </div></ComposerImageIntakeContext.Provider></CompactComposerContext.Provider>
 }
 
@@ -329,7 +332,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
 }
 
 /** Rows above the field: availability, session change, reply, subject, images and refusals. */
-function SendContext({ availability, recipient, reply, onClearReply, subject, onSubjectChange, images, onRemoveImage, onRetryImage, readOnly, formRef }: EmbraceComposerProps & { readonly readOnly: boolean; readonly formRef: React.RefObject<HTMLFormElement | null> }) {
+function SendContext({ availability, recipient, reply, onClearReply, subject, onSubjectChange, images, imagePolicy, onRemoveImage, onRetryImage, readOnly, formRef }: EmbraceComposerProps & { readonly readOnly: boolean; readonly formRef: React.RefObject<HTMLFormElement | null> }) {
   const intake = React.useContext(ComposerImageIntakeContext)
   const imageBlock = imageSubmitBlock(images)
   const unavailable = availability !== undefined && availability._tag !== 'Ready' ? availability : undefined
@@ -338,10 +341,10 @@ function SendContext({ availability, recipient, reply, onClearReply, subject, on
   const focusField = () => formRef.current?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus()
   return <div data-testid="composer-send-context" {...stylex.props(styles.context)}>
     {unavailable !== undefined ? <ComposerAvailabilityNotice availability={unavailable} /> : null}
-    {recipient?.sessionChanged === true ? <div role="status" {...stylex.props(styles.help)}>Session changed. This message continues {recipient.sessionId === undefined ? 'the current session' : `session ${recipient.sessionId}`}.</div> : null}
+    {recipient?.sessionChanged === true ? <div data-testid="composer-session-note" {...stylex.props(styles.help)}>{sessionChangeNote(recipient)}</div> : null}
     {reply !== undefined ? <ComposerReplyChip reply={reply} onClear={readOnly || onClearReply === undefined ? undefined : () => { onClearReply(); focusField() }} /> : null}
     {onSubjectChange !== undefined ? <ComposerSubjectField subject={subject ?? ''} onSubjectChange={onSubjectChange} isReadOnly={readOnly} onEnter={focusField} /> : null}
-    {images !== undefined ? <ComposerImageTray images={images} onRemoveImage={onRemoveImage === undefined ? undefined : id => { onRemoveImage(id); focusField() }} onRetryImage={onRetryImage} disabled={readOnly} /> : null}
+    {images !== undefined ? <ComposerImageTray images={images} maxCount={(imagePolicy ?? composerImagePolicy).maxCount} onRemoveImage={onRemoveImage === undefined ? undefined : id => { onRemoveImage(id); focusField() }} onRetryImage={onRetryImage} disabled={readOnly} /> : null}
     {intake?.refused !== undefined ? <div role="alert" data-testid="composer-image-refusal" {...stylex.props(styles.refusal)}>{intake.refused}</div> : null}
     {imageBlock !== undefined ? <div role="status" data-testid="composer-image-wait" {...stylex.props(styles.help)}>{imageBlock}</div> : null}
   </div>

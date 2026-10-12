@@ -8,7 +8,7 @@ import { Transcript, type TranscriptTurn } from './assistant-ui/composition/Tran
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { serializeDraft, type MentionToken } from './assistant-ui/embrace-composer/draft'
-import { composerImagePolicy, isComposerImageType, type ComposerAvailability, type ComposerImage, type ComposerRecipientReadout, type ComposerReply } from './assistant-ui/embrace-composer/send'
+import { composerImagePolicy, isComposerImageType, type ComposerAvailability, type ComposerImage, type ComposerImagePolicy, type ComposerRecipientReadout, type ComposerReply } from './assistant-ui/embrace-composer/send'
 import type { SendState, TextItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -28,7 +28,10 @@ type AvailabilityTag = ComposerAvailability['_tag']
 interface Scenario {
   readonly variant: 'C1' | 'C2'
   readonly roster: 'full' | 'none'
-  readonly sessionChanged?: boolean
+  /** The host can move the active session while the draft is open. */
+  readonly sessionControl?: boolean
+  /** Limits the fixture adapter declares; absent means st's defaults. */
+  readonly imagePolicy?: ComposerImagePolicy
   readonly reply?: boolean
   readonly subject?: boolean
   readonly images?: boolean
@@ -37,10 +40,11 @@ interface Scenario {
 }
 const scenarios = {
   recipient: { variant: 'C1', roster: 'full', availability: 'Ready' },
-  readout: { variant: 'C1', roster: 'none', sessionChanged: true, availability: 'Ready' },
+  readout: { variant: 'C1', roster: 'none', sessionControl: true, availability: 'Ready' },
   mention: { variant: 'C2', roster: 'full', availability: 'Ready' },
   reply: { variant: 'C1', roster: 'full', reply: true, subject: true, images: true, availability: 'Ready' },
   images: { variant: 'C1', roster: 'full', images: true, availability: 'Ready' },
+  limited: { variant: 'C1', roster: 'full', images: true, imagePolicy: { maxCount: 2, maxBytes: 5 * 1024 * 1024, mediaTypes: ['image/png', 'image/jpeg'] }, availability: 'Ready' },
   keyboard: { variant: 'C1', roster: 'full', images: true, availability: 'Ready' },
   states: { variant: 'C1', roster: 'full', images: true, transcript: true, availability: 'Ready' },
   offline: { variant: 'C1', roster: 'full', images: true, transcript: true, availability: 'Offline' },
@@ -73,7 +77,7 @@ function createUploads(): Uploads {
     preview: (id: string) => previews.get(id),
     start: (id: string, file: File) => {
       previews.set(id, URL.createObjectURL(file))
-      emit(new Map(states).set(id, file.name.startsWith('fail') ? { _tag: 'Failed', detail: 'The connection dropped.' } : { _tag: 'Uploading', progress: 40 }))
+      emit(new Map(states).set(id, file.name.startsWith('fail') ? { _tag: 'Failed', detail: 'The connection dropped.' } : { _tag: 'Uploading', progress: 0.4 }))
     },
     retry: (id: string) => emit(new Map(states).set(id, { _tag: 'Uploading', progress: 0 })),
     completeAll: () => emit(new Map([...states].map(([id, state]) => [id, state._tag === 'Uploading' ? { _tag: 'Ready' } : state]))),
@@ -89,8 +93,8 @@ function createUploads(): Uploads {
   }
 }
 let attachmentSequence = 0
-const fixtureAttachments = (uploads: Uploads): AttachmentAdapter => ({
-  accept: composerImagePolicy.mediaTypes.join(','),
+const fixtureAttachments = (uploads: Uploads, policy: ComposerImagePolicy): AttachmentAdapter => ({
+  accept: policy.mediaTypes.join(','),
   add: async ({ file }) => {
     const id = `attachment/fixture-${++attachmentSequence}`
     uploads.start(id, file)
@@ -124,6 +128,8 @@ interface Host {
   readonly onRecipientChange: (ref: string) => void
   readonly record: (line: string) => void
   readonly afterSend: () => void
+  /** Host-moved session for the readout; 0 means the draft's session is still active. */
+  readonly sessionMoves: number
 }
 
 /** One recipient's runtime: drafts, images and transcript rows stay with it across navigation. */
@@ -133,7 +139,8 @@ function RecipientPane({ recipient, active, host }: { readonly recipient: (typeo
   React.useEffect(() => uploads.dispose, [uploads])
   const hostRef = React.useRef(host)
   hostRef.current = host
-  const adapters = React.useMemo(() => ({ attachments: fixtureAttachments(uploads) }), [uploads])
+  const policy = host.scenario.imagePolicy ?? composerImagePolicy
+  const adapters = React.useMemo(() => ({ attachments: fixtureAttachments(uploads, policy) }), [uploads, policy])
   const options = React.useMemo(() => ({
     messages: rows, isRunning: false, adapters,
     onNew: async (message: AppendMessage) => {
@@ -173,7 +180,8 @@ function PaneComposer({ recipient, uploads, host }: { readonly recipient: (typeo
     if (mediaType === undefined || !isComposerImageType(mediaType)) return []
     return [{ id: attachment.id, name: attachment.name, mediaType, size: attachment.file?.size ?? 0, previewUrl: uploads.preview(attachment.id), state: states.get(attachment.id) ?? { _tag: 'Ready' } }]
   }), [attachments, states, uploads])
-  const readout: ComposerRecipientReadout = { ref: recipient.ref, label: recipient.label, sessionId: host.scenario.sessionChanged === true ? 'session/fixture-a2' : recipient.sessionId, sessionChanged: host.scenario.sessionChanged }
+  const moved = host.scenario.sessionControl === true && host.sessionMoves > 0
+  const readout: ComposerRecipientReadout = { ref: recipient.ref, label: recipient.label, sessionId: moved ? `session/fixture-a${host.sessionMoves + 1}` : recipient.sessionId, sessionChanged: moved }
   return <EmbraceComposer
     variant={host.scenario.variant}
     readingColumn
@@ -183,6 +191,7 @@ function PaneComposer({ recipient, uploads, host }: { readonly recipient: (typeo
     mentionCandidates={host.scenario.variant === 'C2' ? [buildMention] : undefined}
     onSendDraft={draft => { const mentions = serializeDraft(draft).mentions; if (mentions.length > 0) host.record(`Mentions ${mentions.join(', ')}`) }}
     images={host.scenario.images === true ? images : undefined}
+    imagePolicy={host.scenario.imagePolicy}
     onRemoveImage={id => { void aui.composer.attachment({ id }).remove() }}
     onRetryImage={uploads.retry}
     availability={host.availability}
@@ -213,10 +222,11 @@ function ComposerSendStory({ scheme, scenario: name }: { readonly scheme: Scheme
   const [log, setLog] = React.useState<readonly string[]>([])
   const [recipientChanges, setRecipientChanges] = React.useState<readonly string[]>([])
   const [recoveries, setRecoveries] = React.useState(0)
+  const [sessionMoves, setSessionMoves] = React.useState(0)
   // The host owns recovery: the kit only reports intent. Offline reconnects at once; grants and enrollment wait for an explicit fixture step.
   const recover = () => { setRecoveries(count => count + 1); if (availabilityTag === 'Offline') setAvailabilityTag('Ready') }
   const host: Host = {
-    scenario, reply, subject,
+    scenario, reply, subject, sessionMoves,
     availability: availabilityFor(availabilityTag, recover),
     onClearReply: () => setReply(undefined),
     onSubjectChange: setSubject,
@@ -234,6 +244,7 @@ function ComposerSendStory({ scheme, scenario: name }: { readonly scheme: Scheme
       <p data-testid="fixture-recipient-changes">Recipient changes: {recipientChanges.length === 0 ? 'none' : recipientChanges.join(', ')}</p>
       <p data-testid="fixture-recoveries">Recovery requests: {recoveries}</p>
       {availabilityTag !== 'Ready' && availabilityTag !== 'Offline' ? <Button onPress={() => setAvailabilityTag('Ready')} {...stylex.props(styles.button)}>Finish setup</Button> : null}
+      {scenario.sessionControl === true ? <Button onPress={() => setSessionMoves(count => count + 1)} {...stylex.props(styles.button)}>Move session</Button> : null}
       <ol aria-label="Host log" data-testid="fixture-log" {...stylex.props(styles.log)}>{log.map((line, index) => <li key={index}>{line}</li>)}</ol>
     </section>
   </main>
@@ -276,7 +287,7 @@ const pasteFiles = (target: HTMLElement, files: readonly File[]) => {
   target.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }))
 }
 const tray = (root: HTMLElement) => within(root).getByRole('list', { name: /^Images, / })
-const tileStates = (root: HTMLElement) => [...root.querySelectorAll('[data-image-state]')].map(tile => tile.getAttribute('data-image-state'))
+const tileStates = (root: HTMLElement) => [...root.querySelectorAll('[data-image-state]')].map(tile => tile.getAttribute('data-image-state')?.toLowerCase())
 const describedText = (element: Element) => (element.getAttribute('aria-describedby') ?? '').split(' ').map(id => document.getElementById(id)?.textContent ?? '').join(' ')
 async function sound(canvasElement: HTMLElement) {
   await expect(canvasElement.textContent ?? '').not.toMatch(/unknown/i)
@@ -294,6 +305,10 @@ export const RecipientSelection: Story = {
     const review = pane(canvasElement)
     const trigger = await within(review).findByRole('button', { name: 'To Review seat, change recipient' })
     await expect(describedText(trigger)).toContain('agent/fixture-review')
+    // Label in name: the accessible name starts with the visible "To Review seat".
+    await expect(trigger.getAttribute('aria-label')?.startsWith('To Review seat')).toBe(true)
+    await expect(trigger.querySelector('[data-composer-readout]')).toHaveTextContent('Review seat')
+    await expect(trigger.textContent).toMatch(/^To/)
     await expect(describedText(trigger)).toContain('session/fixture-a1')
     await userEvent.type(messageField(review), 'Draft for review')
     // Typing can move the footer between layouts; query the trigger the user would see now.
@@ -333,17 +348,64 @@ export const RecipientSelection: Story = {
 }
 export const RecipientSelectionLight: Story = { ...RecipientSelection, args: { scheme: 'light' } }
 
-/** K1: with nobody else to pick, the readout stays a labelled, focusable fact; a session change is announced. */
+/** K1: with nobody else to pick, the readout stays a labelled, focusable fact; each session change is announced politely, once. */
 export const RecipientReadout: Story = {
   args: { scenario: 'readout' },
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     const readout = await within(root).findByRole('group', { name: 'To Review seat' })
     await expect(within(root).queryByRole('button', { name: /change recipient/ })).toBeNull()
-    await expect(describedText(readout)).toContain('session/fixture-a2')
-    await expect(root.querySelector('[data-testid="composer-send-context"]')).toHaveTextContent('Session changed. This message continues session session/fixture-a2.')
+    await expect(describedText(readout)).toContain('session/fixture-a1')
     readout.focus()
     await expect(document.activeElement).toBe(readout)
+    const announcement = within(root).getByTestId('composer-session-announcement')
+    await expect(announcement).toHaveAttribute('role', 'status')
+    await expect(announcement).not.toHaveAttribute('aria-live', 'assertive')
+    await expect(announcement.textContent).toBe('')
+    await expect(within(root).queryByTestId('composer-session-note')).toBeNull()
+    const changes = new MutationObserver(() => {})
+    changes.observe(announcement, { subtree: true, childList: true, characterData: true })
+    try {
+      await userEvent.click(within(canvasElement).getByRole('button', { name: 'Move session' }))
+      await waitFor(() => expect(announcement).toHaveTextContent('Session changed. This message continues session session/fixture-a2.'))
+      await expect(within(root).getByTestId('composer-session-note')).toHaveTextContent('Session changed. This message continues session session/fixture-a2.')
+      await expect(changes.takeRecords()).toHaveLength(1)
+      // Unrelated re-renders leave the region untouched, so nothing is announced twice.
+      await userEvent.type(messageField(root), 'Still the same draft')
+      await settled()
+      await expect(changes.takeRecords()).toHaveLength(0)
+      await expect(within(root).getByTestId('composer-session-announcement')).toBe(announcement)
+      await userEvent.click(within(canvasElement).getByRole('button', { name: 'Move session' }))
+      await waitFor(() => expect(announcement).toHaveTextContent('Session changed. This message continues session session/fixture-a3.'))
+      await expect(changes.takeRecords()).toHaveLength(1)
+    } finally { changes.disconnect() }
+    await expect(describedText(within(root).getByRole('group', { name: 'To Review seat' }))).toContain('session/fixture-a3')
+    await expect(messageField(root)).toHaveValue('Still the same draft')
+    await sound(canvasElement)
+  },
+}
+
+/** K3: the adapter's declared limits, not the kit defaults, drive the picker filter, the refusals and the copy. */
+export const DeclaredImageLimits: Story = {
+  args: { scenario: 'limited' },
+  play: async ({ canvasElement }) => {
+    const root = pane(canvasElement)
+    const attach = await within(root).findByRole('button', { name: 'Attach image' })
+    await expect(root.querySelector('input[type="file"]')).toHaveAttribute('accept', 'image/png,image/jpeg')
+    await userEvent.hover(attach)
+    await expect(await within(document.body).findByRole('tooltip')).toHaveTextContent('Attach up to 2 images (PNG or JPEG), 5 MB each')
+    await userEvent.unhover(attach)
+    const field = messageField(root)
+    pasteFiles(field, [imageFile('one.png'), imageFile('two.jpg', 'image/jpeg'), imageFile('three.png')])
+    await waitFor(() => expect(tray(root)).toHaveAccessibleName('Images, 2 of 2'))
+    await expect(within(root).getByRole('alert')).toHaveTextContent('A message carries at most 2 images.')
+    await userEvent.click(within(root).getByRole('button', { name: 'Remove two.jpg' }))
+    await waitFor(() => expect(tray(root)).toHaveAccessibleName('Images, 1 of 2'))
+    pasteFiles(field, [imageFile('six.png', 'image/png', 6 * 1024 * 1024), imageFile('loop.gif', 'image/gif')])
+    await waitFor(() => expect(within(root).getByRole('alert')).toHaveTextContent('six.png is 6.0 MB; st takes images up to 5 MB. loop.gif is image/gif; st takes PNG or JPEG.'))
+    await expect(tray(root)).toHaveAccessibleName('Images, 1 of 2')
+    // The st default (four images, 10 MB) never leaks into the copy when the adapter declares less.
+    await expect(root.textContent ?? '').not.toMatch(/10 MB|at most 4/)
     await sound(canvasElement)
   },
 }
@@ -577,15 +639,15 @@ export const RevokedRecovery: Story = {
 }
 export const RevokedRecoveryLight: Story = { ...RevokedRecovery, args: { scheme: 'light', scenario: 'revoked' } }
 
-/** K4: a missing grant offers one Check permission; an unavailable relay offers nothing to press. */
+/** K4: a missing grant offers one Check access; an unavailable relay offers nothing to press. */
 export const MissingGrant: Story = {
   args: { scenario: 'missingGrant' },
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     const box = await waitFor(() => notice(root))
     await expect(within(box).getByRole('status')).toHaveTextContent('Sending messages is not permitted here.')
-    await expect(within(box).getAllByRole('button').map(button => button.textContent)).toEqual(['Check permission'])
-    await userEvent.click(within(box).getByRole('button', { name: 'Check permission' }))
+    await expect(within(box).getAllByRole('button').map(button => button.textContent)).toEqual(['Check access'])
+    await userEvent.click(within(box).getByRole('button', { name: 'Check access' }))
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="fixture-recoveries"]')).toHaveTextContent('Recovery requests: 1'))
     await expect(notice(root)).toBeInTheDocument()
     await sound(canvasElement)

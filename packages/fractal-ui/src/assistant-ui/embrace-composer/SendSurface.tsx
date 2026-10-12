@@ -5,7 +5,8 @@ import { Button, FileTrigger, Focusable, Input, Menu, MenuItem, MenuTrigger, Pop
 import { Icon } from '../composition/Icons'
 import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import {
-  composerImagePolicy, formatImageSize, screenComposerImages,
+  describeImageCount, describeImageTypes, formatImageLimit, formatImageSize, screenComposerImages,
+  type ComposerImagePolicy,
   type ComposerAvailability, type ComposerImage, type ComposerRecipientReadout, type ComposerReply,
 } from './send'
 
@@ -13,19 +14,20 @@ import {
 export interface ComposerImageIntake {
   readonly available: boolean
   readonly disabled: boolean
+  readonly policy: ComposerImagePolicy
   readonly refused?: string
   readonly add: (files: readonly File[]) => void
 }
 export const ComposerImageIntakeContext = React.createContext<ComposerImageIntake | undefined>(undefined)
 
-export function useComposerImageIntake(retainedImages: number, disabled: boolean): ComposerImageIntake {
+export function useComposerImageIntake(retainedImages: number, disabled: boolean, policy: ComposerImagePolicy): ComposerImageIntake {
   const aui = useAui()
   const available = useAuiState(state => state.thread.capabilities.attachments)
   const [refused, setRefused] = React.useState<string>()
   const add = React.useCallback((files: readonly File[]) => {
     if (!available || disabled || files.length === 0) return
     const runtime = aui.composer.__internal_getRuntime?.().getState() ?? aui.composer.getState()
-    const screened = screenComposerImages(files, Math.max(retainedImages, runtime.attachments.length))
+    const screened = screenComposerImages(files, Math.max(retainedImages, runtime.attachments.length), policy)
     setRefused(screened.refused)
     for (const file of screened.accepted) {
       aui.composer.addAttachment(file).catch((error: unknown) => {
@@ -33,21 +35,28 @@ export function useComposerImageIntake(retainedImages: number, disabled: boolean
         setRefused(previous => [previous, `${file.name}: ${reason}`].filter(Boolean).join(' '))
       })
     }
-  }, [aui, available, disabled, retainedImages])
-  return React.useMemo(() => ({ available, disabled, refused, add }), [available, disabled, refused, add])
+  }, [aui, available, disabled, retainedImages, policy])
+  return React.useMemo(() => ({ available, disabled, policy, refused, add }), [available, disabled, policy, refused, add])
 }
-
-const acceptedTypes = [...composerImagePolicy.mediaTypes]
 
 export function ComposerAttachImage({ compact = false }: { readonly compact?: boolean }) {
   const intake = React.useContext(ComposerImageIntakeContext)
   if (intake === undefined || !intake.available) return null
+  const { policy } = intake
   return <TooltipTrigger delay={150} closeDelay={0}>
-    <FileTrigger acceptedFileTypes={acceptedTypes} allowsMultiple onSelect={list => { if (list !== null) intake.add([...list]) }}>
+    <FileTrigger acceptedFileTypes={[...policy.mediaTypes]} allowsMultiple={policy.maxCount > 1} onSelect={list => { if (list !== null) intake.add([...list]) }}>
       <Button aria-label="Attach image" isDisabled={intake.disabled} {...stylex.props(styles.iconButton, compact && styles.iconCompact)}><Icon name="attach" /></Button>
     </FileTrigger>
-    <Tooltip {...stylex.props(styles.tooltip)}>Attach up to {composerImagePolicy.maxCount} PNG, JPEG, GIF or WebP images, 10 MB each</Tooltip>
+    <Tooltip {...stylex.props(styles.tooltip)}>Attach up to {describeImageCount(policy.maxCount)} ({describeImageTypes(policy)}), {formatImageLimit(policy.maxBytes)} each</Tooltip>
   </TooltipTrigger>
+}
+
+export const sessionChangeNote = (recipient: ComposerRecipientReadout) =>
+  `Session changed. This message continues ${recipient.sessionId === undefined ? 'the current session' : `session ${recipient.sessionId}`}.`
+
+/** Always mounted, so the polite region announces each session change once and stays quiet on unrelated re-renders. */
+export function ComposerSessionAnnouncement({ recipient }: { readonly recipient: ComposerRecipientReadout }) {
+  return <span role="status" data-testid="composer-session-announcement" {...stylex.props(styles.visuallyHidden)}>{recipient.sessionChanged === true ? sessionChangeNote(recipient) : ''}</span>
 }
 
 /** `To <label>`; the canonical ref and active session stay available to assistive technology. */
@@ -88,7 +97,7 @@ export function ComposerRecipientControl({ recipient, recipients, onRecipientCha
 
 const availabilityCopy = {
   Offline: { title: 'Offline — reconnect to send.', action: 'Reconnect' },
-  MissingGrant: { title: 'Sending messages is not permitted here.', action: 'Check permission' },
+  MissingGrant: { title: 'Sending messages is not permitted here.', action: 'Check access' },
   Revoked: { title: 'This device is no longer authorized to send.', action: 'Set up again' },
   Unavailable: { title: "Messages can't be sent here.", action: undefined },
 } as const
@@ -128,14 +137,15 @@ const imageStateText = (image: ComposerImage) => image.state._tag === 'Ready' ? 
   : image.state._tag === 'Uploading' ? `Uploading${image.state.progress === undefined ? '' : ` ${Math.round(Math.min(1, Math.max(0, image.state.progress)) * 100)}%`}…`
   : `Upload failed: ${image.state.detail}`
 
-export function ComposerImageTray({ images, onRemoveImage, onRetryImage, disabled }: {
+export function ComposerImageTray({ images, maxCount, onRemoveImage, onRetryImage, disabled }: {
   readonly images: readonly ComposerImage[]
+  readonly maxCount: number
   readonly onRemoveImage?: (id: string) => void
   readonly onRetryImage?: (id: string) => void
   readonly disabled: boolean
 }) {
   if (images.length === 0) return null
-  return <ul aria-label={`Images, ${images.length} of ${composerImagePolicy.maxCount}`} data-testid="composer-images" {...stylex.props(styles.tray)}>
+  return <ul aria-label={`Images, ${images.length} of ${maxCount}`} data-testid="composer-images" {...stylex.props(styles.tray)}>
     {images.map(image => <li key={image.id} data-image-id={image.id} data-image-state={image.state._tag} {...stylex.props(styles.tile)}>
       <span aria-hidden="true" {...stylex.props(styles.thumb)}>{image.previewUrl === undefined ? image.mediaType.slice('image/'.length).toUpperCase() : <img src={image.previewUrl} alt="" {...stylex.props(styles.thumbImage)} />}</span>
       <span {...stylex.props(styles.tileBody)}>
