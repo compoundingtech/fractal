@@ -19,67 +19,110 @@ const fixture: readonly Agent[] = Array.from({ length: 78 }, (_, index) => ({
 const emptyExpanded = new Set<Key>()
 const onExpandedChange = (_keys: Set<Key>) => {}
 const onRowContextMenu = (_item: Agent, event: React.MouseEvent) => event.preventDefault()
-const renderRow = (item: Agent) => <div {...stylex.props(styles.row)}>{item.textValue}</div>
-const budgetMs = 50
-const controlCostMs = 120
 const sampleCount = 10
+/** Filter keystroke-to-next-frame p90 may be at most this multiple of the reference keystroke p90. */
+const ratioBudget = 3
+/** The synchronous regression control: a busy wait of this many reference p90s per keystroke. */
+const controlRatio = 4
+/** Renders are attributed to a keystroke through this many frames after its first post-commit frame. */
+const settleFrames = 2
+
+interface RenderCall { readonly key: string; readonly pinned: boolean; readonly retained: boolean }
 interface Sample {
   readonly durationMs: number
-  readonly query: string
+  readonly value: string
   readonly count: number
   readonly retainedIdentity: boolean
+  readonly paintedBefore: readonly string[]
   readonly paintedKeys: readonly string[]
+  readonly renders?: readonly RenderCall[]
 }
-interface PendingInput { readonly start: number; readonly query: string }
+interface PendingInput { readonly start: number; readonly value: string; readonly paintedBefore: readonly string[] }
+
+const paintedKeys = (element: HTMLElement) => [...element.querySelectorAll<HTMLElement>('[data-sidebar-tree-key]')].map(row => row.dataset.sidebarTreeKey!)
+const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+
+/**
+ * Times input capture through the first animation frame after React commits (the
+ * browser's next-paint boundary, not a physical display-paint claim), then attaches
+ * every renderRow call made until `settleFrames` later, so deferred work is counted.
+ */
+function useKeystrokeSample(value: string, pending: React.RefObject<PendingInput | undefined>, record: (input: PendingInput, durationMs: number) => Sample, settle: (sample: Sample) => void) {
+  const recordEvent = React.useEffectEvent(record)
+  const settleEvent = React.useEffectEvent(settle)
+  React.useLayoutEffect(() => {
+    const input = pending.current
+    if (input === undefined || input.value !== value) return
+    let cancelled = false
+    const frame = requestAnimationFrame(async () => {
+      // Use now(), not the frame timestamp: the latter can precede a costly input handler.
+      const durationMs = performance.now() - input.start
+      pending.current = undefined
+      const sample = recordEvent(input, durationMs)
+      for (let index = 0; index < settleFrames; index++) await nextFrame()
+      if (!cancelled) settleEvent(sample)
+    })
+    return () => { cancelled = true; cancelAnimationFrame(frame) }
+  }, [value, pending])
+}
 
 function FilterProbe({ light, narrow }: { readonly light: boolean; readonly narrow: boolean }) {
   const id = `${light ? 'light' : 'dark'}-${narrow ? '240' : '440'}`
   const [query, setQuery] = React.useState('')
+  const [reference, setReference] = React.useState('')
   const root = React.useRef<HTMLElement>(null)
-  const pending = React.useRef<PendingInput | undefined>(undefined)
-  const samples = React.useRef<Sample[]>([])
-  const items = React.useMemo(() => query === '' ? fixture : fixture.filter(item => item.textValue.toLowerCase().includes(query.toLowerCase())), [query])
-  const captureInput = React.useCallback((event: React.FormEvent<HTMLInputElement>) => {
-    // Start at input capture, BEFORE onChange's synchronous work and React's
-    // commit. A bracket begun in rAF would incorrectly hide the 120ms control.
-    pending.current = { start: performance.now(), query: event.currentTarget.value }
+  const pendingFilter = React.useRef<PendingInput | undefined>(undefined)
+  const pendingReference = React.useRef<PendingInput | undefined>(undefined)
+  const renders = React.useRef<RenderCall[]>([])
+  const filterSamples = React.useRef<Sample[]>([])
+  const referenceSamples = React.useRef<Sample[]>([])
+  const items = React.useMemo(() => {
+    const filtered = query === '' ? fixture : fixture.filter(item => item.textValue.toLowerCase().includes(query.toLowerCase()))
+    // Rebuild control: fresh item objects on every keystroke, as a host that rebuilds
+    // its projection would hand RAC. The work and identity checks must reject it.
+    return root.current?.dataset.rebuildControl === 'true' ? filtered.map(item => ({ ...item })) : filtered
+  }, [query])
+  const renderRow = React.useCallback((item: Agent, state: { readonly pinned: boolean }) => {
+    renders.current.push({ key: String(item.id), pinned: state.pinned, retained: fixture.includes(item) })
+    return <div {...stylex.props(styles.row)}>{item.textValue}</div>
   }, [])
-  const changeQuery = React.useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+  const capture = (pending: React.RefObject<PendingInput | undefined>) => (event: React.FormEvent<HTMLInputElement>) => {
+    // Start at input capture, BEFORE onChange's synchronous work and React's commit.
+    renders.current = []
+    pending.current = { start: performance.now(), value: event.currentTarget.value, paintedBefore: root.current === null ? [] : paintedKeys(root.current) }
+  }
+  const publish = () => {
+    const element = root.current!
+    element.dataset.filterSamples = JSON.stringify(filterSamples.current)
+    element.dataset.referenceSamples = JSON.stringify(referenceSamples.current)
+  }
+  const recordInto = (samples: React.RefObject<Sample[]>, count: number) => (input: PendingInput, durationMs: number) => {
+    const sample: Sample = { durationMs, value: input.value, count, retainedIdentity: items.every(item => fixture.includes(item)), paintedBefore: input.paintedBefore, paintedKeys: paintedKeys(root.current!) }
+    samples.current.push(sample)
+    return sample
+  }
+  const settleInto = (samples: React.RefObject<Sample[]>) => (sample: Sample) => {
+    const index = samples.current.indexOf(sample)
+    if (index < 0) return
+    samples.current[index] = { ...sample, renders: [...renders.current] }
+    publish()
+  }
+  useKeystrokeSample(query, pendingFilter, recordInto(filterSamples, items.length), settleInto(filterSamples))
+  useKeystrokeSample(reference, pendingReference, recordInto(referenceSamples, items.length), settleInto(referenceSamples))
+  const changeQuery = (event: React.ChangeEvent<HTMLInputElement>) => {
     const cost = Number(root.current?.dataset.synchronousCostMs ?? 0)
     if (cost > 0) {
       const until = performance.now() + cost
       while (performance.now() < until) { /* Deliberate synchronous regression control. */ }
     }
     setQuery(event.currentTarget.value)
-  }, [])
-  React.useLayoutEffect(() => {
-    const input = pending.current
-    if (input === undefined || input.query !== query) return
-    const frame = requestAnimationFrame(() => {
-      const element = root.current
-      if (element === null) return
-      // Use now(), not the frame timestamp: the latter can precede the costly
-      // input handler. This is the first animation frame after React's commit,
-      // the browser's next-paint boundary (not a physical display-paint claim).
-      const durationMs = performance.now() - input.start
-      samples.current.push({
-        durationMs,
-        query,
-        count: items.length,
-        retainedIdentity: items.every(item => fixture.includes(item)),
-        paintedKeys: [...element.querySelectorAll<HTMLElement>('[data-sidebar-tree-key]')].map(row => row.dataset.sidebarTreeKey!),
-      })
-      pending.current = undefined
-      element.dataset.filterSamples = JSON.stringify(samples.current)
-      element.dataset.sampleCount = String(samples.current.length)
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [query, items])
-  return <section ref={root} data-testid={`filter-probe-${id}`} data-synchronous-cost-ms="0" data-visible-count={items.length} {...stylex.props(styles.probe, light && lightTheme, narrow ? styles.narrow : styles.wide)}>
-    <label {...stylex.props(styles.toolbar)}>
+  }
+  return <section ref={root} data-testid={`filter-probe-${id}`} data-synchronous-cost-ms="0" data-rebuild-control="false" data-visible-count={items.length} {...stylex.props(styles.probe, light && lightTheme, narrow ? styles.narrow : styles.wide)}>
+    <div {...stylex.props(styles.toolbar)}>
       <span>{light ? 'Light' : 'Dark'} · {narrow ? '240' : '440'} · 78 agents</span>
-      <input data-testid={`filter-input-${id}`} aria-label={`Filter agents ${id}`} type="search" value={query} onInputCapture={captureInput} onChange={changeQuery} {...stylex.props(styles.input)} />
-    </label>
+      <input aria-label={`Filter agents ${id}`} type="search" value={query} onInputCapture={capture(pendingFilter)} onChange={changeQuery} {...stylex.props(styles.input)} />
+      <input aria-label={`Reference keystroke ${id}`} type="text" value={reference} onInputCapture={capture(pendingReference)} onChange={event => setReference(event.currentTarget.value)} {...stylex.props(styles.input)} />
+    </div>
     <div {...stylex.props(styles.viewport)}>
       <SidebarTree aria-label={`Filtered agents ${id}`} items={items} expandedKeys={emptyExpanded} onExpandedChange={onExpandedChange} renderRow={renderRow} onRowContextMenu={onRowContextMenu} />
     </div>
@@ -91,41 +134,50 @@ const meta = {
   component: SidebarTree,
   parameters: {
     layout: 'fullscreen',
-    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Measures input-capture through the first animation frame after React commits. Each composition checks the 50ms p90 budget, proves that a synchronous 120ms regression rejects that same budget, then restores and checks the production path again. This kit-only probe does not measure application agent-search latency.' } },
+    docs: { description: { component: 'Production SidebarTree filter probe with 78 identity-retained synthetic agents. Primary, deterministic: each keystroke may render only rows that newly became painted, with no churn of item identity; a fresh-object rebuild control must reject. Secondary, calibrated: the filter keystroke-to-next-frame p90 must stay within 3x the p90 of a trivial reference keystroke typed into the same page just before it; a busy-wait control of 4x that reference p90 must reject. This kit-only probe does not measure application agent-search latency.' } },
   },
 } satisfies Meta<typeof SidebarTree>
 export default meta
 type Story = StoryObj<typeof meta>
 
-const readSamples = (root: HTMLElement): readonly Sample[] => JSON.parse(root.dataset.filterSamples ?? '[]') as Sample[]
+const read = (root: HTMLElement, key: 'filterSamples' | 'referenceSamples'): readonly Sample[] => JSON.parse(root.dataset[key] ?? '[]') as Sample[]
 const p90 = (samples: readonly Sample[]) => [...samples].map(sample => sample.durationMs).sort((a, b) => a - b)[Math.ceil(samples.length * 0.9) - 1]!
-// Both paths call the exact same budget check; the negative control must reject.
-const assertBudget = async (samples: readonly Sample[]) => {
-  await expect(samples).toHaveLength(sampleCount)
-  await expect(p90(samples)).toBeLessThan(budgetMs)
-}
-async function collectSamples(root: HTMLElement, input: HTMLInputElement) {
-  const before = readSamples(root).length
+
+// One keystroke per sample; the next keystroke waits until the previous sample has settled.
+async function collect(root: HTMLElement, input: HTMLInputElement, key: 'filterSamples' | 'referenceSamples', toggle: string) {
+  const before = read(root, key).length
   await expect(input.value).toBe('')
   for (let index = 0; index < sampleCount; index++) {
-    const filtered = index % 2 === 0
-    await userEvent.type(input, filtered ? 'x' : '{Backspace}')
-    // Exactly one keystroke per sample, and await its commit/frame before the
-    // next input. No userEvent delay or polling time is included in the metric.
-    await waitFor(() => expect(readSamples(root)).toHaveLength(before + index + 1))
-    const sample = readSamples(root)[before + index]!
-    await expect(sample.query).toBe(filtered ? 'x' : '')
-    await expect(sample.count).toBe(filtered ? 26 : 78)
-    await expect(root.dataset.visibleCount).toBe(String(sample.count))
-    await expect(sample.retainedIdentity).toBe(true)
-    await expect(sample.paintedKeys.length).toBeGreaterThan(0)
-    const allowed = fixture.filter(item => !filtered || item.textValue.includes('flux')).map(item => String(item.id))
-    for (const key of sample.paintedKeys) await expect(allowed).toContain(key)
-    // Prove the actual RAC collection changed, not just the count/readout.
-    await expect(sample.paintedKeys[0]).toBe(filtered ? 'filter-agent-2' : 'filter-agent-1')
-    await expect(within(root).getByRole('treegrid')).toBeVisible()
+    await userEvent.type(input, index % 2 === 0 ? toggle : '{Backspace}')
+    await waitFor(() => expect(read(root, key)[before + index]?.renders).toBeDefined())
   }
-  return readSamples(root).slice(before)
+  await expect(input.value).toBe('')
+  return read(root, key).slice(before)
+}
+
+// Primary check. Every keystroke renders only rows that newly became painted, never an
+// unpainted row, and every rendered item is the retained fixture object.
+async function assertWork(samples: readonly Sample[]) {
+  await expect(samples).toHaveLength(sampleCount)
+  for (const [index, sample] of samples.entries()) {
+    const filtered = index % 2 === 0
+    await expect(sample.value).toBe(filtered ? 'x' : '')
+    await expect(sample.count).toBe(filtered ? 26 : 78)
+    await expect(sample.paintedKeys[0]).toBe(filtered ? 'filter-agent-2' : 'filter-agent-1')
+    await expect(sample.retainedIdentity).toBe(true)
+    const renders = sample.renders!
+    await expect(renders.every(call => call.retained)).toBe(true)
+    for (const call of renders) await expect(sample.paintedKeys).toContain(call.key)
+    const changed = sample.paintedKeys.filter(key => !sample.paintedBefore.includes(key)).length
+    await expect(renders.length).toBeLessThanOrEqual(changed)
+  }
+}
+
+// Secondary check, calibrated against the reference keystroke measured just before.
+async function assertRatio(filter: readonly Sample[], reference: readonly Sample[]) {
+  await expect(filter).toHaveLength(sampleCount)
+  await expect(reference).toHaveLength(sampleCount)
+  await expect(p90(filter) / p90(reference)).toBeLessThanOrEqual(ratioBudget)
 }
 
 export const FilterKeystrokeToPaint: Story = {
@@ -133,25 +185,39 @@ export const FilterKeystrokeToPaint: Story = {
   play: async ({ canvasElement }) => {
     await document.fonts.ready
     // Allow initial virtualizer measurements to settle outside all samples.
-    for (let index = 0; index < 6; index++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    for (let index = 0; index < 6; index++) await nextFrame()
     for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-testid^="filter-probe-"]')) {
-      const input = within(root).getByRole('searchbox') as HTMLInputElement
+      const filter = within(root).getByRole('searchbox') as HTMLInputElement
+      const referenceInput = within(root).getByRole('textbox') as HTMLInputElement
       await expect(root.dataset.visibleCount).toBe('78')
-      const production = await collectSamples(root, input)
-      root.dataset.productionP90Ms = String(p90(production))
-      await assertBudget(production)
+      const phase = async (name: string) => {
+        const reference = await collect(root, referenceInput, 'referenceSamples', 'r')
+        const samples = await collect(root, filter, 'filterSamples', 'x')
+        root.dataset[`${name}Ratio`] = String(p90(samples) / p90(reference))
+        return { reference, samples }
+      }
+      const production = await phase('production')
+      await assertWork(production.samples)
+      await assertRatio(production.samples, production.reference)
       try {
-        root.dataset.synchronousCostMs = String(controlCostMs)
-        const control = await collectSamples(root, input)
-        root.dataset.controlP90Ms = String(p90(control))
-        await expect(p90(control)).toBeGreaterThan(controlCostMs)
-        await expect(assertBudget(control)).rejects.toThrow()
+        root.dataset.rebuildControl = 'true'
+        const rebuild = await phase('rebuild')
+        await expect(assertWork(rebuild.samples)).rejects.toThrow()
+      } finally {
+        root.dataset.rebuildControl = 'false'
+      }
+      try {
+        const reference = await collect(root, referenceInput, 'referenceSamples', 'r')
+        root.dataset.synchronousCostMs = String(controlRatio * p90(reference))
+        const samples = await collect(root, filter, 'filterSamples', 'x')
+        root.dataset.busyRatio = String(p90(samples) / p90(reference))
+        await expect(assertRatio(samples, reference)).rejects.toThrow()
       } finally {
         root.dataset.synchronousCostMs = '0'
       }
-      const restored = await collectSamples(root, input)
-      root.dataset.restoredP90Ms = String(p90(restored))
-      await assertBudget(restored)
+      const restored = await phase('restored')
+      await assertWork(restored.samples)
+      await assertRatio(restored.samples, restored.reference)
     }
   },
 }
