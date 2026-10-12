@@ -764,6 +764,14 @@ To reverify a published tag with the current Nix workflow and runner, use
 `gh workflow run nix.yml --ref main -f tag=v0.3.17`. The checkout and proof retain
 that tag's exact source; the tag and its published release are not modified.
 
+Configure free-space thresholds on the Nix daemon that owns the persistent store.
+An untrusted runner's `NIX_CONFIG` cannot override those daemon settings. The dedicated
+runner uses a 20 GiB minimum and 50 GiB collection target; keep the runner account
+untrusted and retain successful package/check outputs as GC roots. Configure the
+daemon's `build-dir` on a separate persistent build disk so durable SQLite tests
+do not share the system/store disk's write queue. Keep the disk-backed fixtures
+and their latency assertions unchanged.
+
 The content guard still rejects real machine/home identities and private fleet configuration
 references. Release workflows remain separate from the required gate; neither package
 verification nor the Nix package/check graph is made redundant by workspace nextest.

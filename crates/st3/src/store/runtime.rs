@@ -179,20 +179,30 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn create_schema(&self, connection: &Connection) -> Result<()> {
-        connection.execute_batch(SCHEMA)?;
-        connection.execute_batch(&RUNTIME_ID_INDEX)?;
-        connection.execute_batch(arrangements::SCHEMA)?;
-        usage_period::create_schema(connection)?;
+        // These declarations form one schema update. Autocommitting each table and index
+        // performs hundreds of durable syncs before a new daemon can accept connections.
+        {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(SCHEMA)?;
+            transaction.execute_batch(&RUNTIME_ID_INDEX)?;
+            transaction.execute_batch(arrangements::SCHEMA)?;
+            usage_period::create_schema(&transaction)?;
+            transaction.commit()?;
+        }
         migrate_local_usage_seen(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
-        resources::create_schema(connection)?;
-        custom::create_schema(connection)?;
-        agent_messages::create_schema(connection)?;
-        coordination::create_schema(connection)?;
-        glass_heads::create_schema(connection)?;
-        limits::create_limits_schema(connection)?;
+        {
+            let transaction = connection.unchecked_transaction()?;
+            resources::create_schema(&transaction)?;
+            custom::create_schema(&transaction)?;
+            agent_messages::create_schema(&transaction)?;
+            coordination::create_schema(&transaction)?;
+            glass_heads::create_schema(&transaction)?;
+            limits::create_limits_schema(&transaction)?;
+            transaction.commit()?;
+        }
         if let Some(views) = &self.ivm_views {
             // Registered stores run this on every open; each view's schema hook must
             // be idempotent, including reopen with persisted outputs and event cursors.
@@ -451,6 +461,33 @@ const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.arrangements.v2";
 pub(crate) fn compatibility_digest(registry_digest: &str) -> String {
     canonical_hash(&(SHARED_PROJECTION_LAYOUT, registry_digest))
         .expect("projection compatibility identity serializes")
+}
+
+#[cfg(test)]
+mod schema_transaction_tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_runtime_schema_update_preserves_the_previous_schema() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        // A preexisting incompatible table fails a later declaration, after earlier
+        // indexes and tables have been created. None of those may remain after failure.
+        connection.execute_batch("CREATE TABLE mission_runs(id TEXT)").unwrap();
+        let objects = || {
+            connection.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+                .unwrap()
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = objects();
+        assert!(SmalltalkRuntime::default().create_schema(&connection).is_err());
+        assert!(connection.is_autocommit(), "the failed update releases its transaction");
+        assert_eq!(objects(), before, "a failed update leaves no partial schema");
+    }
 }
 
 #[cfg(test)]

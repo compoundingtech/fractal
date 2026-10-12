@@ -419,14 +419,25 @@ mod projection_failure_diagnostic_tests {
     }
 }
 
-/// The graph's tables: the claim log and its batches, operations, documents and blobs, replica
-/// envelopes and records, peers, fleet invites and checkpoints. A runtime adds its own.
-pub const SCHEMA: &str = r#"
+// Keep the public SQL batch and the separately executed connection settings in sync.
+macro_rules! graph_schema {
+    ($settings:literal, $declarations:literal) => {
+        const CONNECTION_SETTINGS: &str = $settings;
+        const GRAPH_SCHEMA: &str = $declarations;
+        /// The graph's tables: claims, batches, operations, documents, replicas and checkpoints.
+        /// A runtime adds its own declarations.
+        pub const SCHEMA: &str = concat!($settings, $declarations);
+    };
+}
+
+graph_schema!(
+    r#"
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
-
+"#,
+    r#"
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -709,7 +720,39 @@ CREATE INDEX IF NOT EXISTS checkpoint_claims_envelope
 ON checkpoint_claims(writer, sequence, envelope_hash);
 CREATE INDEX IF NOT EXISTS checkpoint_claims_operation
 ON checkpoint_claims(operation_id) WHERE operation_id IS NOT NULL;
-"#;
+"#
+);
+
+fn create_graph_schema(connection: &Connection) -> Result<()> {
+    // WAL and synchronous settings must be applied outside a transaction. The graph's
+    // declarations commit together, instead of syncing every table and index separately.
+    connection.execute_batch(CONNECTION_SETTINGS)?;
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute_batch(GRAPH_SCHEMA)?;
+    transaction.execute_batch(&fleet_generation_schema())?;
+    idempotency::initialize(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn a_failed_graph_schema_update_preserves_the_previous_schema() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection.execute_batch("CREATE TABLE batches(incompatible TEXT)").unwrap();
+    let objects = || {
+        connection.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let before = objects();
+    assert!(create_graph_schema(&connection).is_err());
+    assert!(connection.is_autocommit(), "the failed update releases its transaction");
+    assert_eq!(objects(), before, "no partial graph declarations survive the failure");
+}
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
 pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 18;";
@@ -903,12 +946,14 @@ impl Store {
     fn create_schema(connection: &Connection, runtime: &dyn Runtime) -> Result<()> {
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
-        connection.execute_batch(SCHEMA)?;
-        connection.execute_batch(&fleet_generation_schema())?;
-        idempotency::initialize(connection)?;
+        create_graph_schema(connection)?;
         events::initialize(connection)?;
-        inventory_generation::initialize(connection)?;
-        connection.execute_batch(principals::PRINCIPAL_SCHEMA)?;
+        {
+            let transaction = connection.unchecked_transaction()?;
+            inventory_generation::initialize(&transaction)?;
+            transaction.execute_batch(principals::PRINCIPAL_SCHEMA)?;
+            transaction.commit()?;
+        }
         runtime.create_schema(connection)?;
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
@@ -917,8 +962,12 @@ impl Store {
             connection.execute_batch(SCHEMA_VERSION)?;
         }
         document_index::initialize(connection)?;
-        connection.execute_batch(WRITE_CLOCK)?;
-        create_graph_generation_triggers(connection, runtime.legacy_digest_tables())?;
+        {
+            let transaction = connection.unchecked_transaction()?;
+            transaction.execute_batch(WRITE_CLOCK)?;
+            create_graph_generation_triggers(&transaction, runtime.legacy_digest_tables())?;
+            transaction.commit()?;
+        }
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
         Ok(())
