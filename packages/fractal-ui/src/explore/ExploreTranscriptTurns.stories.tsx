@@ -82,7 +82,7 @@ function Block({ block, previous, turn, kind, meta }: Pick<ExploreArgs, 'turn' |
   return <div ref={root} {...hoverProps} data-turn-block={block.id} data-turn-kind={block.kind} data-turn-structure={turn} data-kind-cue={kind} data-meta={meta} data-hovered={isHovered || undefined} data-tapped={tapped || undefined} title={meta === 'M3' ? exact(block.at) : undefined} onPointerDown={event => { if (event.pointerType === 'touch') setTapped(value => !value) }} {...stylex.props(styles.block, !seat && styles.input, turn === 'T2' && !seat && styles.bubble, turn === `T${3}` && styles.senderGutter, kind === 'K2' && block.kind === 'Person' && styles.humanRail, kind === 'K2' && block.kind === 'Agent' && styles.agentRail, kind === 'K2' && (block.kind === 'Relay' || block.kind === 'System') && styles.quietRail, collapsedKind && styles.quiet)}>
     {turn === `T${3}` ? <span aria-hidden="true" {...stylex.props(styles.glyph)}>{glyphs[block.kind]}</span> : null}
     {meta === 'M3' && isDivider(block, previous) ? <div data-time-divider {...stylex.props(styles.divider)}>── {time} ──</div> : null}
-    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary)}><span data-input-kind-icon aria-hidden="true">{glyphs[block.kind]} {expanded ? '▾' : '▸'}</span><strong data-input-sender>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}>{block.text.split('\n')[0]}</span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{header}{body}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
+    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary)}><span data-input-kind-icon aria-hidden="true">{glyphs[block.kind]} {expanded ? '▾' : '▸'}</span><strong data-input-sender>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}><span data-input-title-run {...stylex.props(styles.summaryRun)}>{block.text.split('\n')[0]}</span></span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{header}{body}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
     {meta === 'M1' || meta === 'M2' ? <div data-meta-time data-affordance={meta === 'M2' || seat ? 'reveal' : 'always'} {...stylex.props(styles.timeOverlay, meta === 'M2' && styles.gutterTime)}>{time}</div> : null}
     {meta === 'M4' && tail !== null && (!collapsedKind || expanded) ? createPortal(<span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span>, tail) : null}
     <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`Copy ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy)}>{copied ? 'Copied' : 'Copy'}</Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? exact(block.at) : 'Copy message'}</Tooltip></TooltipTrigger>
@@ -116,7 +116,7 @@ function Explorer(args: ExploreArgs) {
       <div data-control-transition data-turn-variant="T1" data-kind-variant="K1" data-meta-variant="M1" data-scheme="dark" data-width="1440" data-lane-count="1"><Button {...stylex.props(styles.control)}>Inert transition control</Button><Button aria-expanded={false} {...stylex.props(styles.control)}>Inert disclosure control</Button></div>
       <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false }}><ThreadPrimitive.Root data-control-production-meta><ThreadPrimitive.Unstable_MessageById messageId={replyItems[0]!.id} components={metaControlComponents} /></ThreadPrimitive.Root></EmbraceRuntimeProvider>
       <div data-control-k3 {...stylex.props(styles.quietInputControl)}><span data-input-title>Quiet summary with no sender or kind cue</span></div>
-      <div data-control-k3-stacked {...stylex.props(styles.stackedInputControl)}><span data-input-title>Sender<br />Wrapped title</span></div>
+      <div data-control-k3-stacked {...stylex.props(styles.stackedInputControl)}><span data-input-title><span data-input-title-run>Sender<br />Wrapped title</span></span></div>
       <FocusRemountControl />
       <div data-control-missing-time>Reply without its own timestamp.</div>
     </section>
@@ -157,6 +157,7 @@ const styles = stylex.create({
   copy: { position: 'absolute', top: s.xs, right: 0, minHeight: g.controlSm, padding: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fgMuted, cursor: 'pointer', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   divider: { position: 'absolute', top: geometry.lift, left: 0, right: 0, textAlign: 'center', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   summary: { display: 'flex', flexWrap: 'nowrap', alignItems: 'center', gap: s.sm, width: '100%', padding: 0, paddingRight: geometry.metaRoom, minHeight: g.toolRow, lineHeight: g.toolRow, whiteSpace: 'nowrap', borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } }, summaryText: { flex: '1 1 auto', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 },
+  summaryRun: { display: 'inline-block', whiteSpace: 'nowrap' },
   stackedInputControl: { width: geometry.metaRoom, fontSize: t.uiSize, lineHeight: g.toolRow },
   quietInputControl: { color: ink.fgMuted, height: g.iconSm, overflow: 'hidden', fontSize: t.metaSize, lineHeight: t.metaLeading },
   work: { marginTop: s.md }, tooltip: { padding: s.md, backgroundColor: surface.raised, color: ink.fg, fontSize: t.metaSize, borderRadius: r.sm },
@@ -200,9 +201,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
       await expect(trigger.querySelector('[data-input-kind-icon]')!.textContent?.trim().length).toBeGreaterThan(0)
       await expect(trigger.getBoundingClientRect().height).toBeGreaterThanOrEqual(24)
       await expect(trigger.getBoundingClientRect().height).toBeLessThanOrEqual(parseFloat(getComputedStyle(trigger).lineHeight))
-      const titleRun = document.createRange()
-      titleRun.selectNodeContents(trigger.querySelector('[data-input-title]')!)
-      await expect(titleRun.getClientRects()).toHaveLength(1)
+      await expect(trigger.querySelector<HTMLElement>('[data-input-title-run]')!.getClientRects()).toHaveLength(1)
     }
   }
   await waitFor(() => expect(canvasElement.querySelector('[data-control-production-meta] [data-testid="answer-meta"]')).not.toBeNull())
@@ -212,9 +211,7 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   await expect(quietControl.getBoundingClientRect().height).toBeLessThan(24)
   const stackedControl = canvasElement.querySelector<HTMLElement>('[data-control-k3-stacked]')!
   await expect(stackedControl.getBoundingClientRect().height).toBeGreaterThan(parseFloat(getComputedStyle(stackedControl).lineHeight))
-  const stackedRun = document.createRange()
-  stackedRun.selectNodeContents(stackedControl.querySelector('[data-input-title]')!)
-  await expect(stackedRun.getClientRects().length).toBeGreaterThan(1)
+  await expect(stackedControl.querySelector<HTMLElement>('[data-input-title-run]')!.getClientRects().length).toBeGreaterThan(1)
   for (const lane of canvasElement.querySelectorAll('[data-lane]')) {
     const blocks = Array.from(lane.querySelectorAll<HTMLElement>('[data-turn-block]'))
     for (const [index, block] of blocks.entries()) {
