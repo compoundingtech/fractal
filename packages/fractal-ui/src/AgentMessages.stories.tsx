@@ -476,6 +476,22 @@ export const HierarchyIncoming: Story = {
     const message = canvasElement.querySelector<HTMLElement>('[data-message-variant]')!
     await rejectOldMessageRhythm(message)
     const header = message.querySelector<HTMLElement>('[data-message-header]')!
+    const avatar = header.querySelector<HTMLElement>('[aria-hidden="true"]')!
+    const assertAvatarContained = async () => {
+      const bounds = avatar.getBoundingClientRect()
+      const line = header.getBoundingClientRect()
+      await expect(bounds.width).toBe(16)
+      await expect(bounds.height).toBe(16)
+      await expect(bounds.left).toBeGreaterThanOrEqual(line.left)
+      await expect(bounds.right).toBeLessThanOrEqual(line.right)
+      await expect(bounds.top).toBeGreaterThanOrEqual(line.top)
+      await expect(bounds.bottom).toBeLessThanOrEqual(line.bottom)
+    }
+    await assertAvatarContained()
+    avatar.style.width = '1.5rem'
+    avatar.style.height = '1.5rem'
+    try { await expect(assertAvatarContained()).rejects.toThrow() } finally { avatar.style.width = ''; avatar.style.height = '' }
+    await assertAvatarContained()
     const copy = within(header).getByRole('button', { name: 'Copy message' })
     await expect(message.querySelectorAll('button')).toHaveLength(1)
     await expect(message.querySelector('ul ul')).not.toBeNull()
@@ -583,10 +599,10 @@ export const HierarchyWithoutSubject: Story = {
       const body = message.querySelector<HTMLElement>('[data-message-content]')!
       const assertGap = async () => {
         await expect(message.querySelector('[data-message-subject], footer')).toBeNull()
-        await expect(body.getBoundingClientRect().top - header.getBoundingClientRect().bottom).toBe(2)
+        await expect(body.getBoundingClientRect().top - header.getBoundingClientRect().bottom).toBe(4)
       }
       await assertGap()
-      body.style.marginTop = '0.25rem'
+      body.style.marginTop = '0.125rem'
       try { await expect(assertGap()).rejects.toThrow() } finally { body.style.marginTop = '' }
       await assertGap()
     }

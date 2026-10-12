@@ -72,7 +72,7 @@ const MessageFrame = ({ variant, header, subject, children, label, outgoing = fa
 }) => <article {...stylex.props(styles.message, variant._tag === 'Incoming' ? styles.card : variant._tag === 'Outgoing' ? styles.outgoing : styles.human)} aria-label={label} data-harness-weight={variant._tag === 'Incoming' ? 'card' : 'row'} data-agent-message-direction={variant._tag === 'Incoming' ? 'incoming' : variant._tag === 'Outgoing' ? 'outgoing' : 'human'} data-message-variant={variant._tag.toLowerCase()} data-work-kind={outgoing ? 'messages-sent' : undefined}>
   <header data-message-header {...stylex.props(styles.header)}>{header}</header>
   {subject !== undefined ? <h3 data-message-subject {...stylex.props(styles.subject)}>{subject}</h3> : null}
-  {children !== undefined && children !== null ? <div data-message-content {...stylex.props(styles.content, subject !== undefined && styles.contentWithSubject)}>{children}</div> : null}
+  {children !== undefined && children !== null ? <div data-message-content {...stylex.props(styles.content)}>{children}</div> : null}
 </article>
 
 /** Transport and full-body loading belong to the host, not the message presentation. */
@@ -159,10 +159,9 @@ const styles = stylex.create({
   direction: { flex: '0 0 auto', width: g.icon, textAlign: 'center', color: textVars.fgMuted },
   sender: { color: textVars.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium },
   time: { marginLeft: 'auto', flex: '0 0 auto', whiteSpace: 'nowrap', textAlign: 'right' },
-  content: { marginTop: s.xs2, minWidth: 0 },
-  contentWithSubject: { marginTop: s.xs },
+  content: { marginTop: s.xs, minWidth: 0 },
   messageBody: { maxHeight: g.workExpandedMax, overflowY: 'auto', minWidth: 0, overflowWrap: 'anywhere', outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
-  avatar: { flex: '0 0 auto', width: g.controlSm, height: g.controlSm, display: 'grid', alignItems: 'center', justifyItems: 'center', backgroundColor: surfaceVars.rowActive, borderRadius: r.sm, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  avatar: { flex: '0 0 auto', width: g.avatarSm, height: g.avatarSm, display: 'grid', alignItems: 'center', justifyItems: 'center', backgroundColor: surfaceVars.rowActive, borderRadius: r.sm, fontSize: t.metaSize, lineHeight: t.metaLeading },
   chip: { paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, color: textVars.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', flex: '0 1 auto' },
   meta: { color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   subject: { margin: 0, marginTop: s.xs, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
