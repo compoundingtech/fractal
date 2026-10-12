@@ -21,7 +21,7 @@ import { replyItems, turnBlocks, workTurn, type TurnBlock } from './turns-fixtur
 import { turnsGeometry as geometry } from './turns-tokens.stylex'
 
 const dimensions = {
-  T: [{ id: 'T1', description: 'Inputs are sender cards; the owning seat replies in unnamed prose.' }, { id: 'T2', description: 'Inputs align right in 75% bubbles; seat prose aligns left.' }, { id: `T${3}`, description: '24-wide sender glyph gutter; names only when the sender changes.' }],
+  T: [{ id: 'T1', description: 'Inputs are sender Cards; the owning seat replies in unnamed Prose.' }, { id: 'T2', description: 'Inputs align right in 75% bubbles; seat Prose aligns left.' }, { id: `T${3}`, description: 'Composition glyph slot and nesting-step gutter; names only when the sender changes.' }],
   K: [{ id: 'K1', description: 'One Card shape with kind word; verified is silent, Unverified is explicit.' }, { id: 'K2', description: 'Person accent rail, agent neutral rail, muted dashed relay / system rails.' }, { id: 'K3', description: 'Relay / system become expandable one-line summaries; person / agent stay cards.' }],
   M: [{ id: 'M1', description: 'Time in input header; seat time / copy float above the run on reveal.' }, { id: 'M2', description: 'Time in the left first-line gutter; copy overlay top-right on reveal.' }, { id: 'M3', description: 'Time divider for inputs after ≥5 minutes or a day change; exact-time tooltip.' }, { id: 'M4', description: 'Time inline after the last line; copy overlay top-right on reveal.' }],
 } as const
@@ -178,7 +178,7 @@ const styles = stylex.create({
   summaryRun: { display: 'inline-block', whiteSpace: 'nowrap' },
   summarySender: { fontWeight: t.weightMedium, flexShrink: 0 },
   summarySlot: { width: g.icon, height: g.icon, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  marker: { minHeight: t.uiLeading, lineHeight: t.uiLeading },
+  marker: { minHeight: t.uiLeading, lineHeight: t.uiLeading, fontSize: t.metaSize, color: ink.fgMuted },
   stackedInputControl: { width: geometry.metaRoom, fontSize: t.uiSize, lineHeight: g.toolRow },
   quietInputControl: { color: ink.fgMuted, height: g.iconSm, overflow: 'hidden', fontSize: t.metaSize, lineHeight: t.metaLeading },
   work: { marginTop: s.md }, tooltip: { padding: s.md, backgroundColor: surface.raised, color: ink.fg, fontSize: t.metaSize, borderRadius: r.sm },
@@ -267,7 +267,8 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     for (const block of lane.querySelectorAll<HTMLElement>('[data-kind-cue="K3"]')) {
       const trigger = block.querySelector<HTMLElement>('button[aria-expanded="false"]')
       if (trigger === null) continue
-      await expect(getComputedStyle(trigger.querySelector('[data-input-title]')!).color).toBe(getComputedStyle(block).color)
+      const isMarker = lane.hasAttribute('data-recommended') && block.getAttribute('data-turn-kind') === 'System'
+      await expect(getComputedStyle(trigger.querySelector('[data-input-title]')!).color).toBe(isMarker ? getComputedStyle(canvasElement.querySelector('[data-control-k3]')!).color : getComputedStyle(block).color)
       await expect(trigger.querySelector('[data-input-sender]')!.textContent?.trim().length).toBeGreaterThan(0)
       await expect(getComputedStyle(trigger.querySelector('[data-input-sender]')!).fontWeight).toBe('500')
       await expect(trigger.querySelector('[data-input-kind-icon] svg')).not.toBeNull()
