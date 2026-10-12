@@ -430,7 +430,8 @@ workflow-level path filters. `linux-gate` does not depend on them.
   (`apps/fractal-web/scripts/vite-css-assets.mjs`) fails every production build that
   emits a stylesheet without rules, or a chunk that loads a font file no `@font-face`
   in its loaded stylesheets declares. The preceding CSS asset guard lane builds
-  fixtures that must trip both failures and a control that must pass.
+  fixtures that must trip both failures, and controls (quoted URLs with parentheses,
+  faces declared by the entry's stylesheet) that must pass.
   App, UI kit, Storybook, browser and performance lanes join the script with the
   packages that add them.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its

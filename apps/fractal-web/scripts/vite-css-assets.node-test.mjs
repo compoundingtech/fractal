@@ -8,19 +8,16 @@ import { build } from 'vite'
 import { fractalCssAssets } from './vite-css-assets.mjs'
 
 // The terminal's shape: the entry lazily loads a chunk that imports its face stylesheet
-// and, when `preload` is set, also loads the font file by URL as terminalFonts.ts does.
-const buildFixture = async ({ stylesheet, preload }) => {
+// and loads the font file by URL, as terminalFonts.ts does.
+const buildFixture = async (files) => {
   const root = await mkdtemp(join(tmpdir(), 'fractal-css-assets-'))
   try {
-    await writeFile(join(root, 'index.html'), '<script type="module" src="./main.js"></script>\n')
-    await writeFile(join(root, 'main.js'), "import('./terminal.js')\n")
-    await writeFile(
-      join(root, 'terminal.js'),
-      preload ? "import './fonts.css'\nexport { default } from './Mono.woff2?url'\n" : "import './fonts.css'\nexport default 1\n",
-    )
-    await writeFile(join(root, 'fonts.css'), stylesheet)
-    // Above Vite's 4 KiB inline limit, like the real faces, so it is emitted as a file.
-    await writeFile(join(root, 'Mono.woff2'), randomBytes(8192))
+    const fixture = {
+      'index.html': '<script type="module" src="./main.js"></script>\n',
+      'main.js': "import('./terminal.js')\n",
+      ...files,
+    }
+    for (const [name, content] of Object.entries(fixture)) await writeFile(join(root, name), content)
     const result = await build({
       root,
       configFile: false,
@@ -34,27 +31,57 @@ const buildFixture = async ({ stylesheet, preload }) => {
   }
 }
 
-const face = "@font-face { font-family: 'Mono'; src: url('./Mono.woff2') format('woff2'); }\n"
+// Above Vite's 4 KiB inline limit, like the real faces, so it is emitted as a file.
+const font = () => randomBytes(8192)
+const terminal = (fontFile) => `import './fonts.css'\nexport { default } from './${fontFile}?url'\n`
+const face = (src) => `@font-face { font-family: 'Mono'; src: ${src}; }\n`
 
 test('control: a lazy chunk whose stylesheet declares its preloaded face builds', async () => {
-  const output = await buildFixture({ stylesheet: face, preload: true })
+  const output = await buildFixture({
+    'terminal.js': terminal('Mono.woff2'),
+    'fonts.css': face("url('./Mono.woff2') format('woff2')"),
+    'Mono.woff2': font(),
+  })
   const stylesheets = output.filter((asset) => asset.fileName.endsWith('.css'))
-  const font = output.find((asset) => asset.fileName.endsWith('.woff2'))
+  const emitted = output.find((asset) => asset.fileName.endsWith('.woff2'))
   assert.equal(stylesheets.length, 1)
-  assert.ok(font)
-  assert.match(String(stylesheets[0]?.source), new RegExp(`@font-face\\{[^}]*${font.fileName.split('/').pop()}`))
+  assert.ok(emitted)
+  assert.ok(String(stylesheets[0]?.source).includes(emitted.fileName.split('/').pop() ?? ''))
+})
+
+test('control: a quoted URL with parentheses among several src alternatives declares its face', async () => {
+  const output = await buildFixture({
+    'terminal.js': terminal('Mono(Regular).woff2'),
+    'fonts.css': face(`local('Mono'), url("./Mono(Regular).woff2") format('woff2')`),
+    'Mono(Regular).woff2': font(),
+  })
+  assert.ok(output.some((asset) => /^assets\/Mono\(Regular\)-[\w-]+\.woff2$/.test(asset.fileName)))
+})
+
+test("control: a face declared by the entry's stylesheet covers a lazy chunk that preloads it", async () => {
+  const output = await buildFixture({
+    'main.js': "import './app.css'\nimport('./terminal.js')\n",
+    'app.css': face("url('./Mono.woff2') format('woff2')"),
+    'terminal.js': "export { default } from './Mono.woff2?url'\n",
+    'Mono.woff2': font(),
+  })
+  assert.equal(output.filter((asset) => asset.fileName.endsWith('.css')).length, 1)
 })
 
 test('negative: a lazy chunk whose stylesheet lost every rule fails the build', async () => {
   await assert.rejects(
-    buildFixture({ stylesheet: '/* Faces moved elsewhere. */\n', preload: false }),
+    buildFixture({ 'terminal.js': "import './fonts.css'\nexport default 1\n", 'fonts.css': '/* Faces moved elsewhere. */\n' }),
     /\[fractal:css-assets\]\nassets\/terminal-[\w-]+\.css has no CSS rules \(\d+ bytes\), yet assets\/terminal-[\w-]+\.js loads it/,
   )
 })
 
 test('negative: a preloaded font without a declared face fails even when other rules remain', async () => {
   await assert.rejects(
-    buildFixture({ stylesheet: '::highlight(find) { color: red; }\n', preload: true }),
+    buildFixture({
+      'terminal.js': terminal('Mono.woff2'),
+      'fonts.css': '::highlight(find) { color: red; }\n',
+      'Mono.woff2': font(),
+    }),
     /assets\/terminal-[\w-]+\.js loads assets\/Mono-[\w-]+\.woff2, but no @font-face in its stylesheets \(assets\/terminal-[\w-]+\.css\) declares it/,
   )
 })

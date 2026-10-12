@@ -3,10 +3,11 @@
 const fontFile = /\.(?:woff2?|ttf|otf)$/i
 const comments = /\/\*[\s\S]*?\*\//g
 const fontFaces = /@font-face\s*\{([^}]*)\}/gi
-const urls = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi
+// Quoted values keep parentheses and the other quote; unquoted ones need them escaped.
+const urls = /url\(\s*(?:"([^"]*)"|'([^']*)'|((?:\\.|[^'"()\s\\])+))\s*\)/gi
 
 /** @param {string} url */
-const fileNameOf = (url) => url.split(/[?#]/)[0]?.split('/').pop() ?? url
+const fileNameOf = (url) => url.replace(/\\(.)/g, '$1').split(/[?#]/)[0]?.split('/').pop() ?? url
 
 /**
  * Problems in a finished bundle's stylesheets, one human-readable line each.
@@ -58,7 +59,7 @@ const cssAssetProblems = (bundle) => {
     const declared = new Set()
     for (const stylesheet of loaded) {
       for (const [, face = ''] of (stylesheets.get(stylesheet) ?? '').matchAll(fontFaces)) {
-        for (const [, , url = ''] of face.matchAll(urls)) declared.add(fileNameOf(url))
+        for (const [, double, single, bare] of face.matchAll(urls)) declared.add(fileNameOf(double ?? single ?? bare ?? ''))
       }
     }
     for (const font of fonts) {
