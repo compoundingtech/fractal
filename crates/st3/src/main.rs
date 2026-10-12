@@ -59,6 +59,7 @@ use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
 mod cli_help;
+mod change_cli;
 mod directive_note;
 mod completion;
 mod doctor_cli;
@@ -119,6 +120,8 @@ enum Command {
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = st_drivers::version::display_version())]
     Ui(stui::Args),
+    /// Inspect Git-backed changes and their separate ref/index/evidence freshness.
+    Changes(change_cli::ChangesArgs),
     /// Validate and publish KDL files containing seats, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     Apply(ApplyArgs),
@@ -5535,6 +5538,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Clients => run_clients(&endpoint, cli.json).await,
         Command::Work { command } => run_work(&client, &endpoint, command, cli.json).await,
+        Command::Changes(arguments) => change_cli::run(&client, arguments, cli.json).await,
         Command::Gh { command } => run_gh(&client, command, cli.json).await,
         Command::Lanes { command } => {
             run_lanes(&client, config.person.as_deref(), command, cli.json).await
@@ -6531,6 +6535,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.state_dir.clone(),
         st3::sekrets::client::socket_path(),
     );
+    store.install_git_change_registry(Arc::new(st3::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
         store: store.clone(),
         notify: notify.clone(),
