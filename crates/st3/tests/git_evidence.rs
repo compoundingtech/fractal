@@ -669,3 +669,283 @@ os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
     std::fs::write(fixtures.join("artifact.zip"), damaged).unwrap();
     assert!(!observer(&[]).status.success());
 }
+
+#[test]
+fn protected_review_cli_fetches_daemon_claim_and_snapshot_and_exports_verified_or_degraded_record()
+{
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let public = root.path().join("public-repository");
+    std::fs::create_dir(&public).unwrap();
+    git(&public, &["init", "-q"], b"");
+    let before = git(&public, &["hash-object", "-w", "--stdin"], b"before");
+    let after = git(&public, &["hash-object", "-w", "--stdin"], b"after");
+    let base_tree = git(
+        &public,
+        &["mktree"],
+        format!("100644 blob {before}\tcheck.rs\n").as_bytes(),
+    );
+    let head_tree = git(
+        &public,
+        &["mktree"],
+        format!("100644 blob {after}\tcheck.rs\n").as_bytes(),
+    );
+    let base = git(&public, &["commit-tree", &base_tree], b"base\n");
+    let head = git(
+        &public,
+        &["commit-tree", &head_tree, "-p", &base],
+        b"head\n",
+    );
+    git(&public, &["update-ref", "refs/heads/main", &head], b"");
+    let key = root.path().join("throwaway-key");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let test_key = root.path().join("throwaway-ci-key");
+    assert!(
+        Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&test_key)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let test_public = std::fs::read_to_string(test_key.with_extension("pub")).unwrap();
+    let trusted = root.path().join("allowed-signers");
+    let pubkey = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+    std::fs::write(&trusted, format!("fleet/fixture-ci namespaces=\"git\" {test_public}fleet/fixture-review namespaces=\"git\" {pubkey}")).unwrap();
+    let tests = Statement {
+        statement_type: evidence::STATEMENT_TYPE.into(),
+        predicate_type: evidence::PREDICATE_TYPE.into(),
+        subject: vec![Subject {
+            name: head.clone(),
+            digest: BTreeMap::from([("gitTree".into(), head_tree.clone())]),
+        }],
+        predicate: Observation {
+            schema_version: 1,
+            change_id: "github:fixture/new-name#7".into(),
+            signer: Some("fleet/fixture-ci".into()),
+            tier: TrustTier::Full,
+            re_attests: None,
+            producer_sha256: "a".repeat(64),
+            observed_at: "2026-10-12T07:00:00Z".into(),
+            fact: Fact::Tests {
+                runner: "fixture-runner".into(),
+                inputs: BTreeMap::new(),
+                checks: BTreeMap::from([(
+                    "unit-tests".into(),
+                    Check {
+                        command: vec!["fixture-check".into()],
+                        exit_code: 0,
+                        output_sha256: "b".repeat(64),
+                    },
+                )]),
+            },
+        },
+    };
+    let tests_id = evidence::sign_observation(&public, &tests, &test_key).unwrap();
+    evidence::put(&public, &tests_id, &trusted).unwrap();
+    let home = root.path().join("profile");
+    std::fs::create_dir_all(home.join(".config/st")).unwrap();
+    let scratch = home.join("observations.git");
+    assert!(
+        Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&scratch)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let configuration = serde_json::json!({"repository":"fixture/new-name", "scratch_repo":scratch,
+        "daemon_socket":home.join("read-only-daemon.sock"), "trusted_signers":trusted,
+        "resource_prefixes":["resource/github/fixture/old-name/pull-request/"], "review_origins":["fixture-node"],
+        "snapshot_origins":["fixture-node"], "reviewers":["agent/fixture-reviewer"], "test_signers":["fleet/fixture-ci"],
+        "required_checks":["unit-tests"], "tier":"full", "signer":"fleet/fixture-review", "ssh_key":key});
+    std::fs::write(
+        home.join(".config/st/evidence-review.json"),
+        serde_json::to_vec(&configuration).unwrap(),
+    )
+    .unwrap();
+    let document = b"Fixture immutable review document.\n";
+    let document_ref = format!(
+        "doc/fixture/review@{}",
+        hex::encode(Sha256::digest(document))
+    );
+    let claim_id = "c".repeat(64);
+    let snapshot_id = "d".repeat(64);
+    let mut claim = serde_json::json!({"id":claim_id,"kind":"resource.observed","subject":"resource/mission-run/fixture/review",
+        "origin":"fixture-node","actor":"agent/fixture-reviewer","accepted_at_unix_ms":1791792000000u64,
+        "body":{"fields":{"kind":"human.review","reviewer":"agent/fixture-reviewer","decision":"approve",
+            "submitted_at":"2026-10-12T08:00:00Z","document":document_ref,"target":format!("resource/github/fixture/old-name/pull-request/7@{snapshot_id}"),
+            "evidence_tests":[tests_id]}}});
+    let snapshot = serde_json::json!({"id":snapshot_id,"kind":"resource.observed","origin":"fixture-node",
+        "subject":"resource/github/fixture/old-name/pull-request/7", "body":{"fields":{"kind":"vcs.pull-request",
+            "facts":{"number":7,"node_id":"PR_fixture","head_sha":head}}}});
+    let mut pull = serde_json::json!({"number":7,"node_id":"PR_fixture","head":{"sha":head},
+        "base":{"sha":base,"repo":{"full_name":"fixture/new-name"}}});
+    for (name, value) in [
+        ("claim.json", &claim),
+        ("snapshot.json", &snapshot),
+        ("pull.json", &pull),
+    ] {
+        std::fs::write(root.path().join(name), serde_json::to_vec(value).unwrap()).unwrap();
+    }
+    std::fs::write(
+        root.path().join("document.json"),
+        serde_json::to_vec(&serde_json::json!({"reference":document_ref,"bytes":&document[..]}))
+            .unwrap(),
+    )
+    .unwrap();
+    let tools = root.path().join("installed");
+    std::fs::create_dir(&tools).unwrap();
+    let real_git = String::from_utf8(Command::new("which").arg("git").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let providers = [
+        (
+            "curl",
+            r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['FIXTURE_REVIEW_ROOT'])
+args = sys.argv[1:]
+assert args[:9] == ['-q','--silent','--fail','--max-time','30','--noproxy','*','--unix-socket',str(root / 'profile/read-only-daemon.sock')]
+url = args[9]
+assert len(args) == 10
+if url.startswith('http://localhost/v1/claims/by-id/'):
+    identity = url.rsplit('/',1)[1]
+    claim = json.loads((root / 'claim.json').read_text())
+    snapshot = json.loads((root / 'snapshot.json').read_text())
+    assert identity in (claim['id'],snapshot['id'])
+    value = claim if identity == claim['id'] else snapshot
+else:
+    value = json.loads((root / 'document.json').read_text())
+    assert url == 'http://localhost/v1/documents/content?reference=' + value['reference']
+print(json.dumps({'api_version':'st3.client.v0','value':value}))
+"#,
+        ),
+        (
+            "gh",
+            r#"#!/usr/bin/env python3
+import os, pathlib, sys
+assert sys.argv[1:] == ['api','--hostname','github.com','repos/fixture/new-name/pulls/7']
+print((pathlib.Path(os.environ['FIXTURE_REVIEW_ROOT']) / 'pull.json').read_text())
+"#,
+        ),
+        (
+            "git",
+            r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+if 'fetch' in args:
+    root = pathlib.Path(os.environ['FIXTURE_REVIEW_ROOT'])
+    expected = 'https://github.com/fixture/new-name.git'
+    assert expected in args
+    (root / 'fetch-arguments.json').write_text(json.dumps(args))
+    args[args.index(expected)] = str(root / 'public-repository')
+os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
+"#,
+        ),
+    ];
+    for (name, source) in providers {
+        let path = tools.join(name);
+        std::fs::write(&path, source).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let invoke = |id: &str, extra: &[&str]| {
+        Command::new(test_bin!("st3"))
+            .args(["evidence", "observe-review", "--claim", id])
+            .args(extra)
+            .env("HOME", &home)
+            .env(
+                "PATH",
+                format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("FIXTURE_REVIEW_ROOT", root.path())
+            .env("FIXTURE_REAL_GIT", &real_git)
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !invoke(&claim_id, &["--ssh-key", key.to_str().unwrap()])
+            .status
+            .success()
+    );
+    assert!(!invoke("../authored-claim", &[]).status.success());
+    let observed = success(invoke(&claim_id, &[]));
+    assert_eq!(observed["record"]["tier"], "full");
+    assert_eq!(observed["metrics"]["fresh_records"], 1);
+    let record = observed["record"]["record"].as_str().unwrap();
+    let imported = root.path().join("caller");
+    std::fs::create_dir(&imported).unwrap();
+    git(&imported, &["init", "-q"], b"");
+    let pack = base64::engine::general_purpose::STANDARD
+        .decode(observed["object_pack_base64"].as_str().unwrap())
+        .unwrap();
+    git(&imported, &["index-pack", "--stdin"], &pack);
+    assert_eq!(
+        evidence::verify_record(&imported, record, &trusted)
+            .unwrap()
+            .predicate
+            .tier,
+        TrustTier::Full
+    );
+    // Check the private key's Git object ID, rather than searching compressed pack bytes.
+    let private_oid = git(
+        &public,
+        &["hash-object", "--stdin"],
+        &std::fs::read(&key).unwrap(),
+    );
+    assert!(
+        !Command::new("git")
+            .arg("-C")
+            .arg(&imported)
+            .args(["cat-file", "-e", &private_oid])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert_eq!(
+        success(invoke(&claim_id, &[]))["record"]["newly_recorded"],
+        false
+    );
+    pull["head"]["sha"] = base.clone().into();
+    std::fs::write(
+        root.path().join("pull.json"),
+        serde_json::to_vec(&pull).unwrap(),
+    )
+    .unwrap();
+    assert!(!invoke(&claim_id, &[]).status.success());
+    pull["head"]["sha"] = head.clone().into();
+    std::fs::write(
+        root.path().join("pull.json"),
+        serde_json::to_vec(&pull).unwrap(),
+    )
+    .unwrap();
+    claim["id"] = "e".repeat(64).into();
+    std::fs::write(
+        root.path().join("claim.json"),
+        serde_json::to_vec(&claim).unwrap(),
+    )
+    .unwrap();
+    let unavailable = key.with_extension("unavailable");
+    std::fs::rename(&key, &unavailable).unwrap();
+    let degraded = success(invoke(&"e".repeat(64), &[]));
+    assert_eq!(degraded["record"]["tier"], "degraded");
+    assert_eq!(degraded["metrics"]["full_trust_share"], 0.0);
+    std::fs::rename(&unavailable, &key).unwrap();
+    let repeated = success(invoke(&"e".repeat(64), &[]));
+    assert_eq!(repeated["record"]["tier"], "degraded");
+    assert_eq!(
+        repeated["metrics"]["full_trust_share"],
+        serde_json::Value::Null
+    );
+}

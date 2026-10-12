@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add a protected selector-only review evidence observer",
+  "replay": {"status": "none", "detail": "No daemon replay change."},
+  "schema": {"status": "changed", "detail": "Portable v1 review STOP records may have no test citations; GO still requires them. Daemon claim schemas are unchanged by this slice."},
+  "rules": {"status": "none", "detail": "No daemon rule or main landing change."},
+  "compatibility": {"status": "changed", "detail": "Adds an internal observe-review command. Older verifiers reject empty-citation STOP records; upgrade participating verifiers before activating enforcement. No gate is enforced here."},
+  "downtime": {"status": "none", "detail": "No daemon downtime required."},
+  "manual": {"status": "changed", "detail": "Operators pin the installed adapter in a protected profile with read-only daemon and GitHub access, a private bare repository and external signer policy. No production keys or grants are provisioned here."},
+  "recovery": {"status": "changed", "detail": "Unavailable signing preserves observed facts at degraded trust; replay cannot promote them. Missing or inapplicable observations cannot invent a verdict. Automatic invocation and publication follow separately."}
+}

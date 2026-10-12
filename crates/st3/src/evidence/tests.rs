@@ -941,3 +941,321 @@ fn malformed_configured_signer_is_rejected_before_any_observation_write() {
     );
     assert!(records(f.repo()).unwrap().is_empty());
 }
+
+struct ReviewCase {
+    binding: review_observer::ReviewBinding,
+    claim: serde_json::Value,
+    snapshot: serde_json::Value,
+    pull: serde_json::Value,
+    document: Vec<u8>,
+}
+
+impl ReviewCase {
+    fn new(f: &Fixture, tests: Vec<String>) -> Self {
+        let document = b"Fixture review document; prose is not a verdict.\n".to_vec();
+        use sha2::Digest;
+        let doc_hash = hex::encode(sha2::Sha256::digest(&document));
+        // The immutable resource retains an old name after the repository rename.
+        let resource = "resource/github/fixture/old-name/pull-request/7";
+        let actor = "agent/fixture-reviewer";
+        let claim = serde_json::json!({
+            "id":"c".repeat(64), "kind":"resource.observed", "origin":"fixture-node", "actor":actor,
+            "subject":"resource/mission-run/fixture/review", "accepted_at_unix_ms":1791792000000u64,
+            "body":{"fields":{"kind":"human.review", "target":format!("{resource}@{}", "d".repeat(64)),
+                "document":format!("doc/fixture/review@{doc_hash}"), "decision":"approve", "reviewer":actor,
+                "submitted_at":"2026-10-12T08:00:00Z", "evidence_tests":tests}}
+        });
+        let snapshot = serde_json::json!({
+            "id":"d".repeat(64), "subject":resource, "kind":"resource.observed", "origin":"fixture-node",
+            "body":{"fields":{"kind":"vcs.pull-request", "facts":{"number":7, "node_id":"PR_fixture", "head_sha":f.head}}}
+        });
+        let pull = serde_json::json!({"number":7, "node_id":"PR_fixture", "head":{"sha":f.head},
+            "base":{"sha":f.base, "repo":{"full_name":"fixture/new-name"}}});
+        Self {
+            binding: review_observer::ReviewBinding {
+                repository: "fixture/new-name".into(),
+                resource_prefixes: BTreeSet::from([
+                    "resource/github/fixture/old-name/pull-request/".into(),
+                ]),
+                review_origins: BTreeSet::from(["fixture-node".into()]),
+                snapshot_origins: BTreeSet::from(["fixture-node".into()]),
+                reviewers: BTreeSet::from([actor.into()]),
+                test_signers: BTreeSet::from(["fleet/fixture-observer".into()]),
+                required_checks: BTreeSet::from(["unit-tests".into()]),
+            },
+            claim,
+            snapshot,
+            pull,
+            document,
+        }
+    }
+    fn inputs(&self) -> review_observer::ReviewInputs<'_> {
+        review_observer::ReviewInputs {
+            claim_id: self.claim["id"].as_str().unwrap(),
+            claim: &self.claim,
+            snapshot: &self.snapshot,
+            document: &self.document,
+            pull_request: &self.pull,
+        }
+    }
+    fn statement(&self, f: &Fixture) -> Result<Statement> {
+        review_observer::review_statement(f.repo(), &self.binding, &self.inputs(), &f.trusted)
+    }
+}
+
+fn review_case_tests(f: &Fixture, exit: i32) -> String {
+    let mut test = f.tests("fixture-runner", exit);
+    test.predicate.change_id = "github:fixture/new-name#7".into();
+    f.put(&test)
+}
+
+#[test]
+fn review_observer_binds_daemon_actor_immutable_snapshot_document_and_live_head_base() {
+    use observers::ObserverSigner;
+    let f = Fixture::new();
+    let mut case = ReviewCase::new(&f, vec![review_case_tests(&f, 0)]);
+    let produced = review_observer::produce_review(
+        f.repo(),
+        &case.binding,
+        &case.inputs(),
+        &f.trusted,
+        &ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.key,
+        },
+    )
+    .unwrap();
+    let statement = verify_record(f.repo(), &produced.record, &f.trusted).unwrap();
+    assert_eq!(statement.predicate.observed_at, "2026-10-12T08:00:00+00:00");
+    let Fact::Review {
+        base_commit,
+        files,
+        reviewer,
+        ..
+    } = statement.predicate.fact
+    else {
+        panic!()
+    };
+    assert_eq!(base_commit, f.base);
+    assert_eq!(files, changed_files(f.repo(), &f.base, &f.head).unwrap());
+    assert_eq!(reviewer, "agent/fixture-reviewer");
+    let message = git_text(
+        f.repo(),
+        &["show", "-s", "--format=%B", &produced.record],
+        None,
+    )
+    .unwrap();
+    assert!(
+        message.contains(&"c".repeat(64))
+            && message.contains(case.claim["body"]["fields"]["document"].as_str().unwrap())
+    );
+    assert!(
+        !review_observer::produce_review(
+            f.repo(),
+            &case.binding,
+            &case.inputs(),
+            &f.trusted,
+            &ObserverSigner::Full {
+                principal: "fleet/fixture-observer",
+                key: &f.key
+            }
+        )
+        .unwrap()
+        .newly_recorded
+    );
+    case.claim["actor"] = "agent/forged-reviewer".into();
+    assert!(case.statement(&f).is_err());
+    case.claim["actor"] = "agent/fixture-reviewer".into();
+    case.claim["body"]["fields"]["reviewer"] = "agent/forged-reviewer".into();
+    assert!(case.statement(&f).is_err());
+    case.claim["body"]["fields"]["reviewer"] = "agent/fixture-reviewer".into();
+    case.claim["origin"] = "untrusted-node".into();
+    assert!(case.statement(&f).is_err());
+    case.claim["origin"] = "fixture-node".into();
+    case.snapshot["id"] = "e".repeat(64).into();
+    assert!(case.statement(&f).is_err());
+    case.snapshot["id"] = "d".repeat(64).into();
+    case.pull["node_id"] = "PR_other".into();
+    assert!(case.statement(&f).is_err());
+    case.pull["node_id"] = "PR_fixture".into();
+    case.pull["head"]["sha"] = f.base.clone().into();
+    assert!(case.statement(&f).is_err());
+    case.pull["head"]["sha"] = f.head.clone().into();
+    case.document.push(b'!');
+    assert!(case.statement(&f).is_err());
+}
+
+#[test]
+fn review_observer_go_needs_explicit_full_passing_applicable_citations_and_operator_checks() {
+    let f = Fixture::new();
+    let mut case = ReviewCase::new(&f, vec![review_case_tests(&f, 0)]);
+    assert!(case.statement(&f).is_ok());
+    case.binding
+        .required_checks
+        .insert("another-required-check".into());
+    assert!(case.statement(&f).is_err());
+    case.binding
+        .required_checks
+        .remove("another-required-check");
+    case.claim["body"]["fields"]["evidence_tests"] = serde_json::json!([]);
+    assert!(case.statement(&f).is_err());
+    case.claim["body"]["fields"]
+        .as_object_mut()
+        .unwrap()
+        .remove("evidence_tests");
+    assert!(case.statement(&f).is_err());
+    case.claim["body"]["fields"]["evidence_tests"] = serde_json::json!([17]);
+    assert!(case.statement(&f).is_err());
+    for tier in [TrustTier::Degraded, TrustTier::Test] {
+        let mut test = f.tests("fixture-other-runner", 0);
+        test.predicate.change_id = "github:fixture/new-name#7".into();
+        test.predicate.tier = tier;
+        let id = if tier == TrustTier::Degraded {
+            test.predicate.signer = None;
+            record_degraded(f.repo(), &test).unwrap()
+        } else {
+            sign_observation(f.repo(), &test, &f.key).unwrap()
+        };
+        case.claim["body"]["fields"]["evidence_tests"] = serde_json::json!([id]);
+        assert!(case.statement(&f).is_err());
+    }
+    case.claim["body"]["fields"]["evidence_tests"] = serde_json::json!([review_case_tests(&f, 1)]);
+    assert!(case.statement(&f).is_err());
+    case.claim["body"]["fields"]["decision"] = "comment".into();
+    assert!(case.statement(&f).is_err());
+}
+
+#[test]
+fn review_observer_accepts_a_tested_merge_containing_unchanged_reviewed_files_only() {
+    let f = Fixture::new();
+    let mut tests = f.tests("fixture-merge-runner", 0);
+    tests.predicate.change_id = "github:fixture/new-name#7".into();
+    // Synthetic tested merge adds a file outside the reviewed change.
+    let extra = git_text(
+        f.repo(),
+        &["hash-object", "-w", "--stdin"],
+        Some(b"base advance"),
+    )
+    .unwrap();
+    let old_tree = tree(f.repo(), &f.head).unwrap();
+    let mut entries = git(f.repo(), &["ls-tree", &old_tree], None).unwrap();
+    entries.extend(format!("100644 blob {extra}\textra.rs\n").as_bytes());
+    let new_tree = git_text(f.repo(), &["mktree"], Some(&entries)).unwrap();
+    let merge = f.commit_tree(&new_tree, Some(&f.head));
+    tests.subject[0].name = merge;
+    tests.subject[0].digest.insert("gitTree".into(), new_tree);
+    let mut case = ReviewCase::new(&f, vec![f.put(&tests)]);
+    assert!(case.statement(&f).is_ok());
+    // A source that undoes the reviewed file cannot authorize that review.
+    let changed = f.revision("different reviewed bytes", Some(&f.head));
+    tests.subject[0].name = changed.clone();
+    tests.subject[0]
+        .digest
+        .insert("gitTree".into(), tree(f.repo(), &changed).unwrap());
+    case.claim["body"]["fields"]["evidence_tests"] = serde_json::json!([f.put(&tests)]);
+    assert!(case.statement(&f).is_err());
+    // Neither can an unrelated source with coincidentally identical file bytes.
+    let unrelated = f.revision("after", None);
+    tests.subject[0].name = unrelated.clone();
+    tests.subject[0]
+        .digest
+        .insert("gitTree".into(), tree(f.repo(), &unrelated).unwrap());
+    case.claim["body"]["fields"]["evidence_tests"] = serde_json::json!([f.put(&tests)]);
+    assert!(case.statement(&f).is_err());
+}
+
+#[test]
+fn a_new_signed_stop_without_test_citations_blocks_an_older_go() {
+    let f = Fixture::new();
+    let mut case = ReviewCase::new(&f, vec![review_case_tests(&f, 0)]);
+    let signer = observers::ObserverSigner::Full {
+        principal: "fleet/fixture-observer",
+        key: &f.key,
+    };
+    review_observer::produce_review(f.repo(), &case.binding, &case.inputs(), &f.trusted, &signer)
+        .unwrap();
+    let verify = || {
+        super::verify(
+            f.repo(),
+            &f.head,
+            &f.base,
+            "github:fixture/new-name#7",
+            &f.trusted,
+            &policy(),
+        )
+    };
+    assert!(verify().is_ok());
+    case.claim["id"] = "e".repeat(64).into();
+    case.claim["accepted_at_unix_ms"] = serde_json::json!(1791792001000u64);
+    case.claim["body"]["fields"]["decision"] = "request-changes".into();
+    case.claim["body"]["fields"]
+        .as_object_mut()
+        .unwrap()
+        .remove("evidence_tests");
+    let stop = review_observer::produce_review(
+        f.repo(),
+        &case.binding,
+        &case.inputs(),
+        &f.trusted,
+        &signer,
+    )
+    .unwrap();
+    let Fact::Review { tests, verdict, .. } = verify_record(f.repo(), &stop.record, &f.trusted)
+        .unwrap()
+        .predicate
+        .fact
+    else {
+        panic!()
+    };
+    assert!(tests.is_empty());
+    assert_eq!(verdict, Verdict::STOP);
+    assert!(format!("{:#}", verify().unwrap_err()).contains("STOP"));
+}
+
+#[test]
+fn review_signer_outage_is_degraded_and_replay_cannot_promote_it() {
+    let f = Fixture::new();
+    let case = ReviewCase::new(&f, vec![review_case_tests(&f, 0)]);
+    let missing = f.repo().join("unavailable-throwaway-key");
+    let result = review_observer::produce_review(
+        f.repo(),
+        &case.binding,
+        &case.inputs(),
+        &f.trusted,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &missing,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.tier, TrustTier::Degraded);
+    assert!(result.signing_unavailable);
+    let repeated = review_observer::produce_review(
+        f.repo(),
+        &case.binding,
+        &case.inputs(),
+        &f.trusted,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.key,
+        },
+    )
+    .unwrap();
+    assert_eq!(repeated.record, result.record);
+    assert_eq!(repeated.tier, TrustTier::Degraded);
+    assert!(!repeated.newly_recorded);
+    assert!(
+        review_observer::produce_review(
+            f.repo(),
+            &case.binding,
+            &case.inputs(),
+            &f.trusted,
+            &observers::ObserverSigner::Test {
+                principal: "fleet/fixture-observer",
+                key: &f.key,
+                expires_at: chrono::Utc::now() - chrono::Duration::seconds(1)
+            }
+        )
+        .is_err()
+    );
+}

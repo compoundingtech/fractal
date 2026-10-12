@@ -20,8 +20,8 @@ struct Configuration {
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-struct Github {
-    repository: String,
+pub(super) struct Github {
+    pub(super) repository: String,
 }
 
 impl Github {
@@ -43,7 +43,7 @@ impl Github {
         command
     }
 
-    fn json(&self, suffix: &str) -> Result<Value> {
+    pub(super) fn json(&self, suffix: &str) -> Result<Value> {
         let output = self.command(suffix).output().context("contact GitHub")?;
         ensure!(output.status.success(), "GitHub observation unavailable");
         ensure!(
