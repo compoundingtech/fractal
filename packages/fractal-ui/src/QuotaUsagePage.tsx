@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
+import { Icon } from './assistant-ui/composition/Icons.tsx'
 import { Button, Label, ListBox, ListBoxItem, Radio, RadioGroup, Slider, SliderOutput, SliderThumb, SliderTrack, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { QuotaAccount, QuotaEconomics, QuotaHistoryDay, QuotaHistoryValue, QuotaUnit, QuotaUsageProps, QuotaWindow } from './quota-design-types'
@@ -457,8 +458,9 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
   const series = buildSeries(days, accounts, stackBy)
   const allCells = days.map(day => buildCell(day, effectiveUnit, stackBy))
   const cells = allCells.slice(start, end + 1)
-  const focusCell = allCells.find(cell => cell.day.id === (hoveredDay ?? selectedDay))
-  const selected = days.find(day => day.id === selectedDay)
+  // Controlled selections can outlive a brush change; never display records outside the admitted range.
+  const focusCell = cells.find(cell => cell.day.id === (hoveredDay ?? selectedDay))
+  const selected = rangeDays.find(day => day.id === selectedDay)
   const detailAccount = accounts.find(account => account.id === selectedAccount) ?? accounts[0]
   const rangeLabel = `${rangeDays[0]?.label ?? 'No days'}${rangeDays.length > 1 ? ` – ${rangeDays.at(-1)?.label ?? ''}` : ''}`
   const unitNote = unit === 'tokens' ? 'Preferred tokens; showing tokens.'
@@ -476,7 +478,7 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
   }
   return <div data-quota-usage data-quota-variant={variant} data-quota-status={quotaStatus.kind} data-quota-unit={effectiveUnit} data-quota-unit-preference={unit} onKeyDown={onKeyDown} {...stylex.props(styles.root)}>
     <header {...stylex.props(styles.header)}>
-      {onBack !== undefined && <Button onPress={onBack} {...stylex.props(styles.button)}>← Back</Button>}
+      {onBack !== undefined && <Button onPress={onBack} {...stylex.props(styles.button)}><Icon name="chevrons-left" size={12} />Back</Button>}
       <h1 {...stylex.props(styles.pageTitle)}>Usage</h1>
       <p role={statusAlert ? 'alert' : 'status'} title={quotaStatus.text} data-quota-status-kind={quotaStatus.kind} {...stylex.props(styles.status, (quotaStatus.kind === 'stale' || quotaStatus.kind === 'unpublished' || quotaStatus.kind === 'loading') && styles.statusWarn, statusAlert && styles.statusDanger)}>
         <span aria-hidden="true" {...stylex.props(styles.statusDot)} />
@@ -578,8 +580,8 @@ const styles = stylex.create({
   chartSmall: { blockSize: quotaGeometry.px72 },
   svg: { position: 'absolute', inset: 0, inlineSize: '100%', blockSize: '100%', overflow: 'visible' },
   baseline: { stroke: border.borderStrong, strokeWidth: 1 },
-  hatchInk: { fill: ink.fgFaint },
-  unknownBar: { stroke: ink.fgFaint, strokeWidth: 1 },
+  hatchInk: { fill: ink.fgMuted },
+  unknownBar: { stroke: ink.fgMuted, strokeWidth: 1 },
   zeroTick: { fill: ink.fgSoft },
   emptyTick: { fill: border.borderStrong },
   partialBar: { opacity: 0.55 },
@@ -603,7 +605,7 @@ const styles = stylex.create({
   track: { position: 'relative', inlineSize: '100%' },
   trackStrip: { blockSize: quotaGeometry.px44, borderRadius: radius.sm, backgroundColor: surface.washSubtle },
   trackRail: { blockSize: quotaGeometry.px20 },
-  stripBar: { fill: ink.fgFaint },
+  stripBar: { fill: ink.fgMuted },
   stripUnknown: { fill: border.borderStrong },
   brush: { position: 'absolute', pointerEvents: 'none', backgroundColor: surface.washSubtle, borderInline: quotaGeometry.accentHair },
   brushStrip: { insetBlock: 0 },
@@ -622,7 +624,7 @@ const styles = stylex.create({
   weekday: { alignSelf: 'end', color: ink.fgMuted, fontSize: type.denseSize, blockSize: quotaGeometry.px16 },
   cellAt: (row: number, column: number) => ({ gridRowStart: String(row), gridColumnStart: String(column) }),
   heatCell: { position: 'relative', padding: 0, overflow: 'hidden', border: quotaGeometry.hair, borderRadius: radius.sm, backgroundColor: surface.canvas, cursor: 'pointer', ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
-  heatPartial: { borderStyle: 'dashed', borderColor: ink.fgFaint },
+  heatPartial: { borderStyle: 'dashed', borderColor: ink.fgMuted },
   heatFill: { position: 'absolute', inset: 0 },
   heatKnown: { backgroundColor: accent.primary },
   heatZero: { backgroundColor: surface.transparent, boxShadow: quotaGeometry.heatZeroShadow },

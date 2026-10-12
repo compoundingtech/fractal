@@ -21,7 +21,7 @@ const windowOf = (id: string, column: string, fraction: number | undefined, gove
   reported: true, governing, comparison, resetAt: column === 'short' ? '2030-04-30T16:00:00Z' : '2030-05-03T12:00:00Z',
   scope: column === 'model' ? 'model · Cedar' : 'account', facts: [
     { label: 'Window kind', value: 'Rolling' }, { label: 'Evidence', value: 'Observed · synthetic fixture' },
-    { label: 'Utilization', value: fraction === undefined ? 'Unknown' : `${Math.round(fraction * 100)}%` },
+    { label: 'Utilization', value: fraction === undefined ? 'Unreported' : `${Math.round(fraction * 100)}%` },
   ], ...extra,
 })
 const accountOf = (id: string, label: string, provider: string, fraction: number | undefined, index: number): QuotaAccount => ({
@@ -31,7 +31,7 @@ const accountOf = (id: string, label: string, provider: string, fraction: number
     ...(index % 2 === 0 ? [windowOf(`${id}-model`, 'model', ((index * 11) % 70) / 100, false, provider === 'Orbit')] : []),
   ], usd: 14.6 + index * 9.12, tokens: 480000 + index * 175000, usdCoverage: index !== 4,
   ...(index % 3 === 0 ? { resetCount: index === 0 ? 0 : 3 } : {}),
-  resetCredits: index % 3 === 0 ? [{ label: 'Reported available resets', value: index === 0 ? '0' : '3' }, ...(index === 0 ? [] : [{ label: 'Credit 1 expiry', value: '2030-05-02T12:00:00Z' }, { label: 'Undated or unsupplied slots', value: '2' }])] : [{ label: 'Available resets', value: 'Unknown · not reported' }],
+  resetCredits: index % 3 === 0 ? [{ label: 'Reported available resets', value: index === 0 ? '0' : '3' }, ...(index === 0 ? [] : [{ label: 'Credit 1 expiry', value: '2030-05-02T12:00:00Z' }, { label: 'Undated or unsupplied slots', value: '2' }])] : [{ label: 'Available resets', value: 'Unreported' }],
   facts: [{ label: 'Identity', value: id }, { label: 'Provider', value: provider }, { label: 'Plan', value: index % 3 === 0 ? 'Team' : 'Personal' }, { label: 'Value observed', value: '2030-04-30T11:59:00Z' }, { label: 'Latest collection', value: 'Determinate · 2030-04-30T12:00:00Z' }, { label: 'Source confidence', value: 'Observed' }],
 })
 export const quotaAccounts: readonly QuotaAccount[] = [
@@ -61,6 +61,11 @@ export const quotaDays: readonly QuotaHistoryDay[] = Array.from({ length: 30 }, 
       }
     })) }
 })
+/** One low-coverage day surrounded by admitted records exposes stale controlled day selections. */
+export const quotaCoverageDays: readonly QuotaHistoryDay[] = quotaDays.map(day => ({
+  ...day,
+  values: day.values.map(value => ({ ...value, coverage: day.id === '2030-04-15' ? .50 : .99 })),
+}))
 export const quotaEconomics: readonly QuotaEconomics[] = quotaAccounts.slice(0, 6).map((account, index) => ({
   id: `${account.id}-economics`, label: account.label, accountId: account.id, limitId: `${account.id}-week`, usageValue: 54 + index * 31,
   ledgerValue: index === 4 ? undefined : 52 + index * 29, price: index % 3 === 0 ? 120 : 24, basis: index === 2 ? 'list' : 'invoiced', coverageDays: index === 4 ? 22 : 30,

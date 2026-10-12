@@ -205,6 +205,17 @@ at 440 and 1440 viewport widths in light and dark.
 surfaces and story frames use the same values. Sort and reset glyphs use the
 existing SVG icon family. Missing readings are explicitly unreported.
 
+Provider, plan and state filters use controlled React Aria Select/ListBox
+controls. Each change reports only that filter field; retained selections that
+are absent from the current inventory remain selectable.
+
+Selected and hovered history-day evidence is constrained to the current brush
+range before readouts and breakdowns render. A host retaining an old selected
+day cannot bypass the range's 95% USD coverage gate. The coverage story selects
+a low-coverage day, brushes to admitted days while retaining that controlled
+selection, rejects injected out-of-range USD evidence, and checks restoration
+after rerenders.
+
 History uses the supplied calendar buckets, exposes exact measured values and
 unknown token classes, and marks the unfinished bucket. Cost compares rate-card
 usage value with invoiced/list subscription price for **last 30 days, normalized**;

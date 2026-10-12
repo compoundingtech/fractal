@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
 import { Icon } from './assistant-ui/composition/Icons.tsx'
-import { Button, Cell, Column, Row, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
+import { Button, Cell, Column, Label, ListBox, ListBoxItem, Popover, Row, Select, SelectValue, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex.ts'
 import type { QuotaAccount, QuotaDrawerProps, QuotaSortKey, QuotaWindow } from './quota-design-types.ts'
 import { filterQuotaAccounts, quotaAccountAmount, quotaGoverningResetAt, quotaOmittedWindowCount, quotaProviderSubtotal, quotaRoleWindow, quotaSortKeys, quotaVisibleWindows, quotaWindowFraction, sortQuotaAccounts } from './quota-design-sort.ts'
@@ -59,6 +59,24 @@ const providerRows = (accounts: readonly QuotaAccount[], grouped: boolean): read
   })
 }
 
+/** Controlled filter keys preserve missing retained choices and only report the changed field. */
+const QuotaFilter = ({ label, value, options, onChange }: { readonly label: string; readonly value: string; readonly options: readonly string[]; readonly onChange: (value: string) => void }) => {
+  const choices = value !== '' && !options.includes(value) ? [value, ...options] : options
+  return <Select aria-label={`Filter ${label.toLowerCase()}`} selectedKey={value === '' ? 'all' : `value:${value}`} onSelectionChange={key => {
+    if (key === 'all') onChange('')
+    else if (typeof key === 'string' && key.startsWith('value:')) onChange(key.slice(6))
+  }} {...stylex.props(styles.filterLabel)}>
+    <Label>{label}</Label>
+    <Button {...stylex.props(styles.select)}><SelectValue {...stylex.props(usageMeterGrid.truncate)} /><Icon name="chevron-down" size={10} /></Button>
+    <Popover {...stylex.props(styles.filterPopover)}>
+      <ListBox {...stylex.props(styles.filterOptions)}>
+        <ListBoxItem id="all" textValue="All" {...stylex.props(styles.filterOption)}>All</ListBoxItem>
+        {choices.map(choice => <ListBoxItem key={choice} id={`value:${choice}`} textValue={choice} {...stylex.props(styles.filterOption)}>{choice}</ListBoxItem>)}
+      </ListBox>
+    </Popover>
+  </Select>
+}
+
 /** Presentation-only: callers retain last-good accounts and own all persistent UI state. */
 export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
   const accounts = sortQuotaAccounts(filterQuotaAccounts(props.accounts, props), props.sort, props)
@@ -79,7 +97,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
     if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return
     if (!event.currentTarget.contains(event.currentTarget.ownerDocument.activeElement)) return
     const target = event.target
-    if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]') !== null) return
+    if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [aria-haspopup="listbox"], [role="listbox"], [role="option"]') !== null) return
     if (event.key === 's' && !event.shiftKey) cycleSort()
     else if (event.key === 'S' || (event.key === 's' && event.shiftKey)) props.onSort({ key: props.sort.key, direction: props.sort.direction === 'ascending' ? 'descending' : 'ascending' })
     else if (event.key === 'u' && !event.shiftKey) toggleUnit()
@@ -101,9 +119,9 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
     </div>
     {!props.collapsed && <>
       <div {...stylex.props(styles.filters)}>
-        <label {...stylex.props(styles.filterLabel)}>Provider<select aria-label="Filter provider" value={props.provider} onChange={event => props.onFilter({ provider: event.currentTarget.value })} {...stylex.props(styles.select)}><option value="">All</option>{props.provider !== '' && !providers.includes(props.provider) && <option value={props.provider}>{props.provider}</option>}{providers.map(provider => <option key={provider} value={provider}>{provider}</option>)}</select></label>
-        <label {...stylex.props(styles.filterLabel)}>Plan<select aria-label="Filter plan" value={props.plan} onChange={event => props.onFilter({ plan: event.currentTarget.value })} {...stylex.props(styles.select)}><option value="">All</option>{props.plan !== '' && !plans.includes(props.plan) && <option value={props.plan}>{props.plan}</option>}{plans.map(plan => <option key={plan} value={plan}>{plan}</option>)}</select></label>
-        <label {...stylex.props(styles.filterLabel)}>State<select aria-label="Filter state" value={props.state} onChange={event => props.onFilter({ state: event.currentTarget.value })} {...stylex.props(styles.select)}><option value="">All</option>{props.state !== '' && !states.some(state => state === props.state) && <option value={props.state}>{props.state}</option>}{states.map(state => <option key={state} value={state}>{state}</option>)}</select></label>
+        <QuotaFilter label="Provider" value={props.provider} options={providers} onChange={provider => props.onFilter({ provider })} />
+        <QuotaFilter label="Plan" value={props.plan} options={plans} onChange={plan => props.onFilter({ plan })} />
+        <QuotaFilter label="State" value={props.state} options={states} onChange={state => props.onFilter({ state })} />
       </div>
       <div {...stylex.props(styles.viewControls)}>
         <Button aria-label="Group by provider" aria-pressed={props.grouped} onPress={() => props.onGrouped(!props.grouped)} {...stylex.props(styles.button, props.grouped && styles.pressed)}>By provider</Button>
@@ -184,7 +202,10 @@ const styles = stylex.create({
   statusNote: { display: 'block', color: ink.fgMuted, fontSize: type.microSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   filters: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: space.xs, padding: `0 ${space.md} ${space.sm}`, flexShrink: 0 },
   filterLabel: { minWidth: 0, color: ink.fgMuted, fontSize: type.microSize },
-  select: { display: 'block', width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', font: 'inherit', fontSize: type.denseSize, color: ink.fgSoft, backgroundColor: surface.raised, border: quotaGeometry.strongHair, borderRadius: radius.keyboard, height: quotaGeometry.px24, padding: space.xs2, outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.px1 },
+  select: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: space.xs2, width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', font: 'inherit', fontSize: type.denseSize, color: ink.fgSoft, backgroundColor: surface.raised, border: quotaGeometry.strongHair, borderRadius: radius.keyboard, height: quotaGeometry.px24, padding: space.xs2, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.px1 },
+  filterPopover: { minWidth: 'var(--trigger-width)', maxWidth: '100%', backgroundColor: surface.raised, border: quotaGeometry.strongHair, borderRadius: radius.keyboard, color: ink.fg, fontFamily: type.fontSans, fontSize: type.denseSize },
+  filterOptions: { padding: space.xs2, outline: 'none', maxHeight: quotaGeometry.px200, overflowY: 'auto' },
+  filterOption: { padding: `${space.xs2} ${space.sm}`, cursor: 'pointer', borderRadius: radius.keyboard, outline: 'none', backgroundColor: { default: surface.transparent, ':is([data-focused])': surface.rowHover, ':is([data-selected])': surface.rowActive } },
   viewControls: { display: 'flex', flexWrap: 'wrap', gap: space.xs, padding: `0 ${space.md} ${space.md}`, flexShrink: 0 },
   scroll: { minHeight: 0, minWidth: 0, flexGrow: 1, overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin', scrollbarColor: `${status.scrollThumb} ${surface.transparent}`, scrollbarGutter: 'stable' },
   sortHeader: { position: 'sticky', top: 0, zIndex: 3, display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: space.xs2, padding: `${space.xs} ${space.xs}`, backgroundColor: surface.raised, borderBottom: quotaGeometry.strongHair },
@@ -210,7 +231,7 @@ const styles = stylex.create({
   reading: { flexShrink: 0, color: ink.fgSoft, fontFamily: type.fontMono, fontSize: type.microSize, fontVariantNumeric: 'tabular-nums', lineHeight: usageMeterGridVars.lineHeight, whiteSpace: 'nowrap' },
   exhausted: { fontFamily: type.fontSans, fontWeight: type.weightSemibold, fontSize: type.microSize },
   track: { display: 'block', flex: '1 1 0', minWidth: 2, height: quotaGeometry.px3, backgroundColor: surface.rowActive, overflow: 'hidden' },
-  fill: { display: 'block', height: '100%', backgroundColor: ink.fgFaint },
+  fill: { display: 'block', height: '100%', backgroundColor: ink.fgMuted },
   fraction: (fraction: number) => ({ width: `${fraction * 100}%` }),
   warning: { color: status.attention },
   danger: { color: status.dangerFg },

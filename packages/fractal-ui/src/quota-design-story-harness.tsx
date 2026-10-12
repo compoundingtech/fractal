@@ -6,7 +6,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { QuotaDrawer } from './QuotaDrawer.tsx'
 import { QuotaUsagePage } from './QuotaUsagePage.tsx'
 import type { QuotaDrawerProps, QuotaSort, QuotaStatus, QuotaUnit, QuotaUsageProps } from './quota-design-types.ts'
-import { quotaAccounts, quotaClock, quotaColumns, quotaDays, quotaEconomics, quotaRefreshedAccounts, quotaStatuses } from './quota-design-fixtures.ts'
+import { quotaAccounts, quotaClock, quotaColumns, quotaCoverageDays, quotaDays, quotaEconomics, quotaRefreshedAccounts, quotaStatuses } from './quota-design-fixtures.ts'
 import { assertQuotaDrawerDensity } from './quota-design-density-proof.ts'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
@@ -23,6 +23,7 @@ export interface QuotaStoryArgs {
   empty: boolean
   initialView: 'drawer' | 'usage'
   landmarkContext?: string
+  coverageScenario?: boolean
 }
 export const quotaStoryDefaults: QuotaStoryArgs = { scheme: 'dark', width: 320, pageWidth: 1440, drawerVariant: 'columns', usageVariant: 'overview', status: 'current', empty: false, initialView: 'drawer' }
 export const quotaStoryControls = {
@@ -46,15 +47,15 @@ export function QuotaStoryHarness(args: QuotaStoryArgs) {
         : sourceStatus
   const usage = state.view === 'usage'
   return <div {...stylex.props(styles.frame, ...baselineTheme, args.scheme === 'light' && lightTheme, !usage && (args.width === 240 ? styles.small : args.width === 420 ? styles.large : styles.medium), usage && (args.pageWidth === 900 ? styles.pageNarrow : styles.pageWide))}
-    data-quota-story data-quota-account-count={accounts.length} data-sort-key={state.sort.key} data-sort-direction={state.sort.direction} data-unit={state.unit} data-range={`${state.range[0]}:${state.range[1]}`} data-selected-day={state.selectedDay ?? ''} data-selected-account={state.selectedAccount ?? ''} data-view={state.view} data-collapsed={String(state.collapsed)} data-escaped={state.escaped} data-refreshed={String(state.refreshed)}>
+    data-quota-story data-quota-account-count={accounts.length} data-sort-key={state.sort.key} data-sort-direction={state.sort.direction} data-unit={state.unit} data-range={`${state.range[0]}:${state.range[1]}`} data-selected-day={state.selectedDay ?? ''} data-selected-account={state.selectedAccount ?? ''} data-view={state.view} data-collapsed={String(state.collapsed)} data-escaped={state.escaped} data-refreshed={String(state.refreshed)} data-provider={state.provider} data-plan={state.plan} data-state={state.state}>
     <ThemePortal>
       <div {...stylex.props(styles.proofToolbar)}>
         <Button {...stylex.props(styles.button)} onPress={() => update({ refreshed: !state.refreshed, statusOverride: state.refreshed ? undefined : 'current' })}>Refresh snapshot</Button>
         <Button {...stylex.props(styles.button)} onPress={() => update({ statusOverride: 'failed' })}>Simulate failed refresh</Button>
       </div>
-      {usage ? <QuotaUsagePage landmarkContext={args.landmarkContext} accounts={accounts} days={args.empty ? [] : quotaDays} economics={args.empty ? [] : quotaEconomics} status={status} variant={args.usageVariant} unit={state.unit} stackBy={state.stackBy} range={state.range}
+      {usage ? <QuotaUsagePage landmarkContext={args.landmarkContext} accounts={accounts} days={args.empty ? [] : args.coverageScenario ? quotaCoverageDays : quotaDays} economics={args.empty ? [] : quotaEconomics} status={status} variant={args.usageVariant} unit={state.unit} stackBy={state.stackBy} range={state.range}
         selectedDay={state.selectedDay} selectedAccount={state.selectedAccount} detailTab={state.tab}
-        onUnit={unit => update({ unit })} onStackBy={stackBy => update({ stackBy })} onRange={range => update({ range, selectedDay: undefined })}
+        onUnit={unit => update({ unit })} onStackBy={stackBy => update({ stackBy })} onRange={range => update({ range, ...(args.coverageScenario ? {} : { selectedDay: undefined }) })}
         onDay={selectedDay => update({ selectedDay })} onAccount={selectedAccount => update({ selectedAccount: selectedAccount || undefined })} onDetailTab={tab => update({ tab })} onBack={() => update({ view: 'drawer' })} />
       : <QuotaDrawer landmarkContext={args.landmarkContext} accounts={accounts} columns={quotaColumns} status={status} variant={args.drawerVariant} sort={state.sort} unit={state.unit}
         provider={state.provider} plan={state.plan} state={state.state} grouped={state.grouped} collapsed={state.collapsed} now={quotaClock}
@@ -141,6 +142,64 @@ export const quotaBrushPlay = async ({ canvasElement }: { canvasElement: HTMLEle
     readout.focus()
     await expect(readout).toHaveFocus()
   }
+}
+export const quotaCoveragePlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaControlPlay({ canvasElement })
+  const canvas = within(canvasElement)
+  const root = storyRoot(canvasElement)
+  const usage = canvasElement.querySelector<HTMLElement>('[data-quota-usage]')!
+  const lowDay = '2030-04-15'
+  await userEvent.click(canvasElement.querySelector<HTMLElement>(`[data-quota-day="${lowDay}"]`)!)
+  await waitFor(() => expect(root.dataset.selectedDay).toBe(lowDay))
+  await expect(usage.dataset.quotaUnit).toBe('tokens')
+  const breakdown = canvasElement.querySelector<HTMLElement>('[data-quota-breakdown]')!
+  await expect(breakdown.dataset.quotaBreakdown).toBe(lowDay)
+  const start = canvas.getByRole('slider', { name: /Range start/ })
+  start.focus()
+  await userEvent.keyboard('{End}')
+  await waitFor(() => expect(root.dataset.range).toBe('29:29'))
+  await expect(root.dataset.selectedDay).toBe(lowDay)
+  await expect(usage.dataset.quotaUnit).toBe('usd')
+  const assertCoverage = () => {
+    const lowRecords = canvasElement.querySelector(`[data-quota-breakdown="${lowDay}"], [data-quota-readout="${lowDay}"]`)
+    if (usage.dataset.quotaUnit === 'usd' && lowRecords !== null) throw new Error('Low-coverage day bypassed USD admission')
+    expect(breakdown.dataset.quotaBreakdown).toBe('range')
+  }
+  assertCoverage()
+  const admittedScope = breakdown.dataset.quotaBreakdown
+  try {
+    breakdown.dataset.quotaBreakdown = lowDay
+    expect(assertCoverage).toThrow('Low-coverage day bypassed USD admission')
+  } finally {
+    breakdown.dataset.quotaBreakdown = admittedScope
+  }
+  await userEvent.click(canvas.getByRole('button', { name: 'Refresh snapshot' }))
+  await waitFor(() => expect(root.dataset.refreshed).toBe('true'))
+  assertCoverage()
+  await userEvent.click(canvas.getByRole('button', { name: 'Refresh snapshot' }))
+  await waitFor(() => expect(root.dataset.refreshed).toBe('false'))
+  assertCoverage()
+}
+
+export const quotaFilterPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
+  await quotaControlPlay({ canvasElement })
+  const canvas = within(canvasElement)
+  const root = storyRoot(canvasElement)
+  await userEvent.click(canvas.getByRole('button', { name: /Filter provider/ }))
+  await userEvent.click(canvas.getByRole('option', { name: 'Cedar', exact: true }))
+  await waitFor(() => expect(root.dataset.provider).toBe('Cedar'))
+  await expect(root.dataset.plan).toBe('')
+  await expect(root.dataset.state).toBe('')
+  await userEvent.click(canvas.getByRole('button', { name: /Filter plan/ }))
+  await userEvent.click(canvas.getByRole('option', { name: 'Team', exact: true }))
+  await waitFor(() => expect(root.dataset.plan).toBe('Team'))
+  await expect(root.dataset.provider).toBe('Cedar')
+  await userEvent.click(canvas.getByRole('button', { name: /Filter state/ }))
+  await userEvent.click(canvas.getByRole('option', { name: 'stale', exact: true }))
+  await waitFor(() => expect(root.dataset.state).toBe('stale'))
+  await waitFor(() => expect(ids(canvasElement)).toEqual(['elm']))
+  await userEvent.click(canvas.getByRole('button', { name: 'Clear quota filters' }))
+  await waitFor(() => expect(ids(canvasElement)).toEqual(defaultOrder))
 }
 const geometry = (canvas: HTMLElement) => [...canvas.querySelectorAll<HTMLElement>('[data-quota-row], [data-quota-status], [data-quota-breakdown], [data-quota-usage] svg')].map(node => {
   const box = node.getBoundingClientRect(); return [box.x, box.y, box.width, box.height]
