@@ -27,6 +27,8 @@ pub struct CiBinding {
     pub run: u64,
     pub attempt: u64,
     pub recipe_sha256: String,
+    pub accepted_base: String,
+    pub workflow_sha256: String,
     pub required_checks: BTreeSet<String>,
 }
 
@@ -85,6 +87,12 @@ pub fn produce_ci(
     signer: &ObserverSigner<'_>,
 ) -> Result<Vec<Produced>> {
     let statements = ci_statements(repo, binding, run, receipt, jobs)?;
+    if matches!(signer, ObserverSigner::Full { .. }) {
+        ensure!(
+            binding.full_eligible(repo, receipt, run)?,
+            "source is not eligible for full CI trust: need a platform-bound queue/manual run and accepted workflow/recipe"
+        );
+    }
     // These checks happen before any write, never halfway through a set of observations.
     if let ObserverSigner::Test { expires_at, .. } = signer {
         let now = chrono::Utc::now();
@@ -96,8 +104,8 @@ pub fn produce_ci(
     match signer {
         ObserverSigner::Full { principal, .. } | ObserverSigner::Test { principal, .. } => {
             ensure!(
-                !principal.trim().is_empty(),
-                "missing configured signer principal"
+                !principal.is_empty() && !principal.chars().any(char::is_whitespace),
+                "invalid configured signer principal"
             );
         }
         ObserverSigner::Unavailable => {}
@@ -112,6 +120,12 @@ pub fn produce_ci(
             let observed_ref = format!("refs/evidence-observed/ci/{identity}");
             if let Some(record) = reference(repo, &observed_ref)? {
                 let old = show(repo, &record)?;
+                if old.predicate.tier == TrustTier::Full {
+                    ensure!(
+                        binding.full_eligible(repo, receipt, run)?,
+                        "old full observation lacks current source/workflow trust"
+                    );
+                }
                 if matches!(signer, ObserverSigner::Test { .. }) {
                     ensure!(
                         old.predicate.tier != TrustTier::Full,
@@ -208,6 +222,8 @@ impl CiBinding {
             "invalid run/attempt selector"
         );
         sha256(&self.recipe_sha256)?;
+        oid(&self.accepted_base)?;
+        sha256(&self.workflow_sha256)?;
         ensure!(
             !self.required_checks.is_empty()
                 && self
@@ -217,6 +233,49 @@ impl CiBinding {
             "operator must name required checks"
         );
         Ok(())
+    }
+
+    /// An artifact from a PR workflow cannot prove its effective tested source.
+    /// Full trust additionally pins both executed workflow and producer recipe to
+    /// an operator-selected accepted commit, never the tree supplied by the artifact.
+    pub fn full_eligible(&self, repo: &Path, receipt: &SourceReceipt, run: &Value) -> Result<bool> {
+        receipt.validate(repo, self, run)?;
+        if run["event"] == "pull_request" {
+            return Ok(false);
+        }
+        let base = commit(repo, &self.accepted_base)?;
+        let base_recipe = git(
+            repo,
+            &["show", &format!("{base}:scripts/ci-evidence-source")],
+            None,
+        )?;
+        let base_workflow = git(
+            repo,
+            &["show", &format!("{base}:.github/workflows/fleet.yml")],
+            None,
+        )?;
+        ensure!(
+            hex::encode(Sha256::digest(&base_recipe)) == self.recipe_sha256
+                && hex::encode(Sha256::digest(&base_workflow)) == self.workflow_sha256,
+            "accepted base does not match operator recipe/workflow pins"
+        );
+        let source_recipe = git(
+            repo,
+            &[
+                "show",
+                &format!("{}:scripts/ci-evidence-source", receipt.source),
+            ],
+            None,
+        )?;
+        let source_workflow = git(
+            repo,
+            &[
+                "show",
+                &format!("{}:.github/workflows/fleet.yml", receipt.source),
+            ],
+            None,
+        )?;
+        Ok(source_recipe == base_recipe && source_workflow == base_workflow)
     }
 
     pub fn validate_run(&self, run: &Value) -> Result<()> {

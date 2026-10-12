@@ -7,8 +7,9 @@ must allow only that installed command prefix, after review and binary pinning.
 The caller cannot supply a statement, repository, check result, signer or key.
 
 The private configuration names the repository, absolute private bare
-`scratch_repo`, pinned `recipe_sha256` for `scripts/ci-evidence-source`, and
-`required_checks`. It sets `tier` to `full`, `degraded` or `test`. Full mode also
+`scratch_repo`, operator-selected immutable `accepted_base`, pinned
+`recipe_sha256` for `scripts/ci-evidence-source`, pinned `workflow_sha256` for
+`.github/workflows/fleet.yml`, and `required_checks`. It sets `tier` to `full`, `degraded` or `test`. Full mode also
 names `signer` and the absolute private `ssh_key`; degraded mode has neither.
 Test mode requires a throwaway key and `expires_at`, no more than 15 minutes
 ahead. Use a separate scratch repository for the test service. Production key
@@ -26,9 +27,23 @@ Artifact identity, byte length and SHA-256 come from authenticated GitHub
 metadata. The complete ZIP must match before extraction. Exactly two regular
 files are allowed, with bounded sizes: receipt JSON and the Git object pack.
 The receipt must bind the run/attempt and pinned recipe, and its pack digest
-must match. After import into the private bare repo, Git independently derives
-the source tree and the SHA-256 of the retained producer script. A PR's author
-head from run metadata is never substituted for the tested merge tree.
+must match. The observer fetches the accepted baseline and authenticated platform
+head (plus fixed main history for PR merge parents) from its configured public
+repository, with fsck enabled, then imports the bounded source pack with
+`index-pack --strict`. Git independently derives the source tree and producer
+script digest; neither the artifact nor its self-reported producer hash proves
+what executed.
+
+Full trust is limited to `merge_group` and `workflow_dispatch`: their retained
+source must equal the platform's authenticated `run.head_sha`. Both the workflow
+and producer recipe must exactly match the operator-selected accepted base and
+its pins. A workflow change is refused for full trust until separately reviewed
+and accepted by the operator. `pull_request` cannot prove the effective tested
+merge: its author controls the artifact while run metadata names the author head.
+Production PR observations are always degraded, even with a pinned recipe; test
+services may emit test tier. A PR observation never satisfies production policy.
+The response explicitly reports full eligibility and any trust limitation. The
+core producer API refuses a request to sign ineligible source at full tier.
 
 Each required check gets one record, including failures. The command descriptor
 identifies the GitHub workflow/check, while `runner` retains run, attempt and job
@@ -57,4 +72,6 @@ observations and outage fallback is a separate integration.
 
 The cooperative v1 receipt boundary trusts our runner agents. Pinning recipes
 and isolating the key does not prove native process-to-agent identity against a
-hostile workflow author. Native receipts remain a separate prerequisite.
+hostile workflow author. These limits are why full tier requires a platform-bound
+queue/manual source and an accepted workflow pin. Native receipts remain separate
+work; this does not certify the behavior of all target code or runtime identity.
