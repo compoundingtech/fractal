@@ -10,6 +10,8 @@ fn invalid(message: &str) -> ValidationError {
 pub fn person(value: &str) -> bool {
     value.strip_prefix("person/").is_some_and(|name| {
         !name.is_empty()
+            && name != ".."
+            && crate::registry().validate_subject(value).is_ok()
             && name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))

@@ -163,6 +163,7 @@ fn accountable_root_grammar_rejects_nonpersons_duplicates_and_nested_values() {
         "accountable \"agent/example\"",
         "accountable \"person/a/b\"",
         "accountable \"person/\"",
+        "accountable \"person/..\"",
         "accountable \"person/avery\" extra=\"x\"",
         "accountable \"person/avery\" { name \"x\"; }",
         "accountable \"person/avery\" \"person/robin\"",
@@ -175,6 +176,14 @@ fn accountable_root_grammar_rejects_nonpersons_duplicates_and_nested_values() {
             "{child}"
         );
     }
+    let source = format!(
+        "version 2\nagent \"example/root\" {{ accountable \"person/{}\"; command \"true\"; }}",
+        "x".repeat(506)
+    );
+    assert!(
+        crate::graph::parse_internal_intent(&source, "alder").is_err(),
+        "person reference exceeds the schema subject bound"
+    );
     let mission = "version 2\nmission \"example/work\" state=\"ready\" { goal \"Work.\"; agent \"worker\" { accountable \"person/avery\"; command \"true\"; }; step \"work\" { assigned-to \"agent/worker\"; goal \"Work.\"; }; }";
     assert_eq!(
         crate::graph::parse_internal_intent(mission, "alder")
