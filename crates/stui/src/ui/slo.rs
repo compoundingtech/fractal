@@ -127,7 +127,7 @@ impl Counters {
 pub static METRICS: Counters = Counters::new();
 static ENABLED: AtomicBool = AtomicBool::new(false);
 fn bucket(elapsed: Duration) -> usize {
-    let ms = elapsed.as_micros().div_ceil(1000);
+    let ms = elapsed.as_nanos().div_ceil(1_000_000);
     BUCKET_UPPER_MS
         .iter()
         .position(|upper| upper.is_none_or(|upper| ms <= upper as u128))
@@ -636,6 +636,7 @@ mod tests {
             let ms = upper.unwrap();
             assert_eq!(bucket(Duration::from_millis(ms)), i);
             assert_eq!(bucket(Duration::from_micros(ms * 1000 + 1)), i + 1);
+            assert_eq!(bucket(Duration::from_nanos(ms * 1_000_000 + 1)), i + 1);
         }
         assert_eq!(bucket(Duration::ZERO), 0);
         assert_eq!(bucket(Duration::MAX), 16);
