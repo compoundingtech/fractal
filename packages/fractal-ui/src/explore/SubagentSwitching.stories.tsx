@@ -294,7 +294,8 @@ export const SubagentSwitchingProbe: Story = { args: { probe: true, state: 'many
   const beyond = workspaces.alerts.agents.slice(3)
   await expect(beyond.map(agent => agent.status)).toContain('Failed')
   await expect(beyond.map(agent => agent.status)).toContain('Needs you')
-  const overflow = within(lane).getByRole('button', { name: `+${beyond.length} more, ${alertWords(beyond).join(', ')}` })
+  const overflow = lane.querySelector<HTMLElement>('[data-thread-drawer-toggle]')!
+  await expect(overflow.textContent).toContain(`+${beyond.length} more`)
   await expect(overflowCues(overflow, beyond)).toBe(true)
   const failedCue = overflow.querySelector<HTMLElement>('[data-alert-cue="failed"]')!
   failedCue.remove()

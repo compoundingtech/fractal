@@ -46,8 +46,9 @@ function ThreadLabel({ agent, unread }: { agent: Agent; unread: number }) {
   return <>
     <span aria-hidden="true" {...stylex.props(styles.glyph, agent.status === 'Running' && styles.running, agent.status === 'Failed' && styles.failed, agent.status === 'Needs you' && styles.attention)}><Icon name={statusGlyph[agent.status]} /></span>
     <span {...stylex.props(styles.threadName)}>{agent.name}</span>
-    {alert ? <><VisuallyHidden elementType="span">, </VisuallyHidden><span data-status-word {...stylex.props(styles.statusWord, agent.status === 'Failed' ? styles.failed : styles.attention)}>{agent.status}</span></> : <VisuallyHidden elementType="span">{`, ${agent.status.toLowerCase()}`}</VisuallyHidden>}
-    {unread > 0 ? <><VisuallyHidden elementType="span">, </VisuallyHidden><span {...stylex.props(styles.unread)}>{unread}</span><VisuallyHidden elementType="span"> unread</VisuallyHidden></> : null}
+    {/* The leading spaces keep visible words apart in the text accessibility checkers read (flex layout drops them on screen), so label-in-name holds for "Delivery, Failed". */}
+    {alert ? <><VisuallyHidden elementType="span">, </VisuallyHidden><span data-status-word {...stylex.props(styles.statusWord, agent.status === 'Failed' ? styles.failed : styles.attention)}>{' '}{agent.status}</span></> : <VisuallyHidden elementType="span">{`, ${agent.status.toLowerCase()}`}</VisuallyHidden>}
+    {unread > 0 ? <><VisuallyHidden elementType="span">, </VisuallyHidden><span {...stylex.props(styles.unread)}>{' '}{unread}</span><VisuallyHidden elementType="span"> unread</VisuallyHidden></> : null}
   </>
 }
 /** Failed and needs-you threads the strip cannot show stay visible on the overflow control as glyph + count, and are spoken in words. */
@@ -106,7 +107,8 @@ export function SwitchingLane({ switcher: variant, state, scheme, width, placeme
     const alert = agent.status === 'Failed' || agent.status === 'Needs you'
     return [agent.name, ...(alert ? [agent.status] : []), ...(unreadOf(agent) > 0 ? [`${unreadOf(agent)} unread`] : []), ...(alert ? [] : [agent.status.toLowerCase()])].join(', ')
   }
-  const drawerToggle = (text: string, beyond: readonly Agent[]) => <Button data-thread-drawer-toggle aria-label={[text, ...alertWords(beyond)].join(', ')} aria-expanded={drawer} aria-controls={drawer ? drawerId : undefined} onPress={() => setDrawer(open => !open)} {...stylex.props(styles.chip, styles.quiet)}><Icon name="drawer" />{text}<AlertCues agents={beyond} /></Button>
+  // Named from content: the visible count, then the spoken alert words; the aria-hidden glyph cues stay out of the name.
+  const drawerToggle = (text: string, beyond: readonly Agent[]) => <Button data-thread-drawer-toggle aria-expanded={drawer} aria-controls={drawer ? drawerId : undefined} onPress={() => setDrawer(open => !open)} {...stylex.props(styles.chip, styles.quiet)}><Icon name="drawer" />{text}<AlertCues agents={beyond} /></Button>
   const beyondStrip = agents.filter(agent => !shown.includes(agent))
   const more = beyondStrip.length > 0 ? drawerToggle(`+${beyondStrip.length} more`, beyondStrip) : null
   // OMP and other unreported harnesses: say what is unknown instead of an empty child list or a spinner.
