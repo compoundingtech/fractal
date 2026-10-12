@@ -10,3 +10,13 @@ body,
 body:has([data-testid='wf-devbar']:not([hidden])) {
   --wf-devbar-space: 24px;
 }
+
+/* Native status and elapsed belong beside the title, not among panel actions. */
+[data-workspace-header] [data-testid='thread-header'] > nav + div {
+  margin-inline-start: 0;
+  flex: 1 1 0;
+  min-width: 0;
+}
+[data-workspace-header] [data-testid='native-action-slot'] {
+  margin-inline-start: auto;
+}

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Keep conversation synchronization accessible without a native tooltip over header disclosures.",
+  "summary": "Keep conversation synchronization accessible without a native tooltip over header disclosures, place native status and elapsed beside the flexible title, and align native actions to the trailing edge.",
   "replay": { "status": "none", "detail": "Web presentation only." },
   "schema": { "status": "none", "detail": "No schema changes." },
   "rules": { "status": "none", "detail": "No policy changes." },
