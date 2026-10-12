@@ -275,8 +275,11 @@ pub fn effective_agent_name<'a>(subject: &'a str, desired: Option<&'a Value>) ->
         .unwrap_or_else(|| subject.strip_prefix("agent/").unwrap_or(subject))
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct DesiredSubject {
+    /// Declared once on a person-authored root; used only by trace resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accountable: Option<String>,
     pub subject: String,
     pub kind: String,
     pub desired: Value,
@@ -288,6 +291,29 @@ pub struct DesiredSubject {
     pub owner_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_step: Option<String>,
+}
+
+// Accountable roots carry a fields envelope too: legacy admission reads that envelope
+// before decoding DesiredSubject, and therefore retains the new field as unknown.
+impl Serialize for DesiredSubject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("subject", &self.subject)?;
+        map.serialize_entry("kind", &self.kind)?;
+        map.serialize_entry("desired", &self.desired)?;
+        if let Some(member) = &self.member { map.serialize_entry("member", member)?; }
+        if let Some(run) = &self.owner_run { map.serialize_entry("owner_run", run)?; }
+        if let Some(generation) = &self.owner_generation { map.serialize_entry("owner_generation", generation)?; }
+        if let Some(step) = &self.owner_step { map.serialize_entry("owner_step", step)?; }
+        if let Some(person) = &self.accountable {
+            map.serialize_entry("accountable", person)?;
+            map.serialize_entry("fields", &serde_json::json!({
+                "kind": self.kind, "desired": self.desired, "accountable": person,
+            }))?;
+        }
+        map.end()
+    }
 }
 
 impl DesiredSubject {
