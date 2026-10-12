@@ -38,6 +38,7 @@ mod first_sync;
 mod follow_retry;
 mod fleet;
 mod gate_kinds;
+mod git_evidence;
 mod getting_started;
 mod hermetic;
 mod hook_telemetry;
