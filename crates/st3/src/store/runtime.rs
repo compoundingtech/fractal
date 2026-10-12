@@ -8,6 +8,9 @@ use super::*;
 /// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct SmalltalkRuntime {
+    /// Committed launch-source invalidation, independent of append frontiers.
+    pub(crate) publication_cache_epoch: Mutex<Option<(i64, bool)>>,
+    pub(crate) publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub(crate) ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher

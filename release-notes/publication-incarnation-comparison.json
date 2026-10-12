@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds four local derived tables and lookup indexes over those small tables, plus exact source-delta triggers. No new index scans the claims or local_observations table at open. Numeric schema version and replicated claim bodies are unchanged."
+    "detail": "Adds five local derived tables and lookup indexes over those small tables, plus exact source-delta triggers. A local launch-source generation invalidates cached evidence on repair, trim and replay; one constant-size commit-observer read publishes that invalidation. No new index scans the claims or local_observations table at open. Numeric schema version and replicated claim bodies are unchanged."
   },
   "rules": {
     "status": "none",

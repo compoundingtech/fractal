@@ -86,9 +86,11 @@ pub(crate) fn launched_member(
     else {
         return Ok(None);
     };
-    Ok(claim_by_id_tx(connection, token)?
-        .filter(|claim| claim.subject == subject)
-        .and_then(|claim| serde_json::from_value::<DesiredSubject>(claim.body).ok())
+    let body: Option<String> = connection.prepare_cached(&format!(
+        "SELECT body FROM claims WHERE id=?1 AND subject=?2 AND kind='intent.desired' AND {UNREPAIRED_CLAIM}"
+    ))?.query_row(params![token,subject], |row| row.get(0)).optional()?;
+    Ok(body
+        .and_then(|body| serde_json::from_str::<DesiredSubject>(&body).ok())
         .and_then(|desired| desired.member))
 }
 
@@ -184,6 +186,14 @@ pub(crate) fn check(
 }
 
 impl Store {
+    pub(crate) fn publication_cache_epoch(&self) -> Option<(i64, bool)> {
+        *self
+            .smalltalk
+            .publication_cache_epoch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub(crate) fn publication_evidence_epoch(&self, subject: &str) -> Result<(u64, i64, bool)> {
         smallclaims::touched::note_read(|| subject.to_owned());
         Ok(self

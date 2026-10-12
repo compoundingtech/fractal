@@ -823,6 +823,7 @@ fn reconcile_decision_admitted(subject: &str) -> bool {
 }
 
 struct LaunchEvidence {
+    source_epoch: Option<(i64, bool)>,
     member: Option<MemberSpec>,
     epoch: (u64, i64, bool),
     checked_at_ms: u128,
@@ -2177,6 +2178,10 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_pass(&self) -> Result<()> {
         let observe_span = crate::profile::span("pass/changes");
         self.incremental.observe(&self.store)?;
+        self.incremental.observe_value(
+            "publication-launch-evidence",
+            format!("{:?}", self.store.publication_cache_epoch()),
+        );
         drop(observe_span);
         let _runners_span = crate::profile::span("pass/gate-runners");
         let gate_runners = self.gate_runners()?;
@@ -4779,6 +4784,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &DesiredSubject,
         observation: &RuntimeObservation,
     ) -> Result<Option<Vec<&'static str>>> {
+        smallclaims::touched::note_read(|| "publication-launch-evidence".to_owned());
         let preliminary = crate::publication::interruption(
             subject,
             observation.status == "running",
@@ -4797,11 +4803,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             incarnation.to_owned(),
         );
         let now = now_ms();
+        let source_epoch = self.store.publication_cache_epoch();
         let mut cache = self
             .launched_members
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let launched = match cache.get(&key) {
+        // Retained payloads are immutable only while their source remains admitted.
+        // Repair, trim and replay can change that validity without an append frontier.
+        if source_epoch.is_none_or(|(_, ready)| !ready) {
+            cache.clear();
+            return Ok(None);
+        }
+        let launched = match cache
+            .get(&key)
+            .filter(|known| known.source_epoch == source_epoch)
+        {
             Some(known) if known.member.is_some() => known.member.clone(),
             known => {
                 let epoch = self.store.publication_evidence_epoch(&subject.subject)?;
@@ -4822,6 +4838,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     cache.insert(
                         key,
                         LaunchEvidence {
+                            source_epoch,
                             member: member.clone(),
                             epoch,
                             checked_at_ms: now,
@@ -19977,6 +19994,19 @@ mission "feedback-review" state="ready" {
         );
         let desired = store.desired_subjects().unwrap();
         let observations = runtime.ptys.lock().unwrap().clone();
+        let source_epoch = store.publication_cache_epoch();
+        for (subject, observation) in desired.iter().zip(&observations) {
+            store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(), kind: "runtime.observed".into(),
+                actor: Some("agent/example/writer".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), serde_json::json!("running")),
+                    ("incarnation_id".into(), serde_json::json!(observation.incarnation_id)),
+                ]), evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        assert_eq!(store.publication_cache_epoch(), source_epoch,
+            "runtime observations must not invalidate retained launch proofs");
         let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
         for _ in 0..4 {
             for (subject, observation) in desired.iter().zip(&observations) {
@@ -19994,6 +20024,129 @@ mission "feedback-review" state="ready" {
             "found evidence must use no SQLite statements on repeated passes: {cost:?}"
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn publication_found_launch_cache_invalidates_on_retained_source_mutations() {
+        // Mutate the native source tables here to cover the same-frontier seam which
+        // the append feed cannot see. Native admission/repair/trim paths are exercised
+        // separately by the materialized evidence coverage tests.
+        for mutation in [
+            "local-trim",
+            "shared-trim",
+            "definition-trim",
+            "definition-repair",
+            "replay",
+        ] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(
+                &store,
+                "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+                "original",
+            );
+            let subject = "agent/example/worker";
+            let token = store.selected_desired_token(subject).unwrap().unwrap();
+            let receipt = store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: (mutation == "shared-trim").then(|| "agent/fixture".into()),
+                    fields: BTreeMap::from([
+                        ("action".into(), serde_json::json!("start")),
+                        ("incarnation_id".into(), serde_json::json!("one")),
+                        ("desired_token".into(), serde_json::json!(token)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            apply_source(
+                &store,
+                "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"false\"; }",
+                "proposed",
+            );
+            let proposed = store
+                .desired_subject_with_writer(subject)
+                .unwrap()
+                .unwrap()
+                .0;
+            let observation = RuntimeObservation {
+                runtime_id: proposed.member.as_ref().unwrap().runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some("one".into()),
+            };
+            let reconciler = Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            assert_eq!(
+                reconciler
+                    .declared_launch_changes(&proposed, &observation)
+                    .unwrap(),
+                Some(vec!["launch"]),
+                "{mutation}"
+            );
+            let epoch = store.publication_cache_epoch();
+            {
+                let mut writer = store.connection.write();
+                let tx = writer.transaction().unwrap();
+                tx.execute("DELETE FROM local_publication_starts", [])
+                    .unwrap();
+                tx.rollback().unwrap();
+            }
+            assert_eq!(
+                store.publication_cache_epoch(),
+                epoch,
+                "rollback must retain valid cache"
+            );
+            {
+                let mut writer = store.connection.write();
+                let tx = writer.transaction().unwrap();
+                match mutation {
+                    "local-trim" => {
+                        tx.execute("DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
+                    }
+                    "shared-trim" => {
+                        tx.execute("DELETE FROM claims WHERE id=?1", [&receipt.id])
+                            .unwrap();
+                    }
+                    "definition-trim" => {
+                        tx.execute("DELETE FROM claims WHERE id=?1", [&token])
+                            .unwrap();
+                    }
+                    "definition-repair" => {
+                        tx.execute(
+                            "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+                            [&token],
+                        )
+                        .unwrap();
+                    }
+                    "replay" => {
+                        tx.execute("DELETE FROM local_publication_bootstrap", [])
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                tx.commit().unwrap();
+            }
+            assert_ne!(store.publication_cache_epoch(), epoch, "{mutation}");
+            assert!(
+                store.publication_launch(subject, "one").unwrap().is_none(),
+                "{mutation}"
+            );
+            assert_eq!(
+                reconciler
+                    .declared_launch_changes(&proposed, &observation)
+                    .unwrap(),
+                None,
+                "retired or unready proof must not cause a restart: {mutation}"
+            );
+        }
     }
 
     #[test]

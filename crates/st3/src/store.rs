@@ -3231,6 +3231,7 @@ impl Store {
         }
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -3245,6 +3246,7 @@ impl Store {
         let graph = GraphStore::open(path, origin, smalltalk.clone())?;
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -3262,6 +3264,7 @@ impl Store {
         }
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 

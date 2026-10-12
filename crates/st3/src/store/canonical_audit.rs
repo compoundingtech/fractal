@@ -70,6 +70,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_publication_starts",
         "local_publication_pending",
         "local_publication_bootstrap",
+        "local_publication_launch_epoch",
         "local_observations",
         "local_blobs",
         "local_blob_uploads",

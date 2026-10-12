@@ -35,6 +35,40 @@ CREATE TABLE IF NOT EXISTS local_publication_bootstrap (
     local_ceiling INTEGER NOT NULL,
     progress_ms TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS local_publication_launch_epoch (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    generation INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO local_publication_launch_epoch VALUES(1,0);
+CREATE TRIGGER IF NOT EXISTS publication_launch_insert AFTER INSERT ON local_publication_claims
+WHEN NEW.kind='runtime.action.succeeded' BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS publication_launch_delete AFTER DELETE ON local_publication_claims
+WHEN OLD.kind='runtime.action.succeeded' BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS publication_launch_update AFTER UPDATE ON local_publication_claims
+WHEN OLD.kind='runtime.action.succeeded' OR NEW.kind='runtime.action.succeeded' BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS publication_local_launch_insert AFTER INSERT ON local_publication_starts BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS publication_local_launch_delete AFTER DELETE ON local_publication_starts BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS publication_local_launch_update AFTER UPDATE ON local_publication_starts BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS publication_launch_definition_delete AFTER DELETE ON claims
+WHEN OLD.kind='intent.desired' BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS publication_launch_definition_update
+AFTER UPDATE OF subject,kind,body ON claims WHEN OLD.kind='intent.desired' BEGIN
+    UPDATE local_publication_launch_epoch SET generation=generation+1;
+END;
 CREATE TRIGGER IF NOT EXISTS publication_claim_insert AFTER INSERT ON claims
 WHEN NEW.kind IN ('runtime.observed','runtime.action.succeeded') BEGIN
     INSERT OR IGNORE INTO local_publication_pending VALUES(NEW.id);
@@ -96,10 +130,14 @@ const REPAIR_SCHEMA: &str = r#"
 CREATE TRIGGER IF NOT EXISTS publication_repair_insert AFTER INSERT ON projection_digest_repaired_claims BEGIN
     DELETE FROM local_publication_claims WHERE claim_id=NEW.id;
     DELETE FROM local_publication_pending WHERE claim_id=NEW.id;
+    UPDATE local_publication_launch_epoch SET generation=generation+1
+    WHERE EXISTS(SELECT 1 FROM claims WHERE id=NEW.id AND kind='intent.desired');
 END;
 CREATE TRIGGER IF NOT EXISTS publication_repair_delete AFTER DELETE ON projection_digest_repaired_claims BEGIN
     INSERT OR IGNORE INTO local_publication_pending SELECT id FROM claims WHERE id=OLD.id
       AND kind IN ('runtime.observed','runtime.action.succeeded');
+    UPDATE local_publication_launch_epoch SET generation=generation+1
+    WHERE EXISTS(SELECT 1 FROM claims WHERE id=OLD.id AND kind='intent.desired');
 END;
 "#;
 
@@ -110,6 +148,39 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
         connection.execute_batch(REPAIR_SCHEMA)?;
     }
     Ok(())
+}
+
+/// Publish a process-lifetime cache invalidation hint after native commit resolution.
+/// This is not authority for an effect. The publication writer reads its own evidence;
+/// physical-effect authorization must independently fence the current declaration. Read failure invalidates every cached proof.
+pub(super) fn install_cache_observer(graph: &GraphStore, runtime: &Arc<SmalltalkRuntime>) {
+    let weak = Arc::downgrade(runtime);
+    let observer = graph.connection.observe_commits(move |connection| {
+        if let Some(runtime) = weak.upgrade() {
+            *runtime
+                .publication_cache_epoch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = cache_epoch(connection).ok();
+        }
+    });
+    *runtime
+        .publication_cache_observer
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(observer);
+    // Registration precedes the fresh writer cut, so no intervening commit can be missed.
+    let connection = graph.connection.write();
+    *runtime
+        .publication_cache_epoch
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = cache_epoch(&connection).ok();
+}
+
+fn cache_epoch(connection: &Connection) -> Result<(i64, bool)> {
+    Ok(connection.prepare_cached(
+        "SELECT generation,COALESCE((SELECT phase=3 FROM local_publication_bootstrap WHERE singleton=1),0)
+            AND NOT EXISTS(SELECT 1 FROM local_publication_pending)
+         FROM local_publication_launch_epoch WHERE singleton=1"
+    )?.query_row([], |row| Ok((row.get(0)?,row.get(1)?)))?)
 }
 
 /// Indexed ceilings only. Never reads historical bodies or advances a bootstrap page in open.
@@ -159,7 +230,12 @@ fn sync_from_source(transaction: &Transaction<'_>, source: &Connection, id: &str
     transaction.execute(
         "INSERT INTO local_publication_claims VALUES(?1,?2,?3,?4,?5,?6)
          ON CONFLICT(claim_id) DO UPDATE SET subject=excluded.subject,origin=excluded.origin,
-             kind=excluded.kind,incarnation=excluded.incarnation,sort_key=excluded.sort_key",
+             kind=excluded.kind,incarnation=excluded.incarnation,sort_key=excluded.sort_key
+         WHERE local_publication_claims.subject<>excluded.subject
+            OR local_publication_claims.origin<>excluded.origin
+            OR local_publication_claims.kind<>excluded.kind
+            OR local_publication_claims.incarnation<>excluded.incarnation
+            OR local_publication_claims.sort_key<>excluded.sort_key",
         params![
             id,
             subject,
@@ -582,7 +658,7 @@ mod tests {
         );
         let bytes:u64=connection.query_row("SELECT sum(pgsize) FROM dbstat WHERE name IN
             ('local_publication_claims','local_publication_claims_lookup','local_publication_runtime_lookup',
-             'local_publication_starts','local_publication_starts_lookup','local_publication_pending','local_publication_bootstrap')",[],|row|row.get(0)).unwrap();
+             'local_publication_starts','local_publication_starts_lookup','local_publication_pending','local_publication_bootstrap','local_publication_launch_epoch')",[],|row|row.get(0)).unwrap();
         println!("publication census derived_bytes={bytes}");
     }
 
