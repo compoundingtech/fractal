@@ -77,10 +77,24 @@ async function keyboardFile(root: HTMLElement, enabled: boolean) {
 
 // Real DragEvent/DataTransfer dispatch exercises RAC's pointer handlers and keyed
 // drop delegate. No hook callback or model mutation is invoked by the play.
+// Chromium keeps effectAllowed and dropEffect at 'none' on a script-constructed
+// DataTransfer, whereas a live drag session lets dragstart write effectAllowed and
+// dragenter/dragover write dropEffect. The instance emulates exactly that session
+// state, so RAC's own handlers negotiate the operation unmodified.
+function sessionTransfer(effectAllowed: DataTransfer['effectAllowed'] = 'uninitialized') {
+  const transfer = new DataTransfer()
+  let allowed = effectAllowed
+  let effect: DataTransfer['dropEffect'] = 'none'
+  Object.defineProperties(transfer, {
+    effectAllowed: { get: () => allowed, set: (value: DataTransfer['effectAllowed']) => { allowed = value } },
+    dropEffect: { get: () => effect, set: (value: DataTransfer['dropEffect']) => { effect = value } },
+  })
+  return transfer
+}
 async function startPointer(root: HTMLElement) {
   const source = row(root, 'parcel')
   const bounds = source.getBoundingClientRect()
-  const transfer = new DataTransfer()
+  const transfer = sessionTransfer()
   source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: bounds.left + bounds.width / 2, clientY: bounds.top + bounds.height / 2 }))
   await frames()
   return { source, transfer }
@@ -184,8 +198,9 @@ const realRowAt = async (x: number, y: number) => {
   await expect(real).not.toBeNull()
   return real!.dataset.sidebarTreeKey!
 }
+// A file-manager style external source offers copy or move and sets no in-page dragstart.
 const externalTransfer = () => {
-  const transfer = new DataTransfer()
+  const transfer = sessionTransfer('copyMove')
   transfer.setData('text/plain', 'parcel')
   return transfer
 }
