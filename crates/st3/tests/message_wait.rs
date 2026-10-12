@@ -15,6 +15,7 @@ use tokio::sync::{Notify, watch};
 const WORKER: &str = "agent/example/worker";
 const PERSON: &str = "person/avery";
 const OTHER: &str = "person/blake";
+const PEER: &str = "agent/example/peer";
 
 /// An in-process daemon on its own socket, and the store behind it.
 async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()>) {
@@ -192,7 +193,9 @@ async fn a_reply_returns_the_wait_early_and_is_marked_read() {
 async fn after_counts_a_reply_that_beat_the_wait() {
     let root = tempfile::tempdir().unwrap();
     let (socket, _store, server) = daemon(root.path()).await;
-    let question = send(&socket, WORKER, PERSON, "Shall I start?").await;
+    // People have no inbox, so the question the reply follows is any message the seat sent just
+    // before it began to wait; the person answers it in the chat, which reaches the seat as mail.
+    let question = send(&socket, WORKER, PEER, "Shall I start?").await;
     send(&socket, PERSON, WORKER, "Yes.").await;
     let answer = value(
         &st(&socket, &[], &wait_args("0", &["--after", question["subject"].as_str().unwrap()])).await,
