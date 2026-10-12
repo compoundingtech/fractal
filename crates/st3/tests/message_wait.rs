@@ -14,7 +14,7 @@ use tokio::sync::{Notify, watch};
 
 const WORKER: &str = "agent/example/worker";
 const PERSON: &str = "person/avery";
-const OTHER: &str = "person/blake";
+const OTHER: &str = "person/ada";
 const PEER: &str = "agent/example/peer";
 
 /// An in-process daemon on its own socket, and the store behind it.
