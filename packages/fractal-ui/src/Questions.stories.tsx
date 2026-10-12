@@ -17,7 +17,7 @@ function ComposerRoutingExample({ routing, storyId }: { readonly routing: NonNul
   const [sent, setSent] = React.useState<readonly string[]>([])
   const options = React.useMemo<ConversationRuntimeOptions>(() => ({ messages: [], onNew: async message => setSent(previous => [...previous, message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')]) }), [])
   return <EmbraceRuntimeProvider options={options}>
-    <QuestionForm request={questionRequest} composerTyping composerRouting={routing} onOpenTerminal={fn()} />
+    <QuestionForm request={questionRequest} ariaLabel={`Question with ${routing._tag} composer`} composerTyping composerRouting={routing} onOpenTerminal={fn()} />
     <Composer agent={questionRequest.agentLabel} draftKey={`question-routing.${storyId}.${routing._tag}`} onSend={text => setSent(previous => [...previous, text])} />
     <output aria-label="Composer fixture submissions">{sent.join('\n')}</output>
   </EmbraceRuntimeProvider>
@@ -41,8 +41,8 @@ function SharedQuestionDraft({ scrollDriven = false }: { readonly scrollDriven?:
       <div ref={observe}><QuestionForm request={request} {...shared} /></div>
       {scrollDriven ? <div {...stylex.props(styles.scrollSpace)}>Earlier conversation</div> : null}
     </div>
-    <NeedsYouBar requests={[request]} expanded={expanded} onToggle={() => setExpanded(value => !value)} transcriptVisibility={scrollDriven ? ratio : 0}><QuestionForm request={request} variant="pinned" {...shared} /></NeedsYouBar>
-    {!scrollDriven ? <NeedsYouInbox requests={[request]} onShowInThread={fn()} onOpenTerminal={fn()} formProps={() => shared} /> : null}
+    <NeedsYouBar requests={[request]} expanded={expanded} onToggle={() => setExpanded(value => !value)} transcriptVisibility={scrollDriven ? ratio : 0}><QuestionForm request={request} ariaLabel="Pinned question" variant="pinned" {...shared} /></NeedsYouBar>
+    {!scrollDriven ? <NeedsYouInbox requests={[request]} onShowInThread={fn()} onOpenTerminal={fn()} formProps={() => ({ ...shared, ariaLabel: 'Inbox question' })} /> : null}
   </>
 }
 
@@ -129,12 +129,12 @@ export const Keyboard: Story = { args: { request: { ...questionRequest, answerab
   await expect(args.onDecline).not.toHaveBeenCalled()
 } }
 export const AllStates: Story = { render: () => <>
-  {questionKinds.map(kind => <section key={kind.id}><h2>{kind.id}</h2><QuestionForm request={{ ...questionRequest, id: `readonly-${kind.id}`, questions: [kind] }} onOpenTerminal={fn()} />{questionStates.map((state, index) => <QuestionForm key={index} request={{ ...questionRequest, id: `${kind.id}-${index}`, questions: [kind], answerable: true, state }} draft={{ [kind.id]: { selected: [kind.options[0]?.id ?? ''], other: kind.kind === 'text' ? 'Release review' : undefined } }} onOpenTerminal={fn()} onSubmit={fn()} onDraftChange={fn()} onDecline={fn()} onRetry={fn()} />)}</section>)}
-  <QuestionForm request={{ ...questionRequest, questions: questionKinds, answerable: true }} onDraftChange={fn()} onSubmit={fn()} onDecline={fn()} />
-  <QuestionSummary request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Reviewer', where: 'terminal', at: '15:41 UTC' } }} />
-  <NeedsYouBar requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} expanded={false} onToggle={fn()} />
-  <NeedsYouBar requests={[questionRequest]} expanded onToggle={fn()}><QuestionForm request={questionRequest} variant="pinned" onOpenTerminal={fn()} /></NeedsYouBar>
-  <NeedsYouInbox requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} onShowInThread={fn()} onOpenTerminal={fn()} />
+  {questionKinds.map(kind => <section key={kind.id}><h2>{kind.id}</h2><QuestionForm ariaLabel={`${kind.id} read-only question`} request={{ ...questionRequest, id: `readonly-${kind.id}`, questions: [kind] }} onOpenTerminal={fn()} />{questionStates.map((state, index) => <QuestionForm key={index} ariaLabel={`${kind.id} ${state._tag} question ${index}`} request={{ ...questionRequest, id: `${kind.id}-${index}`, questions: [kind], answerable: true, state }} draft={{ [kind.id]: { selected: [kind.options[0]?.id ?? ''], other: kind.kind === 'text' ? 'Release review' : undefined } }} onOpenTerminal={fn()} onSubmit={fn()} onDraftChange={fn()} onDecline={fn()} onRetry={fn()} />)}</section>)}
+  <QuestionForm ariaLabel="Batch questions" request={{ ...questionRequest, questions: questionKinds, answerable: true }} onDraftChange={fn()} onSubmit={fn()} onDecline={fn()} />
+  <QuestionSummary ariaLabel="Batch question outcome" request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Reviewer', where: 'terminal', at: '15:41 UTC' } }} />
+  <NeedsYouBar ariaLabel="Collapsed needs you" requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} expanded={false} onToggle={fn()} />
+  <NeedsYouBar ariaLabel="Expanded needs you" requests={[questionRequest]} expanded onToggle={fn()}><QuestionForm ariaLabel="Expanded pinned question" request={questionRequest} variant="pinned" onOpenTerminal={fn()} /></NeedsYouBar>
+  <NeedsYouInbox requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} onShowInThread={fn()} onOpenTerminal={fn()} formProps={id => ({ ariaLabel: `Inbox question ${id}` })} />
 </> }
 export const NegativeControls: Story = { render: () => <>
   <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'decision-1', callId: 'decision-1', name: 'decision', input: { description: 'Review recorded' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} variant="cards" />
