@@ -372,7 +372,8 @@ const play: NonNullable<Story['play']> = async ({ canvasElement, step }) => {
     await assertProjection(canvasElement, block)
   })
 }
-export const Exploration: Story = { play }
+export const Exploration: Story = {}
+export const ExplorationProbe: Story = { play }
 export const AllStates: Story = { args: { compareT: true, compareK: true, compareM: true }, play }
 export const MetaM1: Story = { args: { meta: 'M1' }, play }
 export const MetaM2: Story = { args: { meta: 'M2' }, play }
