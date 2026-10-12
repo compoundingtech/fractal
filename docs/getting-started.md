@@ -12,7 +12,7 @@ machine and GitHub integration can wait until you need them.
 Run this in your terminal:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
 ```
 
 The installer detects your platform, downloads the latest release and its SHA256
@@ -90,8 +90,13 @@ prompts. Choose the projects and tasks you give your agents accordingly.
 
 ## 3. Work with the expert
 
-When a usable harness is available, first-run setup creates `agent/st/expert` and
-starts `mission/st/onboarding`. When setup publishes the expert during a plain `st`
+When a usable harness is available, the first run, the one that creates your configuration,
+asks before it starts anything. It says that the built-in expert is an agent that runs on your
+own harness account, so it uses that harness's usage and quota, and which access mode it
+runs in, then asks `Start the built-in expert now?` (default yes). `--yes` answers yes and
+`--expert false` declines; a decline prints `Not started. Run st setup --onboarding when you
+want it.` On yes, setup creates `agent/st/expert` and starts `mission/st/onboarding`, and says
+what it created and how to stop it. When setup publishes the expert during a plain `st`
 launch, the interface opens that conversation. You can also find it under Agents.
 Follow its guidance for your first mission; the expert stays available afterward.
 
@@ -119,11 +124,13 @@ st conversations send agent/st/expert --from person/ada \
 st
 ```
 
-Ordinary setup consults onboarding run history across the fleet and does not start
-another first run or resurrect a stopped expert. To begin again deliberately, finish
-or cancel the active onboarding run, then use `st setup --onboarding`. That command
-can restore a stopped expert and starts a distinct onboarding run. It does not cancel
-an existing run for you. Use `st setup --help` for scripted answers and other options.
+Setup starts the expert on its own only on that first run. On a machine that already has a
+configuration, plain `st` and `st setup` start nothing and, for `st setup`, say so. To begin
+(or begin again) deliberately, finish or cancel any active onboarding run, then use
+`st setup --onboarding`. That command skips the question because it is the request, can
+restore a stopped expert and starts a distinct onboarding run; it refuses when the running
+daemon is too old to report onboarding history. It does not cancel an existing run for you.
+Use `st setup --help` for scripted answers and other options.
 
 ## 4. Check the installation
 

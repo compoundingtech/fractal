@@ -5,13 +5,15 @@ your coding agents and follow their work. Give them a mission with goals, constr
 and checks; durable seats carry it through and bring you the decisions that need you.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh | sh
 ```
 
 The installer selects your platform, verifies the downloaded archive and opens `st`.
 On the first run, choose your name and this machine's name, accept the background
-service, and choose an installed coding harness. The built-in expert guides you
-through your first mission and stays available afterward.
+service, and choose an installed coding harness. Before it starts, setup says that the
+built-in expert runs an agent on your own harness account (using its usage and quota) and
+asks; it then guides you through your first mission and stays available afterward. Nothing
+is started on an installation that already has a configuration.
 
 After quitting the interface with **Ctrl+Q**, open it again:
 
