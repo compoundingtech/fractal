@@ -2109,7 +2109,7 @@ time.sleep(300)
                 "python3",
                 "-c",
                 provider,
-                env!("CARGO_BIN_EXE_st3-fixture"),
+                test_env!("CARGO_BIN_EXE_st3-fixture"),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
