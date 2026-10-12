@@ -20116,6 +20116,13 @@ mission "feedback-review" state="ready" {
                             .unwrap();
                     }
                     "definition-trim" => {
+                        // Native trimming retires operation identities before their
+                        // canonical claims. Preserve that foreign-key ordering here.
+                        tx.execute(
+                            "DELETE FROM operations WHERE canonical_claim_id=?1",
+                            [&token],
+                        )
+                        .unwrap();
                         tx.execute("DELETE FROM claims WHERE id=?1", [&token])
                             .unwrap();
                     }
