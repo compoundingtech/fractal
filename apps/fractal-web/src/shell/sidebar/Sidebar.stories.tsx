@@ -184,7 +184,7 @@ export const AllStates: Story = {
   ),
 }
 
-// The ended mark is still Johannes's open choice: the ratified neutral disc, the outline stop circle, or a finish flag.
+// The ended mark is still an open choice: the ratified neutral disc, the outline stop circle, or a finish flag.
 export const EndedOptions: Story = {
   render: () => (
     <div {...stylex.props(styles.statusGrid)}>
