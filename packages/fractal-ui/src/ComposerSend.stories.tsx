@@ -121,7 +121,7 @@ interface Host {
   readonly subject: string
   readonly onClearReply: () => void
   readonly onSubjectChange: (subject: string) => void
-  readonly onRecipientChange: (recipient: { readonly ref: string; readonly label: string }) => void
+  readonly onRecipientChange: (ref: string) => void
   readonly record: (line: string) => void
   readonly afterSend: () => void
 }
@@ -220,10 +220,10 @@ function ComposerSendStory({ scheme, scenario: name }: { readonly scheme: Scheme
     availability: availabilityFor(availabilityTag, recover),
     onClearReply: () => setReply(undefined),
     onSubjectChange: setSubject,
-    onRecipientChange: recipient => {
-      setRecipientChanges(previous => [...previous, recipient.ref])
-      setVisited(previous => new Set(previous).add(recipient.ref))
-      setActiveRef(recipient.ref)
+    onRecipientChange: ref => {
+      setRecipientChanges(previous => [...previous, ref])
+      setVisited(previous => new Set(previous).add(ref))
+      setActiveRef(ref)
     },
     record: line => setLog(previous => [...previous, line]),
     afterSend: () => { setReply(undefined); setSubject('') },

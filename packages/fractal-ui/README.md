@@ -163,6 +163,18 @@ The exported legacy Folio, Relay and Orbit palettes also avoid green: `good` is 
 
 The shared diff tint assertion identifies a token through its causal effect on both the row wash and gutter, letting the browser resolve CSS layers, specificity and conditional rules. It restores exact inline styles and verifies computed paint restoration after each probe. Every dark/light tint story also rejects the original neutral pre-tint paint and an equal-blue wash backed by an unrelated variable, then verifies the restored positive result.
 
+### Composer send
+
+`EmbraceComposer` renders the send surface from host facts and reports intent through callbacks. It makes no network calls and holds no keys; upload, retry, session and transport stay with the host.
+
+- `recipient` (`{ ref, label, sessionId?, sessionChanged? }`) shows "To <label>" in the footer. The ref and session are exposed to assistive technology and in the tooltip. With `recipients` and `onRecipientChange`, the readout opens a single-select "Recipient" menu. Picking the current recipient reports nothing. An @mention only inserts a token and never changes the recipient.
+- `reply` (`{ messageId, sender, subject?, excerpt? }`) with `onClearReply`, and `subject` with `onSubjectChange`, are controlled. Clearing the reply keeps the text and images. Enter in the subject moves to the message field and never sends.
+- `images` (`ComposerImage[]`, each `Ready`, `Uploading` or `Failed`) with `onRemoveImage` and `onRetryImage` render the image tray. Paste and the "Attach image" picker share one intake. It screens files against `composerImagePolicy` (four PNG, JPEG, GIF or WebP images, 10 MiB each) and announces each refusal, then calls the runtime attachment adapter. The picker and paste appear only when the runtime has an attachments adapter. Send waits while an image is uploading or failed; images alone may be sent.
+- `availability` (`Ready`, `Offline`, `MissingGrant`, `Revoked` or `Unavailable`) holds send and shows one recovery action (Reconnect, Check permission or Set up again; none for Unavailable). The draft stays editable, and recovery never sends by itself.
+- Enter never sends during IME composition.
+
+`Transcript` and `EmbraceThread` render `Sending…` and `Sent` under user prompts. A `Failed` send state may carry `code` and `retryable`; Retry appears only for retryable failures, and only while `sendAvailability` is absent or `Ready`. The `Composer send` stories play the host for each case.
+
 ## Clean-room note
 
 The original kit's behavior references are listed below. The gated workbench/composer additions reuse our independently authored internal review route at `98a270d4e58a44e4c4625cf1956ad09dbabfc1a7`, with the reviewed tint cutover from `35b6922a1559b4b3bcd78b672cb6b707c5d1e108`; their host/runtime boundaries are adapted to this kit as described above. This provenance is not a claim that the later additions were authored without consulting our own source.
