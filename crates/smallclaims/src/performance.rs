@@ -539,6 +539,16 @@ fn thread_cpu_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn report_request_counter_payload_size(fixture: &str, counters: &Value) {
+        println!(
+            "request-counter-payload {}",
+            json!({
+                "fixture": fixture,
+                "rows": counters["rows"].as_array().unwrap().len(),
+                "serialized_json_bytes": serde_json::to_vec(counters).unwrap().len(),
+            })
+        );
+    }
     #[test]
     fn performance_window_is_bounded_ranked_and_expires() {
         let mut meter = Meter::default();
@@ -612,6 +622,7 @@ mod tests {
             );
         }
         let first = meter.snapshot(now);
+        report_request_counter_payload_size("25-client fixture", &first["request_counters"]);
         assert_eq!(first["client_requests"].as_array().unwrap().len(), 20);
         assert_eq!(
             first["request_counters"]["rows"].as_array().unwrap().len(),
@@ -662,6 +673,7 @@ mod tests {
         counts.record("/v1/health", Some("client-0"));
         counts.record("/v1/health", Some(&"x".repeat(REQUEST_COUNTER_LABEL_BYTES)));
         let report = counts.snapshot(Instant::now());
+        report_request_counter_payload_size("1024-pair fixture", &report);
         assert_eq!(report["completed"], REQUEST_COUNTER_LABEL_LIMIT as u64 + 3);
         assert_eq!(report["unattributed"], 1);
         assert_eq!(report["overflow"], 2);
