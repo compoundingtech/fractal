@@ -27,7 +27,7 @@ export interface SidebarTreeProps<T extends SidebarTreeItem<T>> {
   readonly stickyAncestors?: boolean
 }
 type Pin<T> = { item: T; height: number; offset: number; breadcrumb?: readonly T[] }
-type Snapshot<T> = { pins: readonly Pin<T>[]; height: number; top?: Key }
+type Snapshot<T> = { pins: readonly Pin<T>[]; height: number; width: number; top?: Key; measurements: readonly T[] }
 
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
 export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProps<T>) {
@@ -38,8 +38,9 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const frame = React.useRef<number | undefined>(undefined)
   const pending = React.useRef<Key | undefined>(undefined)
   const awaitingExpansion = React.useRef(false)
-  const settling = React.useRef({ signature: '', frames: 0 })
-  const [snapshot, setSnapshot] = React.useState<Snapshot<T>>({ pins: [], height: 0 })
+  const settling = React.useRef({ signature: '', frames: 0, attempts: 0 })
+  const measurementBank = React.useRef<HTMLDivElement>(null)
+  const [snapshot, setSnapshot] = React.useState<Snapshot<T>>({ pins: [], height: 0, width: 0, measurements: [] })
   const model = React.useMemo(() => {
     const all = new Map<Key, T>()
     const parents = new Map<Key, readonly T[]>()
@@ -62,15 +63,20 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     if (viewport === null || layout.virtualizer === null) return
     const scroll = viewport.scrollTop
     const height = viewport.clientHeight
+    const width = viewport.clientWidth
     const rows = model.visible.flatMap(item => {
       const info = layout.getLayoutInfo(item.id)
-      return info == null ? [] : [{ item, rect: info.rect }]
+      return info == null ? [] : [{ item, rect: info.rect, estimated: info.estimatedSize }]
     })
     const top = rows.find(row => row.rect.maxY > scroll)
     const ancestors = top === undefined ? [] : model.parents.get(top.item.id) ?? []
+    const measurementCandidates = new Map<Key, T>()
+    for (const item of [...ancestors, ...(pending.current === undefined ? [] : model.parents.get(pending.current) ?? [])]) {
+      if (layout.getLayoutInfo(item.id)?.estimatedSize) measurementCandidates.set(item.id, item)
+    }
     let candidates = ancestors.flatMap(item => {
       const row = rows.find(row => row.item.id === item.id)
-      return row === undefined || row.rect.y >= scroll ? [] : [{ item, height: row.rect.height, offset: 0 }]
+      return row === undefined || row.estimated || row.rect.y >= scroll ? [] : [{ item, height: row.rect.height, offset: 0 }]
     })
     if (props.stickyAncestors === false) candidates = []
     const budget = height * 0.4
@@ -92,8 +98,9 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       slot += pin.height
       return result
     })
-    const next = { pins, height: pins.reduce((sum, pin) => sum + pin.height, 0), top: top?.item.id }
-    setSnapshot(previous => previous.top === next.top && previous.height === next.height && previous.pins.length === pins.length && previous.pins.every((pin, index) => pin.item === pins[index]!.item && pin.height === pins[index]!.height && pin.offset === pins[index]!.offset && pin.breadcrumb?.map(item => item.id).join(',') === pins[index]!.breadcrumb?.map(item => item.id).join(',')) ? previous : next)
+    const measurements = [...measurementCandidates.values()]
+    const next = { pins, height: pins.reduce((sum, pin) => sum + pin.height, 0), width, top: top?.item.id, measurements }
+    setSnapshot(previous => previous.top === next.top && previous.height === next.height && previous.width === width && previous.measurements.length === measurements.length && previous.measurements.every((item, index) => item === measurements[index]) && previous.pins.length === pins.length && previous.pins.every((pin, index) => pin.item === pins[index]!.item && pin.height === pins[index]!.height && pin.offset === pins[index]!.offset && pin.breadcrumb?.map(item => item.id).join(',') === pins[index]!.breadcrumb?.map(item => item.id).join(',')) ? previous : next)
     const key = pending.current
     if (key !== undefined && model.all.has(key)) {
       // Retry while ancestors/data/observed sizes settle, including late ResizeObserver deliveries.
@@ -108,10 +115,10 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       awaitingExpansion.current = false
       const info = layout.getLayoutInfo(key)
       if (info != null) {
-        const inset = props.stickyAncestors === false ? 0 : Math.min(budget, ancestors.reduce((sum, parent) => sum + (layout.getLayoutInfo(parent.id)?.rect.height ?? 0), 0))
+        const inset = props.stickyAncestors === false ? 0 : Math.min(budget, ancestors.reduce((sum, parent) => { const info = layout.getLayoutInfo(parent.id); return sum + (info?.estimatedSize === false ? info.rect.height : 0) }, 0))
         const signature = `${key}:${info.rect.y}:${info.rect.height}:${inset}`
-        settling.current = signature === settling.current.signature ? { signature, frames: settling.current.frames + 1 } : { signature, frames: 0 }
-        if (settling.current.frames < 2) { schedule(); return }
+        settling.current = { signature, frames: signature === settling.current.signature ? settling.current.frames + 1 : 0, attempts: settling.current.attempts + 1 }
+        if ((settling.current.frames < 2 || measurements.length > 0) && settling.current.attempts < 8) { schedule(); return }
         if (info.rect.y < scroll + inset || info.rect.maxY > scroll + height) scrollToLayoutKey(layout, key, viewport, inset)
       }
     }
@@ -123,7 +130,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const reveal = React.useEffectEvent((key: Key) => {
     pending.current = key
     awaitingExpansion.current = true
-    settling.current = { signature: '', frames: 0 }
+    settling.current = { signature: '', frames: 0, attempts: 0 }
     const expanded = new Set(props.expandedKeys)
     for (const ancestor of model.parents.get(key) ?? []) expanded.add(ancestor.id)
     props.onExpandedChange(expanded)
@@ -144,6 +151,24 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     for (const row of viewport.querySelectorAll('[data-sidebar-tree-key]')) observer.observe(row)
     return () => { observer.disconnect(); mutations.disconnect(); if (frame.current !== undefined) cancelAnimationFrame(frame.current); frame.current = undefined }
   }, [schedule])
+  React.useLayoutEffect(() => {
+    const bank = measurementBank.current
+    if (bank === null) return
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const id = (entry.target as HTMLElement).dataset.measureKey
+        const item = snapshot.measurements.find(item => String(item.id) === id)
+        if (item === undefined || layout.virtualizer === null) continue
+        const size = layout.getContentSize().copy()
+        size.width = entry.contentRect.width
+        size.height = entry.contentRect.height
+        layout.virtualizer.updateItemSize(item.id, size)
+      }
+      schedule()
+    })
+    for (const row of bank.children) observer.observe(row)
+    return () => observer.disconnect()
+  }, [snapshot.measurements, layout, schedule, props.renderRow])
   React.useLayoutEffect(schedule, [model, schedule])
   const focusReal = (key: Key) => {
     reveal(key)
@@ -186,25 +211,26 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   </div>
   const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} data-sidebar-tree-key={String(item.id)} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible }) => stylex.props(styles.item, isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
-    <Collection items={item.children ?? []}>{renderItem}</Collection>
+    <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu]}>{renderItem}</Collection>
   </TreeItem>
-  return <div {...stylex.props(styles.root, props.style)} onKeyDownCapture={keyboard} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
+  return <div {...stylex.props(styles.root, props.style)} onKeyDownCapture={event => { pending.current = undefined; keyboard(event) }} onScrollCapture={schedule} onWheelCapture={() => { pending.current = undefined }} onPointerDownCapture={() => { pending.current = undefined }} onFocusCapture={event => {
     const target = (event.target as HTMLElement).closest('[data-sidebar-tree-key]')
     const key = target?.getAttribute('data-sidebar-tree-key')
     const item = model.visible.find(item => String(item.id) === key)
     if (item !== undefined) { pending.current = item.id; awaitingExpansion.current = false; schedule() }
   }}>
-    <Virtualizer layout={layout} shouldObserveItemSize><Tree ref={tree} aria-label={props['aria-label']} items={props.items} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
+    <Virtualizer layout={layout} shouldObserveItemSize><Tree ref={tree} aria-label={props['aria-label']} items={props.items} dependencies={[props.renderRow, props.onRowContextMenu]} selectionMode="none" expandedKeys={props.expandedKeys} onExpandedChange={props.onExpandedChange} onAction={props.onAction} className={({ state }) => { navigation.current = state; return stylex.props(styles.tree).className ?? '' }}>{renderItem}</Tree></Virtualizer>
     <div aria-hidden="true" data-sidebar-pinned-stack data-top-key={snapshot.top} {...stylex.props(styles.stack)} style={{ height: snapshot.height }}>
-      {snapshot.pins.map(pin => <div key={pin.item.id} data-pinned-key={String(pin.item.id)} data-pinned-ancestors={(pin.breadcrumb ?? [pin.item]).map(item => item.id).join(',')} {...stylex.props(styles.pin)} style={{ height: pin.height }} onClick={event => {
+      {snapshot.pins.map(pin => <div key={pin.item.id} {...stylex.props(styles.pinSlot)} style={{ height: pin.height }}><div data-pinned-key={String(pin.item.id)} data-pinned-ancestors={(pin.breadcrumb ?? [pin.item]).map(item => item.id).join(',')} {...stylex.props(styles.pin)} style={{ height: pin.height, transform: `translateY(calc(${pin.offset} * ${g.hairline}))` }} onClick={event => {
         const target = event.target as HTMLElement
         if (target.closest('[data-pinned-toggle]')) { const keys = new Set(props.expandedKeys); keys.has(pin.item.id) ? keys.delete(pin.item.id) : keys.add(pin.item.id); props.onExpandedChange(keys) }
         else focusReal(pin.item.id)
       }} onContextMenu={event => props.onRowContextMenu?.(pin.item, event)}>
-        <div inert {...stylex.props(styles.copy)} style={{ transform: `translateY(${pin.offset}px)` }}>{pin.breadcrumb ? <div data-sidebar-breadcrumb {...stylex.props(styles.breadcrumb)}>{pin.breadcrumb.map(item => item.textValue).join(' / ')}</div> : row(pin.item, props.expandedKeys.has(pin.item.id), true)}</div>
+        <div inert {...stylex.props(styles.copy)}>{pin.breadcrumb ? <div data-sidebar-breadcrumb {...stylex.props(styles.breadcrumb)}>{pin.breadcrumb.map(item => item.textValue).join(' / ')}</div> : row(pin.item, props.expandedKeys.has(pin.item.id), true)}</div>
         {pin.item.children?.length && !pin.breadcrumb ? <span data-pinned-toggle {...stylex.props(styles.toggleProxy)} style={{ insetInlineStart: `calc(${s.lg} * ${pin.item.depth})` }} /> : null}
-      </div>)}
+      </div></div>)}
     </div>
+    <div ref={measurementBank} aria-hidden inert {...stylex.props(styles.measurementBank)} style={{ width: snapshot.width }}>{snapshot.measurements.map(item => <div key={item.id} data-measure-key={String(item.id)}>{row(item, props.expandedKeys.has(item.id), true)}</div>)}</div>
   </div>
 }
 const styles = stylex.create({
@@ -217,6 +243,8 @@ const styles = stylex.create({
   chevron: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted },
   content: { flex: 1, minWidth: 0 },
   stack: { position: 'absolute', top: 0, insetInline: 0, zIndex: 1, pointerEvents: 'none', overflow: 'hidden', maxHeight: '40%' },
+  pinSlot: { position: 'relative', overflow: 'hidden', pointerEvents: 'none' },
+  measurementBank: { position: 'absolute', top: 0, insetInlineStart: 0, visibility: 'hidden', pointerEvents: 'none' },
   pin: { position: 'relative', overflow: 'hidden', backgroundColor: { default: surface.sidebar, ':hover': surface.rowHover }, pointerEvents: 'auto', cursor: 'pointer' },
   copy: { height: '100%', pointerEvents: 'none' },
   toggleProxy: { position: 'absolute', top: 0, width: g.controlSm, height: '100%' },
