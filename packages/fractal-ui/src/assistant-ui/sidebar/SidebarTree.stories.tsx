@@ -29,17 +29,31 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
   const items = reverse ? [...filteredItems].reverse() : filteredItems
   React.useLayoutEffect(() => {
     if (!cold) return
-    if (noSettle) { setKeys(new Set(expanded)); const tree = root.current?.querySelector('[role="treegrid"]'); if (tree instanceof HTMLElement) tree.scrollTop = 0 }
+    if (noSettle) { setKeys(new Set(expanded)); root.current?.querySelector<HTMLElement>(`[data-sidebar-tree-key="${deepKey}"]`)?.scrollIntoView({ block: 'nearest' }) }
     else handle.current?.reveal(deepKey)
     const frame = requestAnimationFrame(() => setResized(true))
-    return () => cancelAnimationFrame(frame)
+    let probeFrame: number | undefined
+    if (!noSettle) {
+      const firstExposure = () => {
+        const example = root.current
+        const target = example === null ? null : real(example, deepKey)
+        if (example === null) return
+        if (target === null) { probeFrame = requestAnimationFrame(firstExposure); return }
+        const bounds = target.getBoundingClientRect()
+        const view = viewport(example).getBoundingClientRect()
+        const inset = Math.min(view.height * 0.4, bounds.height * 4)
+        example.dataset.firstRevealClear = String(bounds.top >= view.top + inset - 1 && bounds.bottom <= view.bottom + 1)
+      }
+      probeFrame = requestAnimationFrame(firstExposure)
+    }
+    return () => { cancelAnimationFrame(frame); if (probeFrame !== undefined) cancelAnimationFrame(probeFrame) }
   }, [cold, noSettle])
-  return <section data-example={sticky ? noSettle ? 'unsettled' : 'sticky' : 'control'} ref={root} {...stylex.props(styles.example, light && lightTheme, width === 240 ? styles.narrow : width === 1440 ? styles.wide : styles.small)}>
+  return <section data-example={sticky ? 'sticky' : 'control'} ref={root} {...stylex.props(styles.example, light && lightTheme, width === 240 ? styles.narrow : width === 1440 ? styles.wide : styles.small)}>
     <div {...stylex.props(styles.toolbar)}><button onClick={() => handle.current?.reveal(deepKey)}>Reveal review</button><button onClick={() => handle.current?.reveal('south.a.a.a.a.a.a.35')}>Reveal unvisited branch</button><button onClick={() => handle.current?.reveal('north.a.a.a.a.a.a.69')}>Reveal boundary</button><button onClick={() => setFiltered(value => !value)}>Filter reviews</button><button onClick={() => setKeys(new Set())}>Collapse all</button><button onClick={() => setReverse(value => !value)}>Reorder</button></div>
     <div {...stylex.props(styles.viewport)}><SidebarTree ref={handle} aria-label="Project reviews" items={items} expandedKeys={keys} onExpandedChange={setKeys} stickyAncestors={sticky} renderRow={item => <div {...stylex.props(styles.label, resized && styles.resized)}>{item.textValue}</div>} /></div>
   </section>
 }
-function Pair({ cold = false, width = 440, light = false }: { readonly cold?: boolean; readonly width?: number; readonly light?: boolean }) { return <main {...stylex.props(styles.matrix)}><Example cold={cold} width={width} light={light} /><Example sticky={!cold} noSettle={cold} cold={cold} width={width} light={light} /></main> }
+function Pair({ cold = false, width = 440, light = false }: { readonly cold?: boolean; readonly width?: number; readonly light?: boolean }) { return <main {...stylex.props(styles.matrix)}><Example cold={cold} width={width} light={light} /><Example sticky={false} noSettle={cold} cold={cold} width={width} light={light} /></main> }
 const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta<typeof SidebarTree>
 export default meta
 type Story = StoryObj<typeof meta>
@@ -49,7 +63,7 @@ const viewport = (example: Element) => example.querySelector('[role="treegrid"]'
 const stack = (example: Element) => example.querySelector('[data-sidebar-pinned-stack]') as HTMLElement
 const real = (example: Element, key: string) => example.querySelector(`[data-sidebar-tree-key="${key}"]`) as HTMLElement | null
 const clear = (example: Element, row: HTMLElement) => { const bounds = row.getBoundingClientRect(); const view = viewport(example).getBoundingClientRect(); return bounds.top >= view.top + stack(example).getBoundingClientRect().height - 1 && bounds.bottom <= view.bottom + 1 }
-async function scroll(example: Element, offset = 600) { viewport(example).dispatchEvent(new WheelEvent('wheel', { bubbles: true })); viewport(example).scrollTop = offset; viewport(example).dispatchEvent(new Event('scroll', { bubbles: true })); await frames() }
+async function scroll(example: Element, offset = 600) { viewport(example).dispatchEvent(new WheelEvent('wheel', { bubbles: true })); viewport(example).scrollTop = offset; await frames() }
 async function assertChain(example: Element) {
   const top = stack(example).dataset.topKey!
   const actual = [...example.querySelectorAll('[data-pinned-ancestors]')].flatMap(row => row.getAttribute('data-pinned-ancestors')!.split(','))
@@ -107,8 +121,9 @@ export const CollapseFilterReorder: Story = { render: pair, play: async ({ canva
 } }
 export const ColdRevealBeforeMeasurement: Story = { render: () => <Pair cold />, play: async ({ canvasElement }) => {
   const yes = canvasElement.querySelector('[data-example="sticky"]')!
-  const no = canvasElement.querySelector('[data-example="unsettled"]')!
+  const no = canvasElement.querySelector('[data-example="control"]')!
   await waitFor(() => expect(real(yes, deepKey)).not.toBeNull())
+  await waitFor(() => expect((yes as HTMLElement).dataset.firstRevealClear).toBe('true'))
   await frames()
   await expect(real(yes, deepKey)!.getBoundingClientRect().height).toBe(32)
   await expect(clear(yes, real(yes, deepKey)!)).toBe(true)

@@ -38,7 +38,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const frame = React.useRef<number | undefined>(undefined)
   const pending = React.useRef<Key | undefined>(undefined)
   const awaitingExpansion = React.useRef(false)
-  const settling = React.useRef({ signature: '', frames: 0, attempts: 0 })
+  const settlingAttempts = React.useRef(0)
   const measurementBank = React.useRef<HTMLDivElement>(null)
   const [snapshot, setSnapshot] = React.useState<Snapshot<T>>({ pins: [], height: 0, width: 0, measurements: [] })
   const model = React.useMemo(() => {
@@ -56,6 +56,24 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     walk(props.items, [], true)
     return { all, parents, visible }
   }, [props.items, props.expandedKeys])
+  // Reanchor before paint after RAC commits measured row positions. This path reads
+  // only RAC geometry, never DOM geometry, including during observer delivery.
+  const applyMeasuredAnchor = React.useEffectEvent(() => {
+    const key = pending.current
+    const viewport = tree.current
+    const virtualizer = layout.virtualizer
+    if (key === undefined || viewport === null || virtualizer === null || virtualizer.visibleRect.height <= 0) return false
+    const ancestors = model.parents.get(key)
+    if (ancestors === undefined || ancestors.some(item => !props.expandedKeys.has(item.id))) return false
+    const infos = ancestors.map(item => layout.getLayoutInfo(item.id))
+    if (infos.some(info => info == null || info.estimatedSize)) return false
+    const info = layout.getLayoutInfo(key)
+    if (info == null) return false
+    const inset = props.stickyAncestors === false ? 0 : Math.min(virtualizer.visibleRect.height * 0.4, infos.reduce((sum, info) => sum + info!.rect.height, 0))
+    const offset = Math.max(0, info.rect.y - inset)
+    if (Math.abs(virtualizer.visibleRect.y - offset) > 0.5) scrollToLayoutKey(layout, key, viewport, inset)
+    return true
+  })
 
   // All viewport reads are batched here. Geometry for rows comes only from RAC layout infos.
   const measure = React.useEffectEvent(() => {
@@ -116,9 +134,11 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       const info = layout.getLayoutInfo(key)
       if (info != null) {
         const inset = props.stickyAncestors === false ? 0 : Math.min(budget, ancestors.reduce((sum, parent) => { const info = layout.getLayoutInfo(parent.id); return sum + (info?.estimatedSize === false ? info.rect.height : 0) }, 0))
-        const signature = `${key}:${info.rect.y}:${info.rect.height}:${inset}`
-        settling.current = { signature, frames: signature === settling.current.signature ? settling.current.frames + 1 : 0, attempts: settling.current.attempts + 1 }
-        if ((settling.current.frames < 2 || measurements.length > 0) && settling.current.attempts < 8) { schedule(); return }
+        settlingAttempts.current++
+        // The first scroll already includes every measured ancestor. Do not expose
+        // a provisional no-inset target while waiting for unrelated row estimates.
+        if (applyMeasuredAnchor()) return
+        if (settlingAttempts.current < 8) { schedule(); return }
         if (info.rect.y < scroll + inset || info.rect.maxY > scroll + height) scrollToLayoutKey(layout, key, viewport, inset)
       }
     }
@@ -130,7 +150,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
   const reveal = React.useEffectEvent((key: Key) => {
     pending.current = key
     awaitingExpansion.current = true
-    settling.current = { signature: '', frames: 0, attempts: 0 }
+    settlingAttempts.current = 0
     const expanded = new Set(props.expandedKeys)
     for (const ancestor of model.parents.get(key) ?? []) expanded.add(ancestor.id)
     props.onExpandedChange(expanded)
@@ -144,10 +164,11 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     const observer = new ResizeObserver(schedule)
     observer.observe(viewport)
     const mutations = new MutationObserver(() => {
+      applyMeasuredAnchor()
       for (const row of viewport.querySelectorAll('[data-sidebar-tree-key]')) observer.observe(row)
       schedule()
     })
-    mutations.observe(viewport, { childList: true, subtree: true })
+    mutations.observe(viewport, { childList: true, attributes: true, attributeFilter: ['style'], subtree: true })
     for (const row of viewport.querySelectorAll('[data-sidebar-tree-key]')) observer.observe(row)
     return () => { observer.disconnect(); mutations.disconnect(); if (frame.current !== undefined) cancelAnimationFrame(frame.current); frame.current = undefined }
   }, [schedule])
@@ -164,6 +185,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
         size.height = entry.contentRect.height
         layout.virtualizer.updateItemSize(item.id, size)
       }
+      applyMeasuredAnchor()
       schedule()
     })
     for (const row of bank.children) observer.observe(row)
