@@ -25,6 +25,9 @@ pub struct Facts {
 }
 
 /// Serialize lifecycle read/modify/write transactions across the driver and work CLI.
+///
+/// # Errors
+/// Returns filesystem or advisory-lock failures.
 pub fn lock(path: &Path) -> Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false)
@@ -45,6 +48,9 @@ fn trace_agent(subject: &str) -> &str {
 }
 
 /// Build a runtime document from observed launch facts, without inventing a model.
+///
+/// # Errors
+/// Rejects facts that the authoritative schema cannot represent and invalid lease references.
 pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
     let mut runtime = Runtime {
         r#type: "agent-trace-runtime/v1".to_owned().try_into()?,
@@ -83,6 +89,9 @@ pub fn build(facts: &Facts, lease: Option<&StepRunView>) -> Result<Runtime> {
 
 /// Lease references use the actual mission run and step generation, not claim IDs.
 /// A completed, expired, foreign, or previous-incarnation claim is idle context.
+///
+/// # Errors
+/// Rejects a foreign trace or malformed references on a held lease.
 pub fn update_lease(
     runtime: &mut Runtime,
     actor: &str,
@@ -123,6 +132,9 @@ pub fn update_lease(
 }
 
 /// Decode with the authoritative schema, preserving every launch and model fact.
+///
+/// # Errors
+/// Propagates locking, reading, authoritative decoding, lease validation, and publication failures.
 pub fn refresh(
     path: &Path,
     actor: &str,
@@ -130,13 +142,26 @@ pub fn refresh(
     lease: Option<&StepRunView>,
     mission_name: Option<&str>,
 ) -> Result<Runtime> {
+    let _lock = lock(path)?;
     let mut runtime: Runtime = serde_json::from_slice(&std::fs::read(path)?)?;
     update_lease(&mut runtime, actor, incarnation, lease, mission_name, now_ms()?)?;
     write_atomic(path, &runtime)?;
     Ok(runtime)
 }
 
+/// Replace the human principal only from the daemon's current ownership reduction.
+///
+/// # Errors
+/// Rejects a principal that the authoritative schema cannot represent.
+pub fn update_principal(runtime: &mut Runtime, principal: String) -> Result<()> {
+    runtime.who.principal = principal.try_into()?;
+    Ok(())
+}
+
 /// Replace model facts only when an actual selected route is known.
+///
+/// # Errors
+/// Rejects a route or effort that the authoritative schema cannot represent.
 pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) -> Result<()> {
     let model = AgentTraceRuntimeV1HowModel {
         route: route.to_owned().try_into()?,
@@ -148,6 +173,9 @@ pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) ->
 
 /// Same-directory exclusive temporary creation and rename keep readers atomic.
 /// The file is private even when replacing a predecessor with broader permissions.
+///
+/// # Errors
+/// Propagates serialization, temporary-file, permission, sync, and rename failures.
 pub fn write_atomic(path: &Path, runtime: &Runtime) -> Result<()> {
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let mut temporary = tempfile::Builder::new().prefix(".agent-trace-").tempfile_in(parent)?;

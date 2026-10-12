@@ -16490,12 +16490,24 @@ async fn refresh_agent_trace(
     {
         return Ok(work);
     }
+    let principal: Option<String> = client
+        .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject))).await?;
+    let Some(principal) = principal else {
+        match fs::remove_file(path) {
+            Ok(()) => write_driver_log(subject,
+                "agent trace removed: the seat has no recorded human principal")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(work);
+    };
     let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(work),
         Err(error) => return Err(error.into()),
     };
     let mut runtime: issuer::Runtime = serde_json::from_slice(&raw)?;
+    issuer::update_principal(&mut runtime, principal)?;
     let lease = trace_lease(&work, subject, incarnation);
     let mission_name = trace_mission_name(client, lease).await?;
     issuer::update_lease(&mut runtime, subject, incarnation, lease, mission_name.as_deref(),
@@ -16508,7 +16520,7 @@ async fn refresh_agent_trace(
         issuer::update_model(&mut runtime, &route, None)?;
     }
     // Avoid file churn for an unchanged lease and model.
-    if serde_json::to_vec(&runtime)? != raw {
+    if serde_json::to_vec(&runtime)?.as_slice() != raw.strip_suffix(b"\n").unwrap_or(&raw) {
         issuer::write_atomic(path, &runtime)?;
     }
     Ok(work)

@@ -145,9 +145,17 @@ impl Daemon {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(message), "expected {message}: {stderr}");
     }
-    fn declare(&self) {
-        let intent = st3::parse_intent("version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\"; }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\"; }", "example").unwrap();
-        self.store.apply_internal(&intent, "seats").unwrap();
+    fn declare(&self, person: Option<&str>) {
+        let source = "version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\"; }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\"; }";
+        let intent = st3::parse_intent(source, "example").unwrap();
+        if let Some(person) = person {
+            let preview = self.store.mission(&intent, st3::model::IntentInput {
+                kdl: source.into(), source_name: None,
+            }).unwrap();
+            self.store.apply_as(&intent, &preview.subject_tokens, "seats", Some(person)).unwrap();
+        } else {
+            self.store.apply_internal(&intent, "seats").unwrap();
+        }
         for (actor, incarnation) in [(ALDER, "alder-one"), (BIRCH, "birch-one")] {
             for (kind, fields) in [
                 (
@@ -193,7 +201,7 @@ async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
     use st3::agent_trace::issuer::{self, Facts};
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare();
+    daemon.declare(Some("person/gardener"));
     daemon.start().await;
     let opened = daemon.ok(&["work", "start", "Check trace lifecycle", "--as", ALDER]).await;
     let step = opened["subject"].as_str().unwrap();
@@ -244,7 +252,7 @@ async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
 async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare();
+    daemon.declare(None);
     daemon.start().await;
     let title = "Inspect ${literal} fixture";
     let start = [
@@ -520,7 +528,7 @@ async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
 async fn person_handoff_is_visible_acknowledged_and_closed_with_evidence() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare();
+    daemon.declare(None);
     daemon.start().await;
     let opened = daemon
         .ok(&["work", "start", "Review fixture", "--as", ALDER])
@@ -638,7 +646,7 @@ async fn person_handoff_is_visible_acknowledged_and_closed_with_evidence() {
 async fn a_person_answers_an_ask_from_spontaneous_work_without_evidence() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare();
+    daemon.declare(None);
     daemon.start().await;
     let opened = daemon
         .ok(&["work", "start", "Rollout scope", "--as", ALDER])
