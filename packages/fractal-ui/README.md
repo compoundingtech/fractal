@@ -31,6 +31,31 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Questions**: harness-neutral read-only and answerable questions, all settled outcomes, attention surfaces, and keyboard/negative-control stories at 440 and 1440 pixels in both schemes. Drafts and callbacks are host-owned; the terminal hand-off is explicit.
+
+### Harness questions
+
+`QuestionForm` uses controlled `draft`/`onDraftChange` props and React Aria radio/checkbox groups. `autoFocus`, question-step transitions, Other and note editing transfer focus; Escape returns to the selected/recommended choice without answering or clearing the draft. Multi-select keeps custom text when another option changes. `NeedsYouBar` receives transcript visibility from the host and hides at 60%; its pinned form and the inbox must receive the same host-owned draft.
+
+Hosts composing repeated forms, settled outcomes or docks may pass `ariaLabel` to name each landmark by its surface/context without changing visible question copy. The full state gallery and shared-draft composition use distinct labels; this keeps identical request views distinguishable to landmark navigation.
+
+`composerRouting` distinguishes a message held until the question is answered from a note about the question; typing copy follows the host-reported route. Forms cap desktop width at the shared reading-lane token, inbox entries start as two-line disclosures, and pinned forms omit duplicate card chrome. The question stories compose the production composer, share drafts keyed by request id, and drive attention visibility with a real IntersectionObserver.
+
+Question surfaces use shared Fractal composition palette, type, spacing, radius and geometry tokens directly, inheriting the nearest ancestor's StyleX theme. Roots establish the shared UI type scale and medium-weight headers instead of inheriting page typography. Selected option descriptions use the soft foreground token. They require no component-specific palette decorator; harness weight and selected-option keyboard plays include axe color-contrast checks in dark and light.
+
+The shared Markdown nesting/quote rules require `rail` and `railStrong` in both composition schemes and the neutral theme. Standalone question consumers receive those definitions here, without depending on the message stack. Controlled submits snapshot each indexed draft before collecting answer facts, preserving strict application type safety.
+
+Recorded `answered` outcomes collapse to one medium-weight row: the selected choice for a single question, or the question count for a batch. A trailing disclosure opens per-question choices and provenance, with original questions behind a further disclosure. The kit derives compact age from the recorded timestamp and the host's numeric `now` clock prop, never a host-supplied display string. Its absolute tooltip uses the viewer's locale and time zone through Intl defaults, never a raw ISO label. Optional `locale`/`timeZone` props make story fixtures deterministic. Invalid or future timestamps omit the age. Successful calls without recorded answer facts keep their original questions/options visible and do not adopt the answered summary.
+
+Question ages floor elapsed time into `now`, seconds, minutes, hours or days, then show a short English month/day after seven days (in the viewer's time zone). The absolute tooltip retains the viewer's locale. Age has a content-sized, non-shrinking track and never wraps; the choice takes the remaining space with ellipsis. Longest-age and long-choice stories keep the collapsed row within its height bound. The local formatter will fold into #2348's shared formatter at grammar adoption; this kit does not depend on that unmerged PR.
+
+Read-only pending questions retain radio/checkbox choice affordances; archived original options use non-interactive choice rows with the same circle/box vocabulary. Settled footer timestamps use compact ages rather than raw source strings. `NeedsYouBar` owns its 12px, medium-weight, 24px-high toggle; the title truncates before the action label. Production plays exercise these looks and reject bold-title, missing-affordance, raw-date and oversized-toggle controls at both story widths and schemes.
+
+The ratified question Card uses an attention hairline, 8/12 padding and a 24-high title row (E37/C24/C25, C1). Choice indicators and disclosures come from the shared SVG glyph family (C22); tags have no fill. The dock and inbox own their frames, while pinned forms omit theirs (C21). `CompositionFrames` mounts the production surfaces together and rejects nested frames and missing glyphs. Markdown uses the shared 8-unit sibling rhythm with no outer margins (C16), and pending input prose requests foreground ink (C27).
+
+The generic `EmbraceToolCall`/`EmbraceToolItem` seam is explicitly read-only: its `ReadOnlyToolQuestion` type cannot carry a web-answer capability. Singular `{question, options}` and batched `{questions}` arguments keep their options; structured result `details.results`/flat `selectedOptions` facts render `QuestionSummary`. Calls that closed without recorded answer facts use `unrecorded`, not an invented answer. Live adapters supply richer typed requests and the terminal callback.
+
+The ACH model is retained with small display extensions: `autoSelected` records per-question timeout picks; `answered.where` labels terminal/web provenance; `chat-redirected` represents the catalog outcome; `unrecorded` keeps archived missing-result facts honest. Optional `variant` defaults to transcript; `composerTyping` labels held composer text; `onAttach` hands real selected files to the host instead of implementing upload/storage in the kit.
 
 ## Families
 

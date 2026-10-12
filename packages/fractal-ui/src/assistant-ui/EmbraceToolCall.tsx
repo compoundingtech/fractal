@@ -8,7 +8,10 @@ import { accentTokens, tokens, geometry, density } from './embrace-tokens.stylex
 import { EmbraceDiffPreview, EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import { embraceToolKind as toolKind, embraceToolNeedsAttention, type EmbraceToolKind as ToolKind } from './embrace-tool-attention'
 export { embraceToolNeedsAttention } from './embrace-tool-attention'
-import { toolDiffs, toolFields, toolHumanSummary, toolOutput, toolString } from './embrace-tool-preview'
+import { toolDiffs, toolHumanSummary, toolOutput, toolString } from './embrace-tool-preview'
+import { QuestionForm, type QuestionFormProps } from './QuestionForm'
+import { questionRequestFromTool, type ReadOnlyToolQuestion } from './tool-question'
+export type { ReadOnlyToolQuestion } from './tool-question'
 
 export type ToolVariant = 'rows' | 'grouped' | 'cards'
 export type EmbraceToolCallItem = Extract<ConversationItem, { _tag: 'ToolCall' }>
@@ -31,7 +34,7 @@ const verbs: Record<ToolKind, readonly [string, string]> = {
 }
 
 /** assistant-ui Parts tools.Fallback compatible renderer; registrations share this implementation. */
-export const EmbraceToolCall = (props: ToolCallMessagePartProps & { readonly variant?: ToolVariant }) => {
+export const EmbraceToolCall = (props: ToolCallMessagePartProps & { readonly variant?: ToolVariant; readonly questionRequest?: ReadOnlyToolQuestion; readonly onOpenTerminal?: () => void; readonly composerTyping?: boolean; readonly composerRouting?: QuestionFormProps['composerRouting'] }) => {
   const item = useAuiState((state) => {
     const candidate = state.message.metadata.custom.item as ConversationItem | undefined
     return candidate?._tag === 'ToolCall' && candidate.callId === props.toolCallId ? candidate : undefined
@@ -45,14 +48,21 @@ export const EmbraceToolCall = (props: ToolCallMessagePartProps & { readonly var
     status={embraceToolStatus(props, item)}
     variant={props.variant ?? inheritedVariant}
     callSeen={item?.callSeen ?? true}
+    id={props.toolCallId}
+    at={item?.result?.at ?? item?.at}
+    agentLabel={item?.sender?.label}
+    questionRequest={props.questionRequest}
+    onOpenTerminal={props.onOpenTerminal}
+    composerTyping={props.composerTyping}
+    composerRouting={props.composerRouting}
   />
 }
 
 /** Also renders a source item outside a message scope, without manufacturing runtime callbacks. */
-export const EmbraceToolItem = ({ item, variant }: { readonly item: EmbraceToolCallItem; readonly variant?: ToolVariant }) => {
+export const EmbraceToolItem = ({ item, variant, questionRequest, onOpenTerminal, composerTyping, composerRouting }: { readonly item: EmbraceToolCallItem; readonly variant?: ToolVariant; readonly questionRequest?: ReadOnlyToolQuestion; readonly onOpenTerminal?: () => void; readonly composerTyping?: boolean; readonly composerRouting?: QuestionFormProps['composerRouting'] }) => {
   const inheritedVariant = React.useContext(EmbraceToolVariantContext)
   return <ToolPresentation name={item.name} input={item.input} output={item.result?.content}
-    mediaType={item.result?.mediaType} status={item.status} variant={variant ?? inheritedVariant} callSeen={item.callSeen} />
+    mediaType={item.result?.mediaType} status={item.status} variant={variant ?? inheritedVariant} callSeen={item.callSeen} questionRequest={questionRequest} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} composerRouting={composerRouting} id={item.callId} at={item.result?.at ?? item.at} agentLabel={item.sender?.label} />
 }
 
 export type EmbraceToolRunProps = {
@@ -105,7 +115,7 @@ export const EmbraceToolRun = ({ items, renderItem, variant, forceExpanded = fal
   )
 }
 
-const ToolPresentation = ({ name, input, output, mediaType, status, variant, callSeen }: {
+const ToolPresentation = ({ name, input, output, mediaType, status, variant, callSeen, questionRequest, onOpenTerminal, composerTyping, composerRouting, id, at, agentLabel }: {
   readonly name: string
   readonly input: unknown
   readonly output: unknown
@@ -113,8 +123,17 @@ const ToolPresentation = ({ name, input, output, mediaType, status, variant, cal
   readonly status: EmbraceToolStatus
   readonly variant: ToolVariant
   readonly callSeen: boolean
+  readonly questionRequest?: ReadOnlyToolQuestion
+  readonly onOpenTerminal?: () => void
+  readonly composerTyping?: boolean
+  readonly composerRouting?: QuestionFormProps['composerRouting']
+  readonly id: string
+  readonly at?: string
+  readonly agentLabel?: string
 }) => {
   const kind = toolKind(name)
+  const request = questionRequest ?? questionRequestFromTool({ name, id, input, output, status, at, agentLabel })
+  if (request !== undefined) return <QuestionForm ariaLabel={`Question · ${request.id}`} request={request} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} composerRouting={composerRouting} />
   const target = toolString(input, ['path', 'file_path', 'pattern', 'query', 'question', 'url', 'description'])
     || (kind === 'run' ? toolString(input, ['command', 'cmd']).trim().split(/\s+/).slice(0, 2).join(' ') : '')
   const label = `${verbs[kind][status === 'running' ? 1 : 0]} ${target || name}`
@@ -156,17 +175,8 @@ const ToolDetails = ({ name, input, output, mediaType, status, variant }: {
   const markdown = mediaType === 'text/markdown' || /\.md(?:own)?$/i.test(path)
     ? (status === 'error' ? toolString(input, ['content', 'markdown']) : outputText || toolString(input, ['content', 'markdown']))
     : toolString(output, ['markdown'])
-  const question = toolString(input, ['question', 'prompt', 'message'])
-  const options = toolFields(input).options
   return <div {...stylex.props(styles.details)}>
     <p {...stylex.props(styles.caption)}>{toolHumanSummary(input, name)} · {status}</p>
-    {kind === 'question' ? <section aria-label="Agent question">
-      <p {...stylex.props(styles.question)}>{question || 'Agent needs your answer'}</p>
-      {Array.isArray(options) ? <ul {...stylex.props(styles.options)}>{options.map((option, index) => <li key={index}>
-        {typeof option === 'string' ? option : toolString(option, ['label', 'title', 'value'])}
-      </li>)}</ul> : null}
-      {status === 'running' && output === undefined ? <p {...stylex.props(styles.caption)}>Awaiting answer</p> : null}
-    </section> : null}
     {diffs.length > 0 ? <>
       <p {...stylex.props(styles.caption)}>{status === 'success' ? 'Recorded changes' : status === 'running' ? 'Proposed changes · tool running' : 'Proposed changes · not confirmed applied'}</p>
       <EmbraceDiffPreview diffs={diffs} />
@@ -204,8 +214,6 @@ const styles = stylex.create({
   warning: { color: tokens.warning },
   details: { display: 'flex', flexDirection: 'column', gap: density.gap, padding: density.toolDetails, minWidth: 0 },
   output: { margin: 0, padding: 8, borderRadius: 4, backgroundColor: tokens.recess, color: tokens.ink, fontSize: 11, lineHeight: 1.55, fontFamily: 'monospace', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 280, overflowY: 'auto' },
-  question: { margin: 0, fontSize: 13, fontWeight: 600 },
-  options: { marginBlock: 5, paddingInlineStart: 20, fontSize: 12 },
   rawDetails: { color: tokens.muted, fontSize: 11 },
   rawSummary: { cursor: 'pointer', outlineColor: accentTokens.accent, outlineOffset: 3 },
 })

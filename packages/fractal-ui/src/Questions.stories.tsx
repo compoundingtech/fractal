@@ -1,0 +1,533 @@
+import * as React from 'react'
+import * as stylex from '@stylexjs/stylex'
+import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
+import axe from 'axe-core'
+import { QuestionForm, QuestionSummary, NeedsYouBar, NeedsYouInbox } from './assistant-ui/QuestionForm'
+import type { Answers, QuestionFormProps } from './assistant-ui/QuestionForm'
+import { Composer } from './assistant-ui/composition/Composer'
+import { EmbraceRuntimeProvider, type ConversationRuntimeOptions } from './assistant-ui/EmbraceRuntime'
+import { EmbraceToolItem } from './assistant-ui/EmbraceToolCall'
+import { baselineTheme } from './assistant-ui/neutral-theme'
+import { lightTheme } from './assistant-ui/composition-theme'
+import { surfaceVars as surface, textVars as ink, typeVars as t, spaceVars as s, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
+import { questionKinds, questionRequest, questionStates } from './question-fixtures'
+
+function ComposerRoutingExample({ routing, storyId }: { readonly routing: NonNullable<QuestionFormProps['composerRouting']>; readonly storyId: string }) {
+  const [sent, setSent] = React.useState<readonly string[]>([])
+  const options = React.useMemo<ConversationRuntimeOptions>(() => ({ messages: [], onNew: async message => setSent(previous => [...previous, message.content.filter(part => part.type === 'text').map(part => part.text).join('\n')]) }), [])
+  return <EmbraceRuntimeProvider options={options}>
+    <QuestionForm request={questionRequest} ariaLabel={`Question with ${routing._tag} composer`} composerTyping composerRouting={routing} onOpenTerminal={fn()} />
+    <Composer agent={questionRequest.agentLabel} draftKey={`question-routing.${storyId}.${routing._tag}`} onSend={text => setSent(previous => [...previous, text])} />
+    <output aria-label="Composer fixture submissions">{sent.join('\n')}</output>
+  </EmbraceRuntimeProvider>
+}
+
+function SharedQuestionDraft({ scrollDriven = false }: { readonly scrollDriven?: boolean }) {
+  const [drafts, setDrafts] = React.useState<Readonly<Record<string, Answers>>>({})
+  const [expanded, setExpanded] = React.useState(true)
+  const [ratio, setRatio] = React.useState(0)
+  const scroll = React.useRef<HTMLDivElement>(null)
+  const observe = React.useCallback((node: HTMLDivElement | null) => {
+    if (node === null || !scrollDriven) return
+    const observer = new IntersectionObserver(entries => setRatio(entries[0]?.intersectionRatio ?? 0), { root: scroll.current, threshold: [0, 0.6, 1] })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [scrollDriven])
+  const request = { ...questionRequest, answerable: true }
+  const shared = { draft: drafts[request.id], onDraftChange: (draft: Answers) => setDrafts(previous => ({ ...previous, [request.id]: draft })) }
+  return <>
+    <div ref={scroll} data-question-scroll {...stylex.props(styles.scroll)}>
+      <div ref={observe}><QuestionForm request={request} {...shared} /></div>
+      {scrollDriven ? <div {...stylex.props(styles.scrollSpace)}>Earlier conversation</div> : null}
+    </div>
+    <NeedsYouBar requests={[request]} expanded={expanded} onToggle={() => setExpanded(value => !value)} transcriptVisibility={scrollDriven ? ratio : 0}><QuestionForm request={request} ariaLabel="Pinned question" variant="pinned" {...shared} /></NeedsYouBar>
+    {!scrollDriven ? <NeedsYouInbox requests={[request]} onShowInThread={fn()} onOpenTerminal={fn()} formProps={() => ({ ...shared, ariaLabel: 'Inbox question' })} /> : null}
+  </>
+}
+
+const assertQuestionComposition = async (root: HTMLElement) => {
+  await expect(root.querySelector('[data-fractal-card] [data-fractal-card]')).toBeNull()
+  for (const header of root.querySelectorAll<HTMLElement>('[data-question-header]')) {
+    await expect(header.querySelector('svg[data-icon="question"]')).not.toBeNull()
+    await expect(parseFloat(getComputedStyle(header).minHeight)).toBe(24)
+    await expect(getComputedStyle(header.querySelector('strong')!).fontWeight).toBe('500')
+  }
+}
+const meta = {
+  title: 'Fractal UI/Questions',
+  component: QuestionForm,
+  parameters: { layout: 'fullscreen' },
+  argTypes: { scheme: { control: 'select', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } },
+  play: async ({ canvasElement }) => {
+    await assertQuestionComposition(canvasElement)
+    const outer = document.createElement('div')
+    outer.dataset.fractalCard = ''
+    const inner = document.createElement('div')
+    inner.dataset.fractalCard = ''
+    outer.append(inner)
+    canvasElement.append(outer)
+    try { await expect(assertQuestionComposition(canvasElement)).rejects.toThrow() } finally { outer.remove() }
+  },
+  args: { request: questionRequest, onOpenTerminal: fn(), onDecline: fn(), onSubmit: fn(), onDraftChange: fn(), composerTyping: true, locale: 'en-US', timeZone: 'America/New_York' },
+  render: function ControlledQuestion(args) {
+    const [draft, setDraft] = React.useState(args.draft)
+    return <QuestionForm {...args} draft={draft} onDraftChange={next => { setDraft(next); args.onDraftChange?.(next) }} />
+  },
+  decorators: [(Story, context) => <main data-scheme={context.args.scheme ?? context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, (context.args.scheme ?? context.parameters.scheme) === 'light' && lightTheme, (context.args.width ?? context.parameters.width) === 1440 ? styles.wide : styles.narrow)}><Story /></main>],
+} satisfies Meta<QuestionFormProps & { readonly scheme?: 'dark' | 'light'; readonly width?: 440 | 1440 }>
+export default meta
+type Story = StoryObj<typeof meta>
+export const ReadOnly: Story = { args: { request: { ...questionRequest, askedAt: '2026-10-11T16:56:11.082Z' }, now: Date.parse('2026-10-11T16:58:11.082Z') }, play: async ({ canvasElement, args }) => {
+  const canvas = within(canvasElement)
+  const title = canvasElement.querySelector<HTMLElement>('header strong')!
+  const assertTitle = async () => expect(getComputedStyle(title).fontWeight).toBe('500')
+  await assertTitle()
+  await assertQuestionComposition(canvasElement)
+  title.style.fontWeight = '700'
+  try { await expect(assertTitle()).rejects.toThrow() } finally { title.style.fontWeight = '' }
+  await assertTitle()
+  const choice = canvasElement.querySelector<HTMLElement>('[data-choice-id="thread"]')!
+  const affordance = choice.querySelector<HTMLElement>('[aria-hidden="true"]')!
+  const assertAffordance = async () => {
+    await expect(affordance).toBeVisible()
+    await expect(affordance.querySelector('svg[data-icon="radio"]')).not.toBeNull()
+    await expect(canvas.getByRole('radio', { name: /This thread/ })).not.toBeChecked()
+  }
+  await assertAffordance()
+  affordance.style.visibility = 'hidden'
+  try { await expect(assertAffordance()).rejects.toThrow() } finally { affordance.style.visibility = '' }
+  await assertAffordance()
+  await userEvent.click(canvas.getByRole('radio', { name: /This thread/ }))
+  await expect(args.onDraftChange).not.toHaveBeenCalled()
+  await assertAffordance()
+  const assertNoRawDate = async () => expect(canvasElement.textContent).not.toContain(args.request.askedAt)
+  await assertNoRawDate()
+  const rawDateControl = document.createTextNode(args.request.askedAt)
+  canvasElement.append(rawDateControl)
+  try { await expect(assertNoRawDate()).rejects.toThrow() } finally { rawDateControl.remove() }
+  await assertNoRawDate()
+  await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
+  await expect(canvas.getByText('delivered after the question is answered')).toBeVisible()
+  await userEvent.click(canvas.getByRole('button', { name: 'Open terminal' }))
+  await expect(args.onOpenTerminal).toHaveBeenCalledTimes(1)
+  await expect(args.onDecline).not.toHaveBeenCalled()
+} }
+export const Keyboard: Story = { args: { request: { ...questionRequest, answerable: true }, draft: { single: { selected: ['thread'], note: 'Keep this draft' } } }, play: async ({ canvasElement, args }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getByRole('radio', { name: /This thread/ }))
+  await userEvent.keyboard('{Escape}')
+  await expect(args.onDecline).not.toHaveBeenCalled()
+  await expect(canvas.getByRole('radio', { name: /This thread/ })).toBeChecked()
+  const contrast = await axe.run(canvasElement, { runOnly: { type: 'rule', values: ['color-contrast'] } })
+  await expect(contrast.violations).toEqual([])
+  await expect(canvas.getByRole('button', { name: 'Submit' })).toBeEnabled()
+  await expect(canvas.getByRole('button', { name: 'Skip · ends the turn' })).toBeVisible()
+  await userEvent.keyboard('2')
+  await expect(args.onDraftChange).toHaveBeenCalledWith({ single: { selected: ['inbox'], note: 'Keep this draft', other: undefined } })
+  await userEvent.keyboard('{Enter}')
+  await expect(args.onDecline).not.toHaveBeenCalled()
+} }
+export const AllStates: Story = { render: () => <>
+  {questionKinds.map(kind => <section key={kind.id}><h2>{kind.id}</h2><QuestionForm ariaLabel={`${kind.id} read-only question`} request={{ ...questionRequest, id: `readonly-${kind.id}`, questions: [kind] }} onOpenTerminal={fn()} />{questionStates.map((state, index) => <QuestionForm key={index} ariaLabel={`${kind.id} ${state._tag} question ${index}`} request={{ ...questionRequest, id: `${kind.id}-${index}`, questions: [kind], answerable: true, state }} draft={{ [kind.id]: { selected: [kind.options[0]?.id ?? ''], other: kind.kind === 'text' ? 'Release review' : undefined } }} onOpenTerminal={fn()} onSubmit={fn()} onDraftChange={fn()} onDecline={fn()} onRetry={fn()} />)}</section>)}
+  <QuestionForm ariaLabel="Batch questions" request={{ ...questionRequest, questions: questionKinds, answerable: true }} onDraftChange={fn()} onSubmit={fn()} onDecline={fn()} />
+  <QuestionSummary ariaLabel="Batch question outcome" request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Reviewer', where: 'terminal', at: '15:41 UTC' } }} />
+  <NeedsYouBar ariaLabel="Collapsed needs you" requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} expanded={false} onToggle={fn()} />
+  <NeedsYouBar ariaLabel="Expanded needs you" requests={[questionRequest]} expanded onToggle={fn()}><QuestionForm ariaLabel="Expanded pinned question" request={questionRequest} variant="pinned" onOpenTerminal={fn()} /></NeedsYouBar>
+  <NeedsYouInbox requests={[questionRequest, { ...questionRequest, id: 'second', agentLabel: 'atlas' }, { ...questionRequest, id: 'third', agentLabel: 'lyra' }]} onShowInThread={fn()} onOpenTerminal={fn()} formProps={id => ({ ariaLabel: `Inbox question ${id}` })} />
+</> }
+export const NegativeControls: Story = { render: () => <>
+  <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'decision-1', callId: 'decision-1', name: 'decision', input: { description: 'Review recorded' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} variant="cards" />
+  <NeedsYouBar requests={[]} expanded={false} onToggle={fn()} />
+  <NeedsYouInbox requests={[]} onShowInThread={fn()} onOpenTerminal={fn()} />
+  <NeedsYouBar requests={[questionRequest]} transcriptVisibility={0.6} expanded={false} onToggle={fn()} />
+  <QuestionSummary request={{ ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { multi: { selected: [] } }, by: 'Reviewer', at: '15:41 UTC' } }} />
+</>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.queryByRole('button', { name: 'Open terminal' })).toBeNull()
+  await expect(canvas.queryByRole('complementary', { name: 'Needs you' })).toBeNull()
+  await expect(canvas.queryByText('none')).toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: /Answered.*2 questions/ }))
+  await expect(canvas.getByText('none')).toBeVisible()
+  await expect(canvas.getByText('Left open')).toBeVisible()
+  await expect(canvas.getByRole('region', { name: 'Needs you inbox' }).childElementCount).toBe(0)
+} }
+export const AllStatesLight440: Story = { ...AllStates, parameters: { scheme: 'light', width: 440 } }
+export const AllStatesDark1440: Story = { ...AllStates, parameters: { scheme: 'dark', width: 1440 } }
+export const AllStatesLight1440: Story = { ...AllStates, parameters: { scheme: 'light', width: 1440 } }
+export const ReadOnlyLight440: Story = { ...ReadOnly, parameters: { scheme: 'light', width: 440 } }
+export const ReadOnlyDark1440: Story = { ...ReadOnly, parameters: { scheme: 'dark', width: 1440 } }
+export const ReadOnlyLight1440: Story = { ...ReadOnly, parameters: { scheme: 'light', width: 1440 } }
+export const KeyboardLight440: Story = { ...Keyboard, parameters: { scheme: 'light', width: 440 } }
+export const KeyboardDark1440: Story = { ...Keyboard, parameters: { scheme: 'dark', width: 1440 } }
+export const KeyboardLight1440: Story = { ...Keyboard, parameters: { scheme: 'light', width: 1440 } }
+export const NegativeControlsLight440: Story = { ...NegativeControls, parameters: { scheme: 'light', width: 440 } }
+export const NegativeControlsDark1440: Story = { ...NegativeControls, parameters: { scheme: 'dark', width: 1440 } }
+export const Pending: Story = { args: { request: { ...questionRequest, answerable: true } } }
+export const PendingTimeout: Story = { args: { request: { ...questionRequest, answerable: true, state: questionStates[1]! } } }
+export const Submitting: Story = { args: { request: { ...questionRequest, answerable: true, state: { _tag: 'submitting' } }, draft: { single: { selected: ['thread'] } } } }
+export const Failed: Story = { args: { request: { ...questionRequest, answerable: true, state: questionStates[3]! }, draft: { single: { selected: ['thread'], note: 'Retain this note on retry' } }, onRetry: fn() }, play: async ({ canvasElement, args }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByRole('radio', { name: /This thread/ })).toBeChecked()
+  await expect(canvas.getByRole('textbox', { name: 'Note to the agent' })).toHaveValue('Retain this note on retry')
+  await userEvent.click(canvas.getByRole('button', { name: 'Retry' }))
+  await expect(args.onRetry).toHaveBeenCalledTimes(1)
+  await expect(args.onDecline).not.toHaveBeenCalled()
+} }
+export const Answered: Story = { args: { request: { ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', where: 'web', at: '2026-10-11T15:41:00Z' } }, now: Date.parse('2026-10-11T15:43:00Z') }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*This thread/ })
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  await expect(canvas.queryByText(questionRequest.questions[0]!.prompt)).toBeNull()
+  await expect(canvas.getByText('2m')).toHaveAttribute('title', new Intl.DateTimeFormat('en-US', { dateStyle: 'full', timeStyle: 'long', timeZone: 'America/New_York' }).format(new Date('2026-10-11T15:41:00Z')))
+  await expect(canvas.getByText('2m')).not.toHaveAttribute('title', '2026-10-11T15:41:00Z')
+  await expect(canvas.queryByText('2026-10-11T15:41:00Z')).toBeNull()
+  await userEvent.click(trigger)
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+  await expect(canvas.getByText('This thread', { selector: 'dd' })).toBeVisible()
+  await expect(trigger).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+} }
+export const AnsweredLight440: Story = { ...Answered, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredDark1440: Story = { ...Answered, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredLight1440: Story = { ...Answered, parameters: { scheme: 'light', width: 1440 } }
+export const AnsweredMultiple: Story = { args: { request: { ...questionRequest, questions: questionKinds.slice(0, 3), state: { _tag: 'answered', answers: { single: { selected: ['thread'] }, multi: { selected: [] }, text: { selected: [], other: 'Accessibility review' } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } }, now: Date.parse('2026-10-11T15:43:00Z') }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*3 questions/ })
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(canvas.queryByText('none')).toBeNull()
+  await userEvent.click(trigger)
+  await expect(canvas.getByText('none')).toBeVisible()
+  await expect(canvas.getByText(/Accessibility review/)).toBeVisible()
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+} }
+export const AnsweredMultipleLight440: Story = { ...AnsweredMultiple, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredMultipleDark1440: Story = { ...AnsweredMultiple, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredMultipleLight1440: Story = { ...AnsweredMultiple, parameters: { scheme: 'light', width: 1440 } }
+export const AnsweredElsewhere: Story = { args: { request: { ...questionRequest, state: questionStates[5]! }, draft: { single: { selected: ['thread'], other: 'Unsent draft must not survive' } } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByText(/your unsent web draft was discarded/)).toBeVisible()
+  await expect(canvas.queryByText(/Unsent draft must not survive/)).toBeNull()
+  await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
+} }
+export const PartiallyAnswered: Story = { args: { request: { ...questionRequest, questions: [questionKinds[0]!, questionKinds[1]!], state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: '15:41 UTC' } } } }
+export const TimedOutAuto: Story = { args: { request: { ...questionRequest, state: questionStates[6]! } } }
+export const TimedOutNone: Story = { args: { request: { ...questionRequest, state: questionStates[7]! } } }
+export const Cancelled: Story = { args: { request: { ...questionRequest, state: questionStates[8]! } } }
+export const ChatRedirected: Story = { args: { request: { ...questionRequest, state: questionStates[9]! } } }
+export const KeyboardWalk: Story = {
+  args: { request: { ...questionRequest, answerable: true, questions: [questionKinds[0]!, questionKinds[1]!, questionKinds[2]!] }, autoFocus: true, draft: { single: { selected: ['thread'] } } },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('radiogroup')).toHaveAttribute('aria-required', 'true')
+    await userEvent.click(canvas.getByRole('radio', { name: /This thread/ }))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(canvas.getByRole('checkbox', { name: 'Unit tests' })).toHaveFocus())
+    await userEvent.keyboard('n')
+    await waitFor(() => expect(canvas.getByRole('textbox', { name: 'Note to the agent' })).toHaveFocus())
+    await userEvent.keyboard('{Escape}')
+    await expect(canvas.getByRole('checkbox', { name: 'Unit tests' })).toHaveFocus()
+    await userEvent.keyboard('3')
+    await waitFor(() => expect(canvas.getByRole('textbox', { name: 'Your answer' })).toHaveFocus())
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Your answer' }), 'Accessibility audit')
+    await userEvent.keyboard('{Escape}1')
+    await expect(canvas.getByRole('textbox', { name: 'Your answer' })).toHaveValue('Accessibility audit')
+    await expect(canvas.getByRole('checkbox', { name: 'Unit tests' })).toBeChecked()
+    await userEvent.click(canvas.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(canvas.getByRole('textbox', { name: 'Your answer' })).toHaveFocus())
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Your answer' }), 'A release ready for review.')
+    await userEvent.click(canvas.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(canvas.getByRole('button', { name: 'Submit' })).toHaveFocus())
+    await expect(canvas.getByRole('button', { name: 'Review' })).toHaveAttribute('aria-current', 'step')
+    await expect(args.onDecline).not.toHaveBeenCalled()
+    await expect(args.onSubmit).not.toHaveBeenCalled()
+  },
+}
+export const ToolQuestions: Story = {
+  render: args => <>
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'singular', callId: 'singular', name: 'ask_user', input: { question: 'Choose a sample size.', options: ['Four rows', 'Eight rows'] }, status: 'running', callSeen: true, at: '2026-10-11T15:40:00Z' }} onOpenTerminal={args.onOpenTerminal} />
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'settled-batch', callId: 'settled-batch', name: 'ask', input: { questions: [{ id: 'db', question: 'Which database?', options: [{ label: 'SQLite' }, { label: 'Postgres' }] }, { id: 'checks', question: 'Which checks?', options: [{ label: 'Unit' }, { label: 'Browser' }], multi: true }] }, result: { content: { details: { results: [{ id: 'db', selectedOptions: ['SQLite'], note: 'Keep it local' }, { id: 'checks', selectedOptions: ['Browser'], customInput: 'Accessibility', timedOut: true }] } }, isError: false, at: '2026-10-11T15:41:00Z' }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'interrupted-singular', callId: 'interrupted-singular', name: 'ask_user', input: { question: 'Choose a sample size.', options: ['Four rows', 'Eight rows'] }, status: 'interrupted', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
+    <EmbraceToolItem item={{ _tag: 'ToolCall', id: 'settled-unrecorded', callId: 'settled-unrecorded', name: 'ask_user', input: { question: 'Choose an archived sample size.', options: ['Four rows', 'Eight rows'] }, status: 'success', callSeen: true, at: '2026-10-11T15:40:00Z' }} />
+  </>,
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('radio', { name: 'Four rows' })).toBeVisible()
+    await expect(canvas.getByRole('radio', { name: 'Eight rows' })).toBeVisible()
+    await expect(canvas.queryByRole('button', { name: 'Submit' })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: /Answered.*2 questions/ }))
+    await expect(canvas.getAllByText('SQLite')[0]).toBeVisible()
+    await expect(canvas.getByText(/Accessibility/)).toBeVisible()
+    await expect(canvas.getByText(/auto-selected/)).toBeVisible()
+    await expect(canvas.getByText('Interrupted')).toBeVisible()
+    await expect(canvas.queryByText('Answer details were not recorded.')).toBeNull()
+    await expect(canvas.queryByText('Question closed')).toBeNull()
+    const original = within(canvas.getByRole('region', { name: /settled-unrecorded/ }))
+    await expect(original.getByText('Four rows')).toBeVisible()
+    await expect(original.getByText('Eight rows')).toBeVisible()
+    await expect(original.queryByText('Left open')).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'Open terminal' }))
+    await expect(args.onOpenTerminal).toHaveBeenCalledTimes(1)
+    await expect(args.onSubmit).not.toHaveBeenCalled()
+  },
+}
+export const KeyboardWalkLight440: Story = { ...KeyboardWalk, parameters: { scheme: 'light', width: 440 } }
+export const KeyboardWalkDark1440: Story = { ...KeyboardWalk, parameters: { scheme: 'dark', width: 1440 } }
+export const KeyboardWalkLight1440: Story = { ...KeyboardWalk, parameters: { scheme: 'light', width: 1440 } }
+export const ToolQuestionsLight440: Story = { ...ToolQuestions, parameters: { scheme: 'light', width: 440 } }
+export const ToolQuestionsDark1440: Story = { ...ToolQuestions, parameters: { scheme: 'dark', width: 1440 } }
+export const ToolQuestionsLight1440: Story = { ...ToolQuestions, parameters: { scheme: 'light', width: 1440 } }
+export const NegativeControlsLight1440: Story = { ...NegativeControls, parameters: { scheme: 'light', width: 1440 } }
+export const SettledWithoutAnswerFacts: Story = {
+  args: { request: { ...questionRequest, state: { _tag: 'unrecorded', reason: '' } } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('This thread')).toBeVisible()
+    await expect(canvas.getByText('Team inbox')).toBeVisible()
+    await expect(canvas.queryByText('Answer details were not recorded.')).toBeNull()
+    await expect(canvas.queryByText('Question closed')).toBeNull()
+    await expect(canvas.queryByText('Left open')).toBeNull()
+  },
+}
+export const SettledWithoutAnswerFactsLight440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 440 } }
+export const SettledWithoutAnswerFactsDark1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'dark', width: 1440 } }
+export const SettledWithoutAnswerFactsLight1440: Story = { ...SettledWithoutAnswerFacts, parameters: { scheme: 'light', width: 1440 } }
+export const ComposerRouting: Story = { render: (_args, context) => <><ComposerRoutingExample storyId={context.id} routing={{ _tag: 'HeldUntilAnswered' }} /><ComposerRoutingExample storyId={context.id} routing={{ _tag: 'ChatAboutQuestion' }} /></>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByText('delivered after the question is answered')).toBeVisible()
+  await expect(canvas.getByText('Your message goes to the agent as a note about this question')).toBeVisible()
+  const composers = canvas.getAllByRole('textbox').filter(element => element.closest('form') !== null)
+  await expect(composers).toHaveLength(2)
+  for (const composer of composers) await userEvent.clear(composer)
+  await userEvent.type(composers[0]!, 'Please clarify the scope')
+  await expect(composers[0]).toHaveValue('Please clarify the scope')
+  await expect(composers[1]).not.toHaveValue('Please clarify the scope')
+} }
+export const SharedDraft: Story = { render: () => <SharedQuestionDraft />, play: async ({ canvasElement }) => {
+  const cards = canvasElement.querySelectorAll('[data-question-variant]')
+  await userEvent.click(within(cards[0] as HTMLElement).getByRole('radio', { name: /Team inbox/ }))
+  await expect(within(cards[1] as HTMLElement).getByRole('radio', { name: /Team inbox/ })).toBeChecked()
+  await expect(within(cards[1] as HTMLElement).getByRole('radio', { name: /This thread/ })).not.toBeChecked()
+  const inbox = within(canvasElement).getByRole('region', { name: 'Needs you inbox' })
+  await userEvent.click(inbox.querySelector('summary')!)
+  await expect(within(inbox).getByRole('radio', { name: /Team inbox/ })).toBeChecked()
+} }
+export const CompositionFrames: Story = { render: () => <SharedQuestionDraft />, play: async ({ canvasElement }) => {
+  await assertQuestionComposition(canvasElement)
+  const cards = canvasElement.querySelectorAll<HTMLElement>('[data-fractal-card]')
+  await expect(cards).toHaveLength(3)
+  const nested = cards[0]!.cloneNode(false) as HTMLElement
+  cards[0]!.append(nested)
+  try { await expect(assertQuestionComposition(canvasElement)).rejects.toThrow() } finally { nested.remove() }
+  const header = canvasElement.querySelector<HTMLElement>('[data-question-header]')!
+  const glyph = header.querySelector('svg')!
+  glyph.remove()
+  try { await expect(assertQuestionComposition(canvasElement)).rejects.toThrow() } finally { header.firstElementChild!.append(glyph) }
+  await assertQuestionComposition(canvasElement)
+} }
+export const CompositionFramesLight440: Story = { ...CompositionFrames, parameters: { scheme: 'light', width: 440 } }
+export const CompositionFramesDark1440: Story = { ...CompositionFrames, parameters: { scheme: 'dark', width: 1440 } }
+export const CompositionFramesLight1440: Story = { ...CompositionFrames, parameters: { scheme: 'light', width: 1440 } }
+export const ScrollAttention: Story = { render: () => <SharedQuestionDraft scrollDriven />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const scroll = canvasElement.querySelector<HTMLElement>('[data-question-scroll]')!
+  await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Needs you' })).toBeNull())
+  scroll.scrollTo({ top: scroll.scrollHeight })
+  await waitFor(() => expect(canvas.getByRole('complementary', { name: 'Needs you' })).toBeVisible())
+  scroll.scrollTo({ top: 0 })
+  await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Needs you' })).toBeNull())
+} }
+export const ComposerRoutingLight440: Story = { ...ComposerRouting, parameters: { scheme: 'light', width: 440 } }
+export const ComposerRoutingDark1440: Story = { ...ComposerRouting, parameters: { scheme: 'dark', width: 1440 } }
+export const ComposerRoutingLight1440: Story = { ...ComposerRouting, parameters: { scheme: 'light', width: 1440 } }
+export const SharedDraftLight440: Story = { ...SharedDraft, parameters: { scheme: 'light', width: 440 } }
+export const SharedDraftDark1440: Story = { ...SharedDraft, parameters: { scheme: 'dark', width: 1440 } }
+export const SharedDraftLight1440: Story = { ...SharedDraft, parameters: { scheme: 'light', width: 1440 } }
+export const ScrollAttentionLight440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 440 } }
+export const ScrollAttentionDark1440: Story = { ...ScrollAttention, parameters: { scheme: 'dark', width: 1440 } }
+export const ScrollAttentionLight1440: Story = { ...ScrollAttention, parameters: { scheme: 'light', width: 1440 } }
+export const RelativeAge: Story = { args: { request: { ...questionRequest, askedAt: '2026-10-11T15:41:00Z' }, now: Date.parse('2026-10-11T15:43:59Z') }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await expect(canvas.getByText(/ · 2m$/)).toBeVisible()
+  await expect(canvas.queryByText(/2 minutes ago/)).toBeNull()
+  await expect(canvas.queryByText('2026-10-11T15:41:00Z', { exact: false })).toBeNull()
+} }
+export const RelativeAgeLight440: Story = { ...RelativeAge, parameters: { scheme: 'light', width: 440 } }
+export const RelativeAgeDark1440: Story = { ...RelativeAge, parameters: { scheme: 'dark', width: 1440 } }
+export const RelativeAgeLight1440: Story = { ...RelativeAge, parameters: { scheme: 'light', width: 1440 } }
+const longAnsweredChoice = 'Keep the release review in this thread and preserve its full explanation. '.repeat(80)
+export const AnsweredLongChoice: Story = { ...Answered, args: { ...Answered.args, request: { ...questionRequest, questions: [{ ...questionKinds[0]!, options: [{ ...questionKinds[0]!.options[0]!, label: longAnsweredChoice }] }], state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: '2026-10-11T15:41:00Z' } } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*Keep the release review/ })
+  const label = trigger.querySelector('span')!
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
+  await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
+  const age = canvas.getByText('2m')
+  await expect(getComputedStyle(age).whiteSpace).toBe('nowrap')
+  await expect(getComputedStyle(age).flexShrink).toBe('0')
+  await expect(age.getBoundingClientRect().height).toBeLessThan(row.getBoundingClientRect().height)
+  await expect(row.getBoundingClientRect().width).toBeLessThanOrEqual(canvasElement.getBoundingClientRect().width)
+  await userEvent.click(trigger)
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+} }
+export const AnsweredLongChoiceLight440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredLongChoiceDark1440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredLongChoiceLight1440: Story = { ...AnsweredLongChoice, parameters: { scheme: 'light', width: 1440 } }
+export const AnsweredLongestAge: Story = { ...AnsweredLongChoice, args: { ...AnsweredLongChoice.args, timeZone: 'UTC', request: { ...AnsweredLongChoice.args!.request!, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: '2026-09-30T15:41:00Z' } } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const row = canvas.getByRole('region', { name: 'Question outcome' })
+  const trigger = canvas.getByRole('button', { name: /Answered.*Keep the release review/ })
+  const label = trigger.querySelector('span')!
+  const age = canvas.getByText('Sep 30')
+  const chevron = trigger.lastElementChild!
+  await expect(row.getBoundingClientRect().height).toBeLessThanOrEqual(64)
+  await expect(label.scrollWidth).toBeGreaterThan(label.clientWidth)
+  await expect(getComputedStyle(label).textOverflow).toBe('ellipsis')
+  await expect(getComputedStyle(age).whiteSpace).toBe('nowrap')
+  await expect(getComputedStyle(age).flex).toBe('0 0 auto')
+  const assertAgeContained = async () => {
+    await expect(age.scrollWidth).toBeLessThanOrEqual(age.clientWidth)
+    const range = document.createRange()
+    range.selectNodeContents(age)
+    const textBox = range.getBoundingClientRect()
+    const track = age.getBoundingClientRect()
+    await expect(textBox.left).toBeGreaterThanOrEqual(track.left)
+    await expect(textBox.right).toBeLessThanOrEqual(track.right)
+    await expect(textBox.top).toBeGreaterThanOrEqual(track.top)
+    await expect(textBox.bottom).toBeLessThanOrEqual(track.bottom)
+  }
+  await assertAgeContained()
+  const previousWidth = age.style.width
+  try {
+    age.style.width = '4ch'
+    await expect(assertAgeContained()).rejects.toThrow()
+  } finally {
+    age.style.width = previousWidth
+  }
+  await assertAgeContained()
+  await expect(label.getBoundingClientRect().right).toBeLessThanOrEqual(age.getBoundingClientRect().left)
+  await expect(age.getBoundingClientRect().right).toBeLessThanOrEqual(chevron.getBoundingClientRect().left)
+  await expect(chevron.getBoundingClientRect().right).toBeLessThanOrEqual(trigger.getBoundingClientRect().right)
+  await userEvent.click(trigger)
+  await expect(row.getBoundingClientRect().height).toBeGreaterThan(64)
+  await expect(trigger).toHaveFocus()
+} }
+export const AnsweredLongestAgeLight440: Story = { ...AnsweredLongestAge, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredLongestAgeDark1440: Story = { ...AnsweredLongestAge, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredLongestAgeLight1440: Story = { ...AnsweredLongestAge, parameters: { scheme: 'light', width: 1440 } }
+export const AnsweredOriginalKeyboard: Story = { ...Answered, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const trigger = canvas.getByRole('button', { name: /Answered.*This thread/ })
+  await userEvent.click(trigger)
+  const original = canvas.getByText('Original questions', { selector: 'summary' })
+  await expect(canvas.getByText('Team inbox')).not.toBeVisible()
+  await userEvent.keyboard('{Tab}')
+  await expect(original).toHaveFocus()
+  const suppressKeyboard = (event: Event) => { event.preventDefault(); event.stopImmediatePropagation() }
+  original.addEventListener('keydown', suppressKeyboard, true)
+  try {
+    await userEvent.keyboard('{Enter}')
+    await expect((async () => { await expect(original.parentElement).toHaveAttribute('open') })()).rejects.toThrow()
+  } finally { original.removeEventListener('keydown', suppressKeyboard, true) }
+  await userEvent.keyboard('{Enter}')
+  await expect(original.parentElement).toHaveAttribute('open')
+  await expect(canvas.getByText('Team inbox')).toBeVisible()
+  await userEvent.keyboard('{Enter}{Shift>}{Tab}{/Shift}')
+  await expect(trigger).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false')
+} }
+export const AnsweredOriginalKeyboardLight440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'light', width: 440 } }
+export const AnsweredOriginalKeyboardDark1440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'dark', width: 1440 } }
+export const AnsweredOriginalKeyboardLight1440: Story = { ...AnsweredOriginalKeyboard, parameters: { scheme: 'light', width: 1440 } }
+const styles = stylex.create({ root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, display: 'flex', flexDirection: 'column', gap: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading }, narrow: { width: g.specimenNarrow, maxWidth: '100%' }, wide: { width: g.specimenWide, maxWidth: '100%' }, scroll: { maxHeight: g.transcriptFrameHeight, overflowY: 'auto', maxWidth: g.lane }, scrollSpace: { height: '200vh' } })
+
+export const DockDimensions: Story = {
+  render: function DockDimensionsExample() {
+    const [expanded, setExpanded] = React.useState(false)
+    return <NeedsYouBar requests={[questionRequest]} expanded={expanded} onToggle={() => setExpanded(value => !value)}><QuestionForm request={questionRequest} variant="pinned" onOpenTerminal={fn()} /></NeedsYouBar>
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const dock = canvas.getByRole('complementary', { name: 'Needs you' })
+    const toggle = within(dock).getByRole('button', { name: /waiting on you/ })
+    const assertDockScale = async () => {
+      await expect(parseFloat(getComputedStyle(toggle).fontSize)).toBe(12)
+      await expect(getComputedStyle(toggle).fontWeight).toBe('500')
+      await expect(toggle.getBoundingClientRect().height).toBe(24)
+      for (const label of toggle.querySelectorAll('span')) await expect(parseFloat(getComputedStyle(label).fontSize)).toBe(12)
+    }
+    await assertDockScale()
+    const previousStyle = toggle.getAttribute('style')
+    try {
+      toggle.style.height = 'auto'
+      toggle.style.paddingBlock = '0.25rem'
+      await expect(assertDockScale()).rejects.toThrow()
+    } finally {
+      if (previousStyle === null) toggle.removeAttribute('style')
+      else toggle.setAttribute('style', previousStyle)
+    }
+    await assertDockScale()
+    await expect(canvas.queryByRole('button', { name: 'Open terminal' })).toBeNull()
+    await userEvent.click(toggle)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(canvas.getByRole('button', { name: 'Open terminal' })).toBeVisible()
+    await expect(toggle).toHaveFocus()
+    await assertDockScale()
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.queryByRole('button', { name: 'Open terminal' })).toBeNull()
+    await expect(toggle).toHaveFocus()
+  },
+}
+export const DockDimensionsLight440: Story = { ...DockDimensions, parameters: { scheme: 'light', width: 440 } }
+export const DockDimensionsDark1440: Story = { ...DockDimensions, parameters: { scheme: 'dark', width: 1440 } }
+export const DockDimensionsLight1440: Story = { ...DockDimensions, parameters: { scheme: 'light', width: 1440 } }
+export const ArchivedChoices: Story = {
+  args: { request: { ...questionRequest, state: { _tag: 'unrecorded', reason: '' } } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const choices = canvas.getByRole('list', { name: /Original choices/ })
+    const rows = within(choices).getAllByRole('listitem')
+    await expect(rows).toHaveLength(questionRequest.questions[0]!.options.length)
+    const affordance = rows[0]!.querySelector<HTMLElement>('[aria-hidden="true"]')!
+    const assertChoiceRow = async () => {
+      await expect(getComputedStyle(rows[0]!).display).toBe('flex')
+      await expect(affordance).toBeVisible()
+      await expect(affordance.querySelector('svg[data-icon="radio"]')).not.toBeNull()
+      await expect(affordance).toHaveTextContent('1.')
+    }
+    await assertChoiceRow()
+    affordance.style.visibility = 'hidden'
+    try { await expect(assertChoiceRow()).rejects.toThrow() } finally { affordance.style.visibility = '' }
+    await assertChoiceRow()
+    await expect(canvas.queryByRole('radio')).toBeNull()
+    await expect(canvas.queryByText('Answer details were not recorded.')).toBeNull()
+  },
+}
+export const ArchivedChoicesLight440: Story = { ...ArchivedChoices, parameters: { scheme: 'light', width: 440 } }
+export const ArchivedChoicesDark1440: Story = { ...ArchivedChoices, parameters: { scheme: 'dark', width: 1440 } }
+export const ArchivedChoicesLight1440: Story = { ...ArchivedChoices, parameters: { scheme: 'light', width: 1440 } }
+export const SettledRelativeAge: Story = {
+  args: { request: { ...questionRequest, state: { _tag: 'answered-elsewhere', where: 'terminal', at: '2026-10-11T16:56:11.082Z', draftDiscarded: true } }, now: Date.parse('2026-10-11T16:58:11.082Z') },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('Answered in terminal · 2m · your unsent web draft was discarded')).toBeVisible()
+    const timestamp = 'at' in args.request.state ? args.request.state.at : ''
+    const assertNoRawDate = async () => expect(canvasElement.textContent).not.toContain(timestamp)
+    await assertNoRawDate()
+    const rawDateControl = document.createTextNode(timestamp)
+    canvasElement.append(rawDateControl)
+    try { await expect(assertNoRawDate()).rejects.toThrow() } finally { rawDateControl.remove() }
+    await assertNoRawDate()
+  },
+}
+export const SettledRelativeAgeLight440: Story = { ...SettledRelativeAge, parameters: { scheme: 'light', width: 440 } }
+export const SettledRelativeAgeDark1440: Story = { ...SettledRelativeAge, parameters: { scheme: 'dark', width: 1440 } }
+export const SettledRelativeAgeLight1440: Story = { ...SettledRelativeAge, parameters: { scheme: 'light', width: 1440 } }

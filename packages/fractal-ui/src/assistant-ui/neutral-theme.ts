@@ -31,6 +31,8 @@ const borderVarsTheme = stylex.createTheme(borderVars, {
   glassBorder: 'rgba(255, 255, 255, 0.05)',
   controlBorder: 'rgba(255, 255, 255, 0.025)',
   focusBorder: 'rgba(255, 255, 255, 0.08)',
+  rail: 'rgba(255, 255, 255, 0.1)',
+  railStrong: 'rgba(255, 255, 255, 0.12)',
 })
 
 const accentVarsTheme = stylex.createTheme(accentVars, {
@@ -61,7 +63,7 @@ const typeVarsTheme = stylex.createTheme(typeVars, {
   uiSize: '14px', uiLeading: '20px',
   metaSize: '12px', metaLeading: '16px',
   denseSize: '11px',
-  codeSize: '13px',
+  codeSize: '13px', codeLeading: '18px',
   bodySize: '14px', bodyLeading: '22.75px',
   weightMedium: '500',
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
