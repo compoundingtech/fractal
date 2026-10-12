@@ -1,5 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { quotaGeometry } from './quota-geometry.stylex.ts'
 import { Button, Label, ListBox, ListBoxItem, Radio, RadioGroup, Slider, SliderOutput, SliderThumb, SliderTrack, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { QuotaAccount, QuotaEconomics, QuotaHistoryDay, QuotaHistoryValue, QuotaUnit, QuotaUsageProps, QuotaWindow } from './quota-design-types'
@@ -32,15 +33,15 @@ const addValue = (tally: Tally, value: number | undefined): Tally => value === u
 const addTally = (left: Tally, right: Tally): Tally => ({ sum: left.sum + right.sum, known: left.known + right.known, unknown: left.unknown + right.unknown })
 const tallyText = (tally: Tally, format: (value: number) => string): string =>
   tally.known === 0 && tally.unknown === 0 ? 'No rows'
-    : tally.known === 0 ? 'Unknown'
+    : tally.known === 0 ? 'Unreported'
       : tally.unknown > 0 ? `${format(tally.sum)} + ${tally.unknown} unknown`
         : format(tally.sum)
 
 const amountOf = (value: QuotaHistoryValue, unit: QuotaUnit): number | undefined => unit === 'usd' ? value.usd : value.tokens
 const formatExact = (unit: QuotaUnit) => (value: number): string => unit === 'usd' ? usdExact.format(value) : `${tokensExact.format(value)} tok`
 const formatCompact = (unit: QuotaUnit, value: number): string => unit === 'usd' ? usdCompact.format(value) : `${tokensCompact.format(value)} tok`
-const formatUsd = (value: number | undefined): string => value === undefined ? 'Unknown' : usdCents.format(value)
-const formatUsdExact = (value: number | undefined): string => value === undefined ? 'Unknown' : usdExact.format(value)
+const formatUsd = (value: number | undefined): string => value === undefined ? 'Unreported' : usdCents.format(value)
+const formatUsdExact = (value: number | undefined): string => value === undefined ? 'Unreported' : usdExact.format(value)
 
 interface Series { readonly key: string; readonly label: string; readonly tone: number }
 interface DayCell { readonly day: QuotaHistoryDay; readonly bySeries: ReadonlyMap<string, Tally> }
@@ -311,7 +312,7 @@ const Breakdown = ({ days, scopeDays, accounts, unit, selected, rangeLabel, land
   const rows = buildBreakdown(scopeDays, accounts, unit, tokenLabels)
   const format = formatExact(unit)
   const count = (value: number) => countExact.format(value)
-  const coverageText = (tally: Tally) => tally.known === 0 ? 'Unknown' : `${percent.format(tally.sum / tally.known)}${tally.unknown > 0 ? ` + ${tally.unknown} unknown` : ''}`
+  const coverageText = (tally: Tally) => tally.known === 0 ? 'Unreported' : `${percent.format(tally.sum / tally.known)}${tally.unknown > 0 ? ` + ${tally.unknown} unknown` : ''}`
   const titleId = React.useId()
   return <section aria-label={`${landmarkContext} by model and scope`} data-quota-breakdown={selected?.id ?? 'range'} {...stylex.props(styles.card)}>
     <header {...stylex.props(styles.cardHead)}>
@@ -363,7 +364,7 @@ const LimitsPanel = ({ account }: { readonly account: QuotaAccount }) => <ul ari
       <dl {...stylex.props(styles.facts)}>
         <dt {...stylex.props(styles.factLabel)}>Scope</dt><dd {...stylex.props(styles.factValue)}>{window.scope}</dd>
         <dt {...stylex.props(styles.factLabel)}>Column</dt><dd {...stylex.props(styles.factValue)}>{window.column}</dd>
-        <dt {...stylex.props(styles.factLabel)}>Resets</dt><dd {...stylex.props(styles.factValue)}>{window.resetAt === undefined ? 'Unknown' : <time dateTime={window.resetAt}>{window.resetAt}</time>}</dd>
+        <dt {...stylex.props(styles.factLabel)}>Resets</dt><dd {...stylex.props(styles.factValue)}>{window.resetAt === undefined ? 'Unreported' : <time dateTime={window.resetAt}>{window.resetAt}</time>}</dd>
         {window.facts.map((fact, index) => <React.Fragment key={`${fact.label}-${index}`}><dt {...stylex.props(styles.factLabel)}>{fact.label}</dt><dd {...stylex.props(styles.factValue)}>{fact.value}</dd></React.Fragment>)}
       </dl>
     </li>
@@ -377,8 +378,8 @@ const AccountPanel = ({ account }: { readonly account: QuotaAccount }) => <div {
     <dt {...stylex.props(styles.factLabel)}>Plan</dt><dd {...stylex.props(styles.factValue)}>{account.plan}</dd>
     <dt {...stylex.props(styles.factLabel)}>State</dt><dd {...stylex.props(styles.factValue)}>{account.state}</dd>
     <dt {...stylex.props(styles.factLabel)}>USD</dt><dd {...stylex.props(styles.factValue)}>{account.usdCoverage ? formatUsdExact(account.usd) : `${formatUsdExact(account.usd)} · coverage below 95%`}</dd>
-    <dt {...stylex.props(styles.factLabel)}>Tokens</dt><dd {...stylex.props(styles.factValue)}>{account.tokens === undefined ? 'Unknown' : tokensExact.format(account.tokens)}</dd>
-    <dt {...stylex.props(styles.factLabel)}>Resets used</dt><dd {...stylex.props(styles.factValue)}>{account.resetCount === undefined ? 'Unknown' : countExact.format(account.resetCount)}</dd>
+    <dt {...stylex.props(styles.factLabel)}>Tokens</dt><dd {...stylex.props(styles.factValue)}>{account.tokens === undefined ? 'Unreported' : tokensExact.format(account.tokens)}</dd>
+    <dt {...stylex.props(styles.factLabel)}>Resets used</dt><dd {...stylex.props(styles.factValue)}>{account.resetCount === undefined ? 'Unreported' : countExact.format(account.resetCount)}</dd>
   </dl>
   <h3 {...stylex.props(styles.subTitle)}>Reset credits</h3>
   <Facts facts={account.resetCredits} label="reset credits" />
@@ -425,8 +426,8 @@ const CostOverview = ({ economics, accounts, landmarkContext }: { readonly econo
             <td {...stylex.props(styles.td, styles.numeric)}>{formatUsd(item.usageValue)}</td>
             <td {...stylex.props(styles.td, styles.numeric)}><span {...stylex.props(styles.block)}>{formatUsd(item.price)}</span><span {...stylex.props(styles.block, styles.muted)}>{item.basis === 'invoiced' ? 'Invoice' : 'List price'}</span></td>
             <td {...stylex.props(styles.td, styles.numeric)}>{formatUsd(item.ledgerValue)}</td>
-            <td {...stylex.props(styles.td, styles.numeric)}>{item.usageValue === undefined || item.price === undefined || item.price === 0 ? 'Unknown' : `${(item.usageValue / item.price).toFixed(2)}×`}</td>
-            <td {...stylex.props(styles.td, styles.numeric)}>{item.coverageDays === undefined ? 'Unknown' : `${countExact.format(item.coverageDays)} of 30 days`}</td>
+            <td {...stylex.props(styles.td, styles.numeric)}>{item.usageValue === undefined || item.price === undefined || item.price === 0 ? 'Unreported' : `${(item.usageValue / item.price).toFixed(2)}×`}</td>
+            <td {...stylex.props(styles.td, styles.numeric)}>{item.coverageDays === undefined ? 'Unreported' : `${countExact.format(item.coverageDays)} of 30 days`}</td>
           </tr>
         })}
         {economics.length === 0 && <tr><td colSpan={6} {...stylex.props(styles.td, styles.muted)}>No subscription economics supplied.</td></tr>}
@@ -540,26 +541,26 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
 
 const styles = stylex.create({
   root: { containerType: 'inline-size', display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0, padding: space.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: type.fontSans, fontSize: type.uiSize, lineHeight: type.uiLeading },
-  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: space.lg, minBlockSize: '32px' },
+  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: space.lg, minBlockSize: quotaGeometry.px32 },
   pageTitle: { margin: 0, fontSize: type.headingSize, lineHeight: type.headingLeading, fontWeight: type.weightSemibold },
-  status: { display: 'flex', alignItems: 'center', gap: space.sm, margin: 0, inlineSize: '320px', maxInlineSize: '100%', blockSize: '24px', paddingInline: space.md, borderRadius: radius.full, border: `1px solid ${border.border}`, color: ink.fgMuted, fontSize: type.metaSize },
+  status: { display: 'flex', alignItems: 'center', gap: space.sm, margin: 0, inlineSize: quotaGeometry.px320, maxInlineSize: '100%', blockSize: quotaGeometry.px24, paddingInline: space.md, borderRadius: radius.full, border: quotaGeometry.hair, color: ink.fgMuted, fontSize: type.metaSize },
   statusWarn: { color: status.attention },
   statusDanger: { color: status.dangerFg },
-  statusDot: { flexShrink: 0, inlineSize: '6px', blockSize: '6px', borderRadius: radius.full, backgroundColor: 'currentColor' },
+  statusDot: { flexShrink: 0, inlineSize: quotaGeometry.px6, blockSize: quotaGeometry.px6, borderRadius: radius.full, backgroundColor: 'currentColor' },
   toolbar: { display: 'flex', alignItems: 'center', gap: space.lg, marginInlineStart: 'auto', flexWrap: 'wrap' },
   segmented: { display: 'flex', alignItems: 'center', gap: space.xs },
   controlLabel: { color: ink.fgMuted, fontSize: type.metaSize, marginInlineEnd: space.xs },
-  segment: { display: 'inline-flex', alignItems: 'center', blockSize: '28px', paddingInline: space.md, borderRadius: radius.control, border: `1px solid ${border.borderStrong}`, color: ink.fgMuted, backgroundColor: surface.transparent, cursor: 'pointer', fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-selected])': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '1px' } },
-  button: { display: 'inline-flex', alignItems: 'center', gap: space.xs, blockSize: '28px', paddingInline: space.md, borderRadius: radius.control, border: `1px solid ${border.borderStrong}`, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', fontFamily: type.fontSans, fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-disabled])': { cursor: 'not-allowed', opacity: 0.5 }, ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '1px' } },
-  unitButton: { inlineSize: '96px', justifyContent: 'center', fontVariantNumeric: 'tabular-nums' },
+  segment: { display: 'inline-flex', alignItems: 'center', blockSize: quotaGeometry.px28, paddingInline: space.md, borderRadius: radius.control, border: quotaGeometry.strongHair, color: ink.fgMuted, backgroundColor: surface.transparent, cursor: 'pointer', fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-selected])': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
+  button: { display: 'inline-flex', alignItems: 'center', gap: space.xs, blockSize: quotaGeometry.px28, paddingInline: space.md, borderRadius: radius.control, border: quotaGeometry.strongHair, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', fontFamily: type.fontSans, fontSize: type.metaSize, ':hover': { backgroundColor: surface.rowHover }, ':is([data-disabled])': { cursor: 'not-allowed', opacity: 0.5 }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
+  unitButton: { inlineSize: quotaGeometry.px96, justifyContent: 'center', fontVariantNumeric: 'tabular-nums' },
   unitFallback: { color: status.attention },
   unitOn: { color: ink.fg, fontWeight: type.weightSemibold },
   unitOff: { color: ink.fgMuted },
-  unitNote: { inlineSize: '260px', color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  grid: { display: 'grid', gap: space.lg, gridTemplateColumns: { default: 'minmax(0, 1fr)', '@container (min-width: 72rem)': 'minmax(0, 1fr) 420px' }, alignItems: 'start' },
+  unitNote: { inlineSize: quotaGeometry.px260, color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  grid: { display: 'grid', gap: space.lg, gridTemplateColumns: { default: 'minmax(0, 1fr)', '@container (min-width: 72rem)': quotaGeometry.workspaceColumns }, alignItems: 'start' },
   mainColumn: { display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0 },
   sideColumn: { display: 'flex', flexDirection: 'column', gap: space.lg, minWidth: 0 },
-  card: { display: 'flex', flexDirection: 'column', gap: space.md, minWidth: 0, padding: space.lg, borderRadius: radius.base, border: `1px solid ${border.border}`, backgroundColor: surface.raised },
+  card: { display: 'flex', flexDirection: 'column', gap: space.md, minWidth: 0, padding: space.lg, borderRadius: radius.base, border: quotaGeometry.hair, backgroundColor: surface.raised },
   cardHead: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: space.md, flexWrap: 'wrap' },
   sectionTitle: { display: 'flex', alignItems: 'center', gap: space.sm, margin: 0, fontSize: type.uiSize, fontWeight: type.weightSemibold },
   subTitle: { margin: `${space.md} 0 0`, fontSize: type.metaSize, fontWeight: type.weightMedium, color: ink.fgSoft },
@@ -568,13 +569,13 @@ const styles = stylex.create({
   truncate: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   block: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   figure: { marginInlineStart: 'auto', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', color: ink.fg },
-  emptyChart: { display: 'grid', placeItems: 'center', blockSize: '220px', margin: 0, color: ink.fgMuted, border: `1px dashed ${border.borderStrong}`, borderRadius: radius.md },
-  legend: { display: 'flex', flexWrap: 'wrap', gap: `${space.xs} ${space.lg}`, margin: 0, padding: 0, listStyle: 'none', minBlockSize: '20px', fontSize: type.metaSize, color: ink.fgSoft },
-  legendItem: { display: 'flex', alignItems: 'center', gap: space.xs, maxInlineSize: '200px' },
-  swatch: { flexShrink: 0, inlineSize: '8px', blockSize: '8px', borderRadius: '2px' },
+  emptyChart: { display: 'grid', placeItems: 'center', blockSize: quotaGeometry.px220, margin: 0, color: ink.fgMuted, border: quotaGeometry.dashedStrongHair, borderRadius: radius.md },
+  legend: { display: 'flex', flexWrap: 'wrap', gap: `${space.xs} ${space.lg}`, margin: 0, padding: 0, listStyle: 'none', minBlockSize: quotaGeometry.px20, fontSize: type.metaSize, color: ink.fgSoft },
+  legendItem: { display: 'flex', alignItems: 'center', gap: space.xs, maxInlineSize: quotaGeometry.px200 },
+  swatch: { flexShrink: 0, inlineSize: quotaGeometry.px8, blockSize: quotaGeometry.px8, borderRadius: quotaGeometry.px2 },
   chart: { position: 'relative', inlineSize: '100%' },
-  chartMain: { blockSize: '220px' },
-  chartSmall: { blockSize: '72px' },
+  chartMain: { blockSize: quotaGeometry.px220 },
+  chartSmall: { blockSize: quotaGeometry.px72 },
   svg: { position: 'absolute', inset: 0, inlineSize: '100%', blockSize: '100%', overflow: 'visible' },
   baseline: { stroke: border.borderStrong, strokeWidth: 1 },
   hatchInk: { fill: ink.fgFaint },
@@ -585,85 +586,85 @@ const styles = stylex.create({
   dimmedBar: { opacity: 0.35 },
   partialOutline: { fill: 'none', stroke: ink.fgSoft, strokeWidth: 1, strokeDasharray: '3 2' },
   dayButtons: { position: 'absolute', inset: 0, display: 'flex' },
-  dayButton: { flexBasis: 0, flexGrow: 1, minWidth: 0, padding: 0, border: 'none', borderRadius: radius.keyboard, backgroundColor: surface.transparent, cursor: 'pointer', ':hover': { backgroundColor: surface.washSubtle }, ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
-  dayButtonSelected: { boxShadow: `inset 0 -2px 0 ${accent.primary}`, backgroundColor: surface.washSubtle },
+  dayButton: { flexBasis: 0, flexGrow: 1, minWidth: 0, padding: 0, border: 'none', borderRadius: radius.keyboard, backgroundColor: surface.transparent, cursor: 'pointer', ':hover': { backgroundColor: surface.washSubtle }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
+  dayButtonSelected: { boxShadow: quotaGeometry.selectedUnderline, backgroundColor: surface.washSubtle },
   titleCarrier: { display: 'block', inlineSize: '100%', blockSize: '100%' },
-  axis: { display: 'flex', justifyContent: 'space-between', gap: space.md, blockSize: '16px', color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
+  axis: { display: 'flex', justifyContent: 'space-between', gap: space.md, blockSize: quotaGeometry.px16, color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
   partialLegend: { color: ink.fgSoft },
-  partialBadge: { display: 'inline-flex', alignItems: 'center', marginInlineStart: space.sm, paddingInline: space.xs, borderRadius: radius.keyboard, border: `1px dashed ${ink.fgFaint}`, color: ink.fgSoft, fontSize: type.denseSize, fontWeight: type.weightRegular, whiteSpace: 'nowrap' },
-  readout: { display: 'flex', flexDirection: 'column', gap: space.xs, blockSize: '76px', overflowY: 'auto', padding: space.sm, borderRadius: radius.md, backgroundColor: surface.washSubtle, fontSize: type.metaSize },
+  partialBadge: { display: 'inline-flex', alignItems: 'center', marginInlineStart: space.sm, paddingInline: space.xs, borderRadius: radius.keyboard, border: quotaGeometry.dashedMutedHair, color: ink.fgSoft, fontSize: type.denseSize, fontWeight: type.weightRegular, whiteSpace: 'nowrap' },
+  readout: { display: 'flex', flexDirection: 'column', gap: space.xs, blockSize: quotaGeometry.px76, overflowY: 'auto', padding: space.sm, borderRadius: radius.md, backgroundColor: surface.washSubtle, fontSize: type.metaSize },
   readoutHead: { display: 'flex', alignItems: 'center', gap: space.xs, fontWeight: type.weightMedium },
-  readoutList: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: `0 ${space.lg}`, margin: 0, padding: 0, listStyle: 'none' },
+  readoutList: { display: 'grid', gridTemplateColumns: quotaGeometry.multipleColumns, gap: `0 ${space.lg}`, margin: 0, padding: 0, listStyle: 'none' },
   readoutItem: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0, color: ink.fgSoft },
   range: { display: 'flex', flexDirection: 'column', gap: space.xs },
   rangeHead: { display: 'flex', justifyContent: 'space-between', gap: space.md, fontSize: type.metaSize },
   rangeLabel: { color: ink.fgMuted },
   rangeOutput: { color: ink.fgSoft, fontVariantNumeric: 'tabular-nums' },
   track: { position: 'relative', inlineSize: '100%' },
-  trackStrip: { blockSize: '44px', borderRadius: radius.sm, backgroundColor: surface.washSubtle },
-  trackRail: { blockSize: '20px' },
+  trackStrip: { blockSize: quotaGeometry.px44, borderRadius: radius.sm, backgroundColor: surface.washSubtle },
+  trackRail: { blockSize: quotaGeometry.px20 },
   stripBar: { fill: ink.fgFaint },
   stripUnknown: { fill: border.borderStrong },
-  brush: { position: 'absolute', pointerEvents: 'none', backgroundColor: surface.washSubtle, borderInline: `1px solid ${accent.primary}` },
+  brush: { position: 'absolute', pointerEvents: 'none', backgroundColor: surface.washSubtle, borderInline: quotaGeometry.accentHair },
   brushStrip: { insetBlock: 0 },
-  brushRail: { insetBlockStart: '8px', blockSize: '4px', backgroundColor: accent.primary },
+  brushRail: { insetBlockStart: quotaGeometry.px8, blockSize: quotaGeometry.px4, backgroundColor: accent.primary },
   brushSpan: (left: string, width: string) => ({ insetInlineStart: left, inlineSize: width }),
-  thumb: { insetBlockStart: 0, inlineSize: '12px', borderRadius: radius.keyboard, border: `1px solid ${accent.primary}`, backgroundColor: surface.raised, cursor: 'ew-resize', ':is([data-dragging])': { backgroundColor: accent.primary }, ':is([data-focus-visible])': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '2px' } },
-  thumbStrip: { blockSize: '44px' },
-  thumbRail: { blockSize: '20px' },
+  thumb: { insetBlockStart: 0, inlineSize: quotaGeometry.px12, borderRadius: radius.keyboard, border: quotaGeometry.accentHair, backgroundColor: surface.raised, cursor: 'ew-resize', ':is([data-dragging])': { backgroundColor: accent.primary }, ':is([data-focus-visible])': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px2 } },
+  thumbStrip: { blockSize: quotaGeometry.px44 },
+  thumbRail: { blockSize: quotaGeometry.px20 },
   clearDay: { alignSelf: 'flex-start' },
   multiples: { display: 'grid', gridTemplateColumns: { default: 'repeat(2, minmax(0, 1fr))', '@container (min-width: 72rem)': 'repeat(3, minmax(0, 1fr))' }, gap: space.md, margin: 0, padding: 0, listStyle: 'none' },
-  multiple: { display: 'flex', flexDirection: 'column', gap: space.xs, minWidth: 0, padding: space.sm, borderRadius: radius.md, border: `1px solid ${border.border}` },
+  multiple: { display: 'flex', flexDirection: 'column', gap: space.xs, minWidth: 0, padding: space.sm, borderRadius: radius.md, border: quotaGeometry.hair },
   multipleHead: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0, fontSize: type.metaSize },
   scaleNote: { color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
   heatmapWrap: { display: 'grid', gap: space.lg, gridTemplateColumns: { default: 'minmax(0, 1fr)', '@container (min-width: 56rem)': 'minmax(0, 1fr) minmax(0, 1fr)' }, alignItems: 'start' },
-  heatmap: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gridAutoRows: '40px', gap: space.xs },
-  weekday: { alignSelf: 'end', color: ink.fgMuted, fontSize: type.denseSize, blockSize: '16px' },
+  heatmap: { display: 'grid', gridTemplateColumns: 'repeat(7, minmax(0, 1fr))', gridAutoRows: quotaGeometry.px40, gap: space.xs },
+  weekday: { alignSelf: 'end', color: ink.fgMuted, fontSize: type.denseSize, blockSize: quotaGeometry.px16 },
   cellAt: (row: number, column: number) => ({ gridRowStart: String(row), gridColumnStart: String(column) }),
-  heatCell: { position: 'relative', padding: 0, overflow: 'hidden', border: `1px solid ${border.border}`, borderRadius: radius.sm, backgroundColor: surface.canvas, cursor: 'pointer', ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '1px' } },
+  heatCell: { position: 'relative', padding: 0, overflow: 'hidden', border: quotaGeometry.hair, borderRadius: radius.sm, backgroundColor: surface.canvas, cursor: 'pointer', ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
   heatPartial: { borderStyle: 'dashed', borderColor: ink.fgFaint },
   heatFill: { position: 'absolute', inset: 0 },
   heatKnown: { backgroundColor: accent.primary },
-  heatZero: { backgroundColor: surface.transparent, boxShadow: `inset 0 0 0 1px ${ink.fgFaint}` },
-  heatUnknown: { backgroundImage: `repeating-linear-gradient(135deg, ${ink.fgFaint} 0 1px, transparent 1px 5px)` },
+  heatZero: { backgroundColor: surface.transparent, boxShadow: quotaGeometry.heatZeroShadow },
+  heatUnknown: { backgroundImage: quotaGeometry.unreportedHeatPattern },
   heatLabel: { position: 'absolute', insetInlineStart: space.xs, insetBlockStart: space.xs2, color: ink.fg, backgroundColor: surface.canvas, paddingInline: space.xs2, borderRadius: radius.keyboard, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
-  drilldown: { display: 'flex', flexDirection: 'column', gap: space.sm, minBlockSize: '160px' },
+  drilldown: { display: 'flex', flexDirection: 'column', gap: space.sm, minBlockSize: quotaGeometry.px160 },
   drillList: { display: 'flex', flexDirection: 'column', gap: space.xs, margin: 0, padding: 0, listStyle: 'none' },
-  drillItem: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 96px 132px', alignItems: 'center', gap: space.sm, fontSize: type.metaSize, color: ink.fgSoft },
-  drillTrack: { blockSize: '6px', borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
+  drillItem: { display: 'grid', gridTemplateColumns: quotaGeometry.drillColumns, alignItems: 'center', gap: space.sm, fontSize: type.metaSize, color: ink.fgSoft },
+  drillTrack: { blockSize: quotaGeometry.px6, borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
   drillFill: { display: 'block', blockSize: '100%' },
   share: (width: string) => ({ inlineSize: width }),
-  tableScroll: { overflowX: 'auto', scrollbarGutter: 'stable', ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '1px' } },
+  tableScroll: { overflowX: 'auto', scrollbarGutter: 'stable', ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.px1 } },
   table: { inlineSize: '100%', minInlineSize: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: type.metaSize, fontVariantNumeric: 'tabular-nums' },
-  colModel: { inlineSize: '180px' },
-  costIdentity: { inlineSize: '120px' },
-  costAmount: { inlineSize: '88px' },
-  colScope: { inlineSize: '96px' },
-  colAccounts: { inlineSize: '160px' },
-  colValue: { inlineSize: '128px' },
-  colCoverage: { inlineSize: '112px' },
-  colCount: { inlineSize: '96px' },
-  colDay: { inlineSize: '180px' },
-  th: { blockSize: '28px', paddingInline: space.sm, textAlign: 'start', fontWeight: type.weightRegular, color: ink.fgMuted, borderBottom: `1px solid ${border.borderStrong}`, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  td: { blockSize: '32px', paddingInline: space.sm, borderBottom: `1px solid ${border.border}`, color: ink.fgSoft, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  colModel: { inlineSize: quotaGeometry.px180 },
+  costIdentity: { inlineSize: quotaGeometry.px120 },
+  costAmount: { inlineSize: quotaGeometry.px88 },
+  colScope: { inlineSize: quotaGeometry.px96 },
+  colAccounts: { inlineSize: quotaGeometry.px160 },
+  colValue: { inlineSize: quotaGeometry.px128 },
+  colCoverage: { inlineSize: quotaGeometry.px112 },
+  colCount: { inlineSize: quotaGeometry.px96 },
+  colDay: { inlineSize: quotaGeometry.px180 },
+  th: { blockSize: quotaGeometry.px28, paddingInline: space.sm, textAlign: 'start', fontWeight: type.weightRegular, color: ink.fgMuted, borderBottom: quotaGeometry.strongHair, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  td: { blockSize: quotaGeometry.px32, paddingInline: space.sm, borderBottom: quotaGeometry.hair, color: ink.fgSoft, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   rowHead: { textAlign: 'start', fontWeight: type.weightRegular, color: ink.fg },
   numeric: { textAlign: 'end' },
-  accountList: { display: 'flex', flexDirection: 'column', gap: space.xs2, maxBlockSize: '168px', overflowY: 'auto', scrollbarGutter: 'stable' },
-  accountItem: { display: 'flex', alignItems: 'center', gap: space.sm, blockSize: '32px', paddingInline: space.sm, borderRadius: radius.sm, cursor: 'pointer', color: ink.fgSoft, backgroundColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
+  accountList: { display: 'flex', flexDirection: 'column', gap: space.xs2, maxBlockSize: quotaGeometry.px168, overflowY: 'auto', scrollbarGutter: 'stable' },
+  accountItem: { display: 'flex', alignItems: 'center', gap: space.sm, blockSize: quotaGeometry.px32, paddingInline: space.sm, borderRadius: radius.sm, cursor: 'pointer', color: ink.fgSoft, backgroundColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
   accountItemSelected: { backgroundColor: surface.rowActive, color: ink.fg },
   accountMeta: { marginInlineStart: 'auto', color: ink.fgSoft, fontSize: type.denseSize, whiteSpace: 'nowrap' },
-  tabList: { display: 'flex', gap: space.xs, borderBottom: `1px solid ${border.borderStrong}` },
-  tab: { paddingBlock: space.sm, paddingInline: space.md, cursor: 'pointer', color: ink.fgMuted, boxShadow: 'none', fontSize: type.metaSize, fontWeight: type.weightMedium, ':hover': { color: ink.fgSoft }, ':is([data-selected])': { color: ink.fg, boxShadow: `inset 0 -2px 0 ${accent.primary}` }, ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
-  tabPanel: { minBlockSize: '280px', paddingBlockStart: space.md, ':focus-visible': { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
+  tabList: { display: 'flex', gap: space.xs, borderBottom: quotaGeometry.strongHair },
+  tab: { paddingBlock: space.sm, paddingInline: space.md, cursor: 'pointer', color: ink.fgMuted, boxShadow: 'none', fontSize: type.metaSize, fontWeight: type.weightMedium, ':hover': { color: ink.fgSoft }, ':is([data-selected])': { color: ink.fg, boxShadow: quotaGeometry.selectedUnderline }, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
+  tabPanel: { minBlockSize: quotaGeometry.px280, paddingBlockStart: space.md, ':focus-visible': { outlineWidth: quotaGeometry.px2, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.pxNegative2 } },
   panelStack: { display: 'flex', flexDirection: 'column', gap: space.xs },
   windowList: { display: 'flex', flexDirection: 'column', gap: space.md, margin: 0, padding: 0, listStyle: 'none' },
-  window: { display: 'flex', flexDirection: 'column', gap: space.xs, paddingBlockEnd: space.md, borderBottom: `1px solid ${border.border}` },
+  window: { display: 'flex', flexDirection: 'column', gap: space.xs, paddingBlockEnd: space.md, borderBottom: quotaGeometry.hair },
   windowHead: { display: 'flex', alignItems: 'center', gap: space.sm, minWidth: 0, fontSize: type.metaSize },
   windowLabel: { fontWeight: type.weightMedium, color: ink.fg },
-  tag: { paddingInline: space.xs, borderRadius: radius.keyboard, border: `1px solid ${border.borderStrong}`, color: ink.fgMuted, fontSize: type.denseSize },
+  tag: { paddingInline: space.xs, borderRadius: radius.keyboard, border: quotaGeometry.strongHair, color: ink.fgMuted, fontSize: type.denseSize },
   warningText: { color: status.attention },
   dangerText: { color: status.dangerFg },
-  meter: { display: 'block', blockSize: '4px', borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
+  meter: { display: 'block', blockSize: quotaGeometry.px4, borderRadius: radius.full, backgroundColor: surface.washSubtle, overflow: 'hidden' },
   meterFill: { display: 'block', blockSize: '100%', backgroundColor: accent.primary },
   warningFill: { backgroundColor: status.attention },
   dangerFill: { backgroundColor: status.danger },

@@ -1,5 +1,6 @@
 import type * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { quotaGeometry } from './quota-geometry.stylex.ts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useArgs } from 'storybook/preview-api'
 import { UsageMeterHistoryChart, UsageMeterTable, type UsageMeterHistory, type UsageMeterHistoryPoint, type UsageMeterRow, type UsageMeterSortKey, type UsageMeterTableProps } from './UsageMeterTable'
@@ -144,8 +145,8 @@ export const HourlyHistogram: Story = { render: args => <Frame scheme={args.sche
 export const Empty: Story = { render: args => <Frame scheme={args.scheme} width={args.width}><UsageMeterTable rows={[]} status={{ kind: 'loading', text: statusText.loading }} sort={{ key: args.sortKey, direction: args.direction }} onSort={() => {}} onCycleSort={() => {}} onSelect={() => {}} onCloseDetail={() => {}} /></Frame> }
 
 const styles = stylex.create({
-  frame: { width: '720px', maxWidth: '100%', backgroundColor: surface.canvas, color: ink.fg, padding: s.md },
-  narrow: { width: '240px', padding: 0 },
+  frame: { width: quotaGeometry.px720, maxWidth: '100%', backgroundColor: surface.canvas, color: ink.fg, padding: s.md },
+  narrow: { width: quotaGeometry.px240, padding: 0 },
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl, padding: s.xl },
   caption: { fontFamily: t.fontSans, fontSize: t.metaSize, margin: `${s.md} 0` },
 })

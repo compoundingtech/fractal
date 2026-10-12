@@ -1,5 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
+import { quotaGeometry } from './quota-geometry.stylex.ts'
 import { Button } from 'react-aria-components'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { QuotaDrawer } from './QuotaDrawer.tsx'
@@ -155,7 +156,7 @@ const styles = stylex.create({
   pageNarrow: { width: 900 }, pageWide: { width: 1440 },
   matrix: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: 20, padding: 16, backgroundColor: surface.canvas, boxSizing: 'border-box', maxWidth: '100%' },
   matrixItem: { minWidth: 0, maxWidth: '100%' },
-  caption: { fontFamily: type.fontSans, fontSize: 12, fontWeight: 500, margin: '0 0 8px', color: ink.fgMuted },
-  proofToolbar: { display: 'flex', flexShrink: 0, flexWrap: 'wrap', gap: 4, minHeight: 36, padding: 4, borderBottom: `1px solid ${border.border}` },
-  button: { fontFamily: type.fontSans, fontSize: 10, padding: '4px 6px', backgroundColor: surface.controlFill, color: ink.fgMuted, border: `1px solid ${border.borderStrong}`, borderRadius: 4, cursor: 'pointer', ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: 2 } },
+  caption: { fontFamily: type.fontSans, fontSize: 12, fontWeight: 500, margin: quotaGeometry.captionMargin, color: ink.fgMuted },
+  proofToolbar: { display: 'flex', flexShrink: 0, flexWrap: 'wrap', gap: 4, minHeight: 36, padding: 4, borderBottom: quotaGeometry.hair },
+  button: { fontFamily: type.fontSans, fontSize: 10, padding: quotaGeometry.proofButtonPadding, backgroundColor: surface.controlFill, color: ink.fgMuted, border: quotaGeometry.strongHair, borderRadius: 4, cursor: 'pointer', ':focus-visible': { outline: quotaGeometry.focusOutline, outlineOffset: 2 } },
 })
