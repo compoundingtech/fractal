@@ -637,6 +637,7 @@ mod replication_tests {
 #[cfg(test)]
 mod pending_trigger_tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const OLD_PENDING_TRIGGERS: &str = r#"
 CREATE TRIGGER resource_observations_insert AFTER INSERT ON claims
@@ -797,6 +798,67 @@ END;
         ).unwrap();
         assert_eq!(version, PENDING_TRIGGER_VERSION);
         assert_eq!(reopened.resource_collection_page(None, None, Some("resource/fresh-pending-control"), None, 10).unwrap().len(), 1);
+        assert_eq!(projection_digest::tables(&connection).unwrap(), projection_digest::oracle(&connection).unwrap());
+    }
+
+    #[test]
+    fn old_trigger_open_revalidates_held_writer_observer_without_fault() {
+        #[derive(Default)]
+        struct ClaimsObserver {
+            hints: AtomicU64,
+            faults: Mutex<Vec<Arc<str>>>,
+        }
+        impl smallclaims::sqlite::WriterObserver for ClaimsObserver {
+            fn tables(&self) -> &'static [(&'static str, &'static str)] {
+                &[("main", "claims")]
+            }
+            fn mutated(&self, _database: &str, _table: &str) {}
+            fn unobserved(&self, database: &str, table: &str) {
+                assert_eq!((database, table), ("main", "claims"));
+                self.hints.fetch_add(1, Ordering::Relaxed);
+            }
+            fn failed(&self, error: Arc<str>) {
+                self.faults.lock().unwrap().push(error);
+            }
+            fn published(&self, connection: &Connection) {
+                assert!(connection.is_autocommit());
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observed-old-resources.sqlite3");
+        let old_store = Store::open(&path, "observed-pending-control").unwrap();
+        resource_claim(&old_store, "resource/observed-pending-control");
+        {
+            let mut connection = old_store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            transaction.execute_batch(
+                "DROP TRIGGER resource_observations_insert;
+                 DROP TRIGGER resource_observations_delete;
+                 DROP TRIGGER resource_observations_record_insert;
+                 DROP TRIGGER resource_observations_record_update;
+                 DELETE FROM meta WHERE key='resource_pending_trigger_version';",
+            ).unwrap();
+            transaction.execute_batch(OLD_PENDING_TRIGGERS).unwrap();
+            transaction.commit().unwrap();
+        }
+        drop(old_store);
+
+        // Use the held WriterConnection authorizer and publication path, not a second hook.
+        let observer = Arc::new(ClaimsObserver::default());
+        let writer = smallclaims::sqlite::WriterConnection::new_with_observer(
+            Connection::open(&path).unwrap(), Arc::new(AtomicU64::new(0)), observer.clone(),
+        ).unwrap();
+        {
+            let mut connection = writer.write();
+            create_schema(&connection).unwrap();
+            let transaction = connection.transaction().unwrap();
+            open(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(observer.hints.load(Ordering::Relaxed), 1);
+        assert!(observer.faults.lock().unwrap().is_empty());
+        let connection = Connection::open(&path).unwrap();
         assert_eq!(projection_digest::tables(&connection).unwrap(), projection_digest::oracle(&connection).unwrap());
     }
 

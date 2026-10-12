@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "A new local trigger-version marker replaces four persisted resource pending triggers in one opening transaction. Each trigger checks the subject primary key before insertion. The resource observation version remains 2, so existing stores do not rebuild all resource observations solely for this trigger change."
+    "detail": "One-time replacement of four persisted local trigger schema objects and a local version marker occurs in one opening transaction. No table or index definition, graph digest, rule, signature, or nonce code changes. Each trigger checks the subject primary key before insertion. The resource observation version remains 2, so existing stores do not rebuild all resource observations solely for this trigger change."
   },
   "rules": {
     "status": "none",
