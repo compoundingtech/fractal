@@ -1,19 +1,33 @@
-//! Trace attribution follows declaration authors only. Never use this for authorization.
+//! Evidence of declaration through a verified chain; never an authorization input.
+//! Trace attribution follows declaration authors only.
 use super::*;
 
 impl Store {
     /// The accountable person declared once by a fleet root. This does not answer whose
     /// accounts, prompts, asks or directive notes a seat uses. Missing roots and cycles
     /// resolve to none; account owners and mission requesters are never inferred here.
+    /// Every declaration must have a Verified verdict; the root must additionally be signed
+    /// by its named person. Walks stop after 64 declarations and fail closed at that bound.
     pub fn trace_principal(&self, agent: &str) -> Result<Option<String>> {
         self.read_snapshot(|_| {
             let mut actor = agent.to_owned();
             let mut seen = BTreeSet::new();
-            while actor.starts_with("agent/") && seen.insert(actor.clone()) {
+            const MAX_HOPS: usize = 64;
+            for _ in 0..MAX_HOPS {
+                if !actor.starts_with("agent/") || !seen.insert(actor.clone()) {
+                    return Ok(None);
+                }
                 let Some((desired, author)) = self.desired_subject_with_writer(&actor)? else {
                     return Ok(None);
                 };
                 if desired.kind != "agent" {
+                    return Ok(None);
+                }
+                let Some(claim) = self.selected_desired_token(&actor)? else {
+                    return Ok(None);
+                };
+                smallclaims::touched::note_read(|| claim.clone());
+                if self.claim_verdict(&claim)? != smallclaims::principal::Verdict::Verified {
                     return Ok(None);
                 }
                 if let Some(person) = &desired.accountable {
@@ -24,13 +38,6 @@ impl Store {
                         &serde_json::to_value(&desired)?,
                         author.as_deref(),
                     )?;
-                    let Some(claim) = self.selected_desired_token(&actor)? else {
-                        return Ok(None);
-                    };
-                    smallclaims::touched::note_read(|| claim.clone());
-                    if self.claim_verdict(&claim)? != smallclaims::principal::Verdict::Verified {
-                        return Ok(None);
-                    }
                     let Some(signature) = self.claim_signature(&claim)? else {
                         return Ok(None);
                     };
@@ -418,5 +425,115 @@ mission "example/work" state="ready" {
                 "{case}"
             );
         }
+    }
+
+    #[test]
+    fn trace_principal_rejects_unsigned_or_invalid_intermediate_declarations() {
+        for invalid in [false, true] {
+            let store = store();
+            declare(
+                &store,
+                "example/root",
+                "accountable \"person/avery\";",
+                Some("person/avery"),
+                "root",
+            );
+            declare(
+                &store,
+                "example/child",
+                "",
+                Some("agent/example/middle"),
+                "child",
+            );
+            let source = "version 2\nagent \"example/middle\" { command \"true\"; }";
+            let intent = crate::graph::parse_internal_intent(source, "alder").unwrap();
+            let expected = BTreeMap::from([("agent/example/middle".into(), Vec::new())]);
+            store
+                .apply_as(&intent, &expected, "middle", Some("agent/example/root"))
+                .unwrap();
+            let middle = store
+                .latest_claim("agent/example/middle", Some("intent.desired"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(store.trace_principal("agent/example/child").unwrap(), None);
+            if invalid {
+                let key = crate::fleet::MemberKey::generate().unwrap().0;
+                let signature = smallclaims::principal::ClaimSignature::sign(
+                    &key,
+                    "wrong content",
+                    "host/alder",
+                    None,
+                    Vec::new(),
+                    middle.accepted_at_unix_ms as u64,
+                );
+                store
+                    .connection
+                    .batched(|tx| {
+                        smallclaims::store::principals::store_claim_signature_tx(
+                            tx, &middle.id, &signature,
+                        )
+                    })
+                    .unwrap()
+                    .unwrap();
+            }
+            store.seal_local_batches().unwrap();
+            store.judge_claims(true).unwrap();
+            if invalid {
+                assert!(matches!(
+                    store.claim_verdict(&middle.id).unwrap(),
+                    smallclaims::principal::Verdict::Invalid(_)
+                ));
+                assert_eq!(store.trace_principal("agent/example/child").unwrap(), None);
+            } else {
+                assert_eq!(
+                    store.claim_verdict(&middle.id).unwrap(),
+                    smallclaims::principal::Verdict::Verified
+                );
+                assert_eq!(
+                    store
+                        .trace_principal("agent/example/child")
+                        .unwrap()
+                        .as_deref(),
+                    Some("person/avery")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn trace_principal_hop_budget_includes_the_root_and_fails_closed() {
+        let store = store();
+        declare(
+            &store,
+            "example/root",
+            "accountable \"person/avery\";",
+            Some("person/avery"),
+            "root",
+        );
+        for i in 0..64 {
+            let parent = if i == 0 {
+                "agent/example/root".into()
+            } else {
+                format!("agent/example/chain{}", i - 1)
+            };
+            declare(
+                &store,
+                &format!("example/chain{i}"),
+                "",
+                Some(&parent),
+                &format!("chain{i}"),
+            );
+        }
+        assert_eq!(
+            store
+                .trace_principal("agent/example/chain62")
+                .unwrap()
+                .as_deref(),
+            Some("person/avery")
+        );
+        assert_eq!(
+            store.trace_principal("agent/example/chain63").unwrap(),
+            None
+        );
     }
 }
