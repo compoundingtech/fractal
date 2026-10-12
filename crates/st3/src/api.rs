@@ -79,6 +79,7 @@ mod github_watch;
 mod harness_events;
 mod mailbox;
 mod mail_backlog;
+pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
 mod owned_sets;
 mod directive_notes;
@@ -8293,10 +8294,13 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    checks.push(stale_attention_check(
-        &doctor_attention_items(&state.store, client_now_ms()).map_err(ApiError::internal)?,
-        client_now_ms(),
-    ));
+    let attention_now = client_now_ms();
+    let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
+    checks.push(
+        mission_eligibility_doctor::check(&state.store, &attention, attention_now)
+            .map_err(ApiError::internal)?,
+    );
+    checks.push(stale_attention_check(&attention, attention_now));
     let report_status = if checks.iter().any(|check| check.status == "fail") {
         "fail"
     } else if checks.iter().any(|check| check.status == "warn") {
