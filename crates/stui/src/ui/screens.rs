@@ -525,6 +525,22 @@ fn structured_request(
             .answering
             .and_then(|index| request.answers.get(index))
             .is_some_and(|answer| answer.outcome.as_deref() == Some("request_changes"));
+        // The box for them is on the card from the moment the option is chosen: typing starts it.
+        if needs_words {
+            let label = drafts
+                .answering
+                .and_then(|index| request.answers.get(index))
+                .map(|answer| answer.label.clone())
+                .unwrap_or_default();
+            card.section("in your own words", None, inner);
+            text_box(
+                card,
+                &format!("answer {from}"),
+                drafts,
+                &format!("what should change? Start typing; Enter sends it with “{label}”"),
+                inner,
+            );
+        }
         card.buttons(&[
             (
                 "enter",

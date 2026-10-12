@@ -3718,6 +3718,16 @@ impl Ui {
                     ));
                 }
             }
+            // An option that needs the person's words has its box on the card: the first letter
+            // typed opens it and goes into it, whatever the letter is (Nathan, 2026-10-12: the
+            // box should appear when the option is selected).
+            KeyCode::Char(_)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && request.answers.get(index).is_some_and(|answer| self.ask_for_words(answer)) =>
+            {
+                return false;
+            }
             // The other ways to answer or set the card aside are always reachable: write in
             // words (c), chat about it (t), dismiss it (x), go to the agent (g).
             KeyCode::Char('c' | 't' | 'x' | 'g') => return false,
@@ -7911,6 +7921,19 @@ mod tests {
         assert_eq!(ui.conversation_state.drafts["attention/decide"], "keep the brief");
         let screen = frame(&ui, 140, 50).join("\n");
         assert!(screen.contains("in your own words") && screen.contains("◉ Follow the brief"), "{screen}");
+        // Selected with the keys, its box is already on the card, and the first letter typed
+        // opens it and goes into it (even one that is otherwise a command).
+        ui.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        ui.conversation_state.drafts.remove("attention/decide");
+        ui.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(ui.answering, Some(0));
+        assert!(!ui.editing);
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("in your own words") && screen.contains("Start typing"), "{screen}");
+        ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(ui.editing && ui.confirm.is_none(), "x typed into the box, not a dismissal");
+        assert_eq!(ui.conversation_state.drafts["attention/decide"], "xy");
     }
 
     #[test]
