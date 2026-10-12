@@ -1202,6 +1202,7 @@ export type ClientConnections = typeof ClientConnections.Type
 export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
@@ -1212,7 +1213,7 @@ export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
 export type CollectionCommand = typeof CollectionCommand.Type
 export type CollectionCommandEncoded = typeof CollectionCommand.Encoded
 
-export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary"]).annotate({ identifier: "CollectionName" }))()
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary","clients","usage","machines","devices","sessions","terminals"]).annotate({ identifier: "CollectionName" }))()
 export type CollectionName = typeof CollectionName.Type
 export type CollectionNameEncoded = typeof CollectionName.Encoded
 
@@ -1248,6 +1249,28 @@ export const ConversationHeader = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ConversationHeader", description: "Optional conversation header on timeline pages and delta responses (conversation-blocks.v1). A field is absent when neither source has it; `working` comes only from the register and the register wins over the transcript once live." }))()
 export type ConversationHeader = typeof ConversationHeader.Type
 export type ConversationHeaderEncoded = typeof ConversationHeader.Encoded
+
+export const ConnectedClient = /*#__PURE__*/ (() => Schema.Struct({
+  "actor": Schema.String,
+  "client": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "connected": Schema.Boolean,
+  "device_id": optionalKey(Schema.String),
+  "device_name": optionalKey(Schema.String),
+  "follows": Schema.Array(Schema.String),
+  "id": Id,
+  "kind": Schema.Literal("connected-client"),
+  "last_seen": Timestamp,
+  "member": Schema.String,
+  "operational": optionalKey(Operational),
+  "person": Schema.String,
+  "revision": Revision,
+  "since": Timestamp,
+  "streams": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "updated_at": Timestamp,
+  "via": Schema.Literals(["local","gateway","tailscale"])
+}).annotate({ identifier: "ConnectedClient" }))()
+export type ConnectedClient = typeof ConnectedClient.Type
+export type ConnectedClientEncoded = typeof ConnectedClient.Encoded
 
 export const Device = /*#__PURE__*/ (() => Schema.Struct({
   "expires_at": Timestamp,
@@ -1877,13 +1900,105 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary"]),
+  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
 }).annotate({ identifier: "UnknownResource" }))()
 export type UnknownResource = typeof UnknownResource.Type
 export type UnknownResourceEncoded = typeof UnknownResource.Encoded
+
+export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
+  "account": Schema.String,
+  "account_ref": optionalKey(Schema.String),
+  "driver": Schema.String,
+  "five_hour_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "five_hour_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "host": Schema.String,
+  /** The source named a provider identity or declared account; independent of quota freshness. Absent on older servers. */
+  "identified": optionalKey(Schema.Boolean).annotate({ description: "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." }),
+  "measured_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "measured_by": Schema.String,
+  "plan": optionalKey(Schema.String),
+  "seats": Schema.Array(Schema.String),
+  "weekly_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "weekly_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "UsageLimit" }))()
+export type UsageLimit = typeof UsageLimit.Type
+export type UsageLimitEncoded = typeof UsageLimit.Encoded
+
+export const UsagePricingRates = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_read": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_1h": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_5m": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "input": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePricingRates" }))()
+export type UsagePricingRates = typeof UsagePricingRates.Type
+export type UsagePricingRatesEncoded = typeof UsagePricingRates.Encoded
+
+/** Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown. */
+export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_source": Schema.Literals(["provider_reported","computed","unpriced"]),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "price_table_id": optionalKey(Schema.String),
+  "price_table_version": optionalKey(Schema.String),
+  "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
+export type UsagePricing = typeof UsagePricing.Type
+export type UsagePricingEncoded = typeof UsagePricing.Encoded
+
+export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
+  "account": optionalKey(Schema.String),
+  "agent": Id,
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "host": optionalKey(Schema.String),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "mission_run": optionalKey(Id),
+  "model": optionalKey(Schema.String),
+  "native_session_id": optionalKey(Schema.String),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "pricing": optionalKey(Schema.String),
+  "pricing_provenance": optionalKey(Schema.Array(UsagePricing)),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "step": optionalKey(Id),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsageRow" }))()
+export type UsageRow = typeof UsageRow.Type
+export type UsageRowEncoded = typeof UsageRow.Encoded
+
+export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_messages": optionalKey(AgentMessageEstimate),
+  "limits": optionalKey(Schema.Array(UsageLimit)),
+  "rows": Schema.Array(UsageRow),
+  "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePeriod" }))()
+export type UsagePeriod = typeof UsagePeriod.Type
+export type UsagePeriodEncoded = typeof UsagePeriod.Encoded
+
+export const Usage = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Id,
+  "kind": Schema.Literal("usage"),
+  "operational": optionalKey(Operational),
+  "revision": Revision,
+  "updated_at": Timestamp,
+  "value": UsagePeriod
+}).annotate({ identifier: "Usage" }))()
+export type Usage = typeof Usage.Type
+export type UsageEncoded = typeof Usage.Encoded
 
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
@@ -1953,6 +2068,8 @@ export type Work = typeof Work.Type
 export type WorkEncoded = typeof Work.Encoded
 
 export const Resource = /*#__PURE__*/ (() => Schema.Union([
+  ConnectedClient,
+  Usage,
   Summary,
   Attention,
   Message,
@@ -2883,87 +3000,6 @@ export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelinePage = typeof TimelinePage.Type
 export type TimelinePageEncoded = typeof TimelinePage.Encoded
 
-export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
-  "account": Schema.String,
-  "account_ref": optionalKey(Schema.String),
-  "driver": Schema.String,
-  "five_hour_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "five_hour_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  "host": Schema.String,
-  /** The source named a provider identity or declared account; independent of quota freshness. Absent on older servers. */
-  "identified": optionalKey(Schema.Boolean).annotate({ description: "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." }),
-  "measured_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "measured_by": Schema.String,
-  "plan": optionalKey(Schema.String),
-  "seats": Schema.Array(Schema.String),
-  "weekly_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "weekly_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
-}).annotate({ identifier: "UsageLimit" }))()
-export type UsageLimit = typeof UsageLimit.Type
-export type UsageLimitEncoded = typeof UsageLimit.Encoded
-
-export const UsagePricingRates = /*#__PURE__*/ (() => Schema.Struct({
-  "cache_read": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_1h": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_5m": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "input": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "output": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePricingRates" }))()
-export type UsagePricingRates = typeof UsagePricingRates.Type
-export type UsagePricingRatesEncoded = typeof UsagePricingRates.Encoded
-
-/** Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown. */
-export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
-  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_source": Schema.Literals(["provider_reported","computed","unpriced"]),
-  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "price_table_id": optionalKey(Schema.String),
-  "price_table_version": optionalKey(Schema.String),
-  "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
-  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
-export type UsagePricing = typeof UsagePricing.Type
-export type UsagePricingEncoded = typeof UsagePricing.Encoded
-
-export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
-  "account": optionalKey(Schema.String),
-  "agent": Id,
-  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "host": optionalKey(Schema.String),
-  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "mission_run": optionalKey(Id),
-  "model": optionalKey(Schema.String),
-  "native_session_id": optionalKey(Schema.String),
-  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "pricing": optionalKey(Schema.String),
-  "pricing_provenance": optionalKey(Schema.Array(UsagePricing)),
-  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "step": optionalKey(Id),
-  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsageRow" }))()
-export type UsageRow = typeof UsageRow.Type
-export type UsageRowEncoded = typeof UsageRow.Encoded
-
-export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
-  "agent_messages": optionalKey(AgentMessageEstimate),
-  "limits": optionalKey(Schema.Array(UsageLimit)),
-  "rows": Schema.Array(UsageRow),
-  "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePeriod" }))()
-export type UsagePeriod = typeof UsagePeriod.Type
-export type UsagePeriodEncoded = typeof UsagePeriod.Encoded
-
 export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
@@ -3112,7 +3148,7 @@ export type PairingCompleteEncoded = typeof PairingComplete.Encoded
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Resource family. */
-  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","summary"]).annotate({ description: "Resource family." }),
+  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","summary","connected-client","usage"]).annotate({ description: "Resource family." }),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
