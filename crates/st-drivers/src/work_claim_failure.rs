@@ -30,10 +30,7 @@ impl Receipt {
             && bounded(&self.step_run)
             && self.socket.starts_with('/')
             && bounded(&self.socket)
-            && matches!(
-                self.os_error,
-                libc::EPERM | libc::EACCES | libc::ENOENT | libc::ECONNREFUSED
-            )
+            && (1..=4095).contains(&self.os_error)
             && self.started_at_unix_ms > 0
             && self.started_at_unix_ms <= self.observed_at_unix_ms
     }
@@ -122,7 +119,7 @@ mod tests {
             assert!(from_tool_result(&body).is_none());
         }
         let mut malformed = receipt.clone();
-        malformed.os_error = libc::EIO;
+        malformed.os_error = 0;
         assert!(!malformed.valid());
         malformed = receipt;
         malformed.socket = "https://localhost/secret".into();
