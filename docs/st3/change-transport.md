@@ -46,6 +46,19 @@ Only one can replace the old current record and create the fixed claim ref.
 Release checks the worker/nonce, then advances metadata and removes the claim
 atomically. A stale worker's later transition fails its old-object leases.
 
+`publish` enforces one transition table even when a caller bypasses preparation
+helpers: creation is unclaimed draft/ready; terminal records have no ordinary
+successor; a claim uses the old ready/next lane and unchanged content/dependencies/
+mirror; an extant claim permits only release with unchanged state and content.
+Release uses the explicit `publish_release` worker/nonce path. Generic preparation
+of an object grants no publishing authority. There is no landing publication API
+in this slice; a future observer needs a separate independently verified path.
+
+`load` validates the current object and its immediate predecessor's identity,
+generation, creation time and base. It does not recursively validate all history.
+An importer or repair service must walk and validate an otherwise unknown chain
+with a bound before certifying its complete history.
+
 These are primitives, not an authorization service. The stage adapter must
 validate the originating work claim/incarnation against its authoritative runtime,
 check dependencies and existing signed-evidence policy, validate the observed
@@ -63,6 +76,8 @@ without overwriting active local change refs. A later daemon reader will coordin
 single-flight/rate limits, freshness, graph indexing and the existing PR fallback;
 none is claimed to be activated by this library slice. A narrow ls-remote output
 pattern does not guarantee a narrow server-side ref advertisement.
+Tracking namespaces are keyed by the configured URL string; changing that URL
+starts a separate tracking namespace and does not silently merge old histories.
 
 Git processes ignore replacement objects, disable checkout hooks/fsmonitor and
 credential helpers and authentication headers from all Git configuration scopes,
@@ -73,6 +88,8 @@ disabled. Remote helper transports are disabled. Output/time budgets
 bound network operations; a killed push has an uncertain result and supplies no
 claim ownership. These process controls do not isolate a shared OS account or make
 cooperating Git writers hostile-writer safe.
+Other environment settings, including Git system/global configuration, executable
+paths, proxy and TLS settings, remain in the operator account's trust boundary.
 
 The tests use local bare repositories and invented identities. They cover actual
 concurrent claims, stale transitions and releases, missing trailers/explicit

@@ -235,7 +235,7 @@ fn two_concurrent_claims_have_one_winner_and_release_fences_a_stale_worker() {
         .unwrap();
     fixture
         .repo
-        .publish("origin", Some(&winner), &release)
+        .publish_release("origin", &winner, &release, &claim.worker, &claim.nonce)
         .unwrap();
     let stale_finish = fixture
         .repo
@@ -244,7 +244,13 @@ fn two_concurrent_claims_have_one_winner_and_release_fences_a_stale_worker() {
     assert!(
         fixture
             .repo
-            .publish("origin", Some(&winner), &stale_finish)
+            .publish_release(
+                "origin",
+                &winner,
+                &stale_finish,
+                &claim.worker,
+                &claim.nonce
+            )
             .is_err()
     );
     validate_advertisement(&fixture.repo.discover("origin").unwrap(), &release).unwrap();
@@ -465,4 +471,220 @@ fn checkout_rewrites_to_another_https_host_are_rejected_before_network_access() 
         );
         git(&fixture.path, &["config", "--unset", &rewrite]);
     }
+}
+
+#[test]
+fn generic_preparation_cannot_publish_landing_or_reopen_terminal_work() {
+    let fixture = Fixture::new(true);
+    let draft = fixture.create();
+    let mut record = transport::successor(&draft, "agent/fixture/builder").unwrap();
+    record.state = State::Landed;
+    let landed = fixture.repo.prepare(record).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish("origin", Some(&draft), &landed)
+            .is_err()
+    );
+    validate_advertisement(&fixture.repo.discover("origin").unwrap(), &draft).unwrap();
+    let mut initial = fixture.record.clone();
+    initial.state = State::Landed;
+    let initial = fixture.repo.prepare(initial).unwrap();
+    assert!(fixture.repo.publish("origin", None, &initial).is_err());
+    for state in [State::Abandoned, State::Landed] {
+        let mut record = transport::successor(&draft, "agent/fixture/builder").unwrap();
+        record.state = state;
+        let terminal = fixture.repo.prepare(record).unwrap();
+        // Simulate a foreign writer's terminal observation. Reading its data does
+        // not grant an ordinary publisher authority to reopen it.
+        let current = format!("{PREFIX}{}/current", terminal.record.change_id);
+        git(
+            &fixture.path,
+            &[
+                "push",
+                "-q",
+                "--force",
+                "origin",
+                &format!("{}:{current}", terminal.oid),
+            ],
+        );
+        for state in [State::Draft, State::Ready] {
+            let mut record = transport::successor(&terminal, "agent/fixture/builder").unwrap();
+            record.state = state;
+            let reopened = fixture.repo.prepare(record).unwrap();
+            assert!(
+                fixture
+                    .repo
+                    .publish("origin", Some(&terminal), &reopened)
+                    .is_err()
+            );
+            assert_eq!(
+                fixture.repo.discover("origin").unwrap().refs[&current],
+                terminal.oid
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_preparation_cannot_claim_a_different_lane_or_draft_or_changed_content() {
+    let fixture = Fixture::new(true);
+    let ready = fixture.ready();
+    let claim = fixture
+        .repo
+        .prepare_claim(&ready, "agent/fixture/one", work("one"))
+        .unwrap();
+    let mut wrong_lane = claim.record.clone();
+    wrong_lane.claim.as_mut().unwrap().lane = "build".into();
+    let wrong_lane = fixture.repo.prepare(wrong_lane).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish("origin", Some(&ready), &wrong_lane)
+            .is_err()
+    );
+    let mut changed_payload = claim.record.clone();
+    changed_payload.depends_on.push(new_change_id().unwrap());
+    let changed_payload = fixture.repo.prepare(changed_payload).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish("origin", Some(&ready), &changed_payload)
+            .is_err()
+    );
+    std::fs::write(fixture.path.join("source.txt"), "changed before claim\n").unwrap();
+    git(&fixture.path, &["add", "source.txt"]);
+    git(
+        &fixture.path,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            &format!(
+                "Synthetic revision\n\nChange-Id: {}",
+                ready.record.change_id
+            ),
+        ],
+    );
+    let mut changed_source = claim.record.clone();
+    let (source, tree) = fixture.repo.source("HEAD").unwrap();
+    changed_source.source_commit = source.clone();
+    changed_source.source_tree = tree.clone();
+    changed_source.claim.as_mut().unwrap().expected_source = source;
+    changed_source.claim.as_mut().unwrap().expected_tree = tree;
+    let changed_source = fixture.repo.prepare(changed_source).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish("origin", Some(&ready), &changed_source)
+            .is_err()
+    );
+    let draft = fixture
+        .repo
+        .prepare_state(&ready, "agent/fixture/builder", State::Draft, None)
+        .unwrap();
+    fixture
+        .repo
+        .publish("origin", Some(&ready), &draft)
+        .unwrap();
+    let mut claimed_draft = transport::successor(&draft, "agent/fixture/one").unwrap();
+    claimed_draft.state = State::Ready;
+    claimed_draft.claim = claim.record.claim.clone();
+    let claimed_draft = fixture.repo.prepare(claimed_draft).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish("origin", Some(&draft), &claimed_draft)
+            .is_err()
+    );
+    validate_advertisement(&fixture.repo.discover("origin").unwrap(), &draft).unwrap();
+}
+
+#[test]
+fn generic_release_needs_worker_nonce_and_cannot_change_state_or_retarget_claim() {
+    let fixture = Fixture::new(true);
+    let ready = fixture.ready();
+    let claimed = fixture
+        .repo
+        .prepare_claim(&ready, "agent/fixture/one", work("one"))
+        .unwrap();
+    fixture
+        .repo
+        .publish("origin", Some(&ready), &claimed)
+        .unwrap();
+    let claim = claimed.record.claim.as_ref().unwrap();
+    let release = fixture
+        .repo
+        .prepare_release(&claimed, &claim.worker, &claim.nonce, Some("review".into()))
+        .unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish("origin", Some(&claimed), &release)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .repo
+            .publish_release(
+                "origin",
+                &claimed,
+                &release,
+                "agent/fixture/two",
+                &claim.nonce
+            )
+            .is_err()
+    );
+    assert!(
+        fixture
+            .repo
+            .publish_release("origin", &claimed, &release, &claim.worker, "wrong-nonce")
+            .is_err()
+    );
+    let mut foreign_release = release.record.clone();
+    foreign_release.actor = "agent/fixture/two".into();
+    let foreign_release = fixture.repo.prepare(foreign_release).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish_release(
+                "origin",
+                &claimed,
+                &foreign_release,
+                &claim.worker,
+                &claim.nonce
+            )
+            .is_err()
+    );
+    let mut changed_state = release.record.clone();
+    changed_state.state = State::Draft;
+    changed_state.next = None;
+    let changed_state = fixture.repo.prepare(changed_state).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish_release(
+                "origin",
+                &claimed,
+                &changed_state,
+                &claim.worker,
+                &claim.nonce
+            )
+            .is_err()
+    );
+    let mut retargeted = transport::successor(&claimed, &claim.worker).unwrap();
+    retargeted.claim.as_mut().unwrap().lane = "build".into();
+    let retargeted = fixture.repo.prepare(retargeted).unwrap();
+    assert!(
+        fixture
+            .repo
+            .publish("origin", Some(&claimed), &retargeted)
+            .is_err()
+    );
+    validate_advertisement(&fixture.repo.discover("origin").unwrap(), &claimed).unwrap();
+    fixture
+        .repo
+        .publish_release("origin", &claimed, &release, &claim.worker, &claim.nonce)
+        .unwrap();
+    validate_advertisement(&fixture.repo.discover("origin").unwrap(), &release).unwrap();
 }

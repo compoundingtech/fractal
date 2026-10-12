@@ -10,8 +10,8 @@
     "detail": "Defines the v1 Git change.json metadata commit and refs/st/changes/v1 namespace in a library. No database DDL, claim kind, or binding-contract extension."
   },
   "rules": {
-    "status": "none",
-    "detail": "No stage policy, main protection, curator, or merge queue changes."
+    "status": "changed",
+    "detail": "Defines legal library publication edges, terminal fencing and explicit worker/nonce release. No stage authority, main protection, curator, or merge queue changes."
   },
   "compatibility": {
     "status": "none",

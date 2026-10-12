@@ -479,6 +479,29 @@ impl Repository {
         old: Option<&Revision>,
         candidate: &Revision,
     ) -> Result<()> {
+        self.publish_with_release(remote, old, candidate, None)
+    }
+
+    /// Claim release has an explicit worker/nonce proof. The caller still validates
+    /// its runtime authority; actor labels and a publicly readable nonce are not identity.
+    pub fn publish_release(
+        &self,
+        remote: &str,
+        old: &Revision,
+        candidate: &Revision,
+        worker: &str,
+        nonce: &str,
+    ) -> Result<()> {
+        self.publish_with_release(remote, Some(old), candidate, Some((worker, nonce)))
+    }
+
+    fn publish_with_release(
+        &self,
+        remote: &str,
+        old: Option<&Revision>,
+        candidate: &Revision,
+        release: Option<(&str, &str)>,
+    ) -> Result<()> {
         let loaded = self.load(&candidate.oid)?;
         ensure!(
             &loaded == candidate,
@@ -503,6 +526,23 @@ impl Repository {
             ensure!(
                 candidate.record.previous_record.is_none(),
                 "creation has previous metadata"
+            );
+        }
+        let edge = transition(old, candidate)?;
+        if edge == Edge::Release {
+            let (worker, nonce) =
+                release.context("claim release requires publish_release worker/nonce")?;
+            let claim = old
+                .and_then(|old| old.record.claim.as_ref())
+                .context("missing old claim")?;
+            ensure!(
+                claim.worker == worker && claim.nonce == nonce,
+                "claim release worker/nonce mismatch"
+            );
+        } else {
+            ensure!(
+                release.is_none(),
+                "release proof supplied for a non-release transition"
             );
         }
         let before = old.map(markers).transpose()?.unwrap_or_default();
@@ -555,7 +595,9 @@ impl Repository {
             expected_tree: record.source_tree.clone(),
             acquired_at: record.updated_at.clone(),
         });
-        self.prepare(record)
+        let candidate = self.prepare(record)?;
+        transition(Some(current), &candidate)?;
+        Ok(candidate)
     }
 
     pub fn prepare_release(
@@ -577,7 +619,9 @@ impl Repository {
         let mut record = successor(current, worker)?;
         record.claim = None;
         record.next = next;
-        self.prepare(record)
+        let candidate = self.prepare(record)?;
+        transition(Some(current), &candidate)?;
+        Ok(candidate)
     }
 
     pub fn prepare_state(
@@ -602,8 +646,81 @@ impl Repository {
         let mut record = successor(current, actor)?;
         record.state = state;
         record.next = next;
-        self.prepare(record)
+        let candidate = self.prepare(record)?;
+        transition(Some(current), &candidate)?;
+        Ok(candidate)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Edge {
+    Create,
+    Update,
+    Claim,
+    Release,
+}
+
+/// One publication transition table. A generic prepared object carries no permission
+/// to reopen terminal work, land, retarget a claim, or release another worker's claim.
+fn transition(old: Option<&Revision>, candidate: &Revision) -> Result<Edge> {
+    let new = &candidate.record;
+    new.validate()?;
+    let Some(old) = old else {
+        ensure!(
+            new.generation == 1
+                && new.previous_record.is_none()
+                && new.claim.is_none()
+                && matches!(new.state, State::Draft | State::Ready),
+            "creation requires unclaimed draft or ready work"
+        );
+        return Ok(Edge::Create);
+    };
+    let prior = &old.record;
+    ensure!(
+        matches!(prior.state, State::Draft | State::Ready),
+        "terminal change has no ordinary successor"
+    );
+    ensure!(
+        prior.change_id == new.change_id
+            && prior.base_commit == new.base_commit
+            && prior.created_at == new.created_at
+            && prior.generation.checked_add(1) == Some(new.generation)
+            && new.previous_record.as_deref() == Some(old.oid.as_str())
+            && candidate.oid != old.oid,
+        "invalid change identity/base/history transition"
+    );
+    let same_payload = prior.source_commit == new.source_commit
+        && prior.source_tree == new.source_tree
+        && prior.trailer_status == new.trailer_status
+        && prior.depends_on == new.depends_on
+        && prior.mirror == new.mirror;
+    if let Some(claim) = &prior.claim {
+        ensure!(
+            new.claim.is_none()
+                && new.state == prior.state
+                && same_payload
+                && new.actor == claim.worker,
+            "claimed work permits only owner release with unchanged state/content"
+        );
+        return Ok(Edge::Release);
+    }
+    if let Some(claim) = &new.claim {
+        ensure!(
+            prior.state == State::Ready
+                && prior.next.as_deref() == Some(claim.lane.as_str())
+                && new.state == State::Ready
+                && new.next.is_none()
+                && same_payload
+                && new.actor == claim.worker,
+            "claim requires old ready/next lane and unchanged content"
+        );
+        return Ok(Edge::Claim);
+    }
+    ensure!(
+        matches!(new.state, State::Draft | State::Ready | State::Abandoned),
+        "landing has no ordinary publication path; an independently verified observer is required"
+    );
+    Ok(Edge::Update)
 }
 
 pub fn successor(current: &Revision, actor: &str) -> Result<Record> {
