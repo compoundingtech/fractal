@@ -93,11 +93,19 @@ pub(crate) fn check(
             unknown_reason: Some("publication-evidence-incomplete"),
         });
     }
-    // DISTINCT skips the covering (subject, kind, origin) prefix. One runtime per
-    // origin prevents a stopped peer from hiding another host's running incarnation.
+    // Seek the next origin prefix instead of DISTINCT's walk over every historical row.
+    // One runtime per origin prevents a stopped peer from hiding a running incarnation.
     let mut origins = connection.prepare_cached(
-        "SELECT DISTINCT origin FROM local_publication_claims INDEXED BY local_publication_runtime_lookup
-         WHERE subject=?1 AND kind='runtime.observed'",
+        "WITH RECURSIVE origins(origin) AS (
+            SELECT MIN(origin) FROM local_publication_claims
+                INDEXED BY local_publication_runtime_lookup
+                WHERE subject=?1 AND kind='runtime.observed'
+            UNION ALL
+            SELECT (SELECT MIN(origin) FROM local_publication_claims
+                INDEXED BY local_publication_runtime_lookup
+                WHERE subject=?1 AND kind='runtime.observed' AND origin>origins.origin)
+            FROM origins WHERE origin IS NOT NULL
+         ) SELECT origin FROM origins WHERE origin IS NOT NULL",
     )?;
     let origins = origins
         .query_map([&proposed.subject], |row| row.get::<_, String>(0))?
