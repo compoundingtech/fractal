@@ -32,6 +32,66 @@ const pendingCssPlaceholder = '#--overeng-stylex--{compiled:pending}'
  */
 const stylexRuntimePackage = '@stylexjs/stylex'
 
+
+/** Keep the inline first-paint shell independent of the development CSS transfer. */
+export const deferStylexDevTags = (tags) => {
+  if (!Array.isArray(tags)) return tags
+  const deferred = tags.map((tag) => tag.tag === 'link' && tag.attrs?.rel === 'stylesheet'
+    ? { ...tag, attrs: { ...tag.attrs, media: 'print', 'data-wf-stylex-bootstrap': '' } }
+    : tag)
+  if (!deferred.some((tag) => tag.attrs?.['data-wf-stylex-bootstrap'] !== undefined)) return deferred
+  return [...deferred, {
+    tag: 'script', injectTo: 'head',
+    children: `;(() => {
+      const sheet = document.querySelector('link[data-wf-stylex-bootstrap]')
+      if (!sheet) return
+      // Capture readiness before StyleX's runtime disables the loaded link in favor of its style node.
+      let resolveReady
+      window.__wfStylexReady = new Promise(resolve => { resolveReady = resolve })
+      let observer
+      let timer
+      const show = (message) => {
+        const host = document.querySelector('[data-wf-workspace-skeleton]')
+        if (!host) { document.addEventListener('DOMContentLoaded', () => show(message), { once: true }); return }
+        host.removeAttribute('aria-hidden')
+        document.querySelector('[data-wf-shell-skeleton]')?.setAttribute('aria-busy', 'false')
+        let notice = host.querySelector('[data-wf-style-failure]')
+        if (!notice) {
+          notice = document.createElement('div')
+          notice.dataset.wfStyleFailure = ''
+          notice.setAttribute('role', 'status')
+          const text = document.createElement('p')
+          const retry = document.createElement('button')
+          retry.type = 'button'; retry.textContent = 'Reload workspace'; retry.onclick = () => location.reload()
+          notice.append(text, retry); host.append(notice)
+        }
+        notice.querySelector('p').textContent = message
+      }
+      const ready = () => {
+        clearTimeout(timer); sheet.media = 'all'
+        observer?.disconnect()
+        document.querySelector('[data-wf-style-failure]')?.remove()
+        document.querySelector('[data-wf-workspace-skeleton]')?.setAttribute('aria-hidden', 'true')
+        document.querySelector('[data-wf-shell-skeleton]')?.setAttribute('aria-busy', 'true')
+        resolveReady()
+      }
+      if (sheet.sheet) ready()
+      else {
+        sheet.addEventListener('load', ready, { once: true })
+        sheet.addEventListener('error', () => { clearTimeout(timer); show('Workspace styles could not load. Your saved drafts are unchanged.') }, { once: true })
+        timer = setTimeout(() => show('Workspace styles are taking longer to load. Your saved drafts are unchanged.'), 5000)
+        // The runtime can win the transfer race and disable the link before its load event.
+        const runtimeReady = () => {
+          const style = document.getElementById('__stylex_virtual__')
+          if (style?.sheet && style.textContent) ready()
+        }
+        observer = new MutationObserver(runtimeReady)
+        observer.observe(document.head, { childList: true, subtree: true, characterData: true })
+        runtimeReady()
+      }
+    })()`,
+  }]
+}
 /** @param {string} id */
 const stripQuery = (id) => id.split('?')[0] ?? id
 
@@ -129,8 +189,12 @@ export const createStylexVitePlugins = ({
   const {
     generateBundle: _pickAssetInGenerateBundle,
     writeBundle: _appendToDisk,
+    transformIndexHtml: injectDevTags,
     ...compiler
   } = upstream
+  compiler.transformIndexHtml = function (...args) {
+    return deferStylexDevTags(injectDevTags?.apply(this, args))
+  }
   /**
    * Keeps StyleX runtime pre-bundling inside dev-server start-up.
    *
