@@ -27,6 +27,7 @@ export const quotaGeometry = stylex.defineVars({
   usageWideWidth: '1440px',
   proofToolbarHeight: '36px',
   primaryUsageWidth: '8ch',
+  readingWidth: '4ch',
   primaryResetWidth: '5ch',
   primaryResetMinimum: '4ch',
   secondaryWindowWidth: '7ch',
@@ -90,6 +91,10 @@ export const quotaGeometry = stylex.defineVars({
   meterResetColumnWidth: '56px',
   comparisonColumnWidth: '84px',
   meterMoreColumnWidth: '26px',
+  /** From a 40rem container: a 7ch window label, the bar, a full "72% · 3.6k / 5k" reading, a reset with its count, and the "More" header; the account keeps 130px+. */
+  meterWideColumnWidth: '184px',
+  meterWideResetColumnWidth: '96px',
+  meterWideMoreColumnWidth: '44px',
   meterTrackBasis: '56px',
   meterTrackMaximumWidth: '72px',
   meterTrackHeight: geometry.progressSm,

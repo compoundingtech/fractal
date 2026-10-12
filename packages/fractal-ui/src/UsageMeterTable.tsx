@@ -6,7 +6,7 @@ import { Icon } from './assistant-ui/composition/Icons.tsx'
 import { Button, Cell, Column, Row, Table, TableBody, TableHeader, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { UsageMeterCell, UsageMeterFact, UsageMeterHistory, UsageMeterRow, UsageMeterSortKey, UsageMeterTableProps } from './usage-meter-types'
-import { usageMeterGrid } from './UsageMeterGrid.stylex.ts'
+import { usageMeterGrid, usageMeterGridVars } from './UsageMeterGrid.stylex.ts'
 
 export type { UsageMeterCell, UsageMeterDetail, UsageMeterFact, UsageMeterHistory, UsageMeterHistoryPoint, UsageMeterRow, UsageMeterSort, UsageMeterSortKey, UsageMeterTableProps, UsageMeterTone, UsageMeterWindow } from './usage-meter-types'
 
@@ -37,7 +37,7 @@ const columns: readonly { readonly id: UsageMeterSortKey; readonly label: string
 ]
 const isSortKey = (key: string | number): key is UsageMeterSortKey => columns.some(column => column.id === key)
 const resetEvidence = (row: UsageMeterRow): string =>
-  `Reset ${row.reset}${row.resetAt === undefined ? '' : ` · ${row.resetAt}`} · ${row.resetCount === undefined ? 'Reset count unreported' : `${row.resetCount} reported resets`}`
+  `Reset ${row.reset}${row.resetAt === undefined ? '' : ` · ${row.resetAt}`} · ${row.resetCount === undefined ? 'Reset count Unreported' : `${row.resetCount} reported resets`}`
 
 const Meter = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCell; readonly stale: boolean; readonly compact?: boolean }) => <div data-usage-meter-tone={meter.tone} {...stylex.props(styles.meter, compact && styles.compactMeter)}>
   <span title={meter.label} {...stylex.props(styles.windowLabel, compact && styles.compactWindow)}>{meter.label}</span>
@@ -45,7 +45,7 @@ const Meter = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCe
     {meter.fraction !== undefined && meter.tone !== 'unknown' && <span aria-hidden="true" data-usage-meter-bar {...stylex.props(styles.track, stale && styles.staleBar, compact && styles.compactTrack)}>
       <span {...stylex.props(styles.fill, meter.tone === 'warning' && styles.warningFill, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerFill, styles.fraction(meter.fraction))} />
     </span>}
-    <span title={meter.text} {...stylex.props(styles.reading, meter.tone === 'warning' && styles.warningText, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerText, stale && styles.staleText)}>{meter.text}</span>
+    <span title={meter.text} {...stylex.props(styles.reading, compact && styles.compactReadingText, meter.tone === 'warning' && styles.warningText, (meter.tone === 'critical' || meter.tone === 'exhausted') && styles.dangerText, stale && styles.staleText)}>{meter.text}</span>
   </div>
 </div>
 
@@ -94,7 +94,7 @@ export const UsageMeterRowDetail = ({ row, history, onClose }: { readonly row: U
     <Facts facts={window.facts} />
   </section>)}
   <h4 {...stylex.props(styles.title)}>Resets</h4>
-  <p title={resetEvidence(row)} {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}><Icon name="swap" size={10} />{row.resetCount}</span>}</p>
+  <p title={resetEvidence(row)} {...stylex.props(styles.reset)}>{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`} {...stylex.props(styles.inlineGlyph)}><Icon name="swap" size={10} />{row.resetCount}</span>}</p>
   <Facts facts={row.detail.resets} />
   {history !== undefined && <UsageMeterHistoryChart history={history} />}
 </section>
@@ -142,19 +142,20 @@ export const UsageMeterTable = ({ rows, status: observation, sort, onSort, onCyc
     }} {...stylex.props(usageMeterGrid.table, styles.table)}>
       <TableHeader {...stylex.props(usageMeterGrid.header)}>
         {columns.map(column => <Column key={column.id} id={column.id} isRowHeader={column.id === 'account'} allowsSorting textValue={column.label} data-usage-meter-column={column.id} {...stylex.props(usageMeterGrid.column, styles.header, column.id === 'account' && styles.accountColumn, column.id === 'governing' && styles.governingColumn, column.id === 'reset' && styles.resetColumn, column.id === 'comparison' && styles.comparisonColumn, column.id === 'more' && styles.moreColumn)}>
-          {({ sortDirection }) => <span title={column.label} {...stylex.props(styles.headerContent)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === undefined ? null : <Icon name={sortDirection === 'ascending' ? 'send' : 'chevron-down'} size={10} />}</span></span>}
+          {({ sortDirection }) => <span title={column.label} {...stylex.props(styles.headerContent, (column.id === 'reset' || column.id === 'more') && styles.numericHeader)}>{column.narrowLabel === undefined ? column.label : <><span {...stylex.props(styles.wideLabel)}>{column.label}</span><span aria-hidden="true" {...stylex.props(styles.narrowHeaderLabel)}>{column.narrowLabel}</span></>}<span aria-hidden="true" {...stylex.props(styles.sortIndicator)}>{sortDirection === undefined ? null : <Icon name={sortDirection === 'ascending' ? 'send' : 'chevron-down'} size={10} />}</span></span>}
         </Column>)}
       </TableHeader>
       <TableBody {...stylex.props(usageMeterGrid.body)} renderEmptyState={() => <span {...stylex.props(styles.empty)}>No usage rows supplied</span>}>
         {rows.map(row => {
           const accountEvidence = `${row.label} · ${row.identity}${row.stale ? ' · Stale' : ''}${row.note === undefined ? '' : ` · ${row.note}`}`
           const resetDescription = resetEvidence(row)
-          return <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, selected?.id === row.id && styles.selectedRow)}>
-          <Cell textValue={accountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span data-usage-meter-account title={accountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}><span aria-hidden="true">{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}><span data-usage-meter-account-prefix {...stylex.props(styles.compactPrefix)}><span dir="ltr">{row.compactIdentity.prefix}</span></span><span data-usage-meter-account-name {...stylex.props(styles.compactAccount)}>{row.compactIdentity.account}</span></span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note}><Icon name="alert" size={10} /></span>}</span><VisuallyHidden><span data-usage-meter-full-value>{accountEvidence}</span></VisuallyHidden></span></Cell>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
-          <Cell textValue={resetDescription} {...stylex.props(usageMeterGrid.cell, styles.cell)}><span title={resetDescription} {...stylex.props(styles.reset)}><span aria-hidden="true">{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`}><Icon name="swap" size={10} />{row.resetCount}</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{resetDescription}</span></VisuallyHidden></span></Cell>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
-          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell)}><Button aria-label={`Show all windows and evidence for ${row.label}`} aria-expanded={selected?.id === row.id} onPress={() => onSelect(row.id)} {...stylex.props(styles.moreButton)}>
+          const isSelected = selected?.id === row.id
+          return <Row key={row.id} id={row.id} textValue={row.label} data-usage-meter-row={row.id} data-stale={row.stale || undefined} {...stylex.props(usageMeterGrid.row, styles.row, isSelected && styles.selectedRow)}>
+          <Cell textValue={accountEvidence} {...stylex.props(usageMeterGrid.cell, styles.cell, isSelected && styles.selectedCell)}><span data-usage-meter-account title={accountEvidence} {...stylex.props(usageMeterGrid.truncate, styles.accountLabel)}><span aria-hidden="true">{row.compactIdentity === undefined ? row.identity : <><span data-usage-meter-identity="full" {...stylex.props(styles.fullIdentity)}>{row.identity}</span><span data-usage-meter-identity="compact" {...stylex.props(styles.compactIdentity)}><span data-usage-meter-account-prefix {...stylex.props(styles.compactPrefix)}><span dir="ltr">{row.compactIdentity.prefix}</span></span><span data-usage-meter-account-name {...stylex.props(styles.compactAccount)}>{row.compactIdentity.account}</span></span></>}{row.stale && <span {...stylex.props(styles.staleText)}> · Stale</span>}{row.note !== undefined && <span aria-label={row.note} {...stylex.props(styles.inlineGlyph)}><Icon name="alert" size={10} /></span>}</span><VisuallyHidden><span data-usage-meter-full-value>{accountEvidence}</span></VisuallyHidden></span></Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, isSelected && styles.selectedCell)}><Meter meter={row.governing} stale={row.stale} compact /></Cell>
+          <Cell textValue={resetDescription} {...stylex.props(usageMeterGrid.cell, styles.cell, styles.numeric, isSelected && styles.selectedCell)}><span title={resetDescription} {...stylex.props(styles.reset)}><span aria-hidden="true">{row.reset}{row.resetCount !== undefined && <span aria-label={`${row.resetCount} reported resets`} {...stylex.props(styles.inlineGlyph)}><Icon name="swap" size={10} />{row.resetCount}</span>}</span><VisuallyHidden><span data-usage-meter-full-value>{resetDescription}</span></VisuallyHidden></span></Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.comparisonColumn, isSelected && styles.selectedCell)}>{row.comparison === undefined ? <span {...stylex.props(styles.staleText)}>—</span> : <Meter meter={row.comparison} stale={row.stale} compact />}</Cell>
+          <Cell {...stylex.props(usageMeterGrid.cell, styles.cell, styles.numeric, isSelected && styles.selectedCell)}><Button aria-label={`Show all windows and evidence for ${row.label}`} aria-expanded={isSelected} onPress={() => onSelect(row.id)} {...stylex.props(styles.moreButton)}>
             <span {...stylex.props(styles.wideCount)}>+{row.omitted}</span><span {...stylex.props(styles.narrowCount)}>+{row.omitted + (row.comparison === undefined ? 0 : 1)}</span>
           </Button></Cell>
         </Row>})}
@@ -178,12 +179,18 @@ const styles = stylex.create({
   sortIndicator: { display: { default: 'inline-block', ':empty': 'none' }, flexShrink: 0, color: ink.fgSoft },
   // Protect evidence columns first; the account retains its full accessible name and detail.
   accountColumn: { width: 'auto' },
-  governingColumn: { width: quotaGeometry.governingColumnWidth },
-  resetColumn: { width: quotaGeometry.meterResetColumnWidth },
-  comparisonColumn: { width: quotaGeometry.comparisonColumnWidth, display: { default: 'table-cell', '@container (width < 20rem)': 'none' } },
-  moreColumn: { width: quotaGeometry.meterMoreColumnWidth },
+  // Wide window/reset tracks from 40rem; More widens with its full header label at 36rem.
+  governingColumn: { width: { default: quotaGeometry.meterWideColumnWidth, '@container (width < 40rem)': quotaGeometry.governingColumnWidth } },
+  resetColumn: { width: { default: quotaGeometry.meterWideResetColumnWidth, '@container (width < 40rem)': quotaGeometry.meterResetColumnWidth } },
+  comparisonColumn: { width: { default: quotaGeometry.meterWideColumnWidth, '@container (width < 40rem)': quotaGeometry.comparisonColumnWidth }, display: { default: 'table-cell', '@container (width < 20rem)': 'none' } },
+  moreColumn: { width: { default: quotaGeometry.meterWideMoreColumnWidth, '@container (width < 36rem)': quotaGeometry.meterMoreColumnWidth } },
+  /** Reset and +N read as numbers: right edge, tabular. */
+  numeric: { textAlign: 'right' },
+  numericHeader: { justifyContent: 'flex-end' },
   row: { backgroundColor: { default: surface.transparent, ':hover': surface.rowHover }, cursor: 'pointer', outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
-  selectedRow: { backgroundColor: surface.rowActive },
+  // The hover wash keeps muted and warning ink at AA; the accent underline marks the open row.
+  selectedRow: { backgroundColor: surface.rowHover },
+  selectedCell: { boxShadow: quotaGeometry.selectedUnderline },
   cell: { outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
   accountLabel: { color: ink.fg },
   fullIdentity: { display: { default: 'inline', '@container (width < 36rem)': 'none' } },
@@ -194,11 +201,15 @@ const styles = stylex.create({
   note: { display: 'block', margin: 0, color: ink.fgMuted, fontSize: type.denseSize, overflowWrap: 'anywhere' },
   meter: { minWidth: 0 },
   compactMeter: { display: 'flex', alignItems: 'center', gap: space.xs2, whiteSpace: 'nowrap' },
-  compactWindow: { flexShrink: 0, minWidth: 0, maxWidth: '5ch' },
+  compactWindow: { flexShrink: 0, minWidth: 0, maxWidth: { default: '7ch', '@container (width < 40rem)': '5ch' } },
   compactReading: { flex: 1, gap: space.xs2, minWidth: 0 },
+  // Shared SVG glyphs are block-level; this keeps them on the text line inside the 18px line box.
+  inlineGlyph: { display: 'inline-flex', alignItems: 'center', gap: space.xs2, height: usageMeterGridVars.lineHeight, marginInlineStart: space.xs2, verticalAlign: 'top' },
   windowLabel: { display: 'block', color: ink.fgMuted, fontSize: type.denseSize, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   meterReading: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0 },
   reading: { flexShrink: 0, color: ink.fgSoft, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  // The bar yields first (down to its minimum); only then does a reading ellipsize, with its full text in the title.
+  compactReadingText: { minWidth: 0, maxWidth: `calc(100% - ${quotaGeometry.compactMeterMinimumWidth} - ${space.xs2})`, marginInlineStart: 'auto', overflow: 'hidden', textAlign: 'right', textOverflow: 'ellipsis' },
   track: { display: 'block', flexBasis: quotaGeometry.meterTrackBasis, flexGrow: 1, flexShrink: 1, minWidth: 0, maxWidth: quotaGeometry.meterTrackMaximumWidth, height: quotaGeometry.meterTrackHeight, overflow: 'hidden', borderRadius: radius.full, backgroundColor: border.borderStrong },
   compactTrack: { minWidth: quotaGeometry.compactMeterMinimumWidth },
   fill: { display: 'block', height: '100%', backgroundColor: status.done },

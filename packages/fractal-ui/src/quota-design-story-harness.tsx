@@ -133,6 +133,11 @@ export const quotaLinePlay = async ({ canvasElement }: { canvasElement: HTMLElem
   await waitFor(() => expect(root.dataset.refreshed).toBe('false'))
   await waitFor(() => assertQuotaDrawerDensity(drawer))
 }
+/** Stories rest unfocused, so the last pressed control does not keep a focus ring in the at-rest frame. */
+const restFocus = (canvasElement: HTMLElement) => {
+  const active = canvasElement.ownerDocument.activeElement
+  if (active instanceof HTMLElement && canvasElement.contains(active)) active.blur()
+}
 export const quotaSortPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaDensityPlay({ canvasElement })
   await waitFor(() => expect(ids(canvasElement)).toEqual(defaultOrder))
@@ -143,6 +148,7 @@ export const quotaSortPlay = async ({ canvasElement }: { canvasElement: HTMLElem
   await waitFor(() => expect(ids(canvasElement)).toEqual(['willow', 'unknown', 'spruce', 'north', 'meadow', 'lake', 'harbor', 'elm', 'delta', 'cove', 'birch']))
   await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-quota-sort="governing"]')!)
   await waitFor(() => expect(ids(canvasElement)).toEqual(defaultOrder))
+  restFocus(canvasElement)
 }
 export const quotaKeyboardPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaDensityPlay({ canvasElement })
@@ -160,6 +166,24 @@ export const quotaKeyboardPlay = async ({ canvasElement }: { canvasElement: HTML
   await userEvent.keyboard('m{Escape}')
   await waitFor(() => expect(storyRoot(canvasElement).dataset.escaped).toBe('1'))
 }
+/** Independent oracle for a day-chart button's accessible description: account stacking, the chart's series and effective unit. */
+const expectedDayDescription = (dayId: string, unit: QuotaUnit, onlySeries?: string): string => {
+  const exact = unit === 'usd' ? (value: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 10 }).format(value) : (value: number) => `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value)} tok`
+  const tally = (amounts: readonly (number | undefined)[]): string => {
+    const known = amounts.filter((value): value is number => value !== undefined)
+    const unknown = amounts.length - known.length
+    const sum = known.reduce((total, value) => total + value, 0)
+    return known.length === 0 ? unknown === 0 ? 'No rows' : 'Unreported' : unknown > 0 ? `${exact(sum)} + ${unknown} Unreported` : exact(sum)
+  }
+  const label = (id: string) => quotaAccounts.find(account => account.id === id)?.label ?? id
+  const series = onlySeries === undefined
+    ? [...new Set(quotaDays.flatMap(day => day.values.map(value => value.accountId)))].sort((left, right) => label(left).localeCompare(label(right)) || left.localeCompare(right))
+    : [onlySeries]
+  const day = quotaDays.find(candidate => candidate.id === dayId)!
+  const amounts = (id: string) => day.values.filter(value => value.accountId === id).map(value => unit === 'usd' ? value.usd : value.tokens)
+  const parts = series.flatMap(id => amounts(id).length === 0 ? [] : [`${label(id)}: ${tally(amounts(id))}`])
+  return `${day.label}${day.partial ? ' (partial Berlin day, still open)' : ''}. Total ${tally(series.flatMap(amounts))}${parts.length > 0 ? `. ${parts.join('; ')}` : ''}`
+}
 export const quotaBrushPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaControlPlay({ canvasElement })
   const canvas = within(canvasElement)
@@ -167,9 +191,30 @@ export const quotaBrushPlay = async ({ canvasElement }: { canvasElement: HTMLEle
   start.focus()
   await userEvent.keyboard('{ArrowRight}{ArrowRight}{ArrowRight}')
   await waitFor(() => expect(storyRoot(canvasElement).dataset.range).toBe('3:29'))
-  const day = canvasElement.querySelector<HTMLElement>('[data-quota-day="2030-04-15"]')!
+  const dayId = '2030-04-15'
+  // Day-chart buttons: the name is the day, full evidence is a mounted description, and no native title doubles the custom readout.
+  const chartDays = [...canvasElement.querySelectorAll<HTMLElement>('[data-quota-day][aria-describedby]')]
+  for (const button of chartDays) {
+    await expect(button.querySelector('[title]')).toBeNull()
+    await expect(canvasElement.ownerDocument.getElementById(button.getAttribute('aria-describedby')!)).not.toBeNull()
+  }
+  const chartDay = chartDays.find(button => button.dataset.quotaDay === dayId)
+  if (chartDay !== undefined) {
+    const unit = canvasElement.querySelector<HTMLElement>('[data-quota-usage]')!.dataset.quotaUnit as QuotaUnit
+    await expect(chartDay).toHaveAccessibleName(quotaDays.find(candidate => candidate.id === dayId)!.label)
+    await expect(chartDay).toHaveAccessibleDescription(expectedDayDescription(dayId, unit, chartDay.closest<HTMLElement>('[data-quota-series]')?.dataset.quotaSeries))
+    const readoutDay = () => canvasElement.querySelector<HTMLElement>('[data-quota-readout]')?.dataset.quotaReadout
+    await userEvent.hover(chartDay)
+    await waitFor(() => expect(readoutDay()).toBe(dayId))
+    await userEvent.unhover(chartDay)
+    chartDay.focus()
+    await waitFor(() => expect(readoutDay()).toBe(dayId))
+    await expect(chartDay).toHaveAttribute('aria-pressed', 'false')
+  }
+  const day = canvasElement.querySelector<HTMLElement>(`[data-quota-day="${dayId}"]`)!
   await userEvent.click(day)
-  await waitFor(() => expect(storyRoot(canvasElement).dataset.selectedDay).toBe('2030-04-15'))
+  await waitFor(() => expect(storyRoot(canvasElement).dataset.selectedDay).toBe(dayId))
+  await expect(day).toHaveAttribute('aria-pressed', 'true')
   await expect(canvasElement.querySelector('[data-quota-breakdown]')).toHaveTextContent(/15 Apr|2030-04-15/)
   const readout = canvasElement.querySelector<HTMLElement>('[data-quota-readout]')
   if (readout !== null) {
@@ -235,6 +280,7 @@ export const quotaFilterPlay = async ({ canvasElement }: { canvasElement: HTMLEl
   await waitFor(() => expect(ids(canvasElement)).toEqual(['elm']))
   await userEvent.click(canvas.getByRole('button', { name: 'Clear quota filters' }))
   await waitFor(() => expect(ids(canvasElement)).toEqual(defaultOrder))
+  restFocus(canvasElement)
 }
 const geometry = (canvas: HTMLElement) => [...canvas.querySelectorAll<HTMLElement>('[data-quota-row], [data-quota-status], [data-quota-breakdown], [data-quota-usage] svg')].map(node => {
   const box = node.getBoundingClientRect(); return [box.x, box.y, box.width, box.height]
@@ -242,13 +288,21 @@ const geometry = (canvas: HTMLElement) => [...canvas.querySelectorAll<HTMLElemen
 export const quotaRefreshPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaDensityPlay({ canvasElement })
   const canvas = within(canvasElement), before = geometry(canvasElement)
+  const status = () => canvasElement.querySelector<HTMLElement>('[data-quota-status]')
+  const restingStatus = status()?.dataset.quotaStatus
   await expect(before.length).toBeGreaterThan(0)
   await userEvent.click(canvas.getByRole('button', { name: 'Refresh snapshot' }))
   await waitFor(() => expect(storyRoot(canvasElement).dataset.refreshed).toBe('true'))
   await expect(geometry(canvasElement)).toEqual(before)
   await userEvent.click(canvas.getByRole('button', { name: 'Simulate failed refresh' }))
-  await waitFor(() => expect(canvasElement.querySelector('[data-quota-status]')).toHaveTextContent(/failed/i))
+  await waitFor(() => expect(status()).toHaveTextContent(/failed/i))
   await expect(geometry(canvasElement)).toEqual(before)
+  // The story rests in the state its args name, not in the simulated failure.
+  await userEvent.click(canvas.getByRole('button', { name: 'Refresh snapshot' }))
+  await waitFor(() => expect(storyRoot(canvasElement).dataset.refreshed).toBe('false'))
+  await waitFor(() => expect(status()?.dataset.quotaStatus).toBe(restingStatus))
+  await expect(geometry(canvasElement)).toEqual(before)
+  restFocus(canvasElement)
 }
 const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', boxSizing: 'border-box', backgroundColor: surface.canvas, color: ink.fg, fontFamily: type.fontSans, fontSize: type.metaSize, maxWidth: '100%', minWidth: 0 },

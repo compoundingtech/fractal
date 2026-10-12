@@ -83,7 +83,7 @@ const dailyPoints: readonly UsageMeterHistoryPoint[] = Array.from({ length: 30 }
   const date = `2030-04-${String(index + 1).padStart(2, '0')}`
   const value = index === 11 ? undefined : index % 7 === 5 ? 0 : 4 + ((index * 37) % 23) + (index > 20 ? 9 : 0)
   const partial = index === 29
-  return { id: date, label: date, ...(value === undefined ? {} : { value }), text: `${value === undefined ? 'unreported' : `$${value.toFixed(2)}`} · ${partial ? 'partial' : 'complete'}`, partial }
+  return { id: date, label: date, ...(value === undefined ? {} : { value }), text: `${value === undefined ? 'Unreported' : `$${value.toFixed(2)}`} · ${partial ? 'partial' : 'complete'}`, partial }
 })
 const histories: Record<Exclude<HistoryState, 'none'>, UsageMeterHistory> = {
   loading: { kind: 'loading', label: 'Usage history', text: 'Loading usage history…' },
@@ -132,9 +132,10 @@ export const AllStates: Story = { render: AllStatesStory }
 export const Wide: Story = {}
 export const Light: Story = { args: { scheme: 'light' } }
 export const Narrow: Story = { args: { width: 'narrow' } }
-export const DenseEleven: Story = { args: { width: 'narrow' }, render: args => <Controlled {...args} displayRows={denseRows} /> }
+// Call the story function directly: its useArgs preview hook is illegal inside a nested React element.
+export const DenseEleven: Story = { args: { width: 'narrow' }, render: args => Controlled({ ...args, displayRows: denseRows }) }
 export const DenseElevenLight: Story = { ...DenseEleven, args: { width: 'narrow', scheme: 'light' } }
-export const NarrowEvidence: Story = { args: { width: 'narrow' }, render: args => <Controlled {...args} displayRows={narrowEvidenceRows} /> }
+export const NarrowEvidence: Story = { args: { width: 'narrow' }, render: args => Controlled({ ...args, displayRows: narrowEvidenceRows }) }
 export const NarrowEvidenceLight: Story = { ...NarrowEvidence, args: { width: 'narrow', scheme: 'light' } }
 export const Detail: Story = { args: { selectedId: 'meter-north' } }
 export const NarrowDetail: Story = { args: { width: 'narrow', selectedId: 'meter-meadow', status: 'unreachable' } }

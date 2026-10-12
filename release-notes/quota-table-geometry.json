@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Quota drawer and usage-meter tables keep 22px rows at every pixel density, with 8px column gaps, right-aligned tabular reset/amount/+N columns and one shared reading slot. The usage-meter table widens its window and reset tracks from a 40rem container so full readings and reset counts fit, keeps reset and note glyphs on the text line, and marks the open row with an accent underline at AA contrast. Unreported amounts show an em dash, governing-only window columns are not repeated, and refresh stories return to their named state.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted or wire schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Props and sorting contracts are unchanged. The reset evidence text says 'Reset count Unreported'; titles and accessible names keep Unreported where the cell shows an em dash." },
+  "downtime": { "status": "none", "detail": "No restart required." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

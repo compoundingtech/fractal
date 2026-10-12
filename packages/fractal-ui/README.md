@@ -188,7 +188,11 @@ the caller's preferred unit. Mixed-unit subtotals remain separate.
 
 Drawer accounts use one 22px native table row: 18px inline content and 2px
 vertical padding. `src/UsageMeterGrid.stylex.ts` supplies schema-agnostic grid
-geometry shared with other meter tables; inset separators do not add row height.
+geometry shared with other meter tables; adjacent cells sit 8px apart and inset
+separators do not add row height. Account text aligns left; reset, amount and
++N align right with tabular numerals, and usage readings share one right-aligned
+slot so their bars start on the same track. A supplied window column that holds
+only governing windows (already shown under Usage) is not rendered.
 Account identity takes the remaining table width; governing usage and reset have
 protected character-unit tracks. Secondary windows fold first, then amount,
 into the accessible all-evidence action. Its +N counts secondary windows only.
@@ -196,6 +200,14 @@ Its accessible name includes that visible count and the full evidence descriptio
 The governing reset never folds or ellipsizes. The `quotaOverflowPolicy` constant
 is the single swap point for collapse/hide/truncate pending the overflow decision.
 Variant meters stay inside the same row rather than growing an account into a card.
+Unreported amounts and readings show `—`; titles and accessible names say Unreported.
+The usage-meter table uses the same 22px rows and 8px gaps. From a 40rem
+container its window and reset tracks widen to fit a full reading and a reset
+with its count, and More shows its full header from 36rem. In narrower tracks
+the bar shrinks to its minimum before a reading ellipsizes, with the full text
+in its title. Reset glyphs stay on the text line, reset and +N
+align right, and the open row keeps the hover wash with an accent underline so
+muted and warning ink stay at AA contrast.
 
 Every Drawer S/M/L and drawer-variant story proves that all 11 fictional accounts
 fit the stated height without scrolling and that each cell's x-offset matches its
@@ -211,8 +223,10 @@ Standalone navigation uses React Aria options and stable account-row identity.
 Every quota story also disables the real refresh action and proves that the
 controlled snapshot cannot change, restores the action, then asserts both
 snapshot transitions after React rerenders. Empty and matrix stories carry
-the same control. Strict static Storybook lifecycle checks run these stories
-at 440 and 1440 viewport widths in light and dark.
+the same control. Refresh plays simulate a failed collection, then return to the
+status their args name, so a story at rest shows its named state. Strict static
+Storybook lifecycle checks run these stories at 440 and 1440 viewport widths in
+light and dark.
 
 `src/quota-geometry.stylex.ts` holds semantic geometry tokens; existing spacing
 and typography tokens are reused directly. Production surfaces and story frames
@@ -230,6 +244,11 @@ day cannot bypass the range's 95% USD coverage gate. The coverage story selects
 a low-coverage day, brushes to admitted days while retaining that controlled
 selection, rejects injected out-of-range USD evidence, and checks restoration
 after rerenders.
+
+Day-chart buttons are named by their day; the full per-series evidence is a
+mounted accessible description, and no native title doubles the custom hover
+readout. The brush story checks the name, the exact description, hover and
+focus readouts, and the pressed state.
 
 History uses the supplied calendar buckets, exposes exact measured values and
 unknown token classes, and marks the unfinished bucket. Cost compares rate-card

@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { quotaGeometry } from './quota-geometry.stylex.ts'
 import { Icon } from './assistant-ui/composition/Icons.tsx'
-import { Button, Label, ListBox, ListBoxItem, Radio, RadioGroup, Slider, SliderOutput, SliderThumb, SliderTrack, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import { Button, Label, ListBox, ListBoxItem, Radio, RadioGroup, Slider, SliderOutput, SliderThumb, SliderTrack, Tab, TabList, TabPanel, Tabs, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { QuotaAccount, QuotaEconomics, QuotaHistoryDay, QuotaHistoryValue, QuotaUnit, QuotaUsageProps, QuotaWindow } from './quota-design-types'
 import { quotaStateLabels } from './quota-design-copy.ts'
@@ -126,6 +126,7 @@ const StackedChart = ({ cells, series, unit, height, label, selectedDay, onDay, 
   const patternId = `quota-hatch-${React.useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
   const max = scaleOf(cells, series)
   const width = Math.max(1, cells.length) * slotUnits
+  const dayDescriptionId = React.useId()
   return <div {...stylex.props(styles.chart, height === 'main' ? styles.chartMain : styles.chartSmall)}>
     <svg aria-hidden="true" viewBox={`0 0 ${width} ${chartUnits}`} preserveAspectRatio="none" {...stylex.props(styles.svg)}>
       <defs><pattern id={patternId} width="3" height="3" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="1" height="3" {...stylex.props(styles.hatchInk)} /></pattern></defs>
@@ -155,8 +156,9 @@ const StackedChart = ({ cells, series, unit, height, label, selectedDay, onDay, 
       {cells.map(cell => {
         const description = describeDay(cell, series, unit)
         const selected = cell.day.id === selectedDay
-        return <Button key={cell.day.id} aria-label={description} aria-pressed={selected} data-quota-day={cell.day.id} data-partial={cell.day.partial || undefined} onPress={() => onDay(selected ? undefined : cell.day.id)} onHoverStart={() => onHover(cell.day.id)} onFocus={() => onHover(cell.day.id)} onBlur={() => onHover(undefined)} {...stylex.props(styles.dayButton, selected && styles.dayButtonSelected)}>
-          <span {...stylex.props(styles.titleCarrier)} title={description} />
+        const describedBy = `${dayDescriptionId}-${cell.day.id}`
+        return <Button key={cell.day.id} aria-label={cell.day.label} aria-describedby={describedBy} aria-pressed={selected} data-quota-day={cell.day.id} data-partial={cell.day.partial || undefined} onPress={() => onDay(selected ? undefined : cell.day.id)} onHoverStart={() => onHover(cell.day.id)} onFocus={() => onHover(cell.day.id)} onBlur={() => onHover(undefined)} {...stylex.props(styles.dayButton, selected && styles.dayButtonSelected)}>
+          <VisuallyHidden elementType="span"><span id={describedBy}>{description}</span></VisuallyHidden>
         </Button>
       })}
     </div>
@@ -591,7 +593,6 @@ const styles = stylex.create({
   dayButtons: { position: 'absolute', inset: 0, display: 'flex' },
   dayButton: { flexBasis: 0, flexGrow: 1, minWidth: 0, padding: 0, border: 'none', borderRadius: radius.keyboard, backgroundColor: surface.transparent, cursor: 'pointer', ':hover': { backgroundColor: surface.washSubtle }, ':focus-visible': { outlineWidth: quotaGeometry.focusRingWidth, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: quotaGeometry.insetFocusOffset } },
   dayButtonSelected: { boxShadow: quotaGeometry.selectedUnderline, backgroundColor: surface.washSubtle },
-  titleCarrier: { display: 'block', inlineSize: '100%', blockSize: '100%' },
   axis: { display: 'flex', justifyContent: 'space-between', gap: space.md, blockSize: quotaGeometry.chartAxisHeight, color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
   partialLegend: { color: ink.fgSoft },
   partialBadge: { display: 'inline-flex', alignItems: 'center', marginInlineStart: space.sm, paddingInline: space.xs, borderRadius: radius.keyboard, border: quotaGeometry.dashedMutedHair, color: ink.fgSoft, fontSize: type.denseSize, fontWeight: type.weightRegular, whiteSpace: 'nowrap' },
