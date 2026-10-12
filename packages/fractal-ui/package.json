@@ -22,7 +22,9 @@
     "test:palettes": "node --test src/legacy-palettes.test.mjs",
     "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs",
     "check:shell-imports": "node scripts/check-shell-imports.mjs",
-    "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs"
+    "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs",
+    "test:tab-strip": "node --experimental-strip-types src/assistant-ui/workbench/tab-strip-layout.unit.test.ts",
+    "check:details": "node scripts/details-run-gates.mjs"
   },
   "dependencies": {
     "react": "19.2.3",
