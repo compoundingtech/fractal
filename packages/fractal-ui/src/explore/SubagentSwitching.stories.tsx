@@ -66,8 +66,6 @@ export const SubagentSwitchingProbe: Story = { args: { probe: true, compare: fal
   await waitFor(() => expect(nested).toHaveAttribute('data-active', 'root'))
   await userEvent.click(canvas.getByRole('button', { name: 'State attention', exact: true }))
   const attention = canvasElement.querySelector<HTMLElement>('[data-switching-lane]')!
-  await userEvent.click(within(attention).getByRole('textbox', { name: 'Message', exact: true }))
-  await userEvent.keyboard('{Control>}{ArrowRight}{/Control}')
   await waitFor(() => expect(attention).toHaveAttribute('data-active', 'child-1'))
   await expect(attention).toHaveTextContent('waiting on your preference')
   const reply = within(attention).getByRole('textbox', { name: 'Message', exact: true })

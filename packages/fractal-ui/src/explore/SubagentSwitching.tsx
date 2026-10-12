@@ -42,7 +42,7 @@ function threadFor(agent: Agent, sent: readonly string[]): TranscriptTurn[] {
 }
 export function SwitchingLane({ variant, state, scheme, width }: Pick<SwitchingArgs, 'variant' | 'state' | 'scheme' | 'width'>) {
   const agents = React.useMemo(() => agentsFor(state), [state])
-  const [selected, setSelected] = React.useState(state === 'nested' ? 'great-grandchild' : 'root')
+  const [selected, setSelected] = React.useState(state === 'nested' ? 'great-grandchild' : state === 'finished' || state === 'failed' || state === 'attention' ? 'child-1' : 'root')
   const [drawer, setDrawer] = React.useState(false)
   const [messages, setMessages] = React.useState<Record<string, readonly string[]>>({})
   const [read, setRead] = React.useState<ReadonlySet<string>>(new Set())
@@ -59,7 +59,7 @@ export function SwitchingLane({ variant, state, scheme, width }: Pick<SwitchingA
   const overflow = <Button aria-label="All agent threads" aria-expanded={drawer} onPress={() => setDrawer(value => !value)} {...stylex.props(styles.control)}><Icon name="drawer" />{agents.length} threads</Button>
   const strip = <nav aria-label="Bottom agent switcher" {...stylex.props(styles.strip)}>{displayed.map(agent => <Button key={agent.id} aria-label={`Switch to ${agent.name}`} aria-pressed={active.id === agent.id} onPress={() => choose(agent.id)} {...stylex.props(styles.control, active.id === agent.id && styles.selected)}>{cue(agent)}</Button>)}{overflow}</nav>
   return <section data-switching-lane data-variant={variant} data-state={state} data-scheme={scheme} data-width={width} data-active={active.id} aria-label={`${variant} ${state} ${scheme} ${width}`} onKeyDown={event => { if (event.ctrlKey && (event.key === 'ArrowRight' || event.key === 'ArrowLeft')) { event.preventDefault(); cycle(event.key === 'ArrowRight' ? 1 : -1) } }} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.lane, width === 1440 ? styles.wide : styles.narrow)}>
-    <header {...stylex.props(styles.heading)}><strong>{variant} · {variant === 'A' ? 'Composer rail' : variant === 'B' ? 'Thread tabs' : 'Breadcrumb + thread drawer'}</strong><span>{state} / {scheme} / {width}</span><span>Ctrl + Left / Right cycles threads</span></header>
+    <header {...stylex.props(styles.heading)}><strong>{variant} · {variant === 'A' ? 'Composer rail' : variant === 'B' ? 'Thread tabs' : 'Breadcrumb + thread drawer'}</strong><span>{state} / {scheme} / {width}</span>{cue(active)}<span>Ctrl + Left / Right cycles threads</span></header>
     <div {...stylex.props(styles.shell)}><aside aria-label="Workspace sidebar" {...stylex.props(styles.sidebar)}><SidebarAgentRow item={asRow(agents[0]!, agents)} now={now} active={active.id === 'root'} onOpen={() => choose('root')} /><p {...stylex.props(styles.hint)}>The root stays here. Child threads open in the conversation lane.</p></aside>
       <div {...stylex.props(styles.workspace)}>
         {variant === 'B' ? <Tabs selectedKey={active.id} onSelectionChange={key => choose(String(key))}><div {...stylex.props(styles.strip)}><TabList aria-label="Agent thread tabs" {...stylex.props(styles.tabs)}>{agents.map(agent => <Tab id={agent.id} key={agent.id} {...stylex.props(styles.control, active.id === agent.id && styles.selected)}>{cue(agent)}</Tab>)}</TabList>{overflow}</div>{agents.map(agent => <TabPanel id={agent.id} key={agent.id}><span {...stylex.props(styles.meta)}>Selected thread: {agent.name}</span></TabPanel>)}</Tabs> : null}
