@@ -175,10 +175,10 @@ history cursor is not an exception for choosing a shared reason.
 | 12661 | `usage_summaries_at` | Shared | Shared usage fold per subject; same issue as usage_summary_at. |
 | 12921 | `usage_period_rows` | Shared | Shared period totals; equal observed-time ties currently use local store index. |
 | 13051 | `claims_for_subject_kind_at` | Local | Local raw-history page using a local cursor; callers reducing shared state need the canonical helper instead. |
-| 13235 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
-| 13241 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
-| 13242 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
-| 13243 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
+| 13235 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
+| 13241 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
+| 13242 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
+| 13243 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
 | 13301 | `timeline_claim_rows_for_incarnation_at` | Local | Local harness timeline/history page. Current timeline retention is local; legacy rows can appear in claims. |
 | 13339 | `claims_for_kind_at` | Local | Local raw-kind history page; not a permitted source of arrival-ordered shared reduction. |
 | 13435 | `work_claim_is_orphaned` | Shared | Shared runtime-incarnation/terminal-state selection controls durable work ownership. |
