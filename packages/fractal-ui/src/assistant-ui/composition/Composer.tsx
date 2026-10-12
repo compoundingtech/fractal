@@ -36,6 +36,11 @@ function ComposerEditor({ agent, running, folder, branch, onSend, onStop, onStee
   const pending = React.useRef(false)
   const composing = React.useRef(false)
   const saveTimer = React.useRef<number | undefined>(undefined)
+  // Restore the controlled field and runtime together: the shared editor derives
+  // guidance and send availability from runtime text, not the persisted draft.
+  React.useLayoutEffect(() => {
+    aui.composer.setText(current.current)
+  }, [aui, storageKey])
   const edit = (next: string, publish = true) => {
     current.current = next; drafts.set(storageKey, next); setValue(next)
     if (publish) aui.composer.setText(next)

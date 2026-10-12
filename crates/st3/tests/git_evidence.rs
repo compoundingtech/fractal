@@ -416,7 +416,7 @@ fn protected_ci_cli_fetches_selectors_and_exports_verified_objects_without_a_key
                 {"name":"Retain effective tested source","status":"completed","conclusion":"success"},
                 {"name":"Upload effective tested source","status":"completed","conclusion":"success"}]},
         {"id":11,"run_id":123,"run_attempt":2,"name":"unit-tests","status":"completed",
-            "conclusion":"success","completed_at":"2026-10-12T12:00:00Z"}]});
+            "conclusion":"success","completed_at":(chrono::Utc::now()-chrono::Duration::minutes(10)).to_rfc3339()}]});
     for (name, value) in [
         ("run.json", run),
         ("jobs.json", jobs),
@@ -447,7 +447,11 @@ suffix = sys.argv[4].removeprefix('repos/example/project/')
 files = {'actions/runs/123/attempts/2':'run.json',
          'actions/runs/123/attempts/2/jobs?per_page=100&page=1':'jobs.json',
          'actions/artifacts/456':'metadata.json',
-         'actions/artifacts/456/zip':'artifact.zip'}
+         'actions/artifacts/456/zip':'artifact.zip',
+         'actions/runs/123/attempts/3':'run3.json',
+         'actions/runs/123/attempts/3/jobs?per_page=100&page=1':'jobs3.json',
+         'actions/artifacts/789':'metadata3.json',
+         'actions/artifacts/789/zip':'artifact3.zip'}
 sys.stdout.buffer.write((pathlib.Path(os.environ['FIXTURE_API']) / files[suffix]).read_bytes())
 "#,
     )
@@ -472,7 +476,7 @@ os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
     )
     .unwrap();
     std::fs::set_permissions(&installed_git, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let observer = |extra: &[&str]| {
+    let observe_request = |attempt: &str, artifact: &str, extra: &[&str]| {
         let mut paths = vec![tools.clone()];
         paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
         Command::new(test_bin!("st3"))
@@ -486,9 +490,9 @@ os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
                 "--run",
                 "123",
                 "--attempt",
-                "2",
+                attempt,
                 "--artifact",
-                "456",
+                artifact,
             ])
             .args(extra)
             .current_dir(&caller)
@@ -500,6 +504,7 @@ os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
             .output()
             .unwrap()
     };
+    let observer = |extra: &[&str]| observe_request("2", "456", extra);
     assert!(!observer(&["--statement", "forged.json"]).status.success());
     assert!(
         !observer(&["--ssh-key", key.to_str().unwrap()])
@@ -632,6 +637,140 @@ os.execv(os.environ['FIXTURE_REAL_GIT'],[os.environ['FIXTURE_REAL_GIT'],*args])
     assert_eq!(pr_result["full_trust_eligible"], false);
     assert_eq!(pr_result["records"][0]["tier"], "degraded");
     assert!(pr_result["trust_limitation"].is_string());
+    // The unsigned predecessor is published to the fixture's public repository;
+    // the protected observer fetches it independently, then authenticates its old job.
+    let predecessor = pr_result["records"][0]["record"].as_str().unwrap();
+    let old_pack = base64::engine::general_purpose::STANDARD
+        .decode(pr_result["object_pack_base64"].as_str().unwrap())
+        .unwrap();
+    let mut import_old = Command::new("git")
+        .arg("-C")
+        .arg(&caller)
+        .args(["index-pack", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    import_old
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&old_pack)
+        .unwrap();
+    assert!(import_old.wait().unwrap().success());
+    evidence::put(&caller, predecessor, &allowed).unwrap();
+    let now = chrono::Utc::now();
+    let mut rerun = pr_run.clone();
+    rerun["run_attempt"] = 3.into();
+    rerun["event"] = "merge_group".into();
+    std::fs::write(
+        fixtures.join("run3.json"),
+        serde_json::to_vec(&rerun).unwrap(),
+    )
+    .unwrap();
+    let mut rerun_jobs = next_job.clone();
+    for job in rerun_jobs["jobs"].as_array_mut().unwrap() {
+        job["run_attempt"] = 3.into();
+    }
+    rerun_jobs["jobs"][1]["id"] = 14.into();
+    rerun_jobs["jobs"][1]["started_at"] = (now - chrono::Duration::minutes(4)).to_rfc3339().into();
+    rerun_jobs["jobs"][1]["completed_at"] =
+        (now - chrono::Duration::minutes(1)).to_rfc3339().into();
+    std::fs::write(
+        fixtures.join("jobs3.json"),
+        serde_json::to_vec(&rerun_jobs).unwrap(),
+    )
+    .unwrap();
+    let mut rerun_receipt = updated_receipt.clone();
+    rerun_receipt["event"] = "merge_group".into();
+    rerun_receipt["run_attempt"] = "3".into();
+    std::fs::write(
+        fixtures.join("receipt3.json"),
+        serde_json::to_vec(&rerun_receipt).unwrap(),
+    )
+    .unwrap();
+    assert!(Command::new("python3").args(["-c",
+        "import pathlib,sys,zipfile; p=pathlib.Path(sys.argv[1]); z=zipfile.ZipFile(p/'artifact3.zip','w'); z.write(p/'receipt3.json','receipt.json'); z.write(p/'source.pack','source.pack'); z.close()"])
+        .arg(&fixtures).status().unwrap().success());
+    let rerun_zip = std::fs::read(fixtures.join("artifact3.zip")).unwrap();
+    let mut rerun_metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixtures.join("metadata.json")).unwrap()).unwrap();
+    rerun_metadata["id"] = 789.into();
+    rerun_metadata["name"] = "ci-evidence-source-3".into();
+    rerun_metadata["size_in_bytes"] = serde_json::json!(rerun_zip.len());
+    rerun_metadata["digest"] = format!("sha256:{}", hex::encode(Sha256::digest(&rerun_zip))).into();
+    std::fs::write(
+        fixtures.join("metadata3.json"),
+        serde_json::to_vec(&rerun_metadata).unwrap(),
+    )
+    .unwrap();
+    let linked = success(observe_request("3", "789", &["--re-attest", predecessor]));
+    assert_eq!(linked["records"][0]["tier"], "full");
+    assert_eq!(linked["metrics"]["re_attested_records"], 1);
+    assert!(
+        linked["metrics"]["re_attestation_elapsed_ms"]
+            .as_i64()
+            .unwrap()
+            >= 599_000
+    );
+    let linked_record = linked["records"][0]["record"].as_str().unwrap();
+    let imported = root.path().join("linked-export");
+    std::fs::create_dir(&imported).unwrap();
+    git(&imported, &["init", "-q"], b"");
+    let linked_pack = base64::engine::general_purpose::STANDARD
+        .decode(linked["object_pack_base64"].as_str().unwrap())
+        .unwrap();
+    let mut importer = Command::new("git")
+        .arg("-C")
+        .arg(&imported)
+        .args(["index-pack", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    importer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&linked_pack)
+        .unwrap();
+    assert!(importer.wait().unwrap().success());
+    assert_eq!(
+        evidence::verify_record(&imported, linked_record, &allowed)
+            .unwrap()
+            .predicate
+            .re_attests
+            .as_deref(),
+        Some(predecessor)
+    );
+    assert_eq!(
+        evidence::show(&imported, predecessor)
+            .unwrap()
+            .predicate
+            .tier,
+        TrustTier::Degraded
+    );
+    let linked_replay = success(observe_request("3", "789", &["--re-attest", predecessor]));
+    assert_eq!(linked_replay["metrics"]["re_attested_records"], 0);
+    assert!(linked_replay["metrics"]["re_attestation_elapsed_ms"].is_null());
+    // An authenticated result with a changed old-job body cannot supply a re-attestation.
+    let mut changed_old = next_job.clone();
+    changed_old["jobs"][1]["extra"] = "different historical body".into();
+    std::fs::write(
+        fixtures.join("jobs.json"),
+        serde_json::to_vec(&changed_old).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !observe_request("3", "789", &["--re-attest", predecessor])
+            .status
+            .success()
+    );
+    std::fs::write(
+        fixtures.join("jobs.json"),
+        serde_json::to_vec(&next_job).unwrap(),
+    )
+    .unwrap();
     // Authenticated artifact bytes can still contain malformed objects. Strict import
     // refuses an extra unreachable bad commit, even though the source itself is valid.
     let bad = git(
