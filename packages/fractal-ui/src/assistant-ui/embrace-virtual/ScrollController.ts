@@ -22,6 +22,11 @@ type ReadingPosition = { readonly key: string; readonly offset: number }
 const FOLLOW_SLACK = 48
 const USER_SCROLL_WINDOW_MS = 250
 
+/** Write the real maximum, not an overshoot the browser clamps: saved and compared tops stay exact. */
+const scrollToEnd = (element: HTMLElement) => {
+  element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight)
+}
+
 /**
  * Follows the app's long-session virtual conversation. The kit has one renderer per
  * entry, so it needs no block/outline-to-entry mapping.
@@ -128,7 +133,7 @@ export class ScrollController {
     this.pendingAnchor = undefined
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
     this.restoreFrame = undefined
-    if (this.element !== null) this.element.scrollTop = this.element.scrollHeight
+    if (this.element !== null) scrollToEnd(this.element)
     this.options.setUnread(false)
     this.options.save({ _tag: 'Following' })
   }
@@ -201,12 +206,12 @@ export class ScrollController {
       if (this.pressed !== undefined) this.pendingAnchor = this.pressed
       else if (!this.following && this.anchor !== undefined && this.pendingAnchor === undefined) this.pendingAnchor = this.anchor
       if (this.pendingAnchor !== undefined || this.restoring) this.restore()
-      else if (this.following) element.scrollTop = element.scrollHeight
+      else if (this.following) scrollToEnd(element)
       if (resizeFrame !== undefined) return
       resizeFrame = requestAnimationFrame(() => {
         resizeFrame = undefined
         if (this.pendingAnchor !== undefined || this.restoring) this.restore()
-        else if (this.following) element.scrollTop = element.scrollHeight
+        else if (this.following) scrollToEnd(element)
         this.geometry = { contentHeight: element.scrollHeight, viewportHeight: element.clientHeight }
       })
     }
@@ -254,7 +259,7 @@ export class ScrollController {
       this.userScrolling = false
       if (this.following) {
         this.pendingAnchor = undefined
-        element.scrollTop = element.scrollHeight
+        scrollToEnd(element)
       } else {
         this.anchor = held
         this.pendingAnchor = this.anchor
@@ -482,7 +487,7 @@ export class ScrollController {
     }
     if (this.following) {
       this.options.setUnread(false)
-      if (this.element !== null) this.element.scrollTop = this.element.scrollHeight
+      if (this.element !== null) scrollToEnd(this.element)
       return
     }
     if (

@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { EmbraceScrollViewport } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
+import { EmbraceVirtualScrollViewport } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { readingColumnStyles } from '../../../../packages/fractal-ui/src/assistant-ui/reading-column.stylex.ts'
 import { ErrorOverlayHost } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ErrorOverlay.tsx'
 import { SyncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/SyncLine.tsx'
@@ -8,6 +8,9 @@ import { surfaceVars as surface, textVars as ink, borderVars as border, accentVa
 
 const waiting = { _tag: 'Requested', since: 0 } as const
 const noItems: readonly { readonly id: string }[] = []
+const pending = { _tag: 'Pending' } as const
+const noBoundary = () => null
+const noRow = () => null
 
 /** The import boundary has no conversation demand or runtime of its own. Keep the same
  * Waiting frame as the kit so loading code cannot move the header or history lane. */
@@ -18,18 +21,18 @@ export const ConversationPaneFallback = ({ agentName, visible = true }: {
   <div aria-label="Transcript" {...stylex.props(styles.frame)}>
     <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{agentName}</strong></header>
     <ErrorOverlayHost lane>
-      <EmbraceScrollViewport items={noItems} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}>
-        {/* TODO(kit): replace with the exported TranscriptSkeleton */}
-        <div data-testid="transcript-placeholder" aria-label="Loading conversation" {...stylex.props(styles.placeholder)}>
-          <p role="status">Loading conversation…</p>
-          <SyncLine status={waiting} label="conversation" now={0} observedAt={0} />
-          <div aria-hidden="true" {...stylex.props(styles.turn)}>
-            <div {...stylex.props(styles.skeletonPrompt)} />
-            <div {...stylex.props(styles.skeletonWork)} />
-            <div {...stylex.props(styles.skeletonAnswer)} />
-          </div>
-        </div>
-      </EmbraceScrollViewport>
+      <EmbraceVirtualScrollViewport items={noItems} history={pending} boundary={noBoundary} renderItem={noRow} data-testid="transcript-scroll" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+        empty={/* TODO(kit): replace with the exported TranscriptSkeleton */
+          <div data-testid="transcript-placeholder" aria-label="Loading conversation" {...stylex.props(styles.placeholder)}>
+            <p role="status">Loading conversation…</p>
+            <SyncLine status={waiting} label="conversation" now={0} observedAt={0} />
+            <div aria-hidden="true" {...stylex.props(styles.turn)}>
+              <div {...stylex.props(styles.skeletonPrompt)} />
+              <div {...stylex.props(styles.skeletonWork)} />
+              <div {...stylex.props(styles.skeletonAnswer)} />
+            </div>
+          </div>}
+      />
     </ErrorOverlayHost>
   </div>
 </div>
