@@ -18,10 +18,10 @@ export function Menu<T extends object>({ style, ...props }: MenuProps<T>) {
   return <AriaMenu {...props} {...stylex.props(styles.menu, style)} />
 }
 export type MenuItemProps<T> = Omit<AriaMenuItemProps<T>, 'className' | 'style'> & { leading?: React.ReactNode; shortcut?: string; style?: stylex.StyleXStyles }
-/** RAC owns checkbox/radio semantics; the fixed leading slot never shifts the label on selection. */
+/** RAC owns checkbox/radio semantics. Selectable items and items with a leading glyph reserve the 16px slot, so selection never shifts the label. */
 export function MenuItem<T extends object>({ children, leading, shortcut, style, ...props }: MenuItemProps<T>) {
   return <AriaMenuItem {...props} {...stylex.props(styles.menuItem, style)}>{state => <>
-    <span aria-hidden="true" {...stylex.props(styles.leading)}>{state.isSelected ? <CheckMark /> : leading}</span>
+    {(state.selectionMode !== 'none' || leading !== undefined) && <span aria-hidden="true" {...stylex.props(styles.leading)}>{state.isSelected ? <CheckMark /> : leading}</span>}
     <span {...stylex.props(styles.label)}>{typeof children === 'function' ? children(state) : children}</span>
     {shortcut && <kbd {...stylex.props(styles.shortcut)}>{shortcut}</kbd>}
   </>}</AriaMenuItem>
@@ -43,9 +43,10 @@ export function Checkbox({ children, style, ...props }: CheckboxProps) {
 function CheckMark({ indeterminate = false }: { indeterminate?: boolean }) {
   return <svg aria-hidden="true" viewBox="0 0 14 14" fill="none" {...stylex.props(styles.check)}><path d={indeterminate ? 'M3 7h8' : 'm3 7 2.5 2.5L11 4'} stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
 }
-export type TooltipProps = { label: string; shortcut?: string; placement?: 'top' | 'bottom'; delay?: number; children: React.ReactNode; style?: stylex.StyleXStyles }
-export function Tooltip({ label, shortcut, placement = 'bottom', delay = 500, children, style }: TooltipProps) {
-  return <ThemePortal><TooltipTrigger delay={delay} closeDelay={0}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></ThemePortal>
+export type TooltipProps = { label: string; shortcut?: string; placement?: 'top' | 'bottom'; delay?: number; isOpen?: boolean; onOpenChange?: (isOpen: boolean) => void; children: React.ReactNode; style?: stylex.StyleXStyles }
+/** `isOpen` lets a trigger hold its tooltip open to acknowledge an action, e.g. "Copied". */
+export function Tooltip({ label, shortcut, placement = 'bottom', delay = 500, isOpen, onOpenChange, children, style }: TooltipProps) {
+  return <ThemePortal><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={onOpenChange}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></ThemePortal>
 }
 export type TooltipSurfaceProps = Omit<AriaTooltipProps, 'className' | 'style'> & { style?: stylex.StyleXStyles }
 /** Use inside an existing TooltipTrigger and ThemePortal when its trigger is not a kit Button. */

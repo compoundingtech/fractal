@@ -6,7 +6,7 @@ import type { Selection } from 'react-aria-components'
 import { Button, Checkbox, Menu, MenuItem, MenuTrigger, Popover, Tooltip } from './assistant-ui/composition/Controls'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { surfaceVars as surface, textVars as text, typeVars as type, spaceVars as space } from './assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, elevationVars as elevation, interactionVars as interaction, surfaceVars as surface, textVars as text, typeVars as type, spaceVars as space } from './assistant-ui/composition-tokens.stylex'
 
 function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 'multiple', shortcut = '⌘K' }: { scheme?: Scheme; width?: number; selectionMode?: 'single' | 'multiple'; shortcut?: string }) {
   const [revised, setRevised] = React.useState(false)
@@ -18,6 +18,10 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
       <MenuItem id="details" textValue="Show details" shortcut="⌘D">Show details</MenuItem>
       <MenuItem id="unavailable" isDisabled>Host unavailable</MenuItem>
     </Menu></Popover></MenuTrigger>
+    <MenuTrigger><Button variant="outline">Thread actions</Button><Popover><Menu aria-label="Thread actions">
+      <MenuItem id="rename">Rename</MenuItem>
+      <MenuItem id="archive" shortcut="⌘E">Archive</MenuItem>
+    </Menu></Popover></MenuTrigger>
     <Checkbox>Wrap long lines</Checkbox>
     <Checkbox defaultSelected>Follow new events</Checkbox>
     <Checkbox isIndeterminate>Some threads selected</Checkbox>
@@ -26,6 +30,7 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
     <Tooltip label="Copy thread link"><Button>Copy link</Button></Tooltip>
     <Button onPress={() => setRevised(value => !value)}>Update labels</Button>
     <output aria-label="Label revision">{revised ? 'Updated' : 'Original'}</output>
+    <span data-testid="surface-reference" aria-hidden="true" {...stylex.props(styles.reference)} />
   </main>
 }
 const meta = { title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
@@ -63,13 +68,30 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   const root = canvas.getByTestId('surface-primitives')
   await expect(root).toHaveAttribute('data-scheme', args.scheme)
   await expect(root.getBoundingClientRect().width).toBeLessThanOrEqual(args.width!)
+  const reference = getComputedStyle(canvas.getByTestId('surface-reference'))
   const checkbox = canvas.getByRole('checkbox', { name: 'Wrap long lines' })
+  const mark = checkbox.closest('label')!.querySelector<HTMLElement>('span[aria-hidden="true"]')!
   await expect(checkbox).not.toBeChecked()
-  await expect(checkbox.closest('label')!.querySelector('svg')).toBeNull()
+  await expect(mark.querySelector('svg')).toBeNull()
+  await expect(mark.getBoundingClientRect().width).toBe(14)
+  await expect(mark.getBoundingClientRect().height).toBe(14)
   await userEvent.click(checkbox)
   await expect(checkbox).toBeChecked()
-  await expect(checkbox.closest('label')!.querySelector('svg')).not.toBeNull()
+  await expect(mark.querySelector('svg')).not.toBeNull()
+  await expect(getComputedStyle(mark).backgroundColor).toBe(reference.color)
   await expect(canvas.getByRole('checkbox', { name: 'Archived thread' })).toBeDisabled()
+
+  // An action menu without selection or glyphs reserves no leading slot.
+  const actions = canvas.getByRole('button', { name: 'Thread actions' })
+  actions.focus()
+  await userEvent.keyboard('{ArrowDown}')
+  const rename = await canvas.findByRole('menuitem', { name: 'Rename' })
+  await expect(rename).toHaveFocus()
+  await expect(rename.querySelector('span[aria-hidden="true"]')).toBeNull()
+  await expect(getComputedStyle(rename).backgroundColor).toBe(reference.backgroundColor)
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
+  await expect(actions).toHaveFocus()
 
   const trigger = canvas.getByRole('button', { name: 'View options' })
   trigger.focus()
@@ -79,6 +101,17 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(first).toHaveFocus()
   await expect(first).toHaveAttribute('aria-checked', 'false')
   await expect(first.querySelector('svg')).toBeNull()
+  const slot = first.querySelector<HTMLElement>('span[aria-hidden="true"]')!
+  await expect(slot.getBoundingClientRect().width).toBe(16)
+  const surfaceStyle = getComputedStyle(canvas.getByTestId('menu-surface'))
+  await expect(surfaceStyle.borderTopLeftRadius).toBe('8px')
+  await expect(surfaceStyle.paddingTop).toBe('4px')
+  await expect(surfaceStyle.paddingLeft).toBe('4px')
+  await expect(surfaceStyle.borderTopWidth).toBe('1px')
+  await expect(surfaceStyle.boxShadow).toBe(reference.boxShadow)
+  await expect(getComputedStyle(first).borderTopLeftRadius).toBe('6px')
+  await expect(getComputedStyle(first).backgroundColor).toBe(reference.backgroundColor)
+  await expect(getComputedStyle(first).outlineColor).toBe(reference.outlineColor)
   await userEvent.keyboard(' ')
   await expect(first).toHaveAttribute('aria-checked', 'true')
   await expect(first.querySelector('svg')).not.toBeNull()
@@ -116,6 +149,19 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(trigger).toHaveFocus()
   await expect(checkbox).toBeChecked()
 
+  // Hover runs before any other tooltip opens, so React Aria's warm-up cannot skip the 500ms delay.
+  const copy = canvas.getByRole('button', { name: 'Copy link' })
+  const hoverStart = performance.now()
+  await userEvent.hover(copy)
+  await expect(canvas.queryByRole('tooltip')).toBeNull()
+  const plain = await canvas.findByRole('tooltip', {}, { timeout: 2000 })
+  await expect(performance.now() - hoverStart).toBeGreaterThanOrEqual(450)
+  await expect(plain).toHaveTextContent('Copy thread link')
+  await expect(plain.querySelector('kbd')).toBeNull()
+  await assertMotion(plain)
+  await userEvent.unhover(copy)
+  await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())
+
   const search = canvas.getByRole('button', { name: 'Search' })
   search.focus()
   const tooltip = await canvas.findByRole('tooltip')
@@ -124,20 +170,18 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(search).toHaveAccessibleDescription(`Search this thread ${args.shortcut}`)
   await expect(within(tooltip).getByText(args.shortcut!)).toBeVisible()
   await expect(tooltip.closest('[data-scheme]')).toBe(root)
-  await expect(parseFloat(getComputedStyle(tooltip).fontSize)).toBe(12)
-  await expect(parseFloat(getComputedStyle(tooltip).lineHeight)).toBe(16)
   await assertMotion(tooltip)
+  const tooltipStyle = getComputedStyle(tooltip)
+  await expect(parseFloat(tooltipStyle.fontSize)).toBe(12)
+  await expect(parseFloat(tooltipStyle.lineHeight)).toBe(16)
+  await expect(tooltipStyle.borderTopLeftRadius).toBe('6px')
+  await expect(tooltipStyle.paddingTop).toBe('4px')
+  await expect(tooltipStyle.paddingLeft).toBe('8px')
+  await expect(tooltipStyle.borderTopWidth).toBe('1px')
+  await expect(Math.round(tooltip.getBoundingClientRect().top - search.getBoundingClientRect().bottom)).toBe(4)
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())
   search.blur()
-  const copy = canvas.getByRole('button', { name: 'Copy link' })
-  await userEvent.hover(copy)
-  const plain = await canvas.findByRole('tooltip')
-  await expect(plain).toHaveTextContent('Copy thread link')
-  await expect(plain.querySelector('kbd')).toBeNull()
-  await assertMotion(plain)
-  await userEvent.unhover(copy)
-  await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())
   await userEvent.click(trigger)
   const finalSelection = await canvas.findByRole(role, { name: /Show event timestamps/ })
   await expect(finalSelection).toHaveAttribute('aria-checked', 'true')
@@ -153,4 +197,5 @@ const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: space.lg, padding: space.xl, color: text.fg, backgroundColor: surface.canvas, fontFamily: type.fontSans },
   width: (width: number) => ({ width, maxWidth: '100%' }),
   heading: { margin: 0, fontSize: type.headingSize, lineHeight: type.headingLeading, fontWeight: type.weightMedium },
+  reference: { position: 'absolute', visibility: 'hidden', color: accent.primary, backgroundColor: interaction.wash, outlineColor: interaction.focusRing, boxShadow: elevation.popover },
 })
