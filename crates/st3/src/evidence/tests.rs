@@ -81,11 +81,41 @@ impl Fixture {
             Some(format!("100644 blob {policy_blob}\tevidence-policy.json\n").as_bytes()),
         )
         .unwrap();
+        let recipe = git_text(
+            self.repo(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"fixture-ci-source-recipe"),
+        )
+        .unwrap();
+        let scripts = git_text(
+            self.repo(),
+            &["mktree"],
+            Some(format!("100644 blob {recipe}\tci-evidence-source\n").as_bytes()),
+        )
+        .unwrap();
+        let workflow = git_text(
+            self.repo(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"fixture-workflow"),
+        )
+        .unwrap();
+        let workflows = git_text(
+            self.repo(),
+            &["mktree"],
+            Some(format!("100644 blob {workflow}\tfleet.yml\n").as_bytes()),
+        )
+        .unwrap();
+        let github = git_text(
+            self.repo(),
+            &["mktree"],
+            Some(format!("040000 tree {workflows}\tworkflows\n").as_bytes()),
+        )
+        .unwrap();
         let tree = git_text(
             self.repo(),
             &["mktree"],
             Some(
-                format!("040000 tree {policy_tree}\t.st\n100644 blob {file}\tcheck.rs\n")
+                format!("040000 tree {github}\t.github\n040000 tree {policy_tree}\t.st\n100644 blob {file}\tcheck.rs\n040000 tree {scripts}\tscripts\n")
                     .as_bytes(),
             ),
         )
@@ -566,4 +596,348 @@ fn open_test_inputs_round_trip_but_do_not_authorize_scoped_reuse() {
     let mut unknown = tests;
     unknown.predicate.schema_version = 2;
     assert!(sign_observation(f.repo(), &unknown, &f.key).is_err());
+}
+
+fn ci_observation(
+    f: &Fixture,
+) -> (
+    observers::CiBinding,
+    serde_json::Value,
+    observers::SourceReceipt,
+    Vec<serde_json::Value>,
+) {
+    use sha2::{Digest, Sha256};
+    let recipe_digest = hex::encode(Sha256::digest(b"fixture-ci-source-recipe"));
+    let binding = observers::CiBinding {
+        repository: "example/project".into(),
+        run: 123,
+        attempt: 2,
+        recipe_sha256: recipe_digest.clone(),
+        accepted_base: f.base.clone(),
+        workflow_sha256: hex::encode(Sha256::digest(b"fixture-workflow")),
+        required_checks: BTreeSet::from(["unit-tests".into()]),
+    };
+    let run = serde_json::json!({
+        "id":123, "run_attempt":2, "repository":{"full_name":"example/project"},
+        "name":"Workspace CI", "path":".github/workflows/fleet.yml",
+        "status":"completed", "event":"merge_group", "head_sha":f.head,
+        "head_branch":format!("gh-readonly-queue/main/pr-7-{}", f.head),
+        "pull_requests":[{"number":7}]
+    });
+    let receipt = observers::SourceReceipt {
+        version: 1,
+        repository: "example/project".into(),
+        event: "merge_group".into(),
+        run_id: "123".into(),
+        run_attempt: "2".into(),
+        source: f.head.clone(),
+        tree: tree(f.repo(), &f.head).unwrap(),
+        object_format: "sha1".into(),
+        change_id: "github:example/project#7".into(),
+        producer_sha256: recipe_digest,
+        pack_sha256: "b".repeat(64),
+        pack_bytes: 123,
+    };
+    let jobs = vec![
+        serde_json::json!({"id":10, "run_id":123, "run_attempt":2, "name":"evidence-source",
+            "status":"completed", "conclusion":"success", "steps":[
+                {"name":"Retain effective tested source", "status":"completed", "conclusion":"success"},
+                {"name":"Upload effective tested source", "status":"completed", "conclusion":"success"}]}),
+        serde_json::json!({"id":11, "run_id":123, "run_attempt":2, "name":"unit-tests",
+            "status":"completed", "conclusion":"success", "completed_at":"2026-10-12T12:00:00Z"}),
+    ];
+    (binding, run, receipt, jobs)
+}
+
+#[test]
+fn ci_observer_signs_retained_merge_tree_and_reports_observed_job() {
+    let f = Fixture::new();
+    let (binding, run, receipt, jobs) = ci_observation(&f);
+    let records = observers::produce_ci(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.key,
+        },
+    )
+    .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].tier, TrustTier::Full);
+    let statement = verify_record(f.repo(), &records[0].record, &f.trusted).unwrap();
+    assert_eq!(statement.subject[0].name, f.head);
+    assert_eq!(run["head_sha"], f.head); // Queue source is platform-bound.
+    let Fact::Tests { runner, checks, .. } = statement.predicate.fact else {
+        panic!()
+    };
+    assert!(runner.ends_with("/attempts/2/jobs/11"));
+    assert_eq!(checks["unit-tests"].command[0], "github-actions");
+    assert_eq!(checks["unit-tests"].exit_code, 0);
+}
+
+#[test]
+fn ci_outage_is_degraded_and_replaying_the_same_job_cannot_promote_it() {
+    let f = Fixture::new();
+    let (binding, run, receipt, jobs) = ci_observation(&f);
+    let degraded = observers::produce_ci(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.repo().join("absent"),
+        },
+    )
+    .unwrap();
+    assert_eq!(degraded[0].tier, TrustTier::Degraded);
+    assert!(degraded[0].signing_unavailable);
+    let restored = observers::produce_ci(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.key,
+        },
+    )
+    .unwrap();
+    assert_eq!(restored[0].record, degraded[0].record);
+    assert_eq!(restored[0].tier, TrustTier::Degraded);
+    assert!(verify_record(f.repo(), &restored[0].record, &f.trusted).is_ok());
+    assert_eq!(records(f.repo()).unwrap().len(), 1);
+}
+
+#[test]
+fn ci_throwaway_service_expires_and_test_tier_never_satisfies_production() {
+    let f = Fixture::new();
+    let (binding, run, receipt, jobs) = ci_observation(&f);
+    let expired = observers::ObserverSigner::Test {
+        principal: "fleet/fixture-observer",
+        key: &f.key,
+        expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+    };
+    assert!(observers::produce_ci(f.repo(), &binding, &run, &receipt, &jobs, &expired).is_err());
+    assert!(records(f.repo()).unwrap().is_empty());
+    let active = observers::ObserverSigner::Test {
+        principal: "fleet/fixture-observer",
+        key: &f.key,
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+    };
+    let tests = observers::produce_ci(f.repo(), &binding, &run, &receipt, &jobs, &active).unwrap();
+    assert_eq!(tests[0].tier, TrustTier::Test);
+    let mut review = f.review(vec![tests[0].record.clone()], Verdict::GO);
+    review.predicate.change_id = receipt.change_id.clone();
+    f.put(&review);
+    assert!(
+        verify(
+            f.repo(),
+            &f.head,
+            &f.base,
+            &receipt.change_id,
+            &f.trusted,
+            &policy()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn ci_observer_rejects_wrong_provenance_and_duplicate_or_incomplete_checks() {
+    let f = Fixture::new();
+    let (binding, run, receipt, jobs) = ci_observation(&f);
+    for (key, value) in [
+        ("id", serde_json::json!(124)),
+        ("run_attempt", serde_json::json!(1)),
+        ("path", serde_json::json!(".github/workflows/other.yml")),
+        ("status", serde_json::json!("in_progress")),
+        (
+            "repository",
+            serde_json::json!({"full_name":"other/project"}),
+        ),
+    ] {
+        let mut wrong = run.clone();
+        wrong[key] = value;
+        assert!(observers::ci_statements(f.repo(), &binding, &wrong, &receipt, &jobs).is_err());
+    }
+    for modify in 0..5 {
+        let mut wrong = jobs.clone();
+        match modify {
+            0 => {
+                wrong.pop();
+            }
+            1 => {
+                wrong.push(jobs[1].clone());
+            }
+            2 => {
+                wrong[1]["run_attempt"] = serde_json::json!(1);
+            }
+            3 => {
+                wrong[1]["status"] = serde_json::json!("in_progress");
+            }
+            _ => {
+                wrong[0]["steps"][0]["conclusion"] = serde_json::json!("failure");
+            }
+        }
+        assert!(observers::ci_statements(f.repo(), &binding, &run, &receipt, &wrong).is_err());
+    }
+    let mut wrong_receipt = receipt;
+    wrong_receipt.producer_sha256 = "c".repeat(64);
+    assert!(observers::ci_statements(f.repo(), &binding, &run, &wrong_receipt, &jobs).is_err());
+    assert!(records(f.repo()).unwrap().is_empty());
+}
+
+#[test]
+fn ci_failed_and_skipped_checks_are_recorded_as_failures() {
+    let f = Fixture::new();
+    let (binding, run, receipt, mut jobs) = ci_observation(&f);
+    for conclusion in ["failure", "cancelled", "timed_out", "neutral", "skipped"] {
+        jobs[1]["conclusion"] = serde_json::json!(conclusion);
+        let statements =
+            observers::ci_statements(f.repo(), &binding, &run, &receipt, &jobs).unwrap();
+        let Fact::Tests { checks, .. } = &statements[0].predicate.fact else {
+            panic!()
+        };
+        assert_eq!(checks["unit-tests"].exit_code, 1);
+    }
+}
+
+#[test]
+fn pull_request_self_reported_tree_never_gets_full_trust_even_with_a_pinned_recipe() {
+    let f = Fixture::new();
+    let (binding, mut run, mut receipt, jobs) = ci_observation(&f);
+    run["event"] = "pull_request".into();
+    run["head_sha"] = f.head.clone().into();
+    receipt.event = "pull_request".into();
+    // The author retains an old clean tree, not the actual head. Every recipe byte matches.
+    receipt.source = f.base.clone();
+    receipt.tree = tree(f.repo(), &f.base).unwrap();
+    assert!(receipt.validate(f.repo(), &binding, &run).is_ok());
+    assert!(!binding.full_eligible(f.repo(), &receipt, &run).unwrap());
+    assert!(
+        observers::produce_ci(
+            f.repo(),
+            &binding,
+            &run,
+            &receipt,
+            &jobs,
+            &observers::ObserverSigner::Full {
+                principal: "fleet/fixture-observer",
+                key: &f.key
+            }
+        )
+        .is_err()
+    );
+    let grade = observers::produce_ci(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Unavailable,
+    )
+    .unwrap();
+    assert_eq!(grade[0].tier, TrustTier::Degraded);
+    assert_eq!(
+        verify_record(f.repo(), &grade[0].record, &f.trusted)
+            .unwrap()
+            .subject[0]
+            .name,
+        f.base
+    );
+}
+
+#[test]
+fn full_queue_trust_requires_exact_workflow_and_recipe_from_operator_accepted_base() {
+    let f = Fixture::new();
+    let (mut binding, mut run, mut receipt, jobs) = ci_observation(&f);
+    assert!(binding.full_eligible(f.repo(), &receipt, &run).unwrap());
+    let changed_workflow = git_text(
+        f.repo(),
+        &["hash-object", "-w", "--stdin"],
+        Some(b"always report success"),
+    )
+    .unwrap();
+    let workflows = git_text(
+        f.repo(),
+        &["mktree"],
+        Some(format!("100644 blob {changed_workflow}\tfleet.yml\n").as_bytes()),
+    )
+    .unwrap();
+    let github = git_text(
+        f.repo(),
+        &["mktree"],
+        Some(format!("040000 tree {workflows}\tworkflows\n").as_bytes()),
+    )
+    .unwrap();
+    let entries = git_text(
+        f.repo(),
+        &["ls-tree", &tree(f.repo(), &f.head).unwrap()],
+        None,
+    )
+    .unwrap();
+    let mut rows = entries
+        .lines()
+        .filter(|row| !row.ends_with("\t.github"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    rows.push(format!("040000 tree {github}\t.github"));
+    let tree = git_text(
+        f.repo(),
+        &["mktree"],
+        Some(format!("{}\n", rows.join("\n")).as_bytes()),
+    )
+    .unwrap();
+    receipt.source = f.commit_tree(&tree, Some(&f.head));
+    receipt.tree = tree;
+    run["head_sha"] = receipt.source.clone().into();
+    // Platform source binding alone is insufficient when the jobs' workflow is changed.
+    assert!(!binding.full_eligible(f.repo(), &receipt, &run).unwrap());
+    assert!(
+        observers::produce_ci(
+            f.repo(),
+            &binding,
+            &run,
+            &receipt,
+            &jobs,
+            &observers::ObserverSigner::Full {
+                principal: "fleet/fixture-observer",
+                key: &f.key
+            }
+        )
+        .is_err()
+    );
+    // Caller-controlled producer claims or an unreviewed baseline cannot replace the operator pin.
+    binding.accepted_base = receipt.source.clone();
+    assert!(binding.full_eligible(f.repo(), &receipt, &run).is_err());
+    binding.accepted_base = f.base.clone();
+    binding.recipe_sha256 = "a".repeat(64);
+    assert!(binding.full_eligible(f.repo(), &receipt, &run).is_err());
+}
+
+#[test]
+fn malformed_configured_signer_is_rejected_before_any_observation_write() {
+    let f = Fixture::new();
+    let (binding, run, receipt, jobs) = ci_observation(&f);
+    assert!(
+        observers::produce_ci(
+            f.repo(),
+            &binding,
+            &run,
+            &receipt,
+            &jobs,
+            &observers::ObserverSigner::Full {
+                principal: "invalid signer",
+                key: &f.key
+            }
+        )
+        .is_err()
+    );
+    assert!(records(f.repo()).unwrap().is_empty());
 }
