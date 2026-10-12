@@ -1,5 +1,5 @@
 // Keyboard plays focus an active RAC row and exercise its synthetic React key
-// handling unchanged. Native scroller-focus defaults belong to the ui-design
+// handling unchanged. Native scroller-focus defaults belong to the design
 // browser gate; this fixture has no native-input bridge or keyboard scroll shim.
 // Headless Chromium exposes overlay scrollbars (clientWidth === offsetWidth),
 // so these plays cannot target a native thumb gutter and claim no drag coverage.
@@ -509,7 +509,7 @@ async function exerciseHistory({ canvasElement, args }: { canvasElement: HTMLEle
   await mountedBound()
 
   // RAC row keyboard handling is exercised with real row focus, not a synthetic
-  // scroller key default. Native scroller-focus keys are covered by ui-design.
+  // scroller key default. Native scroller-focus keys use the design browser gate.
   // Start the keyboard slice from a fresh host navigation after the preceding
   // width/theme/disclosure changes; no key default or scroll amount is emulated.
   // Checkpoint 1302 has one answer paragraph and no code fence at either width.
