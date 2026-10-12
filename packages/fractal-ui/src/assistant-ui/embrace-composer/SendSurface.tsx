@@ -26,21 +26,27 @@ export function useComposerImageIntake(retainedImages: number, disabled: boolean
   const attached = useAuiState(state => state.composer.attachments.length)
   const sent = useAuiState(state => state.thread.messages.length)
   const retained = Math.max(retainedImages, attached)
-  // A refusal speaks for the tray it was made against: removing an image or sending the draft retires it.
-  const [refusal, setRefusal] = React.useState<{ readonly text: string; readonly retained: number; readonly sent: number }>()
+  // A refusal speaks for the tray it was made against. Once that tray is in place, removing an image or
+  // sending the draft retires it for good; a later restore of the same images does not bring it back.
+  const [refusal, setRefusal] = React.useState<{ readonly text: string; readonly retained: number; readonly sent: number; readonly reached: boolean }>()
+  React.useEffect(() => {
+    if (refusal === undefined) return
+    if (sent !== refusal.sent || (refusal.reached && retained < refusal.retained)) setRefusal(undefined)
+    else if (!refusal.reached && retained >= refusal.retained) setRefusal({ ...refusal, reached: true })
+  }, [refusal, retained, sent])
   const add = React.useCallback((files: readonly File[]) => {
     if (!available || disabled || files.length === 0) return
     const screened = screenComposerImages(files, retained, policy)
     const after = retained + screened.accepted.length
-    setRefusal(screened.refused === undefined ? undefined : { text: screened.refused, retained: after, sent })
+    setRefusal(screened.refused === undefined ? undefined : { text: screened.refused, retained: after, sent, reached: false })
     for (const file of screened.accepted) {
       aui.composer.addAttachment(file).catch((error: unknown) => {
         const reason = error instanceof Error && error.message !== '' ? error.message : 'It could not be added.'
-        setRefusal(previous => ({ text: [previous?.text, `${file.name}: ${reason}`].filter(Boolean).join(' '), retained: Math.min(previous?.retained ?? after, after - 1), sent }))
+        setRefusal(previous => ({ text: [previous?.text, `${file.name}: ${reason}`].filter(Boolean).join(' '), retained: Math.min(previous?.retained ?? after, after - 1), sent, reached: false }))
       })
     }
   }, [aui, available, disabled, retained, sent, policy])
-  const refused = refusal !== undefined && retained >= refusal.retained && sent === refusal.sent ? refusal.text : undefined
+  const refused = refusal !== undefined && sent === refusal.sent && (refusal.reached ? retained >= refusal.retained : true) ? refusal.text : undefined
   return React.useMemo(() => ({ available, disabled, policy, refused, add }), [available, disabled, policy, refused, add])
 }
 
