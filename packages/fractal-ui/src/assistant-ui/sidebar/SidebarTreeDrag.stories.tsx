@@ -52,7 +52,7 @@ function FilingTree({ deep = false }: { readonly deep?: boolean }) {
     <div {...stylex.props(styles.viewport)}><SidebarTree aria-label="Filing folders" items={items} expandedKeys={expanded} onExpandedChange={onExpandedChange} dragAndDropHooks={dragAndDropHooks} renderRow={renderRow} /></div>
   </main>
 }
-const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'Host-owned RAC drag hooks and drag-slot content on the production SidebarTree. Pinned visuals are pointer-transparent during drag; drop targets and autoscroll belong to the real tree. Every play disables filing, proves the same move check rejects, restores it, and performs a real RAC move.' } } } } satisfies Meta<typeof SidebarTree>
+const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'Host-owned RAC drag hooks and drag-slot content on the production SidebarTree. Pinned visuals are pointer-transparent during any drag session, including external drags with no local dragstart; drop targets and autoscroll belong to the real tree. Local-drag plays disable filing, prove the same move check rejects, restore it, and perform a real RAC move; the external play first proves the pinned copy owns the band outside a drag session.' } } } } satisfies Meta<typeof SidebarTree>
 export default meta
 type Story = StoryObj<typeof meta>
 const frames = async (count = 6) => { for (let index = 0; index < count; index++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
@@ -174,6 +174,63 @@ export const DragThroughPinnedBand: Story = { render: () => <FilingTree deep />,
   await expect(indicator.dataset.dropKey).toBe(key)
   await expect(Number(getComputedStyle(indicator).zIndex)).toBeGreaterThan(Number(getComputedStyle(stack).zIndex))
   await finishPointer(drag.source, drag.transfer, target, x, y)
+  await waitFor(() => assertFiled(root, key))
+} }
+// Hit-test one point over the pinned band: passes only when the real row, not a pinned copy, is on top.
+const realRowAt = async (x: number, y: number) => {
+  const hit = document.elementFromPoint(x, y)!
+  await expect(hit.closest('[data-pinned-key]')).toBeNull()
+  const real = hit.closest<HTMLElement>('[data-sidebar-tree-key]')
+  await expect(real).not.toBeNull()
+  return real!.dataset.sidebarTreeKey!
+}
+const externalTransfer = () => {
+  const transfer = new DataTransfer()
+  transfer.setData('text/plain', 'parcel')
+  return transfer
+}
+// The browser fires dragenter/dragover at the first hit element, then re-hit-tests on the next dragover.
+const externalEnter = (transfer: DataTransfer, x: number, y: number) => {
+  const first = document.elementFromPoint(x, y)!
+  for (const type of ['dragenter', 'dragover']) first.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: x, clientY: y }))
+  return first
+}
+export const ExternalDragOverPinnedBand: Story = { render: () => <FilingTree deep />, play: async ({ canvasElement }) => {
+  const root = within(canvasElement).getByTestId('filing-tree')
+  const tree = within(root).getByRole('treegrid')
+  await frames()
+  tree.scrollTop = 600
+  await frames()
+  const stack = root.querySelector<HTMLElement>('[data-sidebar-pinned-stack]')!
+  await expect(stack.querySelectorAll('[data-pinned-key]').length).toBeGreaterThan(0)
+  const bounds = tree.getBoundingClientRect()
+  const x = bounds.left + bounds.width / 2
+  const y = bounds.top + Math.min(12, stack.getBoundingClientRect().height / 2)
+  // Control: with no drag session the pinned copy owns the point, so the real-row check rejects.
+  await expect(realRowAt(x, y)).rejects.toThrow()
+  // An external drag (no local dragstart) that leaves the window restores the band.
+  const probe = externalTransfer()
+  await expect(externalEnter(probe, x, y).closest('[data-pinned-key]')).not.toBeNull()
+  await frames()
+  const probeKey = await realRowAt(x, y)
+  const probeTarget = over(probe, x, y)
+  await expect(probeTarget.closest('[data-sidebar-tree-key]')?.getAttribute('data-sidebar-tree-key')).toBe(probeKey)
+  probeTarget.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, dataTransfer: probe, relatedTarget: null, clientX: -1, clientY: -1 }))
+  await waitFor(() => expect(realRowAt(x, y)).rejects.toThrow())
+  await expect(root.dataset.parentKey).toBe('origin')
+  // A second external drag enters over the band and drops on the real row underneath.
+  const transfer = externalTransfer()
+  await expect(externalEnter(transfer, x, y).closest('[data-pinned-key]')).not.toBeNull()
+  await frames()
+  const key = await realRowAt(x, y)
+  await expect(key).toMatch(/^bucket-/)
+  const target = over(transfer, x, y)
+  await expect(target.closest('[data-pinned-key]')).toBeNull()
+  await frames()
+  const indicator = root.querySelector<HTMLElement>('[data-sidebar-drop-indicator]')!
+  await expect(indicator).not.toBeNull()
+  await expect(indicator.dataset.dropKey).toBe(key)
+  target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: x, clientY: y }))
   await waitFor(() => assertFiled(root, key))
 } }
 const styles = stylex.create({

@@ -31,6 +31,8 @@ type Pin<T> = { item: T; height: number; offset: number; breadcrumb?: readonly T
 type ItemDrop = { key: Key; top: number; height: number }
 type Snapshot<T> = { pins: readonly Pin<T>[]; height: number; width: number; top?: Key; measurements: readonly T[]; drop?: ItemDrop }
 type DropTarget = NonNullable<React.ContextType<typeof DragAndDropContext>['dropState']>['target']
+/** Browsers repeat dragover roughly every 50ms while a drag hovers the window. */
+const dragLeaveGraceMs = 150
 
 /** Keep RAC's own virtualized insertion indicators above the visual ancestor band. */
 class SidebarTreeLayout extends ListLayout<unknown> {
@@ -197,14 +199,39 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
     schedule()
   })
   const dragObserver = React.useCallback((active: boolean, target: DropTarget) => observeDrag(active, target), [])
+  // Any native drag session over the document makes the pinned band transparent, including
+  // drags from another window or the OS that never fire a local dragstart and may enter
+  // directly over the band. The browser re-hit-tests every dragover, so the next one reaches
+  // the real row underneath.
   React.useLayoutEffect(() => {
     if (props.dragAndDropHooks === undefined) return
-    const start = () => { nativeDrag.current = true; pending.current = undefined; setDragging(true) }
-    const end = () => { nativeDrag.current = false; dropTarget.current = null; setDragging(false); schedule() }
-    document.addEventListener('dragstart', start, true)
-    document.addEventListener('dragend', end, true)
-    document.addEventListener('drop', end)
-    return () => { document.removeEventListener('dragstart', start, true); document.removeEventListener('dragend', end, true); document.removeEventListener('drop', end) }
+    let leave: number | undefined
+    const cancelLeave = () => { if (leave !== undefined) { window.clearTimeout(leave); leave = undefined } }
+    const active = () => {
+      cancelLeave()
+      if (nativeDrag.current) return
+      nativeDrag.current = true
+      pending.current = undefined
+      setDragging(true)
+    }
+    const end = () => { cancelLeave(); nativeDrag.current = false; dropTarget.current = null; setDragging(false); schedule() }
+    // A null relatedTarget marks leaving the window; some engines also report it between
+    // elements, so the session only ends when no dragenter/dragover follows within a tick
+    // of the browser's continuous dragover cadence.
+    const leaveWindow = (event: DragEvent) => {
+      if (event.relatedTarget !== null || !nativeDrag.current) return
+      cancelLeave()
+      leave = window.setTimeout(end, dragLeaveGraceMs)
+    }
+    for (const type of ['dragstart', 'dragenter', 'dragover'] as const) document.addEventListener(type, active, true)
+    for (const type of ['dragend', 'drop'] as const) document.addEventListener(type, end, true)
+    document.addEventListener('dragleave', leaveWindow, true)
+    return () => {
+      cancelLeave()
+      for (const type of ['dragstart', 'dragenter', 'dragover'] as const) document.removeEventListener(type, active, true)
+      for (const type of ['dragend', 'drop'] as const) document.removeEventListener(type, end, true)
+      document.removeEventListener('dragleave', leaveWindow, true)
+    }
   }, [props.dragAndDropHooks, schedule])
   const reveal = React.useEffectEvent((key: Key, options?: { readonly anchor: false }) => {
     pending.current = key
