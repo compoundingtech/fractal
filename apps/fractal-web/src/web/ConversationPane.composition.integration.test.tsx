@@ -495,7 +495,8 @@ describe('ConversationPane composition activation', () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
         input: { command: 'python check.py', summary: 'Checking ready state' }, status: 'error', callSeen: true, at: at(1),
-        result: { content: diagnostic, isError: true, at: at(3) } }],
+        result: { content: diagnostic, isError: true, at: at(3) } },
+        { _tag: 'Status', id: 'failed-status', status: 'failed', at: at(4) }],
       hasOlder: false, observation: { empty: false },
     } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -520,7 +521,8 @@ describe('ConversationPane composition activation', () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
         input: { command: 'check' }, status: 'error', callSeen: true, at: at(1),
-        result: { content: diagnostic, isError: true, at: at(3) } }],
+        result: { content: diagnostic, isError: true, at: at(3) } },
+        { _tag: 'Status', id: 'failed-status', status: 'failed', at: at(4) }],
       hasOlder: false, observation: { empty: false },
     } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -540,7 +542,8 @@ describe('ConversationPane composition activation', () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: {
       items: [scenario[0]!, { _tag: 'ToolCall', id: 'failed-run', callId: 'failed-call', name: 'run',
         input: { command: 'check' }, status: 'error', callSeen: true, at: at(1),
-        result: { content: diagnostic, isError: true, at: at(3) } }],
+        result: { content: diagnostic, isError: true, at: at(3) } },
+        { _tag: 'Status', id: 'failed-status', status: 'failed', at: at(4) }],
       hasOlder: false, observation: { empty: false },
     } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -565,6 +568,7 @@ describe('ConversationPane composition activation', () => {
     } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
     await mount()
+    expect(container.querySelector('[data-error-overlay]')).toBeNull()
     const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!
     await act(async () => { fold.click() })
     const row = container.querySelector<HTMLElement>('[data-tool-status="error"]')!
