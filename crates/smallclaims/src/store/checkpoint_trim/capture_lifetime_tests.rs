@@ -129,7 +129,7 @@ impl Runtime for CaptureRuntime {
     }
 }
 
-fn exercise(failures: usize, interrupt: bool) {
+fn exercise(failures: usize, fault: Option<TrimFault>) {
     let runtime = Arc::new(CaptureRuntime::default());
     let store = Store::open_memory("alder", runtime.clone()).unwrap();
     for bytes in [1024, 4096, 16384] {
@@ -167,7 +167,8 @@ fn exercise(failures: usize, interrupt: bool) {
     };
     runtime.failures.store(failures, Ordering::Relaxed);
     store.set_trim_chunk_envelopes(1);
-    if interrupt { store.set_trim_fault(Some(TrimFault::AfterChunk(1))); }
+    let interrupt = fault == Some(TrimFault::AfterChunk(1));
+    store.set_trim_fault(fault);
     let graph_before = graph_digest(&store.readers.get()).unwrap();
     let mut actions = Vec::new();
     let result = store.apply_stable_checkpoints(&[certificate], &mut actions);
@@ -200,15 +201,20 @@ fn exercise(failures: usize, interrupt: bool) {
 
 #[test]
 fn own_plan_releases_full_capture_before_synchronous_trim_and_trim_error() {
-    exercise(0, true);
+    exercise(0, Some(TrimFault::AfterChunk(1)));
 }
 
 #[test]
 fn retry_releases_both_full_captures_before_certified_trim() {
-    exercise(1, false);
+    exercise(1, None);
 }
 
 #[test]
 fn two_uncertified_captures_leave_claims_for_manifest_adoption() {
-    exercise(2, false);
+    exercise(2, None);
+}
+
+#[test]
+fn an_expired_initial_budget_still_deletes_every_tombstoned_row() {
+    exercise(0, Some(TrimFault::ExpireChunkBudget));
 }

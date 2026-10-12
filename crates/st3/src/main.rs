@@ -6221,7 +6221,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
-    st3::fleet::activate(&store, &config)?;
+    st3::fleet::prepare(&store, &config)?;
     // Every claim this node writes is signed; keys are made here the first time, silently.
     let keys = st3::fleet::join::key_directory(&config.state_dir);
     if config.fleet.is_none() {
@@ -6388,20 +6388,6 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
     ));
-    if config.checkpoint.enabled {
-        tokio::spawn(run_checkpoints(
-            store.clone(),
-            st3::store::CheckpointContext {
-                now_unix_ms: 0,
-                configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
-                scratch: config.state_dir.join("checkpoint"),
-                reviewer: config
-                    .person
-                    .clone()
-                    .unwrap_or_else(|| "person/operator".into()),
-            },
-        ));
-    }
     if let Some(otlp) = &config.observations.otlp {
         let exporter = st3::otlp::OtlpExporter::new(otlp, &config.node)?;
         eprintln!(
@@ -6465,6 +6451,40 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let bound = std::sync::atomic::AtomicUsize::new(0);
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            let activation_store = store.clone();
+            let checkpoint_context = config
+                .checkpoint
+                .enabled
+                .then(|| st3::store::CheckpointContext {
+                    now_unix_ms: 0,
+                    configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
+                    scratch: config.state_dir.join("checkpoint"),
+                    reviewer: config
+                        .person
+                        .clone()
+                        .unwrap_or_else(|| "person/operator".into()),
+                });
+            tokio::spawn(async move {
+                match tokio::task::spawn_blocking({
+                    let store = activation_store.clone();
+                    move || store.complete_replication_activation()
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("st: replication history activation failed: {error:#}");
+                        return;
+                    }
+                    Err(error) => {
+                        eprintln!("st: replication history activation stopped: {error}");
+                        return;
+                    }
+                }
+                if let Some(context) = checkpoint_context {
+                    run_checkpoints(activation_store, context).await;
+                }
+            });
             startup_telemetry.serving();
             startup.serving();
             eprintln!("st: local API listening at {}", config.socket.display());
