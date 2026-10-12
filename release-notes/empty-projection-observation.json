@@ -1,11 +1,32 @@
 {
   "version": 1,
   "summary": "A completed empty projection no longer changes the reconciler's observation token; unchanged owned-set rows are not rewritten",
-  "replay": {"status": "none", "detail": "No replay or backfill is added; nonempty and zero-count replay attempts retain conservative invalidation."},
-  "schema": {"status": "none", "detail": "No table, index, claim kind, replication digest or version changes. A private process-lifetime deferral nonce guards token restoration."},
-  "rules": {"status": "none", "detail": "Owned-set selection, lineage, conflicts, pending references and fresh effect authority are unchanged."},
-  "compatibility": {"status": "none", "detail": "Wire fields and getter shape are unchanged. Runtimes opt in only when empty projection hooks have exclusively row effects; unknown runtimes remain conservative."},
-  "downtime": {"status": "none", "detail": "Normal rolling deployment. No startup conversion."},
-  "manual": {"status": "none", "detail": "No operator action is required."},
-  "recovery": {"status": "none", "detail": "Errors, pending work, replay, real writes and a newer deferral prevent restoration. Feed error/gap invalidation and partial projection recovery remain unchanged; a saturated nonce or wrapping entry stays conservative."}
+  "replay": {
+    "status": "none",
+    "detail": "No replay or backfill is added; nonempty and zero-count replay attempts retain conservative invalidation."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, claim kind, replication digest or version changes. A private process-lifetime deferral nonce guards token restoration."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Owned-set selection, lineage, conflicts, pending references and fresh effect authority are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Wire fields and getter shape are unchanged. Runtimes opt in only when empty projection hooks have exclusively row effects; unknown runtimes remain conservative. Non-opted runtimes retain their existing semantics."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Intended idle-CPU correction for unnecessary reevaluation after empty projection attempts; production cause and saving are not proved by source. Normal rolling deployment; no startup conversion."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Errors, pending work, replay, real writes and a newer deferral prevent restoration. Feed error/gap invalidation and partial projection recovery remain unchanged; a saturated nonce or wrapping entry stays conservative."
+  }
 }

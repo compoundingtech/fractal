@@ -119,6 +119,9 @@ impl Runtime for FaultRuntime {
         _origin: &str,
         through: u64,
     ) -> Result<IncrementalProjection, Error> {
+        if *self.stage.lock().unwrap() == Some("memory-only") {
+            return Ok(IncrementalProjection::Projected);
+        }
         if *self.stage.lock().unwrap() == Some("replay") {
             return Err(Error::new(
                 "internal",
@@ -138,6 +141,10 @@ impl Runtime for FaultRuntime {
         self.fail("replay")
     }
     fn after_projection(&self, tx: &Transaction<'_>) -> Result<(), Error> {
+        if *self.stage.lock().unwrap() == Some("memory-only") {
+            self.replays.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
         tx.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES ('busy-test-after','written')",
             [],
@@ -569,4 +576,20 @@ fn the_trust_roots_fold_runs_again_only_when_the_fleet_generation_moves() {
         .unwrap();
     assert_eq!(roots(&store), first);
     assert_eq!(folds(), before + 2, "a moved generation folds again");
+}
+
+#[test]
+fn non_sql_hook_keeps_conservative_attempt_observation() {
+    let runtime = Arc::new(FaultRuntime::new());
+    *runtime.stage.lock().unwrap() = Some("memory-only");
+    assert!(!runtime.empty_projection_has_only_row_effects());
+    let store = Store::open_memory("node", runtime.clone()).unwrap();
+    assert!(store.project_replication_backlog().unwrap());
+    let before = store.replication_projection_observation();
+    let effects = runtime.replays.load(Ordering::Relaxed);
+    let rows = store.connection.write().total_changes();
+    assert!(store.project_replication_backlog().unwrap());
+    assert_eq!(store.connection.write().total_changes() - rows, 1);
+    assert_eq!(runtime.replays.load(Ordering::Relaxed), effects + 1);
+    assert_ne!(store.replication_projection_observation().0, before.0);
 }

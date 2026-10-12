@@ -14,6 +14,28 @@ fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() 
     apply(&store, &input, 1);
     let mut connection = store.connection.write();
     let tx = connection.transaction().unwrap();
+    use smallclaims::ivm::View as _;
+    let mission_view = super::mission_ivm::MissionSelection;
+    // Explicit shadow setup in this fixture, not a production source-readiness grant.
+    mission_view.create_schema(&tx).unwrap();
+    mission_view.maintain_local_key(&tx, "mission/harvest", &smallclaims::ivm::LocalChange {
+        kind: "st3.mission-selection.changed".into(), old_keys: BTreeSet::new(),
+        new_keys: BTreeSet::from(["mission/harvest".into()]), evaluation_time_unix_ms: now_ms(),
+    }).unwrap();
+    tx.execute_batch("CREATE TEMP TABLE projection_test_updates(table_name TEXT);
+      CREATE TEMP TRIGGER projection_test_desired AFTER UPDATE ON main.desired BEGIN
+        INSERT INTO projection_test_updates VALUES('desired'); END;
+      CREATE TEMP TRIGGER projection_test_mission AFTER UPDATE ON main.mission_definitions BEGIN
+        INSERT INTO projection_test_updates VALUES('mission_definitions'); END;").unwrap();
+    let digest = projection_digest::tables(&tx).unwrap();
+    let mission_state = |table: &str| {
+        let mut statement = tx.prepare(&format!("SELECT * FROM {table} ORDER BY 1")).unwrap();
+        let columns = statement.column_count();
+        statement.query_map([], |row| (0..columns).map(|i| row.get::<_, rusqlite::types::Value>(i)).collect::<rusqlite::Result<Vec<_>>>())
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let tables = ["local_mission_counts", "local_mission_pending", "local_mission_selection", "local_mission_clock"];
+    let mission_before = tables.map(mission_state);
     let columns = "kind,revision,claim_id,body,member,owner_run,owner_generation,owner_step";
     let read_desired = || tx.query_row(
         &format!("SELECT {columns} FROM desired WHERE subject='agent/garden/orchard'"),
@@ -24,11 +46,13 @@ fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() 
     owned_sets::project_tx(&tx).unwrap();
     assert_eq!(tx.total_changes(), before, "identical projection must not write rows");
     assert_eq!(read_desired(), expected);
+    assert_eq!(projection_digest::tables(&tx).unwrap(), digest);
+    assert_eq!(tables.map(mission_state), mission_before);
     for column in columns.split(',') {
         tx.execute(&format!("UPDATE desired SET {column}='invented-change' WHERE subject='agent/garden/orchard'"), []).unwrap();
-        let before = tx.total_changes();
+        tx.execute("DELETE FROM projection_test_updates", []).unwrap();
         owned_sets::project_tx(&tx).unwrap();
-        assert_eq!(tx.total_changes() - before, 1, "changed desired column {column}");
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM projection_test_updates WHERE table_name='desired'", [], |r| r.get::<_, u64>(0)).unwrap(), 1, "changed desired column {column}");
         assert_eq!(read_desired(), expected, "restored desired column {column}");
     }
     let read_mission = || tx.query_row(
@@ -38,9 +62,9 @@ fn identical_owned_projection_writes_nothing_and_restores_each_changed_column() 
     let expected = read_mission();
     for column in ["revision", "state", "claim_id"] {
         tx.execute(&format!("UPDATE mission_definitions SET {column}='invented-change' WHERE mission_id='harvest'"), []).unwrap();
-        let before = tx.total_changes();
+        tx.execute("DELETE FROM projection_test_updates", []).unwrap();
         owned_sets::project_tx(&tx).unwrap();
-        assert_eq!(tx.total_changes() - before, 1, "changed mission column {column}");
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM projection_test_updates WHERE table_name='mission_definitions'", [], |r| r.get::<_, u64>(0)).unwrap(), 1, "changed mission column {column}");
         assert_eq!(read_mission(), expected);
     }
     tx.rollback().unwrap();

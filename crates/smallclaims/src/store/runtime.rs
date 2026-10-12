@@ -140,6 +140,8 @@ pub trait Runtime: Send + Sync {
 
     /// Opt in only when empty incremental/after-projection hooks cannot publish
     /// non-SQL effects. Unknown runtimes keep conservative attempt-token changes.
+    /// Plain and SmalltalkRuntime opt in because their empty hooks only write
+    /// SQL on the caller's writer; a new non-SQL hook must revoke that opt-in.
     fn empty_projection_has_only_row_effects(&self) -> bool {
         false
     }
