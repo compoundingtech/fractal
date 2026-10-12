@@ -393,19 +393,12 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   const element = React.useRef<HTMLDivElement | null>(null)
   const current = React.useRef(history)
   current.current = history
-  const request = React.useRef({
-    tag: history._tag, first: items[0]?.id, moreCalled: false, retryCalled: false,
-  })
+  const request = React.useRef({ first: items[0]?.id, moreCalled: false })
   if (request.current.first !== items[0]?.id) {
-    request.current = { tag: history._tag, first: items[0]?.id, moreCalled: false, retryCalled: false }
-  } else if (request.current.tag !== history._tag) {
-    // Loading -> More with an empty page does not authorize another fetch.
-    // A fresh failed state does authorize one reader-driven retry.
-    if (history._tag === 'Failed') request.current.retryCalled = false
-    request.current.tag = history._tag
+    request.current = { first: items[0]?.id, moreCalled: false }
   }
   const insideBoundary = React.useRef(false)
-  const prefetch = React.useCallback((scrollUp = false, freshGesture = false, scrolled = false) => {
+  const prefetch = React.useCallback((olderIntent = false, scrolled = false) => {
     const viewport = element.current
     if (viewport === null) return
     const inside = viewport.scrollTop <= viewport.clientHeight * 1.5
@@ -414,14 +407,11 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     if (!inside) return
     const source = current.current
     // Suppress automatic Loading -> More repeats, but never strand an empty
-    // page: a new upward gesture or leaving/re-entering the boundary can retry.
-    if (source._tag === 'More' && (entered && scrolled || scrollUp && freshGesture)) request.current.moreCalled = false
+    // page: a new upward gesture or leaving/re-entering the boundary can page.
+    if (source._tag === 'More' && (entered && scrolled || olderIntent)) request.current.moreCalled = false
     if (source._tag === 'More' && !request.current.moreCalled) {
       request.current.moreCalled = true
       source.loadOlder()
-    } else if (source._tag === 'Failed' && scrollUp && !request.current.retryCalled) {
-      request.current.retryCalled = true
-      source.retry()
     }
   }, [])
   const attach = React.useCallback((viewport: HTMLDivElement | null) => {
@@ -432,7 +422,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     let viewportHeight = viewport.clientHeight
     // Intent is independent of scroll events: at the top edge there may be
     // nothing left to scroll, but the reader can still request the next page.
-    const olderGesture = () => prefetch(true, true)
+    const olderGesture = () => prefetch(true)
     let draggingScrollbar = false
     let pointerY = 0
     let dragRequested = false
@@ -469,7 +459,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
       contentHeight = viewport.scrollHeight
       viewportHeight = viewport.clientHeight
       // Scroll events observe only boundary entry. Reflow is never a gesture.
-      prefetch(false, false, !geometryChanged)
+      prefetch(false, !geometryChanged)
     }
     const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) olderGesture() }
     const onKey = (event: KeyboardEvent) => {
