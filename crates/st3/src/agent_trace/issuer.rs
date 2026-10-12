@@ -164,7 +164,33 @@ pub fn refresh(
     Ok(runtime)
 }
 
-/// Replace the human principal only from the daemon's current ownership reduction.
+/// Keep reduced seat ownership authoritative; use only an explicitly declared
+/// host trace principal when that reduction yields no human.
+pub fn resolve_principal(reduced: Option<String>, declared: Option<&str>) -> Option<String> {
+    if reduced.is_some() {
+        return reduced;
+    }
+    let declared = declared?;
+    if !declared.strip_prefix("person/").is_some_and(|name| !name.is_empty()) {
+        tracing::warn!(
+            event = "agent_trace_fallback_principal_invalid",
+            "ignoring declared trace principal that is not person/<name>"
+        );
+        return None;
+    }
+    match AgentTraceRuntimeV1WhoPrincipal::validate(declared) {
+        Ok(()) => Some(declared.to_owned()),
+        Err(error) => {
+            tracing::warn!(
+                event = "agent_trace_fallback_principal_invalid", %error,
+                "ignoring declared trace principal outside the runtime authority"
+            );
+            None
+        }
+    }
+}
+
+/// Replace the human principal from reduced ownership or reviewed host declaration.
 ///
 /// # Errors
 /// Rejects a principal that the authoritative schema cannot represent.
@@ -217,6 +243,20 @@ pub fn write_atomic(path: &Path, runtime: &Runtime) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn declared_principal_is_only_a_validated_fallback_for_missing_reduction() {
+        for declared in [None, Some("person/fallback"), Some("agent/not-a-human")] {
+            assert_eq!(resolve_principal(Some("person/reduced".into()), declared),
+                Some("person/reduced".into()));
+        }
+        assert_eq!(resolve_principal(None, Some("person/fallback")), Some("person/fallback".into()));
+        assert_eq!(resolve_principal(None, None), None);
+        for invalid in ["agent/not-a-human", "person/",
+            " person/fallback", "person/fallback\n", "person/fallback "] {
+            assert_eq!(resolve_principal(None, Some(invalid)), None, "{invalid:?}");
+        }
+    }
 
     const MISSION: &str = "0123456789abcdef0123456789abcdef";
     const GENERATION: &str = "abcdef0123456789abcdef0123456789";

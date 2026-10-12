@@ -15027,14 +15027,29 @@ fn normalized_agent_actor(actor: &str) -> Option<String> {
     }
 }
 
-/// Provenance resolves the seat's human through the same ownership reduction as prompts.
-/// This read is not an authorization input.
+/// Provenance prefers the same human ownership reduction as prompts, then an
+/// explicitly reviewed host trace declaration. This read is not authorization.
 async fn agent_trace_principal(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
 ) -> Result<Json<Option<String>>, ApiError> {
     let store = state.store.clone();
-    Ok(Json(blocking_store(move || store.agent_person(&subject)).await?))
+    let reduced = blocking_store(move || store.agent_person(&subject)).await?;
+    if reduced.is_some() {
+        return Ok(Json(reduced));
+    }
+    // interim: delete at cutover to TODO(upstream issue: accountable human per seat/fleet root).
+    // Config::person is command authority, not this reviewed provenance declaration.
+    let declared = match std::env::var("ST_AGENT_TRACE_FALLBACK_PRINCIPAL") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            tracing::warn!(event = "agent_trace_fallback_principal_invalid", %error,
+                "ignoring non-text host trace principal");
+            None
+        }
+    };
+    Ok(Json(crate::agent_trace::issuer::resolve_principal(None, declared.as_deref())))
 }
 
 /// Resolve one immutable mission name, without hydrating its run or step history.

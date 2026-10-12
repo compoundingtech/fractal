@@ -25652,7 +25652,7 @@ mod tests {
     #[tokio::test]
     async fn agent_trace_failures_do_not_block_launch_lease_renewal_or_event_publication() {
         use axum::{Json, Router, extract::OriginalUri};
-        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
         let subject = "agent/invalid whitespace";
         let step = json!({
             "subject":"step-run/0123456789abcdef0123456789abcdef/work",
@@ -25666,9 +25666,12 @@ mod tests {
         });
         let renewals = Arc::new(AtomicUsize::new(0));
         let count = renewals.clone();
+        let principal_present = Arc::new(AtomicBool::new(true));
+        let present = principal_present.clone();
         let app = Router::new().fallback(move |OriginalUri(uri): OriginalUri| {
             let count = count.clone();
             let step = step.clone();
+            let present = present.clone();
             async move {
                 let value = match uri.path() {
                     "/v1/work" => json!([step]),
@@ -25690,7 +25693,8 @@ mod tests {
                             "subject":subject,"kind":"harness.usage","origin":"fixture",
                             "body":{},"predecessors":[],"accepted_at_unix_ms":0})
                     }
-                    path if path.starts_with("/v1/agent-trace/principal/") => json!("person/avery"),
+                    path if path.starts_with("/v1/agent-trace/principal/") =>
+                        json!(present.load(Ordering::SeqCst).then_some("person/avery")),
                     path if path.starts_with("/v1/agent-trace/mission/") => json!("mission/example/repo/check"),
                     path if path.starts_with("/v1/desired/") => json!({
                         "subject":subject,"kind":"agent","desired":{"name":"agent","arguments":[subject]},
@@ -25732,6 +25736,15 @@ mod tests {
             .await.unwrap();
         assert!(fingerprint.is_some(), "usage publication must still complete");
         assert_eq!(renewals.load(Ordering::SeqCst), 2);
+        for declared in [None, Some("agent/not-a-human")] {
+            let principal = st3::agent_trace::issuer::resolve_principal(None, declared);
+            assert!(principal.is_none());
+            principal_present.store(false, Ordering::SeqCst);
+            if path.is_dir() { fs::remove_dir(&path).unwrap(); }
+            fs::write(&path, b"stale predecessor").unwrap();
+            initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+            assert!(!path.exists(), "absent or invalid fallback must not leave a trace");
+        }
         server.abort();
     }
 
