@@ -15,6 +15,7 @@ import { rememberBounded } from './boundedCache';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
+import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, type Context } from './observations';
 import { buildFabricDefault, decodeFabricTarget, encodeFabricTarget, fabricGatewayId, fabricTargetFromText, isFabricGatewayId, type FabricTarget } from './fabricTarget';
@@ -331,6 +332,7 @@ function useAppStore(proof?: FabricProfile) {
             if (state === 'reconnecting' && held.everLive && held.recover === null) held.recover = observations.begin('ios-recover');
           }
         }
+        if (state !== 'live') setCaps(null);
         if (state === 'live') { setError(''); void loadCapabilities(); carrier.feedLive(); feedMisses.current = 0; }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):
         // a refusal ends the trial, anything else is redialed.
@@ -341,7 +343,7 @@ function useAppStore(proof?: FabricProfile) {
       // The next focused mission screen follows again and replaces them with a snapshot.
       onConversationFrame: (rows, replace) => { if (current()) proofRef.current?.record('conversation', { rows, replace }); },
       onTiming: (target, ms) => { if (current() && !proofRef.current) observations.observe(target, ms); },
-    }, foreground.current, actionId, undefined, undefined, false);
+    }, foreground.current, actionId, undefined, undefined, false, undefined, nativeCollectionSocket);
     // Paired: connecting from here on, even while the app waits to be active before it dials.
     setStatus(previous => previous === 'setup' ? 'connecting' : previous);
     setFeed(opened);
@@ -362,6 +364,9 @@ function useAppStore(proof?: FabricProfile) {
     return () => subscription.remove();
   }, []);
 
+  const inventoryGranted = caps === null ? undefined : caps.capabilities.some(capability => capability.id === 'inventory-collections' && capability.version >= 1 && capability.state === 'granted');
+  useEffect(() => { feed?.setInventoryGranted(inventoryGranted === true); }, [feed, inventoryGranted]);
+
   // Spaces: followed on the feed's socket when the gateway grants them.
   useEffect(() => { void AsyncStorage.getItem(SIMPLE_KEY).then(value => setSimpleOn(value !== '0')).catch(() => {}); }, []);
   const arrangementPerson = caps?.session_actor.match(/^person\/[^/]+/)?.[0];
@@ -373,6 +378,7 @@ function useAppStore(proof?: FabricProfile) {
   }, [feed, arrangementPerson, arrangementsGranted]);
   const loadSidebarTerminals = useCallback(async () => {
     if (!client) return;
+    if (inventoryGranted !== false) return;
     const generation = cacheGeneration.current;
     try {
       const result = await listCollectionPages(options => client.terminalsList({ ...options, history: false }), 200);
@@ -380,7 +386,14 @@ function useAppStore(proof?: FabricProfile) {
       setSidebarTerminals(result.pages.flatMap(page => page.value.items.filter((item): item is Runtime => item.kind === 'runtime' && !!item.terminal_id)));
       setSidebarTerminalsIssue(result.truncated ? 'More terminals exist beyond this window.' : '');
     } catch (error) { if (generation === cacheGeneration.current) setSidebarTerminalsIssue(errorText(error)); }
-  }, [client]);
+  }, [client, inventoryGranted]);
+  const watchSidebarTerminals = useCallback(() => {
+    if (!feed || inventoryGranted !== true) return () => {};
+    return feed.watchInventory('terminals', {
+      onRows: (rows, hasMore) => { setSidebarTerminals(rows.filter(row => !!row.terminal_id)); setSidebarTerminalsIssue(hasMore ? 'More terminals exist beyond this window.' : ''); },
+      onIssue: setSidebarTerminalsIssue,
+    });
+  }, [feed, inventoryGranted]);
   const loadSidebarResources = useCallback((focused?: string): Promise<void> => {
     if (!client || status !== 'online') return Promise.resolve();
     const generation = cacheGeneration.current;
@@ -415,10 +428,12 @@ function useAppStore(proof?: FabricProfile) {
     return () => clearTimeout(timer);
   }, [caps, data, glasses, arrangements, hasSynced, snapshot, truncated, url]);
 
-  // Launches, machines, devices, and sessions have no window: a screen loads them when it opens,
-  // and again after an action there. A list that fails is named; the others still show.
+  // Launches and older daemons retain their HTTP reads. Granted inventory windows carry
+  // action updates themselves, so an action does not reread them.
   const loadLists = useCallback(async (keys: readonly OnDemand[]) => {
     if (!client || !keys.length) return;
+    keys = keys.filter(key => key === 'launches' || inventoryGranted === false);
+    if (!keys.length) return;
     const generation = cacheGeneration.current;
     const limit = Math.min(capsRef.current?.limits.max_page_items ?? 30, 30);
     const read = (key: OnDemand): Promise<{ rows: Data[OnDemand]; truncated: boolean }> => {
@@ -437,7 +452,20 @@ function useAppStore(proof?: FabricProfile) {
         setLoadErrors(previous => { if (!(key in previous)) return previous; const rest = { ...previous }; delete rest[key]; return rest; });
       } else if (!isSnapshotChurn(result.reason)) setLoadErrors(previous => ({ ...previous, [key]: errorText(result.reason) }));
     });
-  }, [client]);
+  }, [client, inventoryGranted]);
+
+  const watchLists = useCallback((keys: readonly OnDemand[]) => {
+    if (inventoryGranted !== true || !feed) return () => {};
+    const stops = keys.filter(key => key !== 'launches').map(key => feed.watchInventory(key as 'machines' | 'devices' | 'sessions', {
+      onRows: (rows, hasMore, at) => {
+        setData(previous => ({ ...previous, [key]: rows }));
+        setTruncated(previous => ({ ...previous, [key]: hasMore }));
+        setSnapshot(at);
+      },
+      onIssue: issue => setLoadErrors(previous => { const next = { ...previous }; if (issue) next[key] = issue; else delete next[key]; return next; }),
+    }));
+    return () => { for (const stop of stops) stop(); };
+  }, [feed, inventoryGranted]);
 
   /** A fence on a snapshot read just now: one read seconds ago has nearly always moved on a busy host. */
   async function fence(revisions: Record<string, string> = {}) {
@@ -803,11 +831,11 @@ function useAppStore(proof?: FabricProfile) {
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, client,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, actions,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
     glassesGranted, glasses, glassesIssue, simpleOn,
     carrierInfo: { choice: carrierChoice, built: fabricBuilt, target: fabricTarget, fallback: fallbackOn, route: selected.route, routeText: routeLabel(selected.route), pending: selected.pending, issue: selected.issue, fabric: fabricSnapshot, node: fabricNode, path: fabricPath },
-    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
+    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, watchSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
   };
 }
 
