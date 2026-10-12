@@ -57,6 +57,8 @@ Stories:
 
 `QuestionForm` uses controlled `draft`/`onDraftChange` props and React Aria radio/checkbox groups. `autoFocus`, question-step transitions, Other and note editing transfer focus; Escape returns to the selected/recommended choice without answering or clearing the draft. Multi-select keeps custom text when another option changes. `NeedsYouBar` receives transcript visibility from the host and hides at 60%; its pinned form and the inbox must receive the same host-owned draft.
 
+Hosts composing repeated forms, settled outcomes or docks may pass `ariaLabel` to name each landmark by its surface/context without changing visible question copy. The full state gallery and shared-draft composition use distinct labels; this keeps identical request views distinguishable to landmark navigation.
+
 `composerRouting` distinguishes a message held until the question is answered from a note about the question; typing copy follows the host-reported route. Forms cap desktop width at the shared reading-lane token, inbox entries start as two-line disclosures, and pinned forms omit duplicate card chrome. The question stories compose the production composer, share drafts keyed by request id, and drive attention visibility with a real IntersectionObserver.
 
 Question surfaces use shared Fractal composition palette, type, spacing, radius and geometry tokens directly, inheriting the nearest ancestor's StyleX theme. Roots establish the shared UI type scale and medium-weight headers instead of inheriting page typography. Selected option descriptions use the soft foreground token. They require no component-specific palette decorator; harness weight and selected-option keyboard plays include axe color-contrast checks in dark and light.

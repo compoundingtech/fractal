@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, VisuallyHidden } from 'react-aria-components'
 import { EmbraceMarkdownPreview } from './EmbraceToolPreview'
 import { Icon, type IconName } from './composition/Icons'
 import { surfaceVars, textVars, borderVars, accentVars, statusVars, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
@@ -43,7 +43,7 @@ export interface AgentMessageProps {
 }
 
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels. */
-export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><span {...stylex.props(styles.visuallyHidden)}>{id}</span></span>
+export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}>{id.includes('.') ? <><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></> : id}</span>
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
 const MessageBody = ({ text, foreground = false }: { readonly text: string; readonly foreground?: boolean }) => {
@@ -90,19 +90,19 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
   return <MessageFrame variant={variant} frameStyles={frameStyles} label={variant._tag === 'Outgoing' ? `Message to ${to ?? ''}` : `Message from ${from}`} subject={subject} header={<>
     {headerGlyph?._tag !== 'Hidden' ? <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name={headerGlyph?._tag === 'Icon' ? headerGlyph.name : variant._tag === 'Human' ? 'person' : 'message'} scale="status" /></span> : null}
     <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span><strong {...stylex.props(styles.sender)}>{counterpart !== undefined ? <AgentIdHierarchy id={counterpart} /> : null}</strong>{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta)}> → <AgentIdHierarchy id={to} /></span> : null}{via !== undefined ? <span {...stylex.props(styles.meta)}> · <span>{({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span></span> : null}</span>
-    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} title={`Reply to ${replyTo}`} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <span {...stylex.props(styles.meta)} title={`Reply to ${replyTo}`}><Icon name="arrow-left" scale="status" /></span> : null}
+    {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <span {...stylex.props(styles.meta)} title={`Reply to ${replyTo}`}><Icon name="arrow-left" scale="status" /></span> : null}
     {delivery?._tag === 'BroadcastCopy' ? <span {...stylex.props(styles.chip)}>broadcast · {delivery.recipients} seats</span> : arrivedWhileWorking ? <span {...stylex.props(styles.chip)}>arrived while working</span> : null}
-    {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label="Copy id" {...stylex.props(styles.headerAction, styles.copy)} title={`message/${id}`} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}
+    {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label={`Copy id`} {...stylex.props(styles.headerAction, styles.copy)} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}
     {id !== undefined && (onCopyId === undefined || onCopy !== undefined) ? <span {...stylex.props(styles.visuallyHidden)}>message/<AgentIdHierarchy id={id} /></span> : null}
     {headerMeta === undefined && at !== undefined ? <time {...stylex.props(styles.meta, styles.time)}>{at}</time> : null}
   </>}>
     {body._tag === 'Full' && body.markdown.length > 4000 ? <Disclosure defaultExpanded={loaded}>
       {({ isExpanded }) => <>
         <Button slot="trigger" {...stylex.props(styles.button)}>{isExpanded ? 'Hide full message' : 'Show full message'}</Button>
-        {!isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Message excerpt"><MessageBody text={preview} foreground={variant._tag !== 'Outgoing'} /></div> : null}
+        {!isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="group" aria-label="Message excerpt"><MessageBody text={preview} foreground={variant._tag !== 'Outgoing'} /></div> : null}
         <DisclosurePanel>{isExpanded ? <div {...stylex.props(styles.messageBody)} tabIndex={0} role="region" aria-label="Full message"><MessageBody text={body.markdown} foreground={variant._tag !== 'Outgoing'} /></div> : null}</DisclosurePanel>
       </>}
-    </Disclosure> : <div {...stylex.props(styles.messageBody)} tabIndex={body.markdown.length > 4000 ? 0 : undefined} role="region" aria-label={body._tag === 'Full' ? 'Message body' : 'Message excerpt'}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} foreground={variant._tag !== 'Outgoing'} /></div>}
+    </Disclosure> : <div {...stylex.props(styles.messageBody)} tabIndex={body.markdown.length > 4000 ? 0 : undefined} role={body.markdown.length > 4000 ? 'region' : 'group'} aria-label={body._tag === 'Full' ? 'Message body' : 'Message excerpt'}><MessageBody text={body._tag === 'Full' ? body.markdown : preview} foreground={variant._tag !== 'Outgoing'} /></div>}
     {body._tag !== 'Full' || loaded ? <div {...stylex.props(styles.controls)}>
       {!loaded ? <span {...stylex.props(styles.meta)}>Message preview</span> : null}
       <Button {...stylex.props(styles.button)} isPending={body._tag === 'Loading'} isDisabled={!loaded && onLoadFull === undefined} aria-disabled={loaded || undefined} aria-describedby={reasonId} onPress={loaded ? undefined : () => { setLoadRequested(true); onLoadFull?.() }}>{loaded ? 'Full message loaded' : body._tag === 'Loading' ? 'Loading full message…' : body._tag === 'Failed' ? 'Retry full message' : 'Show full message'}</Button>
@@ -140,13 +140,18 @@ export const OutgoingMessageRow = ({ message, recipients, delivery, at, subject,
       <header data-message-header {...stylex.props(styles.workHeader)} title={at}>
         <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name="message" scale="status" /></span>
         <Button slot="trigger" aria-label={`To ${target ?? ''} · ${firstLine}`} {...stylex.props(styles.trigger)}>
-          <span {...stylex.props(styles.meta)}>To</span>
+          <span {...stylex.props(styles.rowTitle)}>
+          <span {...stylex.props(styles.meta)}>To </span>
           {target !== undefined ? <strong {...stylex.props(styles.sender)}>{delivery._tag === 'Broadcast' ? target : <AgentIdHierarchy id={target} />}</strong> : null}
+          {' · '}
           <span {...stylex.props(styles.excerpt)} title={firstLine}>{firstLine}</span>
+          </span>
+          <span data-message-disclosure aria-hidden="true" {...stylex.props(styles.disclosureGlyph)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span>
         </Button>
-        {receiptCount > 0 ? <span {...stylex.props(styles.meta)}>{receiptCount} {receiptCount === 1 ? 'receipt' : 'receipts'}</span> : null}
-        {onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : null}
-        <span aria-hidden="true" {...stylex.props(styles.disclosureGlyph)}><Icon name={isExpanded ? 'chevron-down' : 'chevron-right'} scale="disclosure" /></span>
+        <span {...stylex.props(styles.rowMetadata)}>
+          {receiptCount > 0 ? <span {...stylex.props(styles.meta)}>{receiptCount} {receiptCount === 1 ? 'receipt' : 'receipts'}</span> : null}
+          {onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : null}
+        </span>
       </header>
       {isExpanded ? <DisclosurePanel>
         <div data-opened-body {...stylex.props(styles.openedBody)}>
@@ -168,9 +173,11 @@ const styles = stylex.create({
   outgoing: { padding: 0, backgroundColor: surfaceVars.transparent },
   human: { paddingBlock: s.xs, paddingInline: s.lg, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accentVars.primary, backgroundColor: surfaceVars.transparent },
   header: { display: 'flex', alignItems: 'center', gap: s.sm, height: g.icon, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  workHeader: { display: 'flex', alignItems: 'center', gap: s.sm, height: g.toolRow, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  disclosureGlyph: { width: g.icon, flex: '0 0 auto', display: 'inline-flex', justifyContent: 'center', color: textVars.fgMuted },
-  openedBody: { marginTop: s.xs2, marginLeft: `calc(${g.icon} + ${s.sm})`, paddingBlock: s.md, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.border, borderRadius: r.sm, display: 'flex', flexDirection: 'column', gap: s.md },
+  workHeader: { position: 'relative', display: 'grid', gridTemplateColumns: g.workRowColumns, alignItems: 'center', gap: s.sm, height: g.toolRow, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  rowMetadata: { gridColumn: 3, gridRow: 1, pointerEvents: 'none', display: 'inline-flex', alignItems: 'center', gap: s.sm, whiteSpace: 'nowrap', minWidth: 0 },
+  rowTitle: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap' },
+  disclosureGlyph: { position: 'absolute', insetInlineEnd: `calc(${g.durationColumn} + ${s.sm})`, top: s.xs, width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
+  openedBody: { marginTop: s.xs2, marginLeft: g.textColumn, paddingBlock: s.md, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.border, borderRadius: r.sm, display: 'flex', flexDirection: 'column', gap: s.md },
   openedSubject: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   counterpart: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
@@ -185,8 +192,8 @@ const styles = stylex.create({
   subject: { margin: 0, marginTop: s.xs, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   button: { padding: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   headerAction: { flex: '0 1 auto', minWidth: 0, height: g.icon, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  copy: { opacity: { default: 0, ':hover': 1, ':focus-visible': 1 }, flex: '0 0 auto', width: g.icon },
-  trigger: { flex: '1 1 auto', minWidth: 0, display: 'flex', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  copy: { pointerEvents: 'auto', opacity: { default: 0, ':hover': 1, ':focus-visible': 1 }, flex: '0 0 auto', width: g.icon },
+  trigger: { gridColumn: '2 / 5', gridRow: 1, height: g.toolRow, minWidth: 0, display: 'grid', gridTemplateColumns: 'subgrid', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   receipt: { flex: '0 1 auto', minWidth: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.denseSize, lineHeight: t.metaLeading, color: textVars.fgMuted, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
   danger: { color: statusVars.dangerFg },

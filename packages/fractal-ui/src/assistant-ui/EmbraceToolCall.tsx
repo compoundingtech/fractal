@@ -133,7 +133,7 @@ const ToolPresentation = ({ name, input, output, mediaType, status, variant, cal
 }) => {
   const kind = toolKind(name)
   const request = questionRequest ?? questionRequestFromTool({ name, id, input, output, status, at, agentLabel })
-  if (request !== undefined) return <QuestionForm request={request} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} composerRouting={composerRouting} />
+  if (request !== undefined) return <QuestionForm ariaLabel={`Question · ${request.id}`} request={request} onOpenTerminal={onOpenTerminal} composerTyping={composerTyping} composerRouting={composerRouting} />
   const target = toolString(input, ['path', 'file_path', 'pattern', 'query', 'question', 'url', 'description'])
     || (kind === 'run' ? toolString(input, ['command', 'cmd']).trim().split(/\s+/).slice(0, 2).join(' ') : '')
   const label = `${verbs[kind][status === 'running' ? 1 : 0]} ${target || name}`

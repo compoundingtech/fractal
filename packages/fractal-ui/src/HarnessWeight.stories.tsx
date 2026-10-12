@@ -26,13 +26,13 @@ export function HarnessWeightComparison({ scheme = 'dark' }: { readonly scheme?:
       <header {...stylex.props(styles.header)}><h2 {...stylex.props(styles.title)}>{variant.name}</h2><p {...stylex.props(styles.note)}>{variant.note}</p></header>
       <p {...stylex.props(styles.prose)}>The retry change is ready for review. I’m collecting the review and background check results.</p>
       <div {...stylex.props(styles.list)}>{harnessWeightExamples.map(item => <HarnessNotice key={item.id} item={item} weight={variant.weight} />)}</div>
-      <section aria-label="Questions specimens" {...stylex.props(styles.list)}>
-        <div data-component-name="QuestionForm" data-weight-class="card"><QuestionForm request={questionRequest} onOpenTerminal={fn()} /></div>
-        <div data-component-name="QuestionSummary" data-weight-class="row"><QuestionSummary request={{ ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: 'a moment ago' } }} /></div>
-        <div data-component-name="NeedsYouBar" data-weight-class="shell"><NeedsYouBar requests={[questionRequest]} expanded={false} onToggle={fn()} /></div>
-        <div data-component-name="NeedsYouInbox" data-weight-class="shell"><NeedsYouInbox requests={[questionRequest]} onShowInThread={fn()} onOpenTerminal={fn()} /></div>
+      <section aria-label={`Questions specimens · ${variant.name}`} {...stylex.props(styles.list)}>
+        <div data-component-name="QuestionForm" data-weight-class="card"><QuestionForm ariaLabel={`Question · ${variant.name}`} request={questionRequest} onOpenTerminal={fn()} /></div>
+        <div data-component-name="QuestionSummary" data-weight-class="row"><QuestionSummary ariaLabel={`Question outcome · ${variant.name}`} request={{ ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: 'a moment ago' } }} /></div>
+        <div data-component-name="NeedsYouBar" data-weight-class="shell"><NeedsYouBar ariaLabel={`Needs you · ${variant.name}`} requests={[questionRequest]} expanded={false} onToggle={fn()} /></div>
+        <div data-component-name="NeedsYouInbox" data-weight-class="shell"><NeedsYouInbox ariaLabel={`Needs you inbox · ${variant.name}`} requests={[questionRequest]} onShowInThread={fn()} onOpenTerminal={fn()} /></div>
       </section>
-      <section aria-label="Messages specimens" {...stylex.props(styles.list)}>
+      <section aria-label={`Messages specimens · ${variant.name}`} {...stylex.props(styles.list)}>
         <div data-component-name="AgentMessage" data-weight-class="card"><AgentMessage {...agentMessage} /></div>
         <div data-component-name="OutgoingMessageRow" data-weight-class="row"><OutgoingMessageRow {...broadcastMessage} /></div>
       </section>
@@ -58,7 +58,7 @@ export const Dark: Story = {
       await expect(within(specimens.querySelector('[data-component-name="QuestionForm"]') as HTMLElement).getByRole('button', { name: 'Open terminal' })).toBeVisible()
       await expect(within(specimens.querySelector('[data-component-name="QuestionSummary"]') as HTMLElement).getByRole('button', { name: /Answered.*This thread/ })).toHaveAttribute('aria-expanded', 'false')
       await expect(within(specimens.querySelector('[data-component-name="NeedsYouBar"]') as HTMLElement).getByRole('button', { name: /is waiting on you/ })).toHaveAttribute('aria-expanded', 'false')
-      await expect(within(specimens.querySelector('[data-component-name="NeedsYouInbox"]') as HTMLElement).getByRole('region', { name: 'Needs you inbox' }).querySelector('details')).not.toHaveAttribute('open')
+      await expect(within(specimens.querySelector('[data-component-name="NeedsYouInbox"]') as HTMLElement).getByRole('region', { name: /^Needs you inbox ·/ }).querySelector('details')).not.toHaveAttribute('open')
       for (const [name, weightClass] of [['AgentMessage', 'card'], ['OutgoingMessageRow', 'row']] as const) {
         await expect(canvas.getByTestId(`harness-weight-${weight}`).querySelector(`[data-component-name="${name}"]`)).toHaveAttribute('data-weight-class', weightClass)
       }
