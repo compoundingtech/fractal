@@ -360,6 +360,8 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
   if (identity !== null) {
     const tooltips = () => Array.from(canvasElement.ownerDocument.querySelectorAll('[role="tooltip"]')).filter(tip => tip.textContent === 'Workspace.Review')
     await expect(identity).toHaveAccessibleName('Workspace.Review')
+    // Earlier steps leave keyboard modality; React Aria opens hover tooltips only under pointer modality.
+    await userEvent.pointer({ keys: '[MouseLeft]', target: canvasElement.ownerDocument.body })
     await userEvent.hover(identity)
     await waitFor(() => expect(tooltips(), 'identity tooltip on hover').toHaveLength(1))
     await userEvent.unhover(identity)
