@@ -64,6 +64,41 @@ const providerRows = (accounts: readonly QuotaAccount[], grouped: boolean): read
   })
 }
 
+/**
+ * Accounts whose ` · provider` suffix does not fit whole beside the name. The suffix folds into the account tooltip instead
+ * of being cut mid-word, so the name keeps the slot whenever secondary columns show. Re-measured on every render, on
+ * resize and once web fonts settle; the suffix keeps its intrinsic width while folded, so the decision is stable.
+ */
+const useFoldedProviders = (scope: React.RefObject<HTMLElement | null>): ReadonlySet<string> => {
+  const [folded, setFolded] = React.useState<ReadonlySet<string>>(() => new Set())
+  const measure = React.useCallback(() => {
+    const root = scope.current
+    if (root === null) return
+    const next = new Set<string>()
+    for (const button of root.querySelectorAll<HTMLElement>('[data-quota-account-button]')) {
+      const label = button.querySelector<HTMLElement>('[data-quota-account-label]')
+      const provider = button.querySelector<HTMLElement>('[data-quota-account-provider]')
+      if (label === null || provider === null || provider.getClientRects().length === 0) continue
+      if (Math.ceil(label.getBoundingClientRect().width) + provider.scrollWidth > button.clientWidth) next.add(button.dataset.quotaAccountButton ?? '')
+    }
+    setFolded(previous => previous.size === next.size && [...next].every(id => previous.has(id)) ? previous : next)
+  }, [scope])
+  React.useLayoutEffect(measure)
+  React.useEffect(() => {
+    const root = scope.current
+    if (root === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(root)
+    const fonts = root.ownerDocument.fonts as FontFaceSet | undefined
+    fonts?.addEventListener('loadingdone', measure)
+    return () => {
+      observer.disconnect()
+      fonts?.removeEventListener('loadingdone', measure)
+    }
+  }, [measure, scope])
+  return folded
+}
+
 /** Controlled filter keys preserve missing retained choices and only report the changed field. */
 const QuotaFilter = ({ label, value, options, valueLabels, onChange }: { readonly label: string; readonly value: string; readonly options: readonly string[]; readonly valueLabels?: Readonly<Partial<Record<string, string>>>; readonly onChange: (value: string) => void }) => {
   const choices = value !== '' && !options.includes(value) ? [value, ...options] : options
@@ -89,6 +124,8 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
   const providers = [...new Set(props.accounts.map(account => account.provider))].sort()
   const plans = [...new Set(props.accounts.map(account => account.plan))].sort()
   const states = [...new Set(props.accounts.map(account => account.state))].sort()
+  const drawerRef = React.useRef<HTMLElement>(null)
+  const foldedProviders = useFoldedProviders(drawerRef)
   // A supplied column holding only governing windows (already under Usage) would stay empty in every row.
   const displayColumns = props.variant === 'columns'
     ? props.columns.filter(column => props.accounts.some(account => account.windows.some(window => window.column === column.id && window.id !== quotaRoleWindow(account, 'governing')?.id)))
@@ -116,7 +153,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
     event.preventDefault()
     event.stopPropagation()
   }
-  return <section aria-label={props.landmarkContext === undefined ? 'Quota drawer' : `${props.landmarkContext} quota drawer`} tabIndex={0} onKeyDownCapture={onKeyDown} data-quota-drawer data-quota-variant={props.variant} data-quota-unit={props.unit} data-quota-collapsed={props.collapsed} data-quota-line-tolerance={quotaGeometry.lineCentreTolerance} {...stylex.props(styles.root)}>
+  return <section ref={drawerRef} aria-label={props.landmarkContext === undefined ? 'Quota drawer' : `${props.landmarkContext} quota drawer`} tabIndex={0} onKeyDownCapture={onKeyDown} data-quota-drawer data-quota-variant={props.variant} data-quota-unit={props.unit} data-quota-collapsed={props.collapsed} data-quota-line-tolerance={quotaGeometry.lineCentreTolerance} {...stylex.props(styles.root)}>
     <header {...stylex.props(styles.toolbar)}>
       <h2 {...stylex.props(styles.title)}>Quota <span {...stylex.props(styles.count)}>{accounts.length}/{props.accounts.length}</span></h2>
       <Button aria-label={`Toggle unit: ${props.unit === 'usd' ? '$ / tok' : 'tok / $'}`} aria-keyshortcuts="u" onPress={toggleUnit} {...stylex.props(styles.button)}>{props.unit === 'usd' ? '$ / tok' : 'tok / $'}</Button>
@@ -188,7 +225,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
               return <Row key={row.id} id={row.id} textValue={account.label} data-quota-row={account.id} data-quota-account-label={account.label} data-quota-state={account.state} {...stylex.props(usageMeterGrid.row, styles.row)}>
                 <Cell data-quota-cell="account" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
                   <div {...stylex.props(styles.accountLine)}>
-                    <ValueTooltipTrigger label={accountEvidence}><Button aria-label={`Open usage for ${accountEvidence}`} onPress={() => props.onOpenUsage(account.id)} {...stylex.props(usageMeterGrid.truncate, styles.accountButton)}><span data-quota-account-label>{account.label}</span><span {...stylex.props(styles.accountProvider)}> · {account.provider}</span></Button></ValueTooltipTrigger>
+                    <ValueTooltipTrigger label={accountEvidence}><Button aria-label={`Open usage for ${accountEvidence}`} onPress={() => props.onOpenUsage(account.id)} data-quota-account-button={account.id} {...stylex.props(usageMeterGrid.truncate, styles.accountButton)}><span data-quota-account-label>{account.label}</span><span data-quota-account-provider {...stylex.props(styles.accountProvider, foldedProviders.has(account.id) && styles.foldedProvider)}> · {account.provider}</span></Button></ValueTooltipTrigger>
                   </div>
                 </Cell>
                 <Cell data-quota-cell="primary" {...stylex.props(usageMeterGrid.cell, styles.cell)}>
@@ -213,7 +250,7 @@ export const QuotaDrawer = (props: QuotaDrawerProps): React.ReactElement => {
           </TableBody>
         </Table>
       </div>
-      <footer {...stylex.props(styles.shortcuts)}><FullValueTooltip full="With focus inside quota: s cycles sort, Shift+s reverses direction, u toggles units, m collapses, Escape closes. Shortcuts do not intercept form fields.">s sort · S reverse · u unit · m collapse · Esc close</FullValueTooltip></footer>
+      <footer data-quota-shortcuts {...stylex.props(styles.shortcuts)}><FullValueTooltip full="With focus inside quota: s cycles sort, Shift+s reverses direction, u toggles units, m collapses, Escape closes. Shortcuts do not intercept form fields."><span {...stylex.props(styles.wideShortcuts)}>s sort · S reverse · u unit · m collapse · Esc close</span><span {...stylex.props(styles.narrowShortcuts)}>s/S sort · u unit · m · Esc</span></FullValueTooltip></footer>
     </>}
   </section>
 }
@@ -254,7 +291,9 @@ const styles = stylex.create({
   moreColumn: { width: `calc(${quotaGeometry.moreWidth} + ${usageMeterGridVars.cellPaddingInline} * 2)`, fontFamily: type.fontMono },
   fullCount: { display: { default: 'inline', '@container (max-width: 26rem)': 'none' } },
   foldedSecondaryCount: { display: { default: 'none', '@container (max-width: 26rem)': 'inline' } },
-  accountProvider: { display: { default: 'inline', '@container (max-width: 18rem)': 'none' } },
+  // Atomic box (pre keeps its leading space) so the suffix shows whole or folds whole into the account tooltip.
+  accountProvider: { display: { default: 'inline-block', '@container (max-width: 18rem)': 'none' }, whiteSpace: 'pre', verticalAlign: 'top' },
+  foldedProvider: { width: 0, overflow: 'hidden', visibility: 'hidden' },
   resetCell: { overflow: 'visible', textOverflow: 'clip' },
   numeric: { textAlign: 'right' },
   cell: { minWidth: 0, outline: { default: 'none', ':focus-visible': quotaGeometry.focusOutline }, outlineOffset: quotaGeometry.insetFocusOffset },
@@ -284,5 +323,8 @@ const styles = stylex.create({
   groupLabel: { color: ink.fgSoft, fontWeight: type.weightSemibold },
   empty: { padding: `${space.xl} ${space.md}`, textAlign: 'center', color: ink.fgSoft, overflowWrap: 'anywhere' },
   emptyNote: { display: 'block', marginTop: space.sm, color: ink.fgMuted, fontSize: type.microSize },
-  shortcuts: { padding: `${space.xs} ${space.md}`, color: ink.fgMuted, fontSize: type.microSize, lineHeight: quotaGeometry.shortcutLeading, flexShrink: 0, overflowWrap: 'anywhere', borderTop: quotaGeometry.hair },
+  // One line at every width: below 18rem the short legend swaps in; the full sentence stays in the tooltip.
+  shortcuts: { padding: `${space.xs} ${space.md}`, color: ink.fgMuted, fontSize: type.microSize, lineHeight: quotaGeometry.shortcutLeading, flexShrink: 0, whiteSpace: 'nowrap', borderTop: quotaGeometry.hair },
+  wideShortcuts: { display: { default: 'inline', '@container (max-width: 18rem)': 'none' } },
+  narrowShortcuts: { display: { default: 'none', '@container (max-width: 18rem)': 'inline' } },
 })

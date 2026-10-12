@@ -200,18 +200,31 @@ Its accessible name includes that visible count and the full evidence descriptio
 The governing reset never folds or ellipsizes. The `quotaOverflowPolicy` constant
 is the single swap point for collapse/hide/truncate pending the overflow decision.
 Variant meters stay inside the same row rather than growing an account into a card.
+When the account's ` · provider` suffix does not fit whole, it folds into the
+account tooltip instead of being cut mid-word; the drawer re-measures on render,
+resize and font load. The density proof fails if an account button overflows
+while any secondary column is shown, or if a shown provider suffix is clipped.
+The shortcut footer stays on one line: at 18rem and below it shows a short
+legend, and the full sentence is in its tooltip.
 Unreported amounts and readings show `—`; their tooltips and accessible names say Unreported.
 The usage-meter table uses the same 22px rows and 8px gaps. From a 40rem
 container its window and reset tracks widen to fit a full reading and a reset
-with its count, and More shows its full header from 36rem. In narrower tracks
-the bar shrinks to its minimum before a reading ellipsizes. Reset glyphs stay on the text line, reset and +N
+with its count, and More shows its full header from 36rem. Below 40rem a cell
+shows a compact reading (percentage, the alert glyph for exhaustion, `—` for
+Unreported) and the row's caller-owned `compactReset` (≤4ch, for example `1h`
+or `—`), so neither reading nor reset is cut: the bar yields to its minimum
+first, then the window label and the account. The full reading and reset stay
+in the cell tooltip. The narrow meter stories assert at 240px that every reading
+and reset sits whole inside its cell and that reset ink keeps 8px from +N. Reset glyphs stay on the text line, reset and +N
 align right, and the open row keeps the hover wash with an accent underline so
 muted and warning ink stay at AA contrast.
 
-Neither table uses native `title` attributes. A clipped or abbreviated value
+Neither table nor the Usage page uses native `title` attributes. A clipped or abbreviated value
 (account caption, compact meter, reset, amount, drawer window reading, status,
-shortcut footer, the drawer's Usage, `$ / tok` and +N column headers, and the
-meter's narrow Δ header) is a focusable trigger built from `FullValueTooltip`: a
+shortcut footer, the drawer's Usage, `$ / tok` and +N column headers, the
+meter's narrow Δ header, and the Usage page's status line, unit note,
+small-multiple and drill labels, model/scope/accounts cells and cost-table
+labels) is a focusable trigger built from `FullValueTooltip`: a
 static `role="img"` element (the role React Aria requires of a non-interactive
 tooltip trigger) whose visible text is `aria-hidden` and whose name comes from
 a mounted `VisuallyHidden` copy of the full value. A React Aria tooltip with the
@@ -223,9 +236,10 @@ tooltip; React Aria closes it when the pointer leaves, even if the trigger
 keeps focus. Drawer sort controls are content-sized flex items 8px apart; at
 18rem and below the inactive sort glyphs hide so the Gov, Cmp, Acct, Reset and
 +N labels still fit, while the active direction stays an SVG glyph. The
-`NarrowFullValueTooltips` meter story and the Drawer S Priority stories assert
-that no non-empty `[title]` exists (React Aria's hidden form `<select>` carries
-an empty one), that the 200/240/320 sort controls keep 8px gaps, and that hover
+`NarrowFullValueTooltips` meter story, the Drawer S Priority stories and every
+quota story's refresh play assert that no non-empty `[title]` exists (React
+Aria's hidden form `<select>` carries an empty one), that the 200/240/320 sort
+controls keep 8px gaps, and that hover
 and then focus on a clipped value or abbreviated header each show one
 `[role=tooltip]` with the full text. Below 36rem only the meter's Δ trigger
 renders (the full More label is `display: none`), so the column is named once.

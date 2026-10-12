@@ -16,7 +16,7 @@ const rows: readonly UsageMeterRow[] = [
     id: 'meter-north', label: 'North workspace', identity: 'team plan · seat 1',
     governing: { label: '5h window', text: '72% · 3.6k / 5k', fraction: 0.72, tone: 'warning' },
     comparison: { label: 'weekly', text: '41%', fraction: 0.41, tone: 'ok' },
-    reset: 'in 1h 12m', resetCount: 2, omitted: 1, stale: false,
+    reset: 'in 1h 12m', compactReset: '1h', resetCount: 2, omitted: 1, stale: false,
     detail: {
       facts: [{ label: 'Plan', value: 'Team' }, { label: 'Observed', value: '10:40 local' }],
       windows: [
@@ -31,7 +31,7 @@ const rows: readonly UsageMeterRow[] = [
     id: 'meter-harbor', label: 'Harbor sandbox', identity: 'personal plan',
     governing: { label: 'weekly', text: 'exhausted!', tone: 'exhausted' },
     comparison: { label: '5h window', text: '100% · 50 / 50', fraction: 1, tone: 'critical' },
-    reset: 'in 2d 4h', resetCount: 0, omitted: 0, stale: false, note: 'Requests resume after reset',
+    reset: 'in 2d 4h', compactReset: '2d', resetCount: 0, omitted: 0, stale: false, note: 'Requests resume after reset',
     detail: {
       facts: [{ label: 'Plan', value: 'Personal' }],
       windows: [
@@ -44,7 +44,7 @@ const rows: readonly UsageMeterRow[] = [
   {
     id: 'meter-meadow', label: 'Meadow lab', identity: 'trial plan',
     governing: { label: 'daily', text: 'Unreported', tone: 'unknown' },
-    reset: 'Unreported', omitted: 2, stale: true,
+    reset: 'Unreported', compactReset: '—', omitted: 2, stale: true,
     detail: {
       facts: [{ label: 'Observed', value: 'yesterday 18:05 local' }],
       windows: [
@@ -130,26 +130,83 @@ const meta = {
 export default meta
 type Story = StoryObj<Args>
 
+/** Painted ink (text fragments and SVG glyphs) inside `root`, clipped by overflow ancestors; display:none and visually hidden copies are skipped. */
+function inkBox(root: HTMLElement): { readonly left: number; readonly right: number } {
+  const boxes: { left: number; right: number }[] = []
+  const paint = (element: Element, box: DOMRect) => {
+    let left = box.left
+    let right = box.right
+    for (let node: Element | null = element; node !== null && node !== root.parentElement; node = node.parentElement) {
+      const style = getComputedStyle(node)
+      if (style.display === 'none' || style.visibility === 'hidden' || style.clipPath !== 'none') return
+      if (style.overflowX !== 'visible') {
+        const clip = node.getBoundingClientRect()
+        left = Math.max(left, clip.left)
+        right = Math.min(right, clip.right)
+      }
+    }
+    if (right > left) boxes.push({ left, right })
+  }
+  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const range = root.ownerDocument.createRange()
+  while (walker.nextNode()) {
+    const text = walker.currentNode
+    if (text.textContent?.trim() === '' || text.parentElement === null) continue
+    range.selectNodeContents(text)
+    for (const box of range.getClientRects()) paint(text.parentElement, box)
+  }
+  for (const svg of root.querySelectorAll('svg')) paint(svg, svg.getBoundingClientRect())
+  return { left: Math.min(...boxes.map(box => box.left)), right: Math.max(...boxes.map(box => box.right)) }
+}
+
+/** At 240px every reading and reset stays whole while account and window labels absorb the cut, and the reset keeps 8px of ink clearance from +N. */
+const narrowMeterPlay: NonNullable<Story['play']> = async ({ canvasElement }) => {
+  const rows = await waitFor(() => {
+    const found = [...canvasElement.querySelectorAll<HTMLElement>('[data-usage-meter-row]')]
+    expect(found.length).toBeGreaterThan(0)
+    return found
+  })
+  await expect(Math.round(rows[0]!.closest<HTMLElement>('[data-usage-meter-table]')!.getBoundingClientRect().width)).toBe(240)
+  for (const row of rows) {
+    const [, governing, reset, , more] = [...row.children] as HTMLElement[]
+    for (const cell of [governing!, reset!]) {
+      await expect(cell.scrollWidth, `${row.dataset.usageMeterRow} cell is cut`).toBeLessThanOrEqual(cell.clientWidth)
+      const style = getComputedStyle(cell)
+      const box = cell.getBoundingClientRect()
+      const values = [...cell.querySelectorAll<HTMLElement>('[data-usage-meter-reading], [data-usage-meter-compact-reading], [data-usage-meter-reset-reading]')].filter(value => value.getClientRects().length > 0)
+      await expect(values.length).toBeGreaterThan(0)
+      for (const value of values) {
+        const rect = value.getBoundingClientRect()
+        await expect(rect.left, `${value.textContent} starts inside its cell`).toBeGreaterThanOrEqual(box.left + Number.parseFloat(style.paddingLeft) - 0.5)
+        await expect(rect.right, `${value.textContent} ends inside its cell`).toBeLessThanOrEqual(box.right - Number.parseFloat(style.paddingRight) + 0.5)
+      }
+    }
+    await expect(inkBox(more!).left - inkBox(reset!).right, `${row.dataset.usageMeterRow} reset → +N ink gap`).toBeGreaterThanOrEqual(8)
+  }
+}
+
 export const AllStates: Story = { render: AllStatesStory }
 export const Wide: Story = {}
 export const Light: Story = { args: { scheme: 'light' } }
-export const Narrow: Story = { args: { width: 'narrow' } }
+export const Narrow: Story = { args: { width: 'narrow' }, play: narrowMeterPlay }
 // Call the story function directly: its useArgs preview hook is illegal inside a nested React element.
-export const DenseEleven: Story = { args: { width: 'narrow' }, render: args => Controlled({ ...args, displayRows: denseRows }) }
+export const DenseEleven: Story = { args: { width: 'narrow' }, render: args => Controlled({ ...args, displayRows: denseRows }), play: narrowMeterPlay }
 export const DenseElevenLight: Story = { ...DenseEleven, args: { width: 'narrow', scheme: 'light' } }
-export const NarrowEvidence: Story = { args: { width: 'narrow' }, render: args => Controlled({ ...args, displayRows: narrowEvidenceRows }) }
+export const NarrowEvidence: Story = { args: { width: 'narrow' }, render: args => Controlled({ ...args, displayRows: narrowEvidenceRows }), play: narrowMeterPlay }
 export const NarrowEvidenceLight: Story = { ...NarrowEvidence, args: { width: 'narrow', scheme: 'light' } }
 export const Detail: Story = { args: { selectedId: 'meter-north' } }
-export const NarrowDetail: Story = { args: { width: 'narrow', selectedId: 'meter-meadow', status: 'unreachable' } }
+export const NarrowDetail: Story = { args: { width: 'narrow', selectedId: 'meter-meadow', status: 'unreachable' }, play: narrowMeterPlay }
 export const DetailHistory: Story = { args: { selectedId: 'meter-north', history: 'ready' } }
-export const NarrowDetailHistory: Story = { args: { width: 'narrow', selectedId: 'meter-north', history: 'ready', scheme: 'light' } }
+export const NarrowDetailHistory: Story = { args: { width: 'narrow', selectedId: 'meter-north', history: 'ready', scheme: 'light' }, play: narrowMeterPlay }
 export const HistoryStates: Story = { render: args => <Frame scheme={args.scheme} width={args.width}>{(['loading', 'unavailable', 'empty', 'ready'] as const).map(state => <UsageMeterHistoryChart key={state} history={histories[state]} landmarkContext={state} />)}</Frame> }
 export const HourlyHistogram: Story = { render: args => <Frame scheme={args.scheme} width={args.width}><UsageMeterHistoryChart history={{ kind: 'ready', label: 'Merged per hour', text: '24h · max 8 · 23:00 partial', points: hourlyPoints, facts: [] }} /></Frame> }
 export const Empty: Story = { render: args => <Frame scheme={args.scheme} width={args.width}><UsageMeterTable rows={[]} status={{ kind: 'loading', text: statusText.loading }} sort={{ key: args.sortKey, direction: args.direction }} onSort={() => {}} onCycleSort={() => {}} onSelect={() => {}} onCloseDetail={() => {}} /></Frame> }
-/** A clipped reading, a history period and the abbreviated Δ column header each disclose their full value through one tooltip on hover and on keyboard focus; no native title remains. */
+/** A compact reading, a history period and the abbreviated Δ column header each disclose their full value through one tooltip on hover and on keyboard focus; no native title remains. */
 export const NarrowFullValueTooltips: Story = {
   args: { width: 'narrow', selectedId: 'meter-north', history: 'ready' },
-  play: async ({ canvasElement }) => {
+  play: async context => {
+    await narrowMeterPlay(context)
+    const { canvasElement } = context
     const row = await waitFor(() => {
       const found = canvasElement.querySelector<HTMLElement>('[data-usage-meter-row="meter-north"]')
       expect(found).not.toBeNull()
@@ -157,8 +214,11 @@ export const NarrowFullValueTooltips: Story = {
     })
     const table = row.closest<HTMLElement>('[data-usage-meter-table]')!
     await expectNoNativeTitles(table)
-    const reading = row.querySelector<HTMLElement>('[data-usage-meter-reading]')!
-    await expect(reading.scrollWidth).toBeGreaterThan(reading.clientWidth)
+    // Below 40rem the cell shows the compact reading; the full reading lives in the tooltip.
+    const reading = row.querySelector<HTMLElement>('[data-usage-meter-compact-reading]')!
+    await expect(reading.getClientRects().length).toBeGreaterThan(0)
+    await expect(row.querySelector<HTMLElement>('[data-usage-meter-reading]')!.getClientRects()).toHaveLength(0)
+    await expect(reading.textContent).toBe('72%')
     await expectSingleFullValueTooltip(reading.closest<HTMLElement>('[data-full-value-trigger]')!, '5h window · 72% · 3.6k / 5k')
     const open = dailyPoints.at(-1)!
     await expectSingleFullValueTooltip(table.querySelector<HTMLElement>(`[data-usage-meter-history-point="${open.id}"]`)!, `${open.label}: ${open.text} (open)`)

@@ -6,6 +6,7 @@ import { Button, Label, ListBox, ListBoxItem, Radio, RadioGroup, Slider, SliderO
 import { accentVars as accent, borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import type { QuotaAccount, QuotaEconomics, QuotaHistoryDay, QuotaHistoryValue, QuotaUnit, QuotaUsageProps, QuotaWindow } from './quota-design-types'
 import { quotaStateLabels } from './quota-design-copy.ts'
+import { FullValueTooltip } from './FullValueTooltip.tsx'
 
 /** USD is only shown when the in-range values carry at least this much USD coverage (TUI rule). */
 const usdCoverageGate = 0.95
@@ -240,7 +241,7 @@ const SmallMultiples = ({ cells, series, unit, selectedDay, onDay, onHover }: { 
       const only = [item]
       const total = cells.reduce((tally, cell) => addTally(tally, cell.bySeries.get(item.key) ?? emptyTally), emptyTally)
       return <li key={item.key} data-quota-series={item.key} {...stylex.props(styles.multiple)}>
-        <div {...stylex.props(styles.multipleHead)}><Swatch tone={item.tone} /><span {...stylex.props(styles.truncate)} title={item.label}>{item.label}</span><span {...stylex.props(styles.figure)}>{tallyText(total, format)}</span></div>
+        <div {...stylex.props(styles.multipleHead)}><Swatch tone={item.tone} /><FullValueTooltip full={item.label} style={styles.truncate}>{item.label}</FullValueTooltip><span {...stylex.props(styles.figure)}>{tallyText(total, format)}</span></div>
         <StackedChart cells={cells} series={only} unit={unit} height="small" label={`${item.label} days`} selectedDay={selectedDay} onDay={onDay} onHover={onHover} />
         <span {...stylex.props(styles.scaleNote)}>Own scale · peak {formatCompact(unit, scaleOf(cells, only))}</span>
       </li>
@@ -269,7 +270,7 @@ const Heatmap = ({ cells, series, unit, selectedDay, onDay, onHover, landmarkCon
           {total.known === 0 && total.unknown > 0 ? <span aria-hidden="true" {...stylex.props(styles.heatFill, styles.heatUnknown)} />
             : total.sum === 0 ? <span aria-hidden="true" {...stylex.props(styles.heatFill, styles.heatZero)} />
               : <span aria-hidden="true" {...stylex.props(styles.heatFill, styles.heatKnown, heatLevels[Math.max(0, level)])} />}
-          <span aria-hidden="true" title={description} {...stylex.props(styles.heatLabel)}>{cell.day.label}</span>
+          <span aria-hidden="true" {...stylex.props(styles.heatLabel)}>{cell.day.label}</span>
         </Button>
       })}
     </div>
@@ -282,7 +283,7 @@ const Heatmap = ({ cells, series, unit, selectedDay, onDay, onHover, landmarkCon
           const total = totalOf(selected, series)
           const share = total.sum === 0 ? 0 : tally.sum / total.sum
           return [<li key={item.key} {...stylex.props(styles.drillItem)}>
-            <span {...stylex.props(styles.truncate)} title={item.label}>{item.label}</span>
+            <FullValueTooltip full={item.label} style={styles.truncate}>{item.label}</FullValueTooltip>
             <span aria-hidden="true" {...stylex.props(styles.drillTrack)}>{tally.known > 0 && <span {...stylex.props(styles.drillFill, toneBackground[item.tone], styles.share(`${share * 100}%`))} />}</span>
             <span {...stylex.props(styles.figure)}>{tallyText(tally, formatExact(unit))}</span>
           </li>]
@@ -334,9 +335,9 @@ const Breakdown = ({ days, scopeDays, accounts, unit, selected, rangeLabel, land
         </tr></thead>
         <tbody>
           {rows.map(row => <tr key={row.key} data-quota-breakdown-row={row.key}>
-            <th scope="row" title={row.model} {...stylex.props(styles.td, styles.rowHead)}>{row.model}</th>
-            <td title={row.scope} {...stylex.props(styles.td)}>{row.scope}</td>
-            <td title={row.accounts.join(', ')} {...stylex.props(styles.td)}>{row.accounts.join(', ')}</td>
+            <th scope="row" {...stylex.props(styles.td, styles.rowHead)}><FullValueTooltip full={row.model} style={styles.block}>{row.model}</FullValueTooltip></th>
+            <td {...stylex.props(styles.td)}><FullValueTooltip full={row.scope} style={styles.block}>{row.scope}</FullValueTooltip></td>
+            <td {...stylex.props(styles.td)}><FullValueTooltip full={row.accounts.join(', ')} style={styles.block}>{row.accounts.join(', ')}</FullValueTooltip></td>
             <td {...stylex.props(styles.td, styles.numeric)}>{tallyText(row.value, format)}</td>
             <td {...stylex.props(styles.td, styles.numeric)}>{coverageText(row.coverage)}</td>
             {tokenLabels.map(label => <td key={label} {...stylex.props(styles.td, styles.numeric)}>{tallyText(row.tokenTypes.get(label) ?? emptyTally, count)}</td>)}
@@ -426,7 +427,7 @@ const CostOverview = ({ economics, accounts, landmarkContext }: { readonly econo
           const account = accounts.find(candidate => candidate.id === item.accountId)
           const limit = account?.windows.find(window => window.id === item.limitId)?.label ?? item.limitId
           return <tr key={item.id} data-quota-economics={item.id}>
-            <th scope="row" {...stylex.props(styles.td, styles.rowHead)}><span {...stylex.props(styles.block)} title={item.label}>{item.label}</span><span {...stylex.props(styles.block, styles.muted)} title={`${account?.label ?? item.accountId} · ${limit}`}>{account?.label ?? item.accountId} · {limit}</span></th>
+            <th scope="row" {...stylex.props(styles.td, styles.rowHead)}><FullValueTooltip full={item.label} style={styles.block}>{item.label}</FullValueTooltip><FullValueTooltip full={`${account?.label ?? item.accountId} · ${limit}`} style={[styles.block, styles.muted]}>{account?.label ?? item.accountId} · {limit}</FullValueTooltip></th>
             <td {...stylex.props(styles.td, styles.numeric)}>{formatUsd(item.usageValue)}</td>
             <td {...stylex.props(styles.td, styles.numeric)}><span {...stylex.props(styles.block)}>{formatUsd(item.price)}</span><span {...stylex.props(styles.block, styles.muted)}>{item.basis === 'invoiced' ? 'Invoice' : 'List price'}</span></td>
             <td {...stylex.props(styles.td, styles.numeric)}>{formatUsd(item.ledgerValue)}</td>
@@ -483,9 +484,9 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
     <header {...stylex.props(styles.header)}>
       {onBack !== undefined && <Button onPress={onBack} {...stylex.props(styles.button)}><Icon name="chevrons-left" size={12} />Back</Button>}
       <h1 {...stylex.props(styles.pageTitle)}>Usage</h1>
-      <p role={statusAlert ? 'alert' : 'status'} title={quotaStatus.text} data-quota-status-kind={quotaStatus.kind} {...stylex.props(styles.status, (quotaStatus.kind === 'stale' || quotaStatus.kind === 'unpublished' || quotaStatus.kind === 'loading') && styles.statusWarn, statusAlert && styles.statusDanger)}>
+      <p role={statusAlert ? 'alert' : 'status'} data-quota-status-kind={quotaStatus.kind} {...stylex.props(styles.status, (quotaStatus.kind === 'stale' || quotaStatus.kind === 'unpublished' || quotaStatus.kind === 'loading') && styles.statusWarn, statusAlert && styles.statusDanger)}>
         <span aria-hidden="true" {...stylex.props(styles.statusDot)} />
-        <span {...stylex.props(styles.truncate)}>{quotaStatus.text}</span>
+        <FullValueTooltip full={quotaStatus.text} style={styles.truncate}>{quotaStatus.text}</FullValueTooltip>
       </p>
       <div role="toolbar" aria-label="Usage view" {...stylex.props(styles.toolbar)}>
         <RadioGroup value={stackBy} orientation="horizontal" onChange={value => { if (value === 'account' || value === 'model') onStackBy(value) }} {...stylex.props(styles.segmented)}>
@@ -496,7 +497,7 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
         <Button aria-label="Toggle unit: $ / tokens" aria-describedby={ids.unitNote} aria-keyshortcuts="u" onPress={toggleUnit} {...stylex.props(styles.button, styles.unitButton)}>
           <span aria-hidden="true" {...stylex.props(unit === 'usd' ? styles.unitOn : styles.unitOff)}>$</span><span aria-hidden="true" {...stylex.props(styles.muted)}>/</span><span aria-hidden="true" {...stylex.props(unit === 'tokens' ? styles.unitOn : styles.unitOff)}>tokens</span>
         </Button>
-        <span id={ids.unitNote} title={unitNote} data-quota-unit-fallback={unit !== effectiveUnit || undefined} {...stylex.props(styles.unitNote, unit !== effectiveUnit && styles.unitFallback)}>{unitNote}</span>
+        <span id={ids.unitNote} data-quota-unit-fallback={unit !== effectiveUnit || undefined} {...stylex.props(styles.unitNote, unit !== effectiveUnit && styles.unitFallback)}><FullValueTooltip full={unitNote} style={styles.block}>{unitNote}</FullValueTooltip></span>
       </div>
     </header>
     <div {...stylex.props(styles.grid)}>

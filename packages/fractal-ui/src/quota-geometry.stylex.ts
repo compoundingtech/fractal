@@ -99,6 +99,13 @@ export const quotaGeometry = stylex.defineVars({
   meterTrackMaximumWidth: '72px',
   meterTrackHeight: geometry.progressSm,
   compactMeterMinimumWidth: '8px',
+  /** Compact meter grid: the window label takes up to its text; the reading (with the bar at its minimum) is never squeezed. */
+  meterCellColumns: 'minmax(0, max-content) minmax(min-content, 1fr)',
+  meterWindowLabelWidth: '7ch',
+  meterNarrowWindowLabelWidth: '5ch',
+  /** Stale bars and open (partial) history periods read as receding evidence, not current fill. */
+  staleMeterOpacity: '0.4',
+  openPeriodOpacity: '0.45',
   meterMoreButtonHeight: '18px',
   historyChartHeight: '48px',
   historyMinimumBarHeight: '1px',

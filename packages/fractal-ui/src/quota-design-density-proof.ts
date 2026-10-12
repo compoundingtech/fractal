@@ -55,6 +55,12 @@ export function assertQuotaDrawerDensity(drawer: HTMLElement) {
     const label = row.querySelector<HTMLElement>('[data-quota-account-label]')
     const accountCell = row.querySelector<HTMLElement>('[data-quota-cell="account"]')!
     if (label === null || label.textContent !== row.dataset.quotaAccountLabel || accountCell.clientWidth < label.textContent.length) throw new Error('Account identity lost its readable slot')
+    // Priority: secondary columns (amount, extra windows) only show once the account fits; its provider suffix folds whole, never mid-word.
+    const accountButton = accountCell.querySelector<HTMLElement>('button')
+    const secondaryShown = [...row.querySelectorAll<HTMLElement>('[data-quota-cell]')].some(cell => !['account', 'primary', 'reset', 'more'].includes(cell.dataset.quotaCell ?? '') && visibleBox(cell, row))
+    if (secondaryShown && (accountButton === null || accountButton.scrollWidth > accountButton.clientWidth + 0.5)) throw new Error(`Account ${row.dataset.quotaAccountLabel} is cut while secondary columns show`)
+    const provider = row.querySelector<HTMLElement>('[data-quota-account-provider]')
+    if (provider !== null && accountButton !== null && visibleBox(provider, row) && provider.getBoundingClientRect().right > accountButton.getBoundingClientRect().right + 0.5) throw new Error('Account provider suffix is cut mid-word')
     const reset = row.querySelector<HTMLElement>('[data-quota-reset-reading]')
     const resetCell = row.querySelector<HTMLElement>('[data-quota-cell="reset"]')!
     if (reset === null || !visibleBox(reset, row) || reset.getBoundingClientRect().right > resetCell.getBoundingClientRect().right + 1) throw new Error('Governing reset is hidden or clipped')

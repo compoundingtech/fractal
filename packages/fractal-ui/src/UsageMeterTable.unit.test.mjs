@@ -268,7 +268,7 @@ test('caller-owned compact captions preserve account names and canonical detail'
 })
 
 test('narrow usage meter captions, headings and reset evidence have complete accessible disclosures', async () => {
-  const supplied = { ...rows[0], identity: 'example-provider/shared-workspace-distinguishing-suffix', compactIdentity: { prefix: 'ep/', account: 'shared-workspace-distinguishing-suffix' }, resetAt: '2030-05-03T12:00:00Z' }
+  const supplied = { ...rows[0], identity: 'example-provider/shared-workspace-distinguishing-suffix', compactIdentity: { prefix: 'ep/', account: 'shared-workspace-distinguishing-suffix' }, resetAt: '2030-05-03T12:00:00Z', compactReset: '1h' }
   const view = await mount({ rows: [supplied] })
   try {
     assert.equal(view.container.querySelector('[title]'), null)
@@ -281,6 +281,7 @@ test('narrow usage meter captions, headings and reset evidence have complete acc
     assert.ok(resetFull.includes(supplied.resetAt))
     assert.ok(resetFull.includes('0 reported resets'))
     assert.equal(reset.firstElementChild.getAttribute('aria-hidden'), 'true')
+    assert.deepEqual([...reset.querySelectorAll('[data-usage-meter-reset-reading]')].map(span => span.textContent), ['in 1h', '1h'], 'the compact reset swaps in below 40rem; the full reset stays in the tooltip')
   } finally { await view.dispose() }
 })
 

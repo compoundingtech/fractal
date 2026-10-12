@@ -72,7 +72,7 @@ export const QuotaStatesMatrix = (args: QuotaStoryArgs) => <div {...stylex.props
 const storyRoot = (canvas: HTMLElement) => canvas.querySelector<HTMLElement>('[data-quota-story]')!
 const ids = (canvas: HTMLElement) => [...canvas.querySelectorAll('[data-quota-row]')].map(row => row.getAttribute('data-quota-row'))
 const defaultOrder = ['harbor', 'north', 'birch', 'delta', 'meadow', 'lake', 'elm', 'spruce', 'cove', 'willow', 'unknown']
-/** Exercise the real controlled refresh callback, including a disabled-action control. */
+/** Exercise the real controlled refresh callback, including a disabled-action control; after the refresh no native title doubles a custom hover anywhere in the story. */
 export const quotaControlPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   for (const root of canvasElement.querySelectorAll<HTMLElement>('[data-quota-story]')) {
     const refresh = within(root).getByRole<HTMLButtonElement>('button', { name: 'Refresh snapshot' })
@@ -89,6 +89,7 @@ export const quotaControlPlay = async ({ canvasElement }: { canvasElement: HTMLE
     await waitFor(() => expect(root.dataset.refreshed).toBe(after))
     await userEvent.click(refresh)
     await waitFor(() => expect(root.dataset.refreshed).toBe(before))
+    await expectNoNativeTitles(root)
     root.dataset.quotaControlPassed = 'true'
   }
 }
@@ -139,7 +140,7 @@ const restFocus = (canvasElement: HTMLElement) => {
   const active = canvasElement.ownerDocument.activeElement
   if (active instanceof HTMLElement && canvasElement.contains(active)) active.blur()
 }
-/** Content-sized sort controls keep 8px between neighbours inside the toolbar; glyphs are SVG, never text arrows. No native title doubles a custom hover. */
+/** Content-sized sort controls keep 8px between neighbours inside the toolbar; glyphs are SVG, never text arrows. No native title doubles a custom hover, and the shortcut footer stays one line. */
 export const quotaPriorityPlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
   await quotaLinePlay({ canvasElement })
   const drawer = canvasElement.querySelector<HTMLElement>('[data-quota-drawer]')!
@@ -156,6 +157,10 @@ export const quotaPriorityPlay = async ({ canvasElement }: { canvasElement: HTML
   const bounds = toolbar.getBoundingClientRect()
   await expect(boxes[0]!.left).toBeGreaterThanOrEqual(bounds.left)
   await expect(boxes.at(-1)!.right).toBeLessThanOrEqual(bounds.right)
+  const footer = drawer.querySelector<HTMLElement>('[data-quota-shortcuts]')!
+  const footerStyle = getComputedStyle(footer)
+  await expect(footer.scrollWidth).toBeLessThanOrEqual(footer.clientWidth)
+  await expect(footer.getBoundingClientRect().height).toBeLessThanOrEqual(Number.parseFloat(footerStyle.lineHeight) + Number.parseFloat(footerStyle.paddingTop) + Number.parseFloat(footerStyle.paddingBottom) + Number.parseFloat(footerStyle.borderTopWidth) + 0.5)
 }
 /** A clipped account name, an abbreviated reset and every abbreviated column header each open exactly one tooltip with the full value on hover and on keyboard focus. */
 export const quotaFullValuePlay = async ({ canvasElement }: { canvasElement: HTMLElement }) => {
