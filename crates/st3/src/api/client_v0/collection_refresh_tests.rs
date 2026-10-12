@@ -957,6 +957,11 @@ async fn devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_dead
     assert_eq!(changed["kind"], "changes");
     assert_eq!(changed["has_more"], false);
     assert_eq!(changed["order"], snapshot["order"]);
+    assert_eq!(changed["snapshot"]["store_index"], snapshot["snapshot"]["store_index"]);
+    let rows = device_resources(&fixture.state, &new_client_snapshot(&fixture.state), "person/ada").unwrap();
+    assert_eq!(rows.iter().find(|row| row["id"] == "device/z-hidden").unwrap()["state"], "expired");
+    fixture.quiet().await;
+    assert_eq!(fixture.counts(), counts(&[("devices", 2)]));
 }
 
 #[tokio::test]

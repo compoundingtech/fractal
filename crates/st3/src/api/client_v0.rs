@@ -4959,7 +4959,9 @@ fn device_resources(
             _ => {}
         }
     }
-    let at = client_snapshot_time(snapshot);
+    // Pairing and revocation are fenced by the graph snapshot above. Expiration is
+    // live state: its clock must advance even when no claim advances that snapshot.
+    let at = client_now_ms();
     let mut resources = paired
         .into_iter()
         .map(|(device_id, (completed, revoked))| {
