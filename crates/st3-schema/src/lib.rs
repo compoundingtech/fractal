@@ -1119,6 +1119,9 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
             &[
                 ("target", reference()),
                 ("document", string()),
+                // Immutable Git notes IDs explicitly considered by the reviewer.
+                // The protected evidence observer validates each full object ID.
+                ("evidence_tests", array()),
                 ("reviewer", reference()),
                 (
                     "decision",
@@ -4143,6 +4146,7 @@ mod tests {
             [
                 "decision",
                 "document",
+                "evidence_tests",
                 "reason",
                 "reviewer",
                 "submitted_at",
@@ -4611,6 +4615,39 @@ mod tests {
         assert_eq!(
             include_str!("../../../docs/st3/schema.md"),
             registry().markdown()
+        );
+    }
+
+    #[test]
+    fn review_test_citations_are_optional_array_facts() {
+        let review = BTreeMap::from([
+            (
+                "target".into(),
+                Value::String("resource/github/acme/garden/pull-request/7".into()),
+            ),
+            (
+                "document".into(),
+                Value::String("doc/review/fixture@digest".into()),
+            ),
+            (
+                "reviewer".into(),
+                Value::String("agent/fixture-reviewer".into()),
+            ),
+            ("decision".into(), Value::String("approve".into())),
+        ]);
+        registry()
+            .validate_resource_facts("human.review", &review)
+            .unwrap();
+        let mut cited = review;
+        cited.insert("evidence_tests".into(), serde_json::json!(["a".repeat(40)]));
+        registry()
+            .validate_resource_facts("human.review", &cited)
+            .unwrap();
+        cited.insert("evidence_tests".into(), Value::String("a".repeat(40)));
+        assert!(
+            registry()
+                .validate_resource_facts("human.review", &cited)
+                .is_err()
         );
     }
 

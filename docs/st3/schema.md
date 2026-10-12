@@ -3,7 +3,7 @@
 This file is generated from `st3-schema`.
 
 Schema: `st3.v1`
-Digest: `861ac834f6262431d29495c3cbefe764ae8fea32e054b737424df097257d94c4`
+Digest: `c2d398a37612bbff864bdea5d6fb3791aaab58c8110bd0e15eceecca775202a0`
 Storage version: `18`
 Storage digest: `d11a3e5db57db0a0bd6a9b27474cdd93958a401b3a6482b62aea3595530dbcef`
 
@@ -58,7 +58,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `ci.run` | `commit:subject-reference`, `completed_at:string`, `conclusion:string`, `external_id:string`, `name:string`, `provider:string`, `pull_request:subject-reference`, `repository:subject-reference`, `started_at:string`, `status:string`, `url:string` | A continuous integration run. |
 | `filesystem.file` | `content_hash:string`, `mode:integer`, `path:string immutable`, `reason:string`, `size:integer`, `status:string` | A file observed through an explicit local path. |
 | `harness.session-file` | `agent:subject-reference`, `harness:string immutable`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id:string`, `status:string` | A harness session file that can outlive one runtime incarnation. |
-| `human.review` | `decision:string`, `document:string`, `reason:string`, `reviewer:subject-reference`, `submitted_at:string`, `target:subject-reference` | A human review of another graph subject. |
+| `human.review` | `decision:string`, `document:string`, `evidence_tests:array`, `reason:string`, `reviewer:subject-reference`, `submitted_at:string`, `target:subject-reference` | A human review of another graph subject. |
 | `vcs.commit` | `author:string`, `committed_at:string`, `committer:string`, `message:string`, `parents:array`, `repository:subject-reference immutable`, `sha:string immutable`, `state:string`, `tree:string immutable`, `url:string` | An immutable version control commit. |
 | `vcs.issue` | `author:string`, `closed_by:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `labels:array`, `last_comment:object`, `mentions:array`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control issue. |
 | `vcs.pull-request` | `author:string`, `base:subject-reference`, `base_branch:string`, `branch:string`, `checks:array`, `checks_state:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `draft:boolean`, `head:subject-reference`, `head_sha:string`, `last_comment:object`, `mentions:array`, `merge_commit_sha:string`, `merge_queue:object`, `merged:boolean`, `merged_at:string`, `merged_by:string`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `required_checks:object`, `review_decision:string`, `reviews:array`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control pull request. |
