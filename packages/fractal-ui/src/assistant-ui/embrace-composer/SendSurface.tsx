@@ -23,19 +23,24 @@ export const ComposerImageIntakeContext = React.createContext<ComposerImageIntak
 export function useComposerImageIntake(retainedImages: number, disabled: boolean, policy: ComposerImagePolicy): ComposerImageIntake {
   const aui = useAui()
   const available = useAuiState(state => state.thread.capabilities.attachments)
-  const [refused, setRefused] = React.useState<string>()
+  const attached = useAuiState(state => state.composer.attachments.length)
+  const sent = useAuiState(state => state.thread.messages.length)
+  const retained = Math.max(retainedImages, attached)
+  // A refusal speaks for the tray it was made against: removing an image or sending the draft retires it.
+  const [refusal, setRefusal] = React.useState<{ readonly text: string; readonly retained: number; readonly sent: number }>()
   const add = React.useCallback((files: readonly File[]) => {
     if (!available || disabled || files.length === 0) return
-    const runtime = aui.composer.__internal_getRuntime?.().getState() ?? aui.composer.getState()
-    const screened = screenComposerImages(files, Math.max(retainedImages, runtime.attachments.length), policy)
-    setRefused(screened.refused)
+    const screened = screenComposerImages(files, retained, policy)
+    const after = retained + screened.accepted.length
+    setRefusal(screened.refused === undefined ? undefined : { text: screened.refused, retained: after, sent })
     for (const file of screened.accepted) {
       aui.composer.addAttachment(file).catch((error: unknown) => {
         const reason = error instanceof Error && error.message !== '' ? error.message : 'It could not be added.'
-        setRefused(previous => [previous, `${file.name}: ${reason}`].filter(Boolean).join(' '))
+        setRefusal(previous => ({ text: [previous?.text, `${file.name}: ${reason}`].filter(Boolean).join(' '), retained: Math.min(previous?.retained ?? after, after - 1), sent }))
       })
     }
-  }, [aui, available, disabled, retainedImages, policy])
+  }, [aui, available, disabled, retained, sent, policy])
+  const refused = refusal !== undefined && retained >= refusal.retained && sent === refusal.sent ? refusal.text : undefined
   return React.useMemo(() => ({ available, disabled, policy, refused, add }), [available, disabled, policy, refused, add])
 }
 
@@ -54,9 +59,26 @@ export function ComposerAttachImage({ compact = false }: { readonly compact?: bo
 export const sessionChangeNote = (recipient: ComposerRecipientReadout) =>
   `Session changed. This message continues ${recipient.sessionId === undefined ? 'the current session' : `session ${recipient.sessionId}`}.`
 
-/** Always mounted, so the polite region announces each session change once and stays quiet on unrelated re-renders. */
-export function ComposerSessionAnnouncement({ recipient }: { readonly recipient: ComposerRecipientReadout }) {
-  return <span role="status" data-testid="composer-session-announcement" {...stylex.props(styles.visuallyHidden)}>{recipient.sessionChanged === true ? sessionChangeNote(recipient) : ''}</span>
+const availabilityAnnouncement = (availability: ComposerAvailability | undefined) =>
+  availability === undefined || availability._tag === 'Ready' ? '' : `${availabilityCopy[availability._tag].title} ${availability.detail}`
+
+/** Names every image that is not ready; progress is left out, so the text changes only when a state does. */
+const imageAnnouncement = (images: readonly ComposerImage[] | undefined) => {
+  if (images === undefined || images.length === 0) return ''
+  const pending = images.flatMap(image => image.state._tag === 'Uploading' ? [`${image.name}: uploading.`] : image.state._tag === 'Failed' ? [`${image.name}: upload failed, ${image.state.detail}`] : [])
+  return pending.length > 0 ? pending.join(' ') : `${describeImageCount(images.length)} ready to send.`
+}
+
+/**
+ * Always-mounted polite regions. Visible notices mount already filled, which screen readers may not
+ * announce; these change text only when the session, availability or an image state changes.
+ */
+export function ComposerLiveStatus({ recipient, availability, images }: { readonly recipient?: ComposerRecipientReadout; readonly availability?: ComposerAvailability; readonly images?: readonly ComposerImage[] }) {
+  return <>
+    <span role="status" data-testid="composer-session-announcement" {...stylex.props(styles.visuallyHidden)}>{recipient?.sessionChanged === true ? sessionChangeNote(recipient) : ''}</span>
+    <span role="status" data-testid="composer-availability-announcement" {...stylex.props(styles.visuallyHidden)}>{availabilityAnnouncement(availability)}</span>
+    <span role="status" data-testid="composer-image-announcement" {...stylex.props(styles.visuallyHidden)}>{imageAnnouncement(images)}</span>
+  </>
 }
 
 /** `To <label>`; the canonical ref and active session stay available to assistive technology. */
@@ -72,7 +94,7 @@ export function ComposerRecipientControl({ recipient, recipients, onRecipientCha
   const detail = `${recipient.ref}${recipient.sessionId === undefined ? '' : ` · session ${recipient.sessionId}`}${onRecipientChange !== undefined && !picker ? ' · No other recipients available' : ''}`
   const label = <><span aria-hidden="true" {...stylex.props(styles.to)}>To</span><span data-composer-readout {...stylex.props(styles.recipientLabel)}>{recipient.label}</span></>
   return <>
-    <span id={detailId} {...stylex.props(styles.visuallyHidden)}>Recipient {recipient.ref}{recipient.sessionId === undefined ? '' : `, session ${recipient.sessionId}`}.</span>
+    <span id={detailId} {...stylex.props(styles.visuallyHidden)}>Recipient {recipient.ref}{recipient.sessionId === undefined ? '' : `, session ${recipient.sessionId}`}.{onRecipientChange !== undefined && !picker ? ' No other recipients available.' : ''}</span>
     {picker ? <MenuTrigger>
       <TooltipTrigger delay={150} closeDelay={0}>
         <Button aria-label={`To ${recipient.label}, change recipient`} aria-describedby={detailId} data-composer-recipient={recipient.ref} {...stylex.props(styles.recipient, styles.recipientButton, compact && styles.recipientCompact)}>
@@ -107,7 +129,7 @@ export function ComposerAvailabilityNotice({ availability }: { readonly availabi
   const copy = availabilityCopy[availability._tag]
   const recover = availability._tag === 'Offline' ? availability.onReconnect : availability._tag === 'Unavailable' ? undefined : availability.onRecover
   return <div data-testid="composer-availability" data-availability={availability._tag} {...stylex.props(styles.notice)}>
-    <div role="status" {...stylex.props(styles.noticeText)}>
+    <div {...stylex.props(styles.noticeText)}>
       <span {...stylex.props(styles.noticeTitle)}>{copy.title}</span>
       <span {...stylex.props(styles.muted)}>{availability.detail} Your draft is kept.{availability._tag === 'Revoked' && availability.code !== undefined ? ` Code ${availability.code}.` : ''}</span>
     </div>
@@ -150,7 +172,7 @@ export function ComposerImageTray({ images, maxCount, onRemoveImage, onRetryImag
       <span aria-hidden="true" {...stylex.props(styles.thumb)}>{image.previewUrl === undefined ? image.mediaType.slice('image/'.length).toUpperCase() : <img src={image.previewUrl} alt="" {...stylex.props(styles.thumbImage)} />}</span>
       <span {...stylex.props(styles.tileBody)}>
         <span {...stylex.props(styles.tileName)}>{image.name}</span>
-        <span role="status" aria-label={`${image.name}: ${imageStateText(image)}`} {...stylex.props(styles.tileState)}>{imageStateText(image)}</span>
+        <span {...stylex.props(styles.tileState)}>{imageStateText(image)}</span>
         <span {...stylex.props(styles.tileActions)}>
           {image.state._tag === 'Failed' && onRetryImage !== undefined ? <Button aria-label={`Retry upload of ${image.name}`} isDisabled={disabled} onPress={() => onRetryImage(image.id)} {...stylex.props(styles.textButton)}>Retry</Button> : null}
           {onRemoveImage !== undefined ? <Button aria-label={`Remove ${image.name}`} isDisabled={disabled} onPress={() => onRemoveImage(image.id)} {...stylex.props(styles.textButton)}>Remove</Button> : null}

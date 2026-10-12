@@ -15,7 +15,7 @@ import {
 } from './embrace-composer/draft'
 import { composerImagePolicy, imageSubmitBlock, type ComposerAvailability, type ComposerImage, type ComposerImagePolicy, type ComposerRecipientReadout, type ComposerReply } from './embrace-composer/send'
 import {
-  ComposerAttachImage, ComposerAvailabilityNotice, ComposerImageIntakeContext, ComposerImageTray, ComposerRecipientControl, ComposerReplyChip, ComposerSessionAnnouncement, ComposerSubjectField,
+  ComposerAttachImage, ComposerAvailabilityNotice, ComposerImageIntakeContext, ComposerImageTray, ComposerLiveStatus, ComposerRecipientControl, ComposerReplyChip, ComposerSubjectField,
   sessionChangeNote, useComposerImageIntake, type ComposerImageIntake,
 } from './embrace-composer/SendSurface'
 
@@ -281,7 +281,8 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   }
   return <CompactComposerContext.Provider value={densityContext}><ComposerImageIntakeContext.Provider value={intake}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
     {(props.plainText ?? props.variant === 'C1') || props.input !== undefined ? <PlainComposer {...composerProps} /> : <TokenComposer {...composerProps} />}
-    {props.recipient !== undefined ? <ComposerSessionAnnouncement recipient={props.recipient} /> : null}
+    {props.recipient !== undefined || props.availability !== undefined || props.images !== undefined
+      ? <ComposerLiveStatus recipient={props.recipient} availability={props.availability} images={props.images} /> : null}
   </div></ComposerImageIntakeContext.Provider></CompactComposerContext.Provider>
 }
 
@@ -346,7 +347,7 @@ function SendContext({ availability, recipient, reply, onClearReply, subject, on
     {onSubjectChange !== undefined ? <ComposerSubjectField subject={subject ?? ''} onSubjectChange={onSubjectChange} isReadOnly={readOnly} onEnter={focusField} /> : null}
     {images !== undefined ? <ComposerImageTray images={images} maxCount={(imagePolicy ?? composerImagePolicy).maxCount} onRemoveImage={onRemoveImage === undefined ? undefined : id => { onRemoveImage(id); focusField() }} onRetryImage={onRetryImage} disabled={readOnly} /> : null}
     {intake?.refused !== undefined ? <div role="alert" data-testid="composer-image-refusal" {...stylex.props(styles.refusal)}>{intake.refused}</div> : null}
-    {imageBlock !== undefined ? <div role="status" data-testid="composer-image-wait" {...stylex.props(styles.help)}>{imageBlock}</div> : null}
+    {imageBlock !== undefined ? <div data-testid="composer-image-wait" {...stylex.props(styles.help)}>{imageBlock}</div> : null}
   </div>
 }
 /** Availability and retained-image state hold submit; the draft stays editable. */
@@ -386,6 +387,8 @@ function PlainComposer(props: EmbraceComposerProps) {
         if (!(target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')) || target.hasAttribute('data-composer-subject')) return
         if (event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229) { event.stopPropagation(); return }
         if (event.repeat) { event.preventDefault(); event.stopPropagation(); return }
+        // A held draft never leaves through the runtime's own modified-Enter steer/queue path.
+        if (blocked && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.stopPropagation(); return }
         if (onRequestSubmit !== undefined && !event.shiftKey && !(window.matchMedia('(pointer: coarse) and (not (any-pointer: fine))').matches && !event.metaKey && !event.ctrlKey)) {
           event.preventDefault(); event.stopPropagation(); if (!readOnly && !blocked) onRequestSubmit(event.metaKey || event.ctrlKey)
         }

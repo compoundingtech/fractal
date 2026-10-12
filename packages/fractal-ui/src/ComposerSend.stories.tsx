@@ -164,7 +164,7 @@ function RecipientPane({ recipient, active, host }: { readonly recipient: (typeo
       </div> : null}
       <div {...stylex.props(styles.fixtureBar)}>
         <Button onPress={uploads.completeAll} {...stylex.props(styles.button)}>Complete uploads</Button>
-        {host.scenario.transcript === true ? <Button onPress={deliver} {...stylex.props(styles.button)}>Deliver pending</Button> : null}
+        {host.scenario.transcript === true ? <Button onPress={deliver} {...stylex.props(styles.button)}>Accept pending</Button> : null}
       </div>
       <div {...stylex.props(styles.dock)}><PaneComposer recipient={recipient} uploads={uploads} host={host} /></div>
     </EmbraceRuntimeProvider>
@@ -363,21 +363,24 @@ export const RecipientReadout: Story = {
     await expect(announcement).not.toHaveAttribute('aria-live', 'assertive')
     await expect(announcement.textContent).toBe('')
     await expect(within(root).queryByTestId('composer-session-note')).toBeNull()
-    const changes = new MutationObserver(() => {})
+    const records: MutationRecord[] = []
+    const changes = new MutationObserver(list => { records.push(...list) })
+    const drain = () => { records.push(...changes.takeRecords()); return records.splice(0) }
     changes.observe(announcement, { subtree: true, childList: true, characterData: true })
     try {
       await userEvent.click(within(canvasElement).getByRole('button', { name: 'Move session' }))
       await waitFor(() => expect(announcement).toHaveTextContent('Session changed. This message continues session session/fixture-a2.'))
       await expect(within(root).getByTestId('composer-session-note')).toHaveTextContent('Session changed. This message continues session session/fixture-a2.')
-      await expect(changes.takeRecords()).toHaveLength(1)
+      await expect(drain()).toHaveLength(1)
       // Unrelated re-renders leave the region untouched, so nothing is announced twice.
       await userEvent.type(messageField(root), 'Still the same draft')
+      await waitFor(() => expect(messageField(root)).toHaveValue('Still the same draft'))
       await settled()
-      await expect(changes.takeRecords()).toHaveLength(0)
+      await expect(drain()).toHaveLength(0)
       await expect(within(root).getByTestId('composer-session-announcement')).toBe(announcement)
       await userEvent.click(within(canvasElement).getByRole('button', { name: 'Move session' }))
       await waitFor(() => expect(announcement).toHaveTextContent('Session changed. This message continues session session/fixture-a3.'))
-      await expect(changes.takeRecords()).toHaveLength(1)
+      await expect(drain()).toHaveLength(1)
     } finally { changes.disconnect() }
     await expect(describedText(within(root).getByRole('group', { name: 'To Review seat' }))).toContain('session/fixture-a3')
     await expect(messageField(root)).toHaveValue('Still the same draft')
@@ -576,7 +579,7 @@ export const SendStates: Story = {
     await waitFor(() => expect(within(rowFor(root, 'pending/fixture-3')).getByRole('status')).toHaveTextContent('Sending…'))
     await expect(hostLog(canvasElement).filter(line => line.startsWith('Retry '))).toEqual(['Retry pending/fixture-3'])
     await expect(messageField(root)).toHaveValue('Newer draft')
-    await userEvent.click(within(root).getByRole('button', { name: 'Deliver pending' }))
+    await userEvent.click(within(root).getByRole('button', { name: 'Accept pending' }))
     await waitFor(() => expect(within(rowFor(root, 'pending/fixture-3')).getByRole('status')).toHaveTextContent('Sent'))
     await expect(within(rowFor(root, 'pending/fixture-2')).getByRole('status')).toHaveTextContent('Sent')
     await userEvent.click(sendButton(root))
@@ -594,8 +597,8 @@ export const OfflineRecovery: Story = {
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     const box = await waitFor(() => notice(root))
-    await expect(within(box).getByRole('status')).toHaveTextContent('Offline — reconnect to send.')
-    await expect(within(box).getByRole('status')).toHaveTextContent('The relay connection is down. Your draft is kept.')
+    await expect(box).toHaveTextContent('Offline — reconnect to send.')
+    await expect(box).toHaveTextContent('The relay connection is down. Your draft is kept.')
     await expect(within(box).getAllByRole('button').map(button => button.textContent)).toEqual(['Reconnect'])
     const field = messageField(root)
     await userEvent.type(field, 'Queue this later{Enter}')
@@ -621,8 +624,8 @@ export const RevokedRecovery: Story = {
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     const box = await waitFor(() => notice(root))
-    await expect(within(box).getByRole('status')).toHaveTextContent('This device is no longer authorized to send.')
-    await expect(within(box).getByRole('status')).toHaveTextContent('The device key was revoked. Your draft is kept. Code device_revoked.')
+    await expect(box).toHaveTextContent('This device is no longer authorized to send.')
+    await expect(box).toHaveTextContent('The device key was revoked. Your draft is kept. Code device_revoked.')
     await expect(within(box).getAllByRole('button').map(button => button.textContent)).toEqual(['Set up again'])
     await expect(within(rowFor(root, 'pending/fixture-3')).queryByRole('button', { name: 'Retry' })).toBeNull()
     await userEvent.type(messageField(root), 'Draft before setup')
@@ -645,7 +648,7 @@ export const MissingGrant: Story = {
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     const box = await waitFor(() => notice(root))
-    await expect(within(box).getByRole('status')).toHaveTextContent('Sending messages is not permitted here.')
+    await expect(box).toHaveTextContent('Sending messages is not permitted here.')
     await expect(within(box).getAllByRole('button').map(button => button.textContent)).toEqual(['Check access'])
     await userEvent.click(within(box).getByRole('button', { name: 'Check access' }))
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="fixture-recoveries"]')).toHaveTextContent('Recovery requests: 1'))
@@ -658,9 +661,10 @@ export const Unavailable: Story = {
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     const box = await waitFor(() => notice(root))
-    await expect(within(box).getByRole('status')).toHaveTextContent('Sending is paused for maintenance. Your draft is kept.')
+    await expect(box).toHaveTextContent('Sending is paused for maintenance. Your draft is kept.')
     await expect(within(box).queryAllByRole('button')).toEqual([])
     await userEvent.type(messageField(root), 'Still typing')
+    await waitFor(() => expect(messageField(root)).toHaveValue('Still typing'))
     await expect(sendButton(root)).toBeDisabled()
     await sound(canvasElement)
   },
