@@ -135,6 +135,12 @@ export const quotaBrushPlay = async ({ canvasElement }: { canvasElement: HTMLEle
   await userEvent.click(day)
   await waitFor(() => expect(storyRoot(canvasElement).dataset.selectedDay).toBe('2030-04-15'))
   await expect(canvasElement.querySelector('[data-quota-breakdown]')).toHaveTextContent(/15 Apr|2030-04-15/)
+  const readout = canvasElement.querySelector<HTMLElement>('[data-quota-readout]')
+  if (readout !== null) {
+    await expect(readout).toHaveAttribute('tabindex', '0')
+    readout.focus()
+    await expect(readout).toHaveFocus()
+  }
 }
 const geometry = (canvas: HTMLElement) => [...canvas.querySelectorAll<HTMLElement>('[data-quota-row], [data-quota-status], [data-quota-breakdown], [data-quota-usage] svg')].map(node => {
   const box = node.getBoundingClientRect(); return [box.x, box.y, box.width, box.height]

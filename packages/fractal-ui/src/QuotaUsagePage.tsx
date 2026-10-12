@@ -173,9 +173,9 @@ const Axis = ({ cells }: { readonly cells: readonly DayCell[] }) => {
 }
 
 /** Fixed-height exact readout for the hovered (or selected) day. */
-const Readout = ({ cell, series, unit }: { readonly cell?: DayCell; readonly series: readonly Series[]; readonly unit: QuotaUnit }) => {
+const Readout = ({ cell, series, unit, landmarkContext }: { readonly cell?: DayCell; readonly series: readonly Series[]; readonly unit: QuotaUnit; readonly landmarkContext: string }) => {
   const format = formatExact(unit)
-  return <div aria-live="polite" data-quota-readout={cell?.day.id ?? ''} {...stylex.props(styles.readout)}>
+  return <div role="region" aria-label={`${landmarkContext} exact usage values`} tabIndex={0} aria-live="polite" data-quota-readout={cell?.day.id ?? ''} {...stylex.props(styles.readout)}>
     {cell === undefined ? <span {...stylex.props(styles.muted)}>Hover, focus or select a day for exact values.</span> : <>
       <span {...stylex.props(styles.readoutHead)}>{cell.day.label}{cell.day.partial && <span {...stylex.props(styles.partialBadge)}>Partial · Berlin</span>}<span {...stylex.props(styles.figure)}>{tallyText(totalOf(cell, series), format)}</span></span>
       <ul {...stylex.props(styles.readoutList)}>
@@ -505,7 +505,7 @@ export const QuotaUsagePage = (props: QuotaUsageProps): React.ReactElement => {
             {variant === 'overview' && <><Legend series={series} /><StackedChart cells={cells} series={series} unit={effectiveUnit} height="main" label="Days in range" selectedDay={selectedDay} onDay={onDay} onHover={setHoveredDay} /><Axis cells={cells} /></>}
             {variant === 'multiples' && <SmallMultiples cells={cells} series={series} unit={effectiveUnit} selectedDay={selectedDay} onDay={onDay} onHover={setHoveredDay} />}
             {variant === 'heatmap' && <Heatmap cells={cells} series={series} unit={effectiveUnit} selectedDay={selectedDay} onDay={onDay} onHover={setHoveredDay} landmarkContext={landmarkContext} />}
-            {variant !== 'heatmap' && <Readout cell={focusCell} series={series} unit={effectiveUnit} />}
+            {variant !== 'heatmap' && <Readout cell={focusCell} series={series} unit={effectiveUnit} landmarkContext={landmarkContext} />}
           </>}
           <RangeControl allCells={allCells} series={series} start={start} end={end} strip={variant === 'overview'} onRange={onRange} />
           {selected !== undefined && <Button onPress={() => onDay(undefined)} {...stylex.props(styles.button, styles.clearDay)}>Clear day {selected.label}</Button>}
@@ -592,7 +592,7 @@ const styles = stylex.create({
   axis: { display: 'flex', justifyContent: 'space-between', gap: space.md, blockSize: quotaGeometry.px16, color: ink.fgMuted, fontSize: type.denseSize, fontVariantNumeric: 'tabular-nums' },
   partialLegend: { color: ink.fgSoft },
   partialBadge: { display: 'inline-flex', alignItems: 'center', marginInlineStart: space.sm, paddingInline: space.xs, borderRadius: radius.keyboard, border: quotaGeometry.dashedMutedHair, color: ink.fgSoft, fontSize: type.denseSize, fontWeight: type.weightRegular, whiteSpace: 'nowrap' },
-  readout: { display: 'flex', flexDirection: 'column', gap: space.xs, blockSize: quotaGeometry.px76, overflowY: 'auto', padding: space.sm, borderRadius: radius.md, backgroundColor: surface.washSubtle, fontSize: type.metaSize },
+  readout: { display: 'flex', flexDirection: 'column', gap: space.xs, blockSize: quotaGeometry.px76, overflowY: 'auto', padding: space.sm, borderRadius: radius.md, backgroundColor: surface.washSubtle, fontSize: type.metaSize, ':focus-visible': { outline: quotaGeometry.focusOutline, outlineOffset: quotaGeometry.px1 } },
   readoutHead: { display: 'flex', alignItems: 'center', gap: space.xs, fontWeight: type.weightMedium },
   readoutList: { display: 'grid', gridTemplateColumns: quotaGeometry.multipleColumns, gap: `0 ${space.lg}`, margin: 0, padding: 0, listStyle: 'none' },
   readoutItem: { display: 'flex', alignItems: 'center', gap: space.xs, minWidth: 0, color: ink.fgSoft },
