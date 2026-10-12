@@ -39,6 +39,11 @@ not (
 )
 '''
 
+# Signature purity and authority regressions must remain visible on their first failure.
+[[profile.ci.overrides]]
+filter = 'package(=smallclaims) and binary(=principals)'
+retries = 0
+
 # The fleet reconnect test also includes a real two-minute outage. The ci profile inherits the
 # default profile's messaging-fault priority above.
 [[profile.ci.overrides]]

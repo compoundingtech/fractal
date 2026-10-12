@@ -401,3 +401,18 @@ test('phone observation schema keeps histogram pairs and live-share as separate 
         [{...report.samples[1],carrier:'unknown'}],
     ]) assert.throws(()=>decode({...report,samples}));
 });
+
+
+test('message provenance retains its serving model and reads historical absence strictly', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.MessageProvenance, 'strict');
+    for (const authorization_model of ['legacy', 'candidate']) {
+        const wire = { verdict: 'unsigned', authorization_model };
+        assert.deepEqual(Schema.encodeSync(Rich.MessageProvenance)(decode(wire)), wire);
+    }
+    const historical = { verdict: 'unsigned' };
+    assert.deepEqual(Schema.encodeSync(Rich.MessageProvenance)(decode(historical)), historical);
+    assert.throws(() => decode({ ...historical, authorization_model: 'unqualified-model' }));
+    assert.throws(() => decode({ ...historical, authorization_model: null }));
+    assert.throws(() => decode({ ...historical, undeclared_authority: true }));
+});

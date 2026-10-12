@@ -783,6 +783,7 @@ pub struct Store {
     pub rules_stale: AtomicBool,
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
+    pub(crate) signature_migration_work: Mutex<Option<principals::SignatureEnvelopeWork>>,
     pub origin: String,
     /// The database file, or the shared-memory URI of an in-memory store. A checkpoint proof
     /// opens its own connection here to copy the store.
@@ -938,10 +939,9 @@ impl Store {
         })?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
-            inventory_generation::initialize(connection)?;
-            connection.execute_batch(principals::PRINCIPAL_SCHEMA)?;
-            Ok(())
+            inventory_generation::initialize(connection)
         })?;
+        principals::initialize_schema(connection)?;
         if fresh {
             runtime.create_schema_for_fresh_store(connection)?;
         } else {
@@ -1031,6 +1031,7 @@ impl Store {
             rules: std::sync::RwLock::new(None),
             rules_stale: AtomicBool::new(true),
             verdicts_due: AtomicBool::new(false),
+            signature_migration_work: Mutex::new(None),
             origin,
             path,
             shared_memory,
@@ -3572,11 +3573,7 @@ fn seed_replica_envelopes_signed_tx(
         collect_referenced_blobs(transaction, &claims, &mut blobs)?;
         let mut claim_signatures = BTreeMap::new();
         for claim in &claims {
-            let existing = transaction
-                .prepare_cached("SELECT signature FROM claim_signatures WHERE claim_id=?1")?
-                .query_row([&claim.id], |row| row.get::<_, String>(0))
-                .optional()?
-                .and_then(|text| serde_json::from_str(&text).ok());
+            let existing = principals::envelope_signature(transaction, &claim.id)?;
             let signature = match (existing, sign) {
                 (Some(signature), _) => Some(signature),
                 (None, Some(sign)) => sign(&principals::Unsealed {
@@ -4920,9 +4917,9 @@ pub fn validate_and_admit_envelope_tx(
             Ok(ReplicatedClaimAdmission::Valid) => {
                 // A checkpoint dropped this claim here, and another envelope carries it again.
                 // A node that still held it would ignore the copy as already stored.
-                let inserted = if checkpoint::claim_tombstoned(transaction, &claim.id)
-                    .map_err(internal)?
-                {
+                let tombstoned = checkpoint::claim_tombstoned(transaction, &claim.id)
+                    .map_err(internal)?;
+                let inserted = if tombstoned {
                     0
                 } else {
                     transaction
@@ -4944,8 +4941,8 @@ pub fn validate_and_admit_envelope_tx(
                     ])
                     .map_err(internal)?
                 };
-                if let Some(signature) = payload.claim_signatures.get(&claim.id) {
-                    principals::store_claim_signature_tx(transaction, &claim.id, signature)
+                if !tombstoned && let Some(signature) = payload.claim_signatures.get(&claim.id) {
+                    principals::store_carried_signature_tx(transaction, &claim.id, signature, &envelope.writer)
                         .map_err(internal)?;
                 }
                 transaction
@@ -8772,7 +8769,7 @@ pub fn append_claim_record_tx(
         now,
     )?;
     // A device signed this claim before the node wrote it: keep the signature with it.
-    principals::attach_expected_signature_tx(transaction, &id, subject, kind, actor)?;
+    principals::attach_expected_signature_from_writer_tx(transaction, &id, subject, kind, actor, origin)?;
     Ok(ClaimRecord {
         id,
         store_index,

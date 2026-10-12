@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "summary": "Retain carried signature candidates and judge them against current authority",
+  "replay": {
+    "status": "changed",
+    "detail": "A finite background bootstrap inventories legacy signatures and accepted validated/admitted-degraded envelopes through the existing TEXT/BLOB codec. Each page handles at most 64 claim positions and keeps its envelope/claim cursor in the same transaction as candidate inserts. A transient parsed envelope continues across pages; restart reconstructs it from the durable offset. Subsequent admission maintains the set. No full graph replay or history scan in ordinary reads."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Storage version 20. Adds retained candidate/writer/count/nonce-use and bounded judgment/inventory state. A true old-schema upgrade atomically renames the complete five-table legacy authorization projection, creates empty candidate relations with distinct index names, and commits the version marker. Existing legacy index root pages are retained; no payload-history scan or history-sized index rebuild occurs at open. Candidate state has no cap, eviction or raw-history overflow. Legacy relations retire only after activation in 64-row writer loans, with empty-table drops.",
+    "transitions": [
+      [
+        19,
+        20
+      ]
+    ]
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Judge every candidate against current roots, delegation, revocation and canonical order. Verified precedes Held then Invalid; normalized signature bytes break ties and losing candidates keep authority dependencies. Every cryptographically matching candidate on an earlier live claim reserves its key/nonce, including a non-winning candidate. Invalid signature bytes cannot reserve another key\u2019s nonce. Checkpoint/fleet coordination rules do not change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Claim/wire vocabulary and replication digest are unchanged. Members independently serve complete legacy semantics (with the first-carried P0 explicitly exposed) while the full candidate inventory reconciles; then activate the candidate model atomically. Legacy-serving members are unqualified for external reliance on corrected candidate authority. Proof/provenance responses label the model. Earlier binaries reject storage version 20 before signature schema creation. No member waits for another to finish migration; external accountable-root/trace features retain their own compatibility fences."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "Normal process restart; signature authorization remains available through the complete isolated legacy model until one-way atomic candidate activation. A cached legacy verdict is never mixed with partial new candidate facts. Fresh stores use candidate semantics directly. The background worker sleeps for each page\u2019s wall time outside locks, limiting its active wall duty to 50%. On a synthetic 100,000-envelope fixture with reused live claims, open took 672ms and paced inventory/reconciliation took 61.3s; these are not production duration bounds. Doctor exposes the serving model, cursors, committed work/rate and stopped progress; first-run stage/activation summaries provide the actual duration to Operations. There is no global authorization pause or required deployment hold on main for bootstrap completion."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Operations snapshots each member, rolls the canary member first and observes the normal rollout. Announce storage version 20 and unsupported in-place rollback to pre-20 binaries: roll forward with a compatible build, or restore a separately approved consistent pre-upgrade backup; changing user_version is not rollback. Inspect high candidate-count/writer attribution faults and use existing membership controls to stop flooding without evicting retained candidates. Legacy P0 exposure and a 300s no-committed-progress attention signal remain visible until activation; the signal adds no retry or abort. Inventory/judgment corruption stops the finite job; correct the named defect on an owned backed-up store and explicitly clear only its fault, preserving cursors and serving model. No production removal family or candidate eviction is authorized."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "No rollback below storage version 20 for an upgraded store. Inventory cursors and candidate inserts commit together; restart resumes the selected model. Each new-model judgment loan evaluates at most 32 direct candidates. Activation observes completed inventory, no pending envelope/claim cursor or fault, and empty shadow fresh/queue in one writer transaction. Live admission maintains both projections before activation; historical backfill affects only the shadow. Deletion queues nonce/key/delegation dependents before removing signature state. A pre-activation fault leaves the complete legacy model serving with the P0 exposed; a post-activation fault is Held and never falls back to legacy, even if legacy rows remain during bounded retirement. Conservative stale dependency links may cause extra rejudging but no missed invalidation; deletion or explicit full recheck owns cleanup. Preserve the version-19 runtime start ledger, immutable publication cuts and runtime generation records through upgrade. A claims-only restore or SQLite-only rollback cannot authorize unresolved producers; use forward recovery with Operations."
+  }
+}
