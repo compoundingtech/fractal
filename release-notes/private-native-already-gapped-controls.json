@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add private already-gapped native writer-path controls.",
+  "replay": {
+    "status": "none",
+    "detail": "Private cfg(test) native source helper and six controls elide redundant persisted-gap diagnostic statements, preserve scope writes and UNKNOWN, and bound new logical refusal text. No production schema, library API, Runtime, Store factory, public Doctor, wire or maintained coverage change. One exact nextest override changes success-output visibility only. Runtime and SQL outcomes remain unmeasured until hosted verification."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Private cfg(test) native source helper and six controls elide redundant persisted-gap diagnostic statements, preserve scope writes and UNKNOWN, and bound new logical refusal text. No production schema, library API, Runtime, Store factory, public Doctor, wire or maintained coverage change. One exact nextest override changes success-output visibility only. Runtime and SQL outcomes remain unmeasured until hosted verification."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Private cfg(test) native source helper and six controls elide redundant persisted-gap diagnostic statements, preserve scope writes and UNKNOWN, and bound new logical refusal text. No production schema, library API, Runtime, Store factory, public Doctor, wire or maintained coverage change. One exact nextest override changes success-output visibility only. Runtime and SQL outcomes remain unmeasured until hosted verification."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Private cfg(test) native source helper and six controls elide redundant persisted-gap diagnostic statements, preserve scope writes and UNKNOWN, and bound new logical refusal text. No production schema, library API, Runtime, Store factory, public Doctor, wire or maintained coverage change. One exact nextest override changes success-output visibility only. Runtime and SQL outcomes remain unmeasured until hosted verification."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Private cfg(test) native source helper and six controls elide redundant persisted-gap diagnostic statements, preserve scope writes and UNKNOWN, and bound new logical refusal text. No production schema, library API, Runtime, Store factory, public Doctor, wire or maintained coverage change. One exact nextest override changes success-output visibility only. Runtime and SQL outcomes remain unmeasured until hosted verification."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Private cfg(test) native source helper and six controls elide redundant persisted-gap diagnostic statements, preserve scope writes and UNKNOWN, and bound new logical refusal text. No production schema, library API, Runtime, Store factory, public Doctor, wire or maintained coverage change. One exact nextest override changes success-output visibility only. Runtime and SQL outcomes remain unmeasured until hosted verification."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Private cfg(test) native source helper and six controls elide redundant persisted-gap diagnostic statements, preserve scope writes and UNKNOWN, and bound new logical refusal text. No production schema, library API, Runtime, Store factory, public Doctor, wire or maintained coverage change. One exact nextest override changes success-output visibility only. Runtime and SQL outcomes remain unmeasured until hosted verification."
+  }
+}

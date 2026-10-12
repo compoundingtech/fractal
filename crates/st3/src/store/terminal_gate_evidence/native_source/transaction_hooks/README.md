@@ -91,10 +91,9 @@ negative injects the error into root publication AFTER apply, where it propagate
 The future production requirement to abort on storage faults while fencing only
 logical coverage failures still needs a typed/error-disposition seam review.
 
-Additional fixture limitations from Intake's source review: while pending remains set,
-prepare repeats its gap UPDATE and Installer::source_gap on every managed transaction.
-A future adapter must short-circuit an already recorded gap, so unrelated writes do
-not pay repeated gap writes. A saved-binding mismatch currently makes prepare error
+At the prior #2293/#2301 source, while pending remains set, prepare repeats its gap
+UPDATE and Installer::source_gap on every managed transaction. The private successor
+below adds a transaction-local skip predicate; its savings remain UNMEASURED. A saved-binding mismatch currently makes prepare error
 and fails every write on this private Store; this abort behavior must not carry into a
 production coverage design. Neither limitation is production-approved by this slice.
 
@@ -171,3 +170,61 @@ storage-version/canonical_audit/digests, writer hold/latency and Doctor activati
 Library root/cleanup errors still do not supply an abort-only capability to arbitrary
 callers which catch an Err. Shared policy consolidation is deferred unless another
 operator needs it. Source review and rustfmt are not Rust/SQLite execution.
+
+
+Private already-gapped successor (all six new controls UNRUN): one transaction-local
+metadata SELECT avoids repeated diagnostic UPDATE statements when the persisted
+source is unavailable, every same-source root is unready with the exact bounded
+guard reason, and no same-source scan/catchup job exists. The predicate is the
+complement of Installer::source_gap's three WHERE clauses. Existing source/job/root
+indexes serve it; EXPLAIN QUERY PLAN and bytecode are printed by the work control.
+NULL, non-text or oversized root errors are mismatches and call source_gap, never
+refusals. The guard alone retains its 512-byte text limit. New logical refusal text
+is truncated at a UTF-8 boundary to <=512 bytes before persistence. Installer's
+first-1024-character transform is then identity. Missing source or invalid source
+availability deliberately refuses this private transaction; that stricter choice,
+binding corruption and arbitrary same-source metadata fanout remain held for
+production. No new schema, library policy, reader call or production hook is added.
+
+The helper is called only from prepare's pending/active branch, finish's preexisting
+gap and logical refusal branches, and finalize's explicit constraint-reason branch.
+Clean prepare and idle finish never call it and remain exactly 2 and 1 statements.
+Stable pending/gap skips the diagnostic guard UPDATE too. Scope entry and clear
+still write: an empty committed transaction changes exactly two rows; a private
+unrelated meta UPDATE changes exactly three. Each uses connection total_changes
+alongside fresh pinned persisted-state equality. total_changes includes rolled-back
+attempts; it is neither commit durability nor a claim that zero-row DML was elided.
+The SELECT decides whether the existing three UPDATE statements execute at all.
+It neither repairs evidence nor certifies the current graph; every gap stays UNKNOWN.
+
+Stable-gap statement arithmetic is prepare 3 + finish 2 + marker read 1 + marker
+clear 1 = 7 phase statements, plus BEGIN/COMMIT = whole idle 9 (clean phases 5,
+whole idle 7). Predeclared private stable limits are prepare <=3/240, finish <=2/160,
+whole idle <=9/500, with zero fullscan, sort and autoindex at 0/1024/100000 unrelated
+claims. Marker, clean and maintenance ceilings are unchanged. The bytecode control
+also derives a tighter fixture-only helper VM bound: EXPLAIN program length +16
+for the two IN probes and final cursor-next branches in the closed one-root,
+one-published-job layout. Actual prepare/finish/whole VM must additionally stay
+under old clean 57/23/127 plus one/one/two helper bounds. These are source-derived
+control obligations, not measured savings; neither the derivation nor ceilings may
+expand after a failure. Header-only Column flags must remain present. The work
+interval includes BEGIN through COMMIT on the lent caller; acquisition/return,
+setup and read proofs are excluded. The unrelated caller is a fixed meta UPDATE,
+not a public append or a production write-cost claim.
+
+The six managed_gap_* controls cover stable identity and exact changes, a legitimate
+later capture reason/status transition, partial fences including all same-source
+roots and jobs, caller savepoint/lent rollback/drop and diagnostic/finalizer/COMMIT
+failure with writer recovery, an actual multibyte logical refusal, and clean-path
+statement equality plus missing/invalid metadata refusal. A diagnostic trigger is
+UPDATE OF available only, so capture's revision updates succeed before the intended
+persistence fault. Only a fresh batch-layout setup may repeat under the existing
+four-attempt bound; semantic assertions never retry. Original 14 native, 8 managed
+and 6 operator-error names and adverse assertions remain unchanged. The required
+future hosted roster is those original 28 plus these six =34, source-bound with
+individual outcomes. #2301's 28 INITIAL PASS belong to its head and do not transfer.
+The only nextest addition exposes this one work control's successful diagnostics;
+selection, retries, threads and ceilings are unchanged. No Rust or SQL execution,
+writer savings, elapsed time, production authority, coverage or feasibility is
+claimed by this source preparation. #2077/#2091, link_minutes UNKNOWN/unwaived,
+replica ownership and #1909/#1865 composed-control obligations remain separate.

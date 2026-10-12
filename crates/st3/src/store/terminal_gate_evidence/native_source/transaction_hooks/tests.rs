@@ -6,6 +6,7 @@ use smallclaims::sqlite::WriterJob;
 use std::sync::mpsc::{Receiver, sync_channel};
 use std::time::{Duration, Instant};
 
+mod gap_path;
 mod operator_errors;
 
 type Saved = (Root, (i64, bool, Option<String>, bool), String, String);
