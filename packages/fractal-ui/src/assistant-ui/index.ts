@@ -37,6 +37,8 @@ export { Button as CompositionButton, IconButton as CompositionIconButton } from
 export { SidebarAgentRow, AgentHoverCard, sidebarRowDescription } from './sidebar/SidebarAgentRow.tsx'
 export { SidebarStatus } from './sidebar/SidebarStatus.tsx'
 export type { SidebarAgentRow as SidebarAgentRowData, SidebarUsage, SidebarDuration, SidebarLastTurn, AgentStatus as SidebarAgentStatus } from './sidebar/model.ts'
+export { SidebarTree } from './sidebar/SidebarTree.tsx'
+export type { SidebarTreeProps, SidebarTreeItem, SidebarTreeHandle } from './sidebar/SidebarTree.tsx'
 
 export { ResourceCardV1, ResourceChipV1 } from './resources/ResourceCardV1.tsx'
 export type { ResourceData, ResourceFile, ResourceMetadata } from './resources/resource-model.ts'

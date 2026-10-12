@@ -31,6 +31,7 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Sidebar tree**: measured RAC Tree/Virtualizer rows, deep sticky ancestors, push-out, breadcrumb depth cap, one accessible treegrid, pointer proxies, keyboard visibility, reveal, collapse/filter/reorder and cold reveal with resized rows. Light/dark specimens include 240, 440 and 1440 widths.
 
 ## Families
 
@@ -71,6 +72,15 @@ Stories:
 Every foreground/background pair used for text meets WCAG AA (≥ 4.5:1) in all six palettes. The minimum, 4.59:1, is in Relay dark. Under `prefers-reduced-motion`, durations are zero and spinner and pulse animations stop. Fonts come from system stacks only; no font or image assets are distributed.
 
 ## Assistant-ui surfaces
+
+### Sidebar tree
+
+`SidebarTree<T>` accepts nested `items` (`id`, `depth`, `children`, `textValue`), `renderRow(item, { depth, expanded, pinned })`, controlled `expandedKeys` / `onExpandedChange`, `onAction`, an `aria-label` and a caller-last StyleX `style`. `textValue` supplies the accessible name and RAC typeahead. The kit supplies indentation, guides and expansion chevrons; render only the row content. Optional `onRowContextMenu` handles the same item on real and pinned rows.
+
+Attach a `SidebarTreeHandle` ref and call `reveal(key)` for selection from another surface. It expands ancestors and retains the reveal anchor across measured-row resize and late item arrival until user scroll/pointer input or a new focus target takes over. Scrolling waits for stable keyed layout geometry and leaves the ancestor stack clear. The host must accept the controlled expansion update. The component must live inside a bounded-height parent.
+
+Pinned copies are `aria-hidden` and their content is inert. Pointer proxies select/focus the real keyed row; the separate chevron proxy toggles expansion. RAC 1.21.1 represents its Tree as a `treegrid` with `row` items, not `treeitem` roles; the kit preserves those semantics. Only virtualized real rows occur in accessibility. Upper ancestors compress into one breadcrumb above the deepest three levels, within 40% of the viewport. Push-out is scroll-driven, without animated transitions, so reduced-motion users receive the same direct positioning. `stickyAncestors={false}` exists for comparisons; normal callers leave it enabled.
+
 
 ### Gated transcript and work log
 
