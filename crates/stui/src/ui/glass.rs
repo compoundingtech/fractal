@@ -5293,6 +5293,9 @@ mod tests {
         ui.usage_period_next();
         assert_eq!(ui.inventories_wanted().usage_hours, Some(168));
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168), "changing focus keeps the visible usage overlay followed");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(ui.inventories_wanted().usage_hours, None);
     }
 
