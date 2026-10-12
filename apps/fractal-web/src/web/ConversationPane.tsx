@@ -7,7 +7,7 @@ import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/com
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNow } from '../data/react.tsx'
 import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
-import { useConnectionNotice } from './ConnectionBanner.tsx'
+import { Button } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { composerSendBinding, createComposerSubmissionCapture, type SendRefusal } from './composerSend.ts'
 import { createComposerAttachmentAdapter } from './composerAttachments.ts'
 import { geometryVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -168,12 +168,15 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+      {binding.availability._tag === 'Revoked' ? <div role="status">
+        <p>{binding.availability.detail}</p>
+        <Button onPress={() => { void binding.recover() }}>Check sending access</Button>
+      </div> : null}
       <EmbraceComposer variant="C1" readingColumn targetLabel={`${agentName} (${agentRef})${feed._tag === 'Observed' && feed.value.sessionId !== undefined ? ` · Session ${feed.value.sessionId}` : ''}`} showHistory historySource={historySource}
         onSendDraft={draft => submissionCapture.submitting(serializeDraft(draft).content)}
         sendDisabled={binding.disabledReason !== undefined}
         disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found'
-          : binding.availability._tag === 'Offline' || binding.availability._tag === 'Revoked'
-            ? undefined : binding.disabledReason} />
+          : binding.availability._tag === 'Offline' ? undefined : binding.disabledReason} />
     </div>
   </EmbraceRuntimeProvider>
 })
