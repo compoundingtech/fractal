@@ -85,6 +85,27 @@ impl Store {
         output: &mut impl Write,
         bodies: Option<&crate::message_body::Bodies>,
     ) -> Result<Header> {
+        // The bodies this member owns that its claims name, checked once here so the header can
+        // say whether the archive carries any, and written again below inside the snapshot.
+        let mut owned: Vec<(String, String, String)> = Vec::new();
+        if let Some(bodies) = bodies {
+            for file in bodies.files().into_iter().filter(|file| !file.temporary) {
+                let subject = format!("message/{}", file.id);
+                let Some(message) = self.message(&subject)? else {
+                    continue;
+                };
+                let (Some(named), true) = (message.body_attachment(), bodies.holds(&message.from, &file))
+                else {
+                    continue;
+                };
+                let Some(bytes) = bodies.read(&message.from, &subject)? else {
+                    continue;
+                };
+                if hex::encode(Sha256::digest(&bytes)) == named.sha256 {
+                    owned.push((subject, message.from, named.sha256));
+                }
+            }
+        }
         loop {
             self.seal_local_batches()?;
             // Capture before pinning: another sealer may advance this atomic after our reader
@@ -110,7 +131,10 @@ impl Store {
                     health.map_or(admitted == 0, |(status, through)| status == "healthy" && through >= admitted),
                     "backup requires a healthy, fully projected graph; retry after replication catches up"
                 );
-                let header = self.backup_header()?;
+                let mut header = self.backup_header()?;
+                if !owned.is_empty() {
+                    header.version = crate::backup::VERSION_WITH_BODIES;
+                }
                 let mut hash = Sha256::new();
                 write_record(output, &mut hash, &Record::Header(header.clone()))?;
                 let mut after = (String::new(), 0_u64, String::new());
@@ -186,31 +210,22 @@ impl Store {
                 }
                 if let Some(bodies) = bodies {
                     use base64::Engine as _;
-                    for file in bodies.files() {
-                        // Only a body its message's claim names, with the hash that claim gives,
-                        // belongs in the archive; anything else is a stray file.
-                        let subject = format!("message/{}", file.id);
-                        let Some(message) = self.message(&subject)? else {
+                    for (subject, actor, sha256) in &owned {
+                        // A body that vanished or changed since it was checked is left out, and
+                        // the restore report counts it as not returned.
+                        let Some(bytes) = bodies.read(actor, subject)? else {
                             continue;
                         };
-                        let Some(named) = message.body_attachment() else {
-                            continue;
-                        };
-                        let Some(bytes) = bodies.read(&message.from, &subject)? else {
-                            continue;
-                        };
-                        if hex::encode(Sha256::digest(&bytes)) != named.sha256
-                            || !bodies.holds(&message.from, &file)
-                        {
+                        if hex::encode(Sha256::digest(&bytes)) != *sha256 {
                             continue;
                         }
                         write_record(
                             output,
                             &mut hash,
                             &Record::MessageBody(crate::backup::MessageBodyRecord {
-                                message: subject,
-                                actor: message.from,
-                                sha256: named.sha256,
+                                message: subject.clone(),
+                                actor: actor.clone(),
+                                sha256: sha256.clone(),
                                 data: base64::engine::general_purpose::STANDARD.encode(bytes),
                             }),
                         )?;

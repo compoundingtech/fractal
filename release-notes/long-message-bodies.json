@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Older builds accept the claim and read the message as its preview, because they keep only image attachments entries. Client API: optional body_ref and body_bytes on message resources and timeline message bodies, limits.max_message_bytes, GET /v1/client/message-bodies/{id}, and the error codes message-too-large, message-store-full and long-message-signature-unsupported. A paired device that signs the whole text of a message over 8 KiB is refused until it signs the preview, hash and size; shorter messages are unchanged. Older clients keep reading the preview."
+    "detail": "Older builds accept the claim and read the message as its preview, because they keep only image attachments entries. Client API: optional body_ref and body_bytes on message resources and timeline message bodies, limits.max_message_bytes, GET /v1/client/message-bodies/{id}, and the error codes message-too-large, message-store-full and long-message-signature-unsupported. A paired device that signs the whole text of a message over 8 KiB is refused until it signs the preview, hash and size; shorter messages are unchanged. Older clients keep reading the preview. A backup that carries message bodies declares archive version 2, which a build without bodies refuses; a backup of a member with no long bodies is unchanged."
   },
   "downtime": {
     "status": "none",

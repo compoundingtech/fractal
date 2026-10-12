@@ -53,6 +53,31 @@ pub struct BodyFile {
     pub id: String,
     pub bytes: u64,
     pub modified: SystemTime,
+    /// A write that has not been committed: `.<id>.<n>.part`. It counts against the quotas and
+    /// is swept once it is old, and it is never a message's body.
+    pub temporary: bool,
+}
+
+/// A body written to its temporary name and not yet renamed into place.
+pub struct Staged {
+    temporary: PathBuf,
+    target: PathBuf,
+}
+
+impl Staged {
+    /// Make the body visible, atomically, and make the rename durable.
+    pub fn commit(self) -> std::io::Result<()> {
+        fs::rename(&self.temporary, &self.target)?;
+        if let Some(directory) = self.target.parent() {
+            fs::File::open(directory)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    /// Remove the temporary file: the claim it was for did not land.
+    pub fn discard(&self) {
+        let _ = fs::remove_file(&self.temporary);
+    }
 }
 
 fn actor_dir(actor: &str) -> String {
@@ -79,20 +104,22 @@ pub fn spawn_reconciler(store: std::sync::Arc<crate::store::Store>, state_dir: P
             let (store, state_dir) = (store.clone(), state_dir.clone());
             let _ = tokio::task::spawn_blocking(move || {
                 let bodies = bodies(&state_dir);
-                bodies.reconcile(|file| {
-                    store
-                        .message(&format!("message/{}", file.id))
-                        .ok()
-                        .flatten()
-                        .is_some_and(|message| {
-                            message.body_ref.is_some() && actor_dir(&message.from) == file.actor_dir
-                        })
-                });
+                bodies.reconcile(|file| body_is_named(&store, file));
             })
             .await;
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
     });
+}
+
+/// Whether a message claim here still names this body. Only a message the store says does not
+/// exist leaves its body unnamed: a read that fails says nothing, and a body is never deleted on
+/// one.
+pub fn body_is_named(store: &crate::store::Store, file: &BodyFile) -> bool {
+    match store.message(&format!("message/{}", file.id)) {
+        Ok(None) => false,
+        Ok(Some(_)) | Err(_) => true,
+    }
 }
 
 /// The owner's store under a state directory.
@@ -107,22 +134,46 @@ impl Bodies {
         Some(self.root.join(actor_dir(actor)).join(message_id(subject)?))
     }
 
-    /// Write one message's body, atomically: a reader sees all of it or none. A repeat of the same
-    /// text only touches the file.
-    pub fn put(&self, actor: &str, subject: &str, bytes: &[u8]) -> std::io::Result<()> {
+    /// Write one message's body to a temporary name and make it durable, to be committed once the
+    /// claim that names it has landed. `None` when the body is already held exactly: nothing to
+    /// write. A failed write removes its temporary file.
+    pub fn stage(&self, actor: &str, subject: &str, bytes: &[u8]) -> std::io::Result<Option<Staged>> {
         let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a message name");
-        let path = self.path(actor, subject).ok_or_else(invalid)?;
-        let directory = path.parent().ok_or_else(invalid)?;
+        let target = self.path(actor, subject).ok_or_else(invalid)?;
+        let directory = target.parent().ok_or_else(invalid)?;
         fs::create_dir_all(directory)?;
-        if fs::read(&path).is_ok_and(|held| held == bytes) {
-            return Ok(());
+        if fs::read(&target).is_ok_and(|held| held == bytes) {
+            return Ok(None);
         }
-        let temporary = directory.join(format!(".{}.{}.part", message_id(subject).unwrap_or("x"), std::process::id()));
-        let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, &path)
+        static STAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let temporary = directory.join(format!(
+            ".{}.{}.{}.part",
+            message_id(subject).unwrap_or("x"),
+            std::process::id(),
+            STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let written = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()
+        })();
+        if let Err(error) = written {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(Some(Staged { temporary, target }))
+    }
+
+    /// Write one message's body, atomically: a reader sees all of it or none.
+    pub fn put(&self, actor: &str, subject: &str, bytes: &[u8]) -> std::io::Result<()> {
+        match self.stage(actor, subject, bytes)? {
+            Some(staged) => staged.commit(),
+            None => Ok(()),
+        }
     }
 
     pub fn read(&self, actor: &str, subject: &str) -> std::io::Result<Option<Vec<u8>>> {
@@ -189,17 +240,20 @@ impl Bodies {
             };
             for entry in entries.flatten() {
                 let Ok(metadata) = entry.metadata() else { continue };
-                let Some(id) = entry.file_name().into_string().ok().filter(|id| message_id(id).is_some()) else {
+                let Some(name) = entry.file_name().into_string().ok() else {
                     continue;
                 };
-                if metadata.is_file() {
-                    files.push(BodyFile {
-                        actor_dir: actor_dir.clone(),
-                        id,
-                        bytes: metadata.len(),
-                        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                    });
+                let temporary = name.starts_with('.') && name.ends_with(".part");
+                if !metadata.is_file() || !(temporary || message_id(&name).is_some()) {
+                    continue;
                 }
+                files.push(BodyFile {
+                    actor_dir: actor_dir.clone(),
+                    id: name,
+                    bytes: metadata.len(),
+                    modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    temporary,
+                });
             }
         }
         files
@@ -224,7 +278,7 @@ impl Bodies {
         let (mine, id) = (actor_dir(actor), message_id(subject).unwrap_or_default().to_owned());
         let (mut total, mut sender) = (0_u64, 0_u64);
         for file in self.files() {
-            if file.actor_dir == mine && file.id == id {
+            if !file.temporary && file.actor_dir == mine && file.id == id {
                 return Ok(());
             }
             total += file.bytes;
@@ -260,8 +314,10 @@ impl Bodies {
     pub fn reconcile(&self, names_a_body: impl Fn(&BodyFile) -> bool) -> usize {
         let mut removed = 0;
         for file in self.files() {
-            let old = file.modified.elapsed().map_or(false, |age| age > ORPHAN_GRACE);
-            if old && !names_a_body(&file) {
+            let old = file.modified.elapsed().is_ok_and(|age| age > ORPHAN_GRACE);
+            // An old temporary file is a write that never committed; a body is kept unless its
+            // message is known not to exist.
+            if old && (file.temporary || !names_a_body(&file)) {
                 let _ = fs::remove_file(self.root.join(&file.actor_dir).join(&file.id));
                 removed += 1;
             }

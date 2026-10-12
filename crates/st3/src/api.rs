@@ -12160,9 +12160,11 @@ fn accept_message_receipt_with_upload_owner(
         fields.insert("session_id".into(), Value::String(session_id));
     }
     // A long body is a file on this member, named in the claim like an image: nothing of it but
-    // the preview and this reference enters the database or replication. The file is written
-    // only after the claim that names it, so a refusal or a failed write leaves no stray file;
-    // a repeat of the same send writes it again, which heals a write that failed.
+    // the preview and this reference enters the database or replication. The file is staged
+    // under a temporary name before the claim, so a failed write never leaves a claim without
+    // its text, and renamed into place once the claim has landed, so a refusal or a failed
+    // append leaves no stray file. A repeat of the same send finishes a rename that did not
+    // happen, which heals a crash between the two.
     let mut body = None;
     let mut claim_attachments = attachments.clone();
     if long_body {
@@ -12209,6 +12211,13 @@ fn accept_message_receipt_with_upload_owner(
         }
         check_device_signature(state, signature, &request, &subject, &from, &signed, expected)?;
     }
+    let staged = if body.is_some() {
+        message_body::bodies(&state.state_dir)
+            .stage(&from, &subject, request.content.as_bytes())
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
     let input = ClaimInput {
         subject: subject.clone(),
         kind: "message.sent".into(),
@@ -12223,11 +12232,14 @@ fn accept_message_receipt_with_upload_owner(
         Some(signature) => state.store.append_signed_message(&input, signature),
         None => state.store.append_claim_outcome(&input),
     }
-    .map_err(ApiError::bad)?;
-    if body.is_some() {
-        message_body::bodies(&state.state_dir)
-            .put(&from, &subject, request.content.as_bytes())
-            .map_err(ApiError::internal)?;
+    .map_err(|error| {
+        if let Some(staged) = staged.as_ref() {
+            staged.discard();
+        }
+        ApiError::bad(error)
+    })?;
+    if let Some(staged) = staged {
+        staged.commit().map_err(ApiError::internal)?;
     }
     let mut work_wake = is_work_wake(&request.tags);
     if let Some(parent) = request.in_reply_to.as_deref() {

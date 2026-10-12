@@ -33,40 +33,49 @@ async fn whole_text(
             .client_relay
             .as_ref()
             .ok_or_else(|| remote_unavailable_for_owner(state, &body.origin))?;
-        let mut bytes = Vec::new();
-        loop {
-            let value = relay
-                .read(
-                    &body.origin,
-                    &ClientReadRequest {
-                        authority_actor: session.authority_actor.clone(),
-                        request: ClientReadOperation::Blob {
-                            sha256: body.sha256.clone(),
-                            message: message.subject.clone(),
-                            offset: bytes.len() as u64,
+        // The most a body is read in is a few chunks, and the owner has half a minute to give
+        // them, so a reader never waits on an owner that streams without end.
+        let fetched = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut bytes = Vec::new();
+            for _ in 0..=(message_body::MAX_BYTES / crate::blobs::CHUNK_BYTES + 1) {
+                let value = relay
+                    .read(
+                        &body.origin,
+                        &ClientReadRequest {
+                            authority_actor: session.authority_actor.clone(),
+                            request: ClientReadOperation::Blob {
+                                sha256: body.sha256.clone(),
+                                message: message.subject.clone(),
+                                offset: bytes.len() as u64,
+                            },
+                            relay: None,
                         },
-                        relay: None,
-                    },
-                )
-                .await
-                .map_err(|error| read_error(state, &body.origin, error))?;
-            let size = value["size"].as_u64().unwrap_or(u64::MAX);
-            let chunk = value["data"]
-                .as_str()
-                .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
-                .ok_or_else(|| remote_unavailable_for_owner(state, &body.origin))?;
-            if size > message_body::MAX_BYTES as u64
-                || chunk.is_empty() && (bytes.len() as u64) < size
-                || bytes.len() + chunk.len() > message_body::MAX_BYTES
-            {
-                return Err(remote_unavailable_for_owner(state, &body.origin));
+                    )
+                    .await
+                    .map_err(|error| read_error(state, &body.origin, error))?;
+                let size = value["size"].as_u64().unwrap_or(u64::MAX);
+                let chunk = value["data"]
+                    .as_str()
+                    .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+                    .ok_or_else(|| remote_unavailable_for_owner(state, &body.origin))?;
+                if size > message_body::MAX_BYTES as u64
+                    || chunk.is_empty() && (bytes.len() as u64) < size
+                    || bytes.len() + chunk.len() > message_body::MAX_BYTES
+                {
+                    return Err(remote_unavailable_for_owner(state, &body.origin));
+                }
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() as u64 >= size {
+                    return Ok(bytes);
+                }
             }
-            bytes.extend_from_slice(&chunk);
-            if bytes.len() as u64 >= size {
-                break;
-            }
+            Err(remote_unavailable_for_owner(state, &body.origin))
+        })
+        .await;
+        match fetched {
+            Ok(result) => result?,
+            Err(_) => return Err(remote_unavailable_for_owner(state, &body.origin)),
         }
-        bytes
     };
     if hex::encode(Sha256::digest(&bytes)) != body.sha256 {
         return Err(gone(format!(

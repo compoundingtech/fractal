@@ -14,6 +14,9 @@ use crate::store::{CheckpointManifest, CheckpointManifestPage, Store};
 
 pub const FORMAT: &str = "st3.claim-backup";
 pub const VERSION: u32 = 1;
+/// The version of an archive that also carries message bodies. An archive without any keeps
+/// [`VERSION`], so a build that predates bodies restores it; one with bodies it refuses cleanly.
+pub const VERSION_WITH_BODIES: u32 = 2;
 pub(crate) const PAGE: usize = 512;
 // One envelope can contain document bytes; reject unbounded lines before allocating them.
 const MAX_RECORD_BYTES: u64 = 128 * 1024 * 1024;
@@ -198,7 +201,8 @@ fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
 
 fn check_header(header: &Header) -> Result<()> {
     ensure!(
-        header.format == FORMAT && header.version == VERSION,
+        header.format == FORMAT
+            && (header.version == VERSION || header.version == VERSION_WITH_BODIES),
         "unsupported claim backup format/version"
     );
     ensure!(
@@ -241,6 +245,10 @@ pub fn verify_file(path: &Path) -> Result<Header> {
             Record::Envelope(_) => envelopes += 1,
             Record::Checkpoint(_) | Record::Signatures(_) => {}
             Record::MessageBody(body) => {
+                ensure!(
+                    header.version >= VERSION_WITH_BODIES,
+                    "a message body in an archive that does not declare them"
+                );
                 body_bytes(&body)?;
             }
             Record::End {

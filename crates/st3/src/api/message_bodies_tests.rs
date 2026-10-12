@@ -462,8 +462,23 @@ fn what_one_sender_and_one_machine_keep_is_bounded_and_orphans_are_reconciled() 
     bodies.put("person/blair", "message/kept", b"x").unwrap();
     age("person/blair", "message/orphan");
     age("person/blair", "message/kept");
+    // An old temporary file is a write that never committed, and counts against the quota until
+    // it is swept; a young one is left.
+    let temporary = |name: &str| {
+        let path = bodies_path(root.path(), "person/blair", "message/x")
+            .parent()
+            .unwrap()
+            .join(name);
+        std::fs::write(&path, vec![0_u8; 1024]).unwrap();
+        path
+    };
+    let stale = temporary(".gone.1.0.part");
+    let fresh = temporary(".going.1.1.part");
+    std::fs::OpenOptions::new().write(true).open(&stale).unwrap().set_modified(old).unwrap();
+    assert!(bodies.files().iter().any(|file| file.temporary && file.id == ".gone.1.0.part"));
     let removed = bodies.reconcile(|file| file.id == "kept");
-    assert_eq!(removed, 1);
+    assert_eq!(removed, 2);
+    assert!(!stale.exists() && fresh.exists());
     assert!(!bodies.exists("person/blair", "message/orphan"));
     assert!(bodies.exists("person/blair", "message/young-orphan"));
     assert!(bodies.exists("person/blair", "message/kept"));
@@ -571,6 +586,11 @@ async fn a_backup_carries_the_long_bodies_a_member_owns_and_a_restore_proves_the
     crate::backup::verify_file(&archive_path).unwrap();
     let archived = String::from_utf8_lossy(&archive);
     assert_eq!(archived.matches("\"record\":\"message-body\"").count(), 2);
+    // Only an archive that carries bodies declares the version a build without them refuses.
+    assert_eq!(
+        crate::backup::verify_file(&archive_path).unwrap().version,
+        crate::backup::VERSION_WITH_BODIES
+    );
     assert!(!archived.contains("message/stray"));
     // Restored into a fresh state directory, every body is back, matched to its claim by hash.
     let restored_dir = root.path().join("restored");
@@ -597,6 +617,23 @@ async fn a_backup_carries_the_long_bodies_a_member_owns_and_a_restore_proves_the
     };
     let bare_path = root.path().join("bare.jsonl");
     std::fs::write(&bare_path, &bare).unwrap();
+    assert_eq!(crate::backup::verify_file(&bare_path).unwrap().version, crate::backup::VERSION);
     let report = crate::backup::restore(&bare_path, &root.path().join("bare").join("claims.sqlite3")).unwrap();
     assert_eq!((report.message_bodies_restored, report.message_bodies_referenced), (0, 2));
+}
+
+#[tokio::test]
+async fn a_body_is_named_while_its_message_exists_and_only_then() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::state(root.path());
+    let subject = send(&state, "named", &text(50 * 1024)).unwrap().message.subject;
+    let file = |id: &str| message_body::BodyFile {
+        actor_dir: String::new(),
+        id: id.into(),
+        bytes: 1,
+        modified: std::time::SystemTime::now(),
+        temporary: false,
+    };
+    assert!(message_body::body_is_named(&state.store, &file(subject.trim_start_matches("message/"))));
+    assert!(!message_body::body_is_named(&state.store, &file("no-such-message")));
 }

@@ -24,8 +24,8 @@ every message written before this, reads exactly as it did.
 ## Reading
 
 A member that reads or delivers the message asks the owner for the text each time, over the signed
-peer route a relayed client read takes (`ClientReadOperation::Blob`, in 512 KiB chunks), and checks
-the hash. The ask is authorized as an attachment's is: a person reads it in a conversation they are
+peer route a relayed client read takes (`ClientReadOperation::Blob`, in 512 KiB chunks, at most
+three of them, within 30 seconds), and checks the hash. The ask is authorized as an attachment's is: a person reads it in a conversation they are
 in, and an agent seat reads what it can name.
 
 - `GET /v1/client/message-bodies/{id}` (scope `read.projections`) answers
@@ -82,16 +82,22 @@ with the claim. The measured rows are 4 KiB and the two file-backed sizes.
 
 ## Lifecycle
 
-- A send is validated, its claim appended, and only then its file written, atomically (a
-  temporary file renamed into place). A refused send, an idempotency conflict or a failed append
-  leaves no file. If the write fails after the claim landed, the send answers an error and a repeat
-  of the same send writes the file; until then readers show the preview and say where the rest is.
-- The owner removes, at startup and hourly, a body whose message no claim names for that sender,
-  such as one a checkpoint dropped. A file younger than an hour is left alone.
+- A send is validated, its text staged to a temporary file (`.<id>.<n>.part`, fsynced), its
+  claim appended, and only then the file renamed into place and the directory fsynced. A failed
+  write never leaves a claim without its text; a refused send, an idempotency conflict or a failed
+  append removes the temporary file. A crash between the append and the rename leaves a claim whose
+  text is not yet in place: readers show the preview and say where the rest is, and a repeat of the
+  same send finishes the rename. Temporary files count against the quotas.
+- The owner removes, at startup and hourly, a temporary file older than an hour and a body whose
+  message the store says does not exist, such as one a checkpoint dropped. A read that fails
+  deletes nothing. A file younger than an hour is left alone.
 - The owner keeps the file as long as it keeps its state directory. Nothing sweeps by age, unlike
   an attachment's seven days.
 - `st backup create` writes each body the member owns, with its message, sender and hash, after the
-  claims; a body no claim names with that hash is left out. `st backup restore` checks every body
+  claims, and declares archive version 2 (an archive with no bodies stays version 1, which a build
+  without bodies restores; one with bodies it refuses cleanly); a body no claim names with that hash
+  is left out. The daemon spools the archive to temporary disk, so up to about 1.4 GiB of free space
+  is needed on a member that owns the most the quota allows. `st backup restore` checks every body
   against its hash and against the restored claim, writes them beside the database, and reports
   `message_bodies_restored`, `message_bodies_unmatched` and `message_bodies_referenced` (the long
   messages the claims name, including those another member owns). An archive made before this still
