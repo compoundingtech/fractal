@@ -536,6 +536,16 @@ export type ClientConnections = {
 };
 
 export type CollectionCommand = ({
+  actor?: null;
+  collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person?: string | null;
+  since_ms?: number;
+  status?: null;
+  until_ms?: number;
+} | {
   actor?: string | null;
   collection: "missions" | "attention" | "agents" | "work" | "glasses" | "summary";
   id: string;
@@ -615,7 +625,23 @@ export type CollectionFrame = ({
   retryable?: boolean;
 });
 
-export type CollectionName = "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary";
+export type CollectionName = "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary" | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
+
+export type ConnectedClient = ResourceHeader & {
+  actor: string;
+  client?: string | null;
+  connected: boolean;
+  device_id?: string;
+  device_name?: string;
+  follows: Array<string>;
+  kind: "connected-client";
+  last_seen: Timestamp;
+  member: string;
+  person: string;
+  since: Timestamp;
+  streams: number;
+  via: "local" | "gateway" | "tailscale";
+};
 
 export type ConversationChanges = {
   header?: unknown;
@@ -1466,11 +1492,11 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
 
 export type ResourceHeader = {
   id: Id;
-  kind: ("attention" | "message" | "launch" | "launch-variant" | "launch-decision" | "launch-approval" | "mission" | "work" | "agent" | "runtime" | "observer" | "subscription" | "lane" | "machine" | "device" | "operation" | "history" | "session" | "glass" | "arrangement" | "summary" | string);
+  kind: ("attention" | "message" | "launch" | "launch-variant" | "launch-decision" | "launch-approval" | "mission" | "work" | "agent" | "runtime" | "observer" | "subscription" | "lane" | "machine" | "device" | "operation" | "history" | "session" | "glass" | "arrangement" | "summary" | "connected-client" | "usage" | string);
   operational?: Operational;
   revision: Revision;
   updated_at: Timestamp;
@@ -2214,6 +2240,11 @@ export type Timestamp = string;
 
 export type UnknownResource = ResourceHeader & {
   kind?: string;
+};
+
+export type Usage = ResourceHeader & {
+  kind: "usage";
+  value: UsagePeriod;
 };
 
 export type UsageContext = {
