@@ -13,7 +13,7 @@ import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as 
  * One settled run of 20 steps under four plan items. Step 4 fails (exit 2) and the seat retries it as step 5;
  * step 16 delegates to two agents. Durations add up to 1m 47s; the phases take 31s, 7s, 40s and 29s.
  */
-const toolKinds: Readonly<Record<string, WorkKind>> = { read: 'read', bash: 'run', eval: 'eval', edit: 'edit', task: 'agent' }
+const toolKinds = { read: 'read', bash: 'run', eval: 'eval', edit: 'edit', task: 'agent' } as const satisfies Readonly<Record<string, WorkKind>>
 const fetchToken = 'Fetch the review token', recordDecisions = 'Record review decisions', startWatcher = 'Start the comment watcher', briefAgents = 'Brief and notify agents'
 const quick = 100
 interface Step { readonly name: keyof typeof toolKinds; readonly phase: string; readonly input: Readonly<Record<string, unknown>>; readonly ms: number; readonly output?: string; readonly agents?: readonly WorkAgent[] }
@@ -69,7 +69,7 @@ function fixture(state: State) {
     offset += step.ms
   })
   const turn = workLogTurnFromItems(items, {
-    kindFor: name => toolKinds[name] ?? 'run', running: state === 'running', failed: state === 'failed', interrupted: false,
+    kindFor: name => Object.entries(toolKinds).find(([tool]) => tool === name)?.[1] ?? 'run', running: state === 'running', failed: state === 'failed', interrupted: false,
     durationMs: state === 'settled' || state === 'failed' ? offset : undefined, startedAt: iso(0),
     completeHistory: state !== 'partial', callFacts: call => facts[call.id],
   })
@@ -124,6 +124,11 @@ const box = (target: Element | Range) => target.getBoundingClientRect()
 const same = async (values: readonly number[], what: string) => { for (const value of values) await expect(Math.abs(value - values[0]!), what).toBeLessThan(0.5) }
 /** Plays leave no focus ring behind, so the settled frame shows the resting table. */
 const restFocus = (canvasElement: HTMLElement) => { const active = canvasElement.ownerDocument.activeElement; if (active instanceof HTMLElement) active.blur() }
+/** A control regression that empties one element; restore puts the same nodes back, so React's tree is untouched. */
+const emptied = (element: Element) => {
+  const nodes = Array.from(element.childNodes)
+  return [() => { element.replaceChildren() }, () => { element.replaceChildren(...nodes) }] as const
+}
 
 /** Collapsed default: a settled block is one summary row, and the failure it holds is a count in danger ink. */
 async function assertCollapsed(block: HTMLElement) {
@@ -144,7 +149,12 @@ async function assertPhases(block: HTMLElement) {
 /** One shared grid: every row 24 tall, one edge per column at every depth, at least 8 between columns. */
 async function assertColumns(block: HTMLElement, narrow: boolean) {
   const rows = rowsOf(block)
-  const table = box(block.querySelector('[role="table"]')!)
+  const tableElement = block.querySelector<HTMLElement>('[role="table"]')!
+  const table = box(tableElement)
+  // The spec's geometry, read back from the rendered tracks: 8 between columns, a 256 name track when wide.
+  const gap = parseFloat(getComputedStyle(tableElement).columnGap)
+  const nameTrack = parseFloat(getComputedStyle(tableElement).gridTemplateColumns.replace(/\[[^\]]*\]/g, '').trim())
+  await expect(gap).toBe(8)
   for (const row of rows) await expect(box(row).height, 'row height').toBe(24)
   await same(rows.map(row => box(cell(row, 'status')).right), 'status right edge')
   await same(rows.map(row => box(cell(row, 'disclosure')).left), 'disclosure left edge')
@@ -163,17 +173,22 @@ async function assertColumns(block: HTMLElement, narrow: boolean) {
   const details = rows.flatMap(row => row.querySelector<HTMLElement>(':scope > [data-cell="detail"]') ?? [])
   await expect(details.length).toBeGreaterThan(0)
   const phaseCounts = rowsOf(block, 'phase').map(row => row.querySelector<HTMLElement>('[data-work-counts]')!)
+  const agentTasks = Array.from(block.querySelectorAll<HTMLElement>('[data-agent-task]'))
   if (narrow) {
-    // Below the lane minimum the detail folds into the opened body and phase titles keep the room their counts took.
+    // Below the lane minimum the detail folds into the opened body, phase titles keep the room their counts took,
+    // and an agent's assignment follows its name.
     for (const detail of details) await expect(getComputedStyle(detail).display).toBe('none')
     for (const counts of phaseCounts) await expect(getComputedStyle(counts).display).toBe('none')
+    for (const task of agentTasks) await expect(box(task).width).toBeGreaterThan(0)
   } else {
-    await same([...details.map(detail => box(detail).left), table.left + 256 + 8], 'detail left edge')
+    await expect(nameTrack).toBe(256)
+    await same([...details.map(detail => box(detail).left), table.left + nameTrack + gap], 'detail left edge')
     for (const counts of phaseCounts) await expect(box(counts).width).toBeGreaterThan(0)
+    for (const task of agentTasks) await expect(getComputedStyle(task).display).toBe('none')
   }
   for (const row of rows) {
     const cells = Array.from(row.querySelectorAll<HTMLElement>(':scope > [data-cell]')).filter(element => getComputedStyle(element).display !== 'none')
-    for (let index = 1; index < cells.length; index++) await expect(box(cells[index]!).left - box(cells[index - 1]!).right, `gap before ${cells[index]!.dataset['cell']}`).toBeGreaterThanOrEqual(7.5)
+    for (let index = 1; index < cells.length; index++) await expect(box(cells[index]!).left - box(cells[index - 1]!).right, `gap before ${cells[index]!.dataset['cell']}`).toBeGreaterThanOrEqual(gap - 0.5)
   }
 }
 /** The failure that ended the turn is open with its tail; the failure the seat moved past keeps its mark but stays shut. */
@@ -187,10 +202,15 @@ async function assertAutoOpen(block: HTMLElement, ending: number | undefined) {
 
 const play = (narrow: boolean): Story['play'] => async ({ canvasElement }) => {
   const block = blockOf(canvasElement)
-  await expect(rowsOf(block, 'summary')[0]!.querySelector('[data-work-title]')).toHaveTextContent(/^Worked for 1m 47s$/)
-  await expect(rowsOf(block, 'summary')[0]!.querySelector('[data-work-counts]')).toHaveTextContent(/^20 steps$/)
-  await expect(cell(rowsOf(block, 'summary')[0]!, 'status')).toHaveTextContent(/^1 failed$/)
-  await expect(getComputedStyle(cell(rowsOf(block, 'summary')[0]!, 'status')).color).not.toBe(getComputedStyle(cell(rowsOf(block, 'summary')[0]!, 'time')).color)
+  const summary = rowsOf(block, 'summary')[0]!
+  const summaryFacts = async () => {
+    await expect(summary.querySelector('[data-work-title]')).toHaveTextContent(/^Worked for 1m 47s$/)
+    await expect(summary.querySelector('[data-work-counts]')).toHaveTextContent(/^20 steps$/)
+    await expect(cell(summary, 'status')).toHaveTextContent(/^1 failed$/)
+    await expect(getComputedStyle(cell(summary, 'status')).color).not.toBe(getComputedStyle(cell(summary, 'time')).color)
+  }
+  // Control: a summary that drops its failure count must be rejected.
+  await withControl(summaryFacts, ...emptied(cell(summary, 'status')))
   // Control: opening the block must break the collapsed default; closing it restores it.
   await withControl(() => assertCollapsed(block), () => press(summaryButton(block), 'true'), () => press(summaryButton(block), 'false'))
 
@@ -201,14 +221,18 @@ const play = (narrow: boolean): Story['play'] => async ({ canvasElement }) => {
 
   // Phase expansion: a phase opens into its own steps, one level in, and only those.
   await press(phaseButton(block, 0), 'true')
-  await waitFor(() => expect(rowsOf(block, 'step')).toHaveLength(7))
-  for (const row of rowsOf(block, 'step')) await expect(row.closest('[data-work-children]')).toHaveAttribute('data-work-children', 'phase:0')
-  await expect(rowsOf(block, 'step').map(row => row.querySelector('[data-call-title]')!.textContent)).toEqual(['token skill', 'find field', 'find by title', 'list fields', 'list fields json', 'read token, test', 'Eval'])
-  // Rows without an intent show the verb at the quieter ink; intents read at the subject ink.
-  await expect(getComputedStyle(stepRow(block, 7)!.querySelector('[data-call-title]')!).color).not.toBe(getComputedStyle(stepRow(block, 6)!.querySelector('[data-call-title]')!).color)
-  await expect(stepRow(block, 2)!.querySelector('[data-call-detail]')).toHaveTextContent(/^vault get svc-review-token/)
-  await expect(cell(stepRow(block, 1)!, 'time')).toHaveTextContent(/^$/)
-  await expect(cell(stepRow(block, 6)!, 'time')).toHaveTextContent(/^17s$/)
+  const phaseSteps = async () => {
+    await expect(rowsOf(block, 'step')).toHaveLength(7)
+    for (const row of rowsOf(block, 'step')) await expect(row.closest('[data-work-children]')).toHaveAttribute('data-work-children', 'phase:0')
+    await expect(rowsOf(block, 'step').map(row => row.querySelector('[data-call-title]')!.textContent)).toEqual(['token skill', 'find field', 'find by title', 'list fields', 'list fields json', 'read token, test', 'Eval'])
+    // Rows without an intent show the verb at the quieter ink; intents read at the subject ink.
+    await expect(getComputedStyle(stepRow(block, 7)!.querySelector('[data-call-title]')!).color).not.toBe(getComputedStyle(stepRow(block, 6)!.querySelector('[data-call-title]')!).color)
+    await expect(stepRow(block, 2)!.querySelector('[data-call-detail]')).toHaveTextContent(/^vault get svc-review-token/)
+    await expect(cell(stepRow(block, 1)!, 'time')).toHaveTextContent(/^$/)
+    await expect(cell(stepRow(block, 6)!, 'time')).toHaveTextContent(/^17s$/)
+  }
+  // Control: a second open phase must break "the phase's own steps and only those"; closing it restores them.
+  await withControl(phaseSteps, () => press(phaseButton(block, 1), 'true'), () => press(phaseButton(block, 1), 'false'))
 
   // Deepest table: phases at depth 1, steps at depth 2, delegated agents at depth 3.
   await press(phaseButton(block, 3), 'true')
@@ -233,13 +257,17 @@ export const SettledLight440: Story = { args: { narrow: true, scheme: 'light' },
 const partialPlay: Story['play'] = async ({ canvasElement }) => {
   const block = blockOf(canvasElement)
   const summary = rowsOf(block, 'summary')[0]!
-  await expect(summary.querySelector('[data-work-tag]')).toHaveTextContent(/^partial history$/)
-  await expect(summary.querySelector('[data-work-title]')).toHaveTextContent(/^Worked$/)
-  await expect(summary.querySelector('[data-work-counts]')).toHaveTextContent(/^20 steps$/)
-  await expect(summaryButton(block)).toHaveAccessibleName('Worked 20 steps partial history 1 failed')
-  await expect(block).not.toHaveTextContent(/unverified|Unknown/)
-  await assertCollapsed(block)
+  const partialFacts = async () => {
+    await expect(summary.querySelector('[data-work-tag]')).toHaveTextContent(/^partial history$/)
+    await expect(summary.querySelector('[data-work-title]')).toHaveTextContent(/^Worked$/)
+    await expect(summary.querySelector('[data-work-counts]')).toHaveTextContent(/^20 steps$/)
+    await expect(summaryButton(block)).toHaveAccessibleName('Worked 20 steps partial history 1 failed')
+    await expect(block).not.toHaveTextContent(/unverified|Unknown/)
+  }
+  // Control: a summary that loses its tag (incomplete history passed off as complete) must be rejected.
+  await withControl(partialFacts, ...emptied(summary.querySelector('[data-work-tag]')!))
   const foldWorks = async () => {
+    await assertCollapsed(block)
     const button = summaryButton(block)
     await userEvent.click(button)
     await waitFor(() => expect(button).toHaveAttribute('aria-expanded', 'true'), { timeout: 500 })
@@ -263,9 +291,9 @@ export const PartialHistoryLight440: Story = { args: { state: 'partial', narrow:
 /** E32 as amended: the turn-ending failure opens its phase and its tail; the earlier failure stays shut. */
 const failurePlay = (narrow: boolean): Story['play'] => async ({ canvasElement }) => {
   const block = blockOf(canvasElement)
-  await expect(summaryButton(block)).toHaveAttribute('aria-expanded', 'true')
-  await expect(cell(rowsOf(block, 'summary')[0]!, 'status')).toHaveTextContent(/^2 failed$/)
   const opened = async () => {
+    await expect(summaryButton(block)).toHaveAttribute('aria-expanded', 'true')
+    await expect(cell(rowsOf(block, 'summary')[0]!, 'status')).toHaveTextContent(/^2 failed$/)
     await expect(rowsOf(block, 'phase').map(row => row.querySelector('button')!.getAttribute('aria-expanded'))).toEqual(['false', 'false', 'false', 'true'])
     await expect(cell(stepRow(block, 20)!, 'status')).toHaveTextContent(/^Failed · exit 1$/)
     await expect(stepRow(block, 20)!.querySelector('button')).toHaveAttribute('aria-expanded', 'true')
@@ -273,19 +301,24 @@ const failurePlay = (narrow: boolean): Story['play'] => async ({ canvasElement }
   // Control: opening a settled phase must break "only the failing phase opens"; closing it restores it.
   await withControl(opened, () => press(phaseButton(block, 1), 'true'), () => press(phaseButton(block, 1), 'false'))
   const body = block.querySelector<HTMLElement>('[data-work-row="body"][data-call-id="work/step-20"]')!
-  await expect(within(body).getByTestId('work-step-output')).toHaveTextContent(/^sent reviewer\s+notify: thread archivist: not found\s+exit 1$/)
-  await expect(body.querySelector('[data-tail-hidden]')).toHaveTextContent(/^… 3 earlier lines$/)
-  // The tail starts at the step's text column and runs to the table's right edge.
-  const title = stepRow(block, 20)!.querySelector('[data-call-title]')!
-  const frame = body.querySelector('[data-opened-body]')!
-  await expect(Math.abs(box(frame).left - box(title).left)).toBeLessThan(0.5)
-  await expect(Math.abs(box(frame).right - box(block.querySelector('[role="table"]')!).right)).toBeLessThan(0.5)
-  await userEvent.click(within(body).getByRole('button', { name: 'Full output' }))
-  await waitFor(() => expect(within(body).getByTestId('work-step-output')).toHaveTextContent(/^resolving recipients/))
-  await expect(body.querySelector('[data-tail-hidden]')).toBeNull()
-  await userEvent.click(within(body).getByRole('button', { name: 'Last lines' }))
-  await waitFor(() => expect(within(body).getByTestId('work-step-output')).toHaveTextContent(/^sent reviewer/))
-  await expect(body.querySelector('[data-tail-hidden]')).toHaveTextContent(/^… 3 earlier lines$/)
+  const output = () => within(body).getByTestId('work-step-output')
+  const tail = async () => {
+    await expect(output()).toHaveTextContent(/^sent reviewer\s+notify: thread archivist: not found\s+exit 1$/)
+    await expect(body.querySelector('[data-tail-hidden]')).toHaveTextContent(/^… 3 earlier lines$/)
+    // The tail starts at the step's text column and runs to the table's right edge.
+    const title = stepRow(block, 20)!.querySelector('[data-call-title]')!
+    const frame = body.querySelector('[data-opened-body]')!
+    await expect(Math.abs(box(frame).left - box(title).left)).toBeLessThan(0.5)
+    await expect(Math.abs(box(frame).right - box(block.querySelector('[role="table"]')!).right)).toBeLessThan(0.5)
+  }
+  // Control: the whole output in place of the tail must be rejected; "Last lines" restores the tail.
+  await withControl(tail, async () => {
+    await userEvent.click(within(body).getByRole('button', { name: 'Full output' }))
+    await waitFor(() => expect(output()).toHaveTextContent(/^resolving recipients/))
+  }, async () => {
+    await userEvent.click(within(body).getByRole('button', { name: 'Last lines' }))
+    await waitFor(() => expect(output()).toHaveTextContent(/^sent reviewer/))
+  })
 
   await press(phaseButton(block, 0), 'true')
   const earlier = stepRow(block, 4)!.querySelector<HTMLElement>('button')!
@@ -305,19 +338,28 @@ export const TurnEndingFailureLight440: Story = { args: { state: 'failed', narro
 const runningPlay = (narrow: boolean): Story['play'] => async ({ canvasElement }) => {
   const block = blockOf(canvasElement)
   const summary = rowsOf(block, 'summary')[0]!
-  await expect(summary.querySelector('[data-work-title]')).toHaveTextContent(/^Working for 1m 41s$/)
-  await expect(summary.querySelector('[data-work-counts]')).toHaveTextContent(/^18 steps$/)
-  await expect(cell(summary, 'status')).toHaveTextContent(/^Running$/)
+  const liveSummary = async () => {
+    await expect(summary.querySelector('[data-work-title]')).toHaveTextContent(/^Working for 1m 41s$/)
+    await expect(summary.querySelector('[data-work-counts]')).toHaveTextContent(/^18 steps$/)
+    await expect(cell(summary, 'status')).toHaveTextContent(/^Running$/)
+  }
+  // Control: a summary that stops saying it runs must be rejected.
+  await withControl(liveSummary, ...emptied(cell(summary, 'status')))
   const live = async () => {
     await expect(rowsOf(block, 'phase').map(row => row.querySelector('button')!.getAttribute('aria-expanded'))).toEqual(['false', 'false', 'false', 'true'])
     await expect(rowsOf(block, 'step').map(row => row.dataset['callId'])).toEqual(['work/step-14', 'work/step-15', 'work/step-16', 'work/step-17', 'work/step-18'])
   }
   // Control: opening a settled phase must break "only the live phase opens"; closing it restores it.
   await withControl(live, () => press(phaseButton(block, 2), 'true'), () => press(phaseButton(block, 2), 'false'))
-  await expect(cell(stepRow(block, 18)!, 'status')).toHaveTextContent(/^Running$/)
-  await expect(cell(stepRow(block, 18)!, 'time')).toHaveTextContent(/^4s$/)
-  await expect(rowsOf(block, 'agent').map(row => [row.querySelector('[data-call-title]')!.textContent, cell(row, 'status').textContent, cell(row, 'time').textContent])).toEqual([['RenderProfile', 'Running', '1m 21s'], ['ElementAudit', '', '1m 04s']])
-  await expect(block.querySelector('[data-work-row="body"]')).toBeNull()
+  const liveRows = async () => {
+    await expect(cell(stepRow(block, 18)!, 'status')).toHaveTextContent(/^Running$/)
+    await expect(cell(stepRow(block, 18)!, 'time')).toHaveTextContent(/^4s$/)
+    await expect(rowsOf(block, 'agent').map(row => [row.querySelector('[data-call-title]')!.textContent, cell(row, 'status').textContent, cell(row, 'time').textContent])).toEqual([['RenderProfile', 'Running', '1m 21s'], ['ElementAudit', '', '1m 04s']])
+    await expect(block.querySelector('[data-work-row="body"]')).toBeNull()
+  }
+  // Control: folding the delegation must break "a running agent stays listed"; reopening it restores the rows.
+  const delegation = stepRow(block, 16)!.querySelector<HTMLElement>('button')!
+  await withControl(liveRows, () => press(delegation, 'false'), () => press(delegation, 'true'))
   const flexRow = stepRow(block, 18)!
   await withControl(() => assertColumns(block, narrow), () => { flexRow.style.display = 'flex' }, () => { flexRow.style.removeProperty('display') })
   restFocus(canvasElement)

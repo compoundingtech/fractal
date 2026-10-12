@@ -8,12 +8,12 @@ import { formatWorkDuration } from './work-log'
 import { workCallGlyph, workCallWord, workRowStyles as grammar, type WorkLogCallDetailRenderer } from './WorkLogV1'
 
 /** Consecutive calls that ran under the same plan item. Calls without one form an untitled run that renders without phase chrome. */
-export interface WorkPhase {
+interface WorkPhase {
   readonly key: string
   readonly title: string | undefined
   readonly calls: readonly WorkLogCall[]
 }
-export function workPhases(calls: readonly WorkLogCall[]): readonly WorkPhase[] {
+function workPhases(calls: readonly WorkLogCall[]): readonly WorkPhase[] {
   const phases: { key: string; title: string | undefined; calls: WorkLogCall[] }[] = []
   for (const call of calls) {
     const last = phases.at(-1)
@@ -26,7 +26,7 @@ export function workPhases(calls: readonly WorkLogCall[]): readonly WorkPhase[] 
 const kindOrder: readonly WorkKind[] = ['run', 'eval', 'edit', 'read', 'agent']
 const kindNouns: Readonly<Record<WorkKind, readonly [string, string]>> = { run: ['command', 'commands'], eval: ['eval', 'evals'], edit: ['edit', 'edits'], read: ['read', 'reads'], agent: ['agent', 'agents'] }
 /** Kinds that change state lead; a delegation counts the agents it named. */
-export function workKindCounts(calls: readonly WorkLogCall[]): string {
+function workKindCounts(calls: readonly WorkLogCall[]): string {
   const counts = new Map<WorkKind, number>()
   for (const call of calls) counts.set(call.kind, (counts.get(call.kind) ?? 0) + (call.kind === 'agent' ? Math.max(call.agents?.length ?? 0, 1) : 1))
   return kindOrder.flatMap(kind => {
@@ -163,6 +163,7 @@ function AgentRow({ agent, depth }: { readonly agent: WorkAgent; readonly depth:
     <div role="rowheader" data-cell="name" {...stylex.props(styles.nameCell, depths[depth])}>
       <span aria-hidden="true" {...stylex.props(grammar.slot, tones[tone])}><Icon name={agent.status === 'running' ? 'spinner' : agent.status === 'error' ? 'alert' : 'agent'} spinning={agent.status === 'running'} size={14} /></span>
       <span data-call-title {...stylex.props(styles.text, styles.subject)}>{agent.name}</span>
+      {agent.task !== undefined && <span data-agent-task {...stylex.props(styles.counts, styles.narrowOnly)}>{agent.task}</span>}
     </div>
     <div role="cell" data-cell="detail" data-call-detail {...stylex.props(styles.detailCell)}>{agent.task}</div>
     <div role="cell" data-cell="status" data-call-word {...stylex.props(styles.wordCell, tones[tone])}>{word}</div>
@@ -198,10 +199,12 @@ function TerminalTail({ text }: { readonly text: string }) {
   </div>
 }
 
+// The lane width where the detail column appears; it matches the transcript lane minimum.
+const wideLane = '@container (min-width: 40rem)'
 const styles = stylex.create({
   // The block is the query container, so the table's tracks follow the lane, not the viewport.
   block: { containerType: 'inline-size', fontFamily: t.fontSans, color: ink.fgMuted },
-  table: { display: 'grid', gridTemplateColumns: { default: g.workTableNarrowColumns, '@container (min-width: 40rem)': g.workTableColumns }, columnGap: s.md, rowGap: 0 },
+  table: { display: 'grid', gridTemplateColumns: { default: g.workTableNarrowColumns, [wideLane]: g.workTableColumns }, columnGap: s.md, rowGap: 0 },
   group: { position: 'relative', display: 'grid', gridTemplateColumns: 'subgrid', gridColumn: '1 / -1' },
   // One rail per nesting level, on the parent's glyph centre, stopping short of the last child.
   rail0: { '::before': { content: '""', position: 'absolute', insetInlineStart: g.railInset, top: 0, bottom: s.xs, width: g.hairline, backgroundColor: border.rail } },
@@ -217,9 +220,11 @@ const styles = stylex.create({
   verb: { flexShrink: 1, color: ink.fgMuted, fontWeight: t.weightRegular },
   counts: { flexShrink: 100, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   // In a narrow lane the phase title keeps the room; its kind counts stay in the accessible name.
-  phaseCounts: { display: { default: 'none', '@container (min-width: 40rem)': 'inline' } },
+  phaseCounts: { display: { default: 'none', [wideLane]: 'inline' } },
+  // An agent's assignment rides after its name while the detail column is folded away.
+  narrowOnly: { display: { default: 'inline', [wideLane]: 'none' } },
   tag: { flexShrink: 0, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, color: ink.fgMuted, whiteSpace: 'nowrap' },
-  detailCell: { gridColumn: 'detail', display: { default: 'none', '@container (min-width: 40rem)': 'block' }, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
+  detailCell: { gridColumn: 'detail', display: { default: 'none', [wideLane]: 'block' }, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   code: { fontFamily: t.fontMono },
   wordCell: { gridColumn: 'status', maxWidth: g.statusWordMax, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'right', fontSize: t.metaSize, lineHeight: t.metaLeading },
   disclosureCell: { gridColumn: 'disclosure', display: 'flex', justifyContent: 'center', color: ink.fgMuted },
@@ -248,9 +253,7 @@ const depthStyles = stylex.create({
   d1: { paddingInlineStart: g.textColumn },
   d2: { paddingInlineStart: `calc(2 * ${g.textColumn})` },
   d3: { paddingInlineStart: `calc(3 * ${g.textColumn})` },
-  // An opened body starts at its step's text column.
-  b2: { paddingInlineStart: `calc(2 * ${g.textColumn})` },
-  b3: { paddingInlineStart: `calc(3 * ${g.textColumn})` },
 })
 const depths = [depthStyles.d0, depthStyles.d1, depthStyles.d2, depthStyles.d3] as const
-const bodyDepths = { 1: depthStyles.b2, 2: depthStyles.b3 } as const
+// An opened body starts at its step's text column, one level in from the step.
+const bodyDepths = { 1: depthStyles.d2, 2: depthStyles.d3 } as const
