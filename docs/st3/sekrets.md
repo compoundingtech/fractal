@@ -73,10 +73,30 @@ A process that is neither is refused as unidentified. A person's own terminal in
 terminal, or a terminal st started) is in the service manager, so the person calls from a login
 session.
 
+### Tiles
+
+A [tile](tiles.md) is an agent with its own Unix user, and the kernel names it without any
+daemon's word. When the caller's Unix user is a tile's in root's tile registry
+(`tile_registry` in the gateway configuration, `/etc/st-tiles/tiles.toml` by default), the
+caller is that tile's agent, working for the tile's person, when its process runs in the tile's
+slice (`/st_tiles.slice/st_tiles-NAME.slice/`), which only root can place it in. Anywhere else,
+such as a login session or a user manager, the same Unix user is unidentified. An attestation
+from a tile changes nothing: no daemon speaks for a tile. A Unix user that is both a person in the
+gateway configuration and a tile in the registry is refused, because a tile is never a person.
+The registry is read for each connection, so a change applies to the next call, and grants work
+as for any agent (`st sekrets grant ada/agent-gh --to agent/web/atlas ...`).
+
+When the registry names the gateway's socket (`sekrets_socket`), every tile reaches it at the
+client's default `/run/st-sekrets/gateway.sock`, and a tile is refused at launch when that socket
+is missing. A command a tile runs through sekrets still runs in the gateway's sandbox, which
+cannot yet bind a checkout from inside a tile's mount namespace; qualifying git and gh from tiles
+is a later step.
+
 While seats run as their person's Unix user, the line between seats of the same person is only as
 strong as that user's files: a seat that reads its daemon's node key, or moves itself into another
 seat's cgroup, can pass for another seat of the same person. It can never pass for the person, for
-another person, or for another person's seat, and it can never read the store. Running seats under their own Unix user would close that; this is not implemented. The same holds for a seat that logs in to its own host
+another person, or for another person's seat, and it can never read the store. Seats under their
+own Unix user, [tiles](tiles.md), close that. The same holds for a seat that logs in to its own host
 over ssh with a key it added to its person's `authorized_keys`: it then runs in a login session.
 Until seats run as another user, keep a person's own profile on a policy that leaves out the
 commands that print credentials (`no-credential-printing`), and remove credentials from the
@@ -183,4 +203,5 @@ can run, list what it may use, read its person's log and lock; it changes nothin
   rules (`st rules`) restrict writes and have no grants to read from; when signed grants land,
   the gateway will take its grants from them.
 - `st sekrets adopt`, which moves existing logins out of the person's home, is the next step.
-- A model API proxy, macOS, and seats under their own Unix user are later phases.
+- A model API proxy and macOS are later phases. Seats run as tiles once a harness runs in a
+  tile (tiles design step 2).

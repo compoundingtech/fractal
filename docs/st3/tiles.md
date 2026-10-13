@@ -20,6 +20,7 @@ state_root = "/var/lib/st-tiles"      # STATE/NAME/home and STATE/NAME/work, the
 runtime_root = "/run/st-tiles"        # RUNTIME/NAME/endpoint and the tile's root mount point
 read_only = ["/nix/store/...-tools"]  # root-controlled closures every tile sees read-only
 path = ["/nix/store/...-tools/bin"]   # PATH inside a tile
+sekrets_socket = "/run/st-sekrets/gateway.sock"  # optional: tiles reach the sekrets gateway
 
 [tiles.atlas]
 uid = 61001                           # a system user with no login home, never a person's
@@ -72,6 +73,7 @@ PID namespace. PID 1 builds the tile's file system on an empty tmpfs:
 | `/proc` | a fresh proc of the tile's PID namespace |
 | `/dev` | `null`, `zero`, `full`, `random`, `urandom`, `tty`, a private `pts` |
 | `/run/st` | the tile's endpoint directory, read-only |
+| `/run/st-sekrets/gateway.sock` | the sekrets gateway's socket, when the registry names it |
 | `/etc` | `passwd`, `group` and `hostname` for the tile alone |
 
 Nothing else of the host is there: no `/sys`, no homes, no `/run/user`, no host sockets, no
@@ -134,6 +136,13 @@ Every other route the daemon serves, including its administrative API, is refuse
 `ST_AGENT`, `--as` and `--from` therefore cannot widen what a tile does; harness integration
 (step 2) widens this list route by route.
 
+## Sekrets
+
+The sekrets gateway names a tile's caller the same way: the tile's Unix user, a process in the
+tile's slice, and root's registry give the agent and its person, with no daemon's attestation.
+The same Unix user anywhere else is unidentified, and a Unix user that is both a person and a
+tile is refused. See [Sekrets: Tiles](sekrets.md#tiles).
+
 ## What it proves
 
 `crates/st3/tests/tiles_root.rs` runs on a real host with `sudo -n`, systemd and cgroups v2,
@@ -174,10 +183,14 @@ that will run tiles; that gate is part of step 2.
   connection from this user outside the tile's slice or from another tile's slice, the daemon
   following the registry and the endpoint directory as they appear, and a kept-open connection
   closing when the registry withdraws the tile.
+- Sekrets: a real tile's `st sekrets whoami`, at the client's default socket, is its agent
+  working for its person, with no daemon; the same Unix user outside the tile is unidentified;
+  a tile whose registry names a missing gateway socket is refused at launch. Unit tests in
+  `sekrets/tests.rs` cover a grant to the tile's agent, attestations that change nothing, every
+  cgroup outside the tile's slice, and a Unix user that is both a person and a tile.
 
 ## Not built yet
 
-- Sekrets' identity binding for tile callers.
 - The credential compartment and one harness running in a tile (design step 2).
 - Network egress: a tile has no route off its loopback until a root-owned veth, route and
   firewall policy is added.
@@ -188,5 +201,8 @@ that will run tiles; that gate is part of step 2.
 - An allowlist filter. The seccomp filter refuses a list of calls; an allowlist of the calls a
   harness and its tools need, measured from real runs, would close new kernel interfaces by
   default. Decide it with step 2, when the workload is known.
+- git and gh through sekrets from a tile's own checkout: the gateway's sandbox binds a checkout
+  by the path the kernel gives a passed descriptor, which a tile's mount namespace does not share
+  (design step 4).
 - Landlock and an AppArmor or SELinux profile on top of the namespaces.
 - macOS.
