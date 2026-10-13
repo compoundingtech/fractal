@@ -149,6 +149,14 @@ from their immutable workflow revision and finish naturally; this change does no
 Optional jobs remain subject to capacity after required checks. See Namespace's
 [job ordering and priority controls](https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering).
 
+CI's default Nix shell explicitly appends `$CARGO_HOME/bin` to `PATH` after
+its pinned tools. Cargo otherwise searches that directory first
+for external subcommands, so a runner's rustup `cargo-clippy` proxy can shadow
+Nix Clippy even inside `nix develop`. The explicit late entry makes Cargo honor
+the shell's order for Clippy and nextest, without changing Cargo's cache home or
+configuring an unpinned rustup default. The Linux guard tests this lookup with
+real Cargo and benign stand-in commands; it compiles no Rust.
+
 `scripts/ci-linux STAGE` runs one stage:
 
 - `linux-tests` and `linux-tests-shard-2`: prepare the provider component fixtures, build the
