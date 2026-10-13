@@ -4208,6 +4208,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-storage-version",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -4232,13 +4233,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "st-decision-fold"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4296,6 +4290,10 @@ dependencies = [
  "sha2",
  "tempfile",
 ]
+
+[[package]]
+name = "st-storage-version"
+version = "0.1.0"
 
 [[package]]
 name = "st-wire"
@@ -4596,6 +4594,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-storage-version",
  "toml 0.9.12+spec-1.1.0",
 ]
 

@@ -4,7 +4,7 @@ Each daemon keeps a local replica of the graph and catches up when it reconnects
 
 Finish [getting started](getting-started.md) on the first machine. Install Smalltalk, set `person = "person/ada"`, and start its user service on the second machine too. Harnesses and their logins are needed only on machines that will run seats.
 
-The examples call the first machine **studio** and the second **beacon**. Choose one route below. Create your first fleet on studio only once; if it already belongs to your fleet, skip `create` and use the endpoints shown by `st fleet status`. Creating a fleet preserves your existing graph.
+The examples call the first machine **studio** and the second **beacon**. Choose one route below. Create your first fleet on studio only once; if it already belongs to your fleet, skip `create` and use the endpoints shown by `st fleet status --json`. Creating a fleet preserves your existing graph. To try the worker and mission examples below, first follow [missions in practice](missions-in-practice.md#declare-a-worker-seat) on studio.
 
 ## Tailscale
 
@@ -13,7 +13,7 @@ Install and connect Tailscale on both machines. Allow TCP port 31313 between the
 ```sh
 tailscale ip -4
 st fleet create --name studio --port 31313 --transports tailscale
-st fleet status
+st fleet status --json
 st service status
 st fleet invite beacon --via tailscale
 ```
@@ -24,7 +24,7 @@ On **beacon**, join and paste the code when asked:
 
 ```sh
 st fleet join --transports tailscale
-st fleet status
+st fleet status --json
 st replication status
 ```
 
@@ -38,7 +38,7 @@ On **studio**:
 
 ```sh
 st fleet create --name studio --port 31313 --transports fabric
-st fleet status
+st fleet status --json
 st service status
 ```
 
@@ -54,7 +54,7 @@ On **beacon**, paste it at the join prompt:
 
 ```sh
 st fleet join --transports fabric
-st fleet status
+st fleet status --json
 st replication status
 ```
 
@@ -87,7 +87,7 @@ st replication status --json
 st doctor
 ```
 
-The same declared worker and first mission should appear. `replication status` reports the last successful exchange, backlog, authority digest, graph digest, and table digests. After both members have caught up and writes settle, matching authority digests mean they hold the same replicated history. With matching builds and no waiting claims, matching graph and table digests also confirm the same shared projections. During an upgrade, a reader may hold claims that need a newer build; update it before comparing projections.
+The worker and missions declared on studio should appear on both machines. `replication status` reports the last successful exchange, backlog, authority digest, graph digest, and table digests. After both members have caught up and writes settle, matching authority digests mean they hold the same replicated history. With matching builds and no waiting claims, matching graph and table digests also confirm the same shared projections. During an upgrade, a reader may hold claims that need a newer build; update it before comparing projections.
 
 If doctor reports invalid claim-signature warnings, retain the report and follow the [operator guidance](st3/founder-signing-audit.md); matching replication digests alone do not establish valid claim signatures.
 
@@ -116,7 +116,7 @@ The graph records a seat's host. Replication does not copy its workspace or move
 Put beacon to sleep or disconnect it from the network. On studio, inspect the fleet again after about 90 seconds:
 
 ```sh
-st fleet status
+st fleet status --json
 st replication status
 st doctor
 ```

@@ -633,6 +633,8 @@ pub struct AgentWorkspace {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentDeclaration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accountable: Option<String>,
     pub id: String,
     pub revision: String,
     pub tree: Value,

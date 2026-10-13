@@ -14,6 +14,27 @@ use st3_client::{
 const PAGE_SIZE: usize = 50;
 pub const MAX_PAGES: usize = 4;
 
+/// Streamed presence rows carry the existing HTTP fields; keep their window order.
+pub fn inventory_clients(items: Vec<Resource>, member: String) -> st3_client::ClientConnections {
+    st3_client::ClientConnections {
+        kind: "client-connections".into(), member,
+        items: items.into_iter().filter_map(|item| match item {
+            Resource::ConnectedClient(row) => Some(st3_client::ClientConnection {
+                actor: row.actor, person: row.person, client: row.client, device_id: row.device_id,
+                device_name: row.device_name, member: row.member, via: row.via,
+                connected: row.connected, streams: row.streams, since: row.since,
+                last_seen: row.last_seen, follows: row.follows,
+            }),
+            _ => None,
+        }).collect(),
+    }
+}
+
+pub fn inventory_usage(items: Vec<Resource>) -> std::result::Result<st3_client::UsagePeriod, String> {
+    items.into_iter().find_map(|item| match item { Resource::Usage(row) => Some(row.value), _ => None })
+        .ok_or_else(|| "The usage inventory did not carry its period.".into())
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct Collection {
     pub items: Vec<Resource>,

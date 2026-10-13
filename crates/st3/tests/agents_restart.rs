@@ -26,6 +26,15 @@ struct Runtime {
     snapshot_unavailable: Mutex<bool>,
 }
 impl RuntimeControl for Runtime {
+    fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.starts.lock().unwrap().iter().enumerate()
+            .find(|(index, member)| member.runtime_id == id && incarnation == format!("fixture:{}", index + 1))
+            .and_then(|(_, member)| member.tags.get("st3.start-operation").cloned()))
+    }
+    fn start_operation_closed(&self, _: &MemberSpec) -> anyhow::Result<bool> {
+        // Rejected fixture starts create neither a runtime nor a detached producer.
+        Ok(true)
+    }
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<RuntimeObservation>> {
         anyhow::ensure!(!*self.snapshot_unavailable.lock().unwrap(), "fixture snapshot unavailable");
         Ok(self
@@ -1211,7 +1220,20 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     let starts = fixture.runtime.starts.lock().unwrap().clone();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[0].workspace, starts[1].workspace);
-    assert_eq!(starts[0].environment, starts[1].environment);
+    let environments: Vec<_> = starts
+        .iter()
+        .map(|member| {
+            let mut environment = member.environment.clone();
+            let operation = environment.remove("ST3_START_OPERATION").unwrap();
+            assert_eq!(member.tags.get("st3.start-operation"), Some(&operation));
+            environment
+        })
+        .collect();
+    assert_ne!(
+        starts[0].environment["ST3_START_OPERATION"], starts[1].environment["ST3_START_OPERATION"],
+        "each physical launch must retain its own operation identity"
+    );
+    assert_eq!(environments[0], environments[1]);
     // Once started again, the seat is the run's own: a restarted daemon keeps it running.
     let daemon = restarted_daemon(&fixture);
     for _ in 0..3 {
