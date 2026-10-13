@@ -82,6 +82,18 @@ pub(super) fn enrich_stalled_at(
     if !matches!(view.status.as_str(), "claimed" | "working") || view.waiting_on.is_some() {
         return Ok(());
     }
+    view.stalled_at_unix_ms = stalled_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?;
+    Ok(())
+}
+
+/// When a held step with no open declared wait became stalled, if its current quiet period
+/// raised a `step-stalled` fault.
+pub(super) fn stalled_at(
+    connection: &Connection,
+    subject: &str,
+    attempt: u32,
+    snapshot_unix_ms: u128,
+) -> rusqlite::Result<Option<u128>> {
     let snapshot = snapshot_unix_ms.to_string();
     let Some((episode, at)) = connection
         .prepare_cached(&canonical_sql(
@@ -92,23 +104,20 @@ pub(super) fn enrich_stalled_at(
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         ))?
         .query_row(
-            params![view.subject, STEP_STALLED_CONDITION, snapshot],
+            params![subject, STEP_STALLED_CONDITION, snapshot],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
     else {
-        return Ok(());
+        return Ok(None);
     };
-    let Some(since) = quiet_since_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?
-    else {
-        return Ok(());
+    let Some(since) = quiet_since_at(connection, subject, attempt, snapshot_unix_ms)? else {
+        return Ok(None);
     };
-    if episode.as_deref()
-        == Some(quiet_episode(STEP_STALLED_CONDITION, &view.subject, view.attempt, since).as_str())
-    {
-        view.stalled_at_unix_ms = at.parse().ok();
-    }
-    Ok(())
+    Ok((episode.as_deref()
+        == Some(quiet_episode(STEP_STALLED_CONDITION, subject, attempt, since).as_str()))
+    .then(|| at.parse().ok())
+    .flatten())
 }
 
 impl Store {

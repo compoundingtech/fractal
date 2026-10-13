@@ -2073,8 +2073,11 @@ export type MissionStep = {
   path: string;
   progress_at?: (Timestamp | null);
   since: Timestamp;
+  stalled_at?: (Timestamp | null);
   state: WorkState;
   title?: string | null;
+  waiting_on?: string | null;
+  waiting_since?: (Timestamp | null);
   wake?: (MissionWake | null);
   wake_reason?: string | null;
 };
@@ -3653,8 +3656,10 @@ export type WorkLabel = {
   mission_run_id: MissionRunId;
   path: string;
   since: Timestamp;
+  stalled_at?: (Timestamp | null);
   state: WorkState;
   title?: string | null;
+  waiting_on?: string | null;
 };
 
 export type WorkState = 

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Show what a held step waits on, or that it stalled, in stui, on the phone and on the web",
+  "replay": {
+    "status": "none",
+    "detail": "No projection replay is needed. The facts are read from the step's own claims when a card, label or mission view is built."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "No tables, columns, indexes or claim kinds change. The client contract adds optional waiting_on, waiting_since and stalled_at to mission steps, and optional waiting_on and stalled_at to work labels (an agent's current, next and upcoming work)."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules, retention and their digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The new fields are optional; older clients ignore them and newer clients show nothing when an older daemon omits them. Not tested against an older build."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing runs at startup. Building a step label or a mission card adds two indexed lookups of a held step's newest claims (its open declared wait, then its stalled fault), and none for a step that is not held. The agents roster already refreshes its queue labels when any claim lands on a step."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Nothing to configure. The guide is in docs/st3/mission-graph-runtime.md under Declared waits and Quiet claims."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swap back to the previous binary or client; the fields disappear."
+  }
+}

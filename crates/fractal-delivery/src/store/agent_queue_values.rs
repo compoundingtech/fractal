@@ -20,6 +20,8 @@ pub fn agent_queue_fields(
         "path": step.path, "title": step.title, "goal": step.goal,
         "state": client_work_state(&step.status),
         "since": client_timestamp(step.updated_at_unix_ms),
+        "waiting_on": step.waiting_on,
+        "stalled_at": step.stalled_at_unix_ms.map(client_timestamp),
     }));
     json!({
         "current_work_ids": queue.current_work_ids,

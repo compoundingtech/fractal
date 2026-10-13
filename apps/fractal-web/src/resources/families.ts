@@ -76,6 +76,8 @@ export const WorkLabel = Schema.Struct({
   state: Schema.String,
   title: Schema.String.pipe(nullable, optional),
   goal: Schema.String.pipe(nullable, optional),
+  waiting_on: Schema.String.pipe(nullable, optional),
+  stalled_at: Timestamp.pipe(nullable, optional),
 }).annotate({ identifier: 'WorkLabel' })
 
 /** `st3.agent@1` — client-v0 `Agent` body (queue, delivery and usage trimmed). */
