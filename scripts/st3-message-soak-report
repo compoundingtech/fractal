@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# The defaults are the friend-ready gate. Overrides exist for synthetic tests only.
+# The defaults define the delivery soak gate. Overrides exist for synthetic tests only.
 STATE_DIR=${ST3_SOAK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/st3/message-soak}
 LOG=${ST3_SOAK_REPORT_LOG:-$STATE_DIR/events.log}
 NOW=${ST3_SOAK_REPORT_NOW_UNIX:-$(/usr/bin/date +%s)}
