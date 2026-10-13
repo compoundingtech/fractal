@@ -30,6 +30,58 @@ fn fixture(now: u128) -> (Arc<Store>, Reconciler<FakeRuntime>, DesiredSubject) {
     );
     (store, reconciler, desired)
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_stale_restart_timer_cannot_erase_or_count_or_wake_its_replacement() {
+    let _clock = Clock;
+    let now = 1_800_000_000_000;
+    let (_, reconciler, desired) = fixture(now);
+    let count = || {
+        crate::performance::snapshot()["reconciler_wakes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["cause"] == "timer restart · member")
+            .map_or(0, |row| row["count"].as_u64().unwrap())
+    };
+    let before = count();
+    reconciler.arm_restart(&desired.subject, now + 10);
+    reconciler.arm_restart(&desired.subject, now + 20);
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        reconciler
+            .delayed_restarts
+            .lock()
+            .unwrap()
+            .get(&desired.subject),
+        Some(&(now + 20))
+    );
+    assert_eq!(
+        count(),
+        before,
+        "a stale timer must not invent an actual wake"
+    );
+    assert!(
+        tokio::time::timeout(Duration::ZERO, reconciler.notify.notified())
+            .await
+            .is_err()
+    );
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !reconciler
+            .delayed_restarts
+            .lock()
+            .unwrap()
+            .contains_key(&desired.subject)
+    );
+    tokio::time::timeout(Duration::ZERO, reconciler.notify.notified())
+        .await
+        .unwrap();
+    assert_eq!(count(), before + 1);
+}
 fn launch(
     store: &Store,
     reconciler: &Reconciler<FakeRuntime>,
