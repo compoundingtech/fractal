@@ -377,6 +377,23 @@ impl Glasses {
             .any(|tab| matches!(Pane::parse(&tab.pane), Some(Pane::Machine(_))))
     }
 
+    pub(crate) fn inventories_wanted(&self, tab: usize, hours: u64) -> crate::feed::Inventories {
+        use crate::feed::Inventories;
+        let glass = self.glass();
+        let panes = (0..glass.layout.groups().len()).filter_map(|index| glass.shown(index))
+            .filter_map(|tab| Pane::parse(&tab.pane)).collect::<Vec<_>>();
+        let fleet = tab == 3 || panes.iter().any(|pane| matches!(pane, Pane::List(3)));
+        let machines = fleet || self.sidebar.shown || self.palette.is_some() || self.shows_machine();
+        Inventories {
+            clients: fleet || self.shows_machine(),
+            usage_hours: self.shows_usage().then_some(hours),
+            machines, devices: fleet,
+            sessions: fleet || tab == 1 || self.sidebar.shown || self.palette.is_some()
+                || panes.iter().any(|pane| matches!(pane, Pane::List(1))),
+            terminals: self.sidebar.shown || self.palette.is_some(),
+        }
+    }
+
     /// Whether a list or card of missions is on screen: a Missions list or a mission's card in a
     /// shown tab, the palette (which offers every mission) or the sidebar's Missions section.
     pub(crate) fn shows_missions(&self) -> bool {
@@ -5261,6 +5278,25 @@ mod tests {
         assert!(!ui.home_open());
         // The sidebar has no Usage section any more.
         assert!(SIDEBAR_SECTIONS.iter().all(|(_, name)| *name != "Usage"));
+    }
+
+    #[test]
+    fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
+        let mut ui = glass();
+        let initial = ui.inventories_wanted();
+        assert!(!initial.terminals && initial.usage_hours.is_none());
+        ctrl(&mut ui, 's');
+        let sidebar = ui.inventories_wanted();
+        assert!(sidebar.machines && sidebar.sessions && sidebar.terminals);
+        ui.click(Hit::Usage);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(24));
+        ui.usage_period_next();
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168), "changing focus keeps the visible usage overlay followed");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(ui.inventories_wanted().usage_hours, None);
     }
 
     #[test]
