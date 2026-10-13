@@ -176,9 +176,21 @@ function assertBaselines(shell: HTMLElement) {
     expect(offsets[0]).toBe(offsets[1])
   }
 }
+/** WCAG 2.5.3 label in name: every button's accessible name starts with its visible label. */
+function assertLabelInName(root: HTMLElement) {
+  const labelled = [...root.querySelectorAll<HTMLElement>('button')].flatMap(button => {
+    const visible = button.cloneNode(true) as HTMLElement
+    for (const hidden of visible.querySelectorAll('[aria-hidden="true"]')) hidden.remove()
+    const label = visible.textContent!.trim()
+    return label === '' ? [] : [{ label, name: button.getAttribute('aria-label') ?? label }]
+  })
+  expect(labelled.map(({ label }) => label)).toContain('Details')
+  for (const { label, name } of labelled) expect(name.slice(0, label.length)).toBe(label)
+}
 function assertExplorer(canvas: HTMLElement) {
   const root = canvas.querySelector<HTMLElement>('[data-spinner-explorer]')!
   expect(root.querySelectorAll('[title], title')).toHaveLength(0)
+  assertLabelInName(root)
   const inks = new Set([...root.querySelectorAll<HTMLElement>('[data-ink]')].map(probe => getComputedStyle(probe).color))
   expect(inks.size).toBe(3)
   const shells = [...root.querySelectorAll<HTMLElement>('[data-shell]')]
@@ -247,6 +259,10 @@ export const ExplorationProbe: Story = { args: { probe: true }, play: async ({ c
     shell.querySelector('[data-context="header"] [data-baseline]')!.setAttribute('title', 'Working')
     expect(() => assertExplorer(canvasElement)).toThrow()
     shell.querySelector('[data-context="header"] [data-baseline]')!.removeAttribute('title')
+    const details = canvas.getByRole('button', { name: 'Details: Spinner descriptions' })
+    details.setAttribute('aria-label', 'Spinner descriptions · Details')
+    expect(() => assertLabelInName(root())).toThrow()
+    details.setAttribute('aria-label', 'Details: Spinner descriptions')
     assertExplorer(canvasElement)
   })
   await step('The other scheme resolves different inks and passes the same assertions', async () => {

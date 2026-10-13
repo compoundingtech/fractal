@@ -33,7 +33,7 @@ export function VariantPicker({ label, choices, value, multiple = false, compare
       {note !== undefined ? <span data-testid="variant-note" {...stylex.props(styles.note)}>{note}</span> : null}
     </div>
     <div role="cell" {...stylex.props(styles.cell, styles.wide, styles.actions)}>
-      <DialogTrigger><Button aria-label={`${label} descriptions · Details`} {...stylex.props(styles.choice)}>Details</Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Dialog aria-label={`${label} descriptions`} {...stylex.props(styles.details)}>{choices.map(choice => <p key={choice.id} {...stylex.props(styles.detail)}><strong>{choice.id}</strong>: {choice.description}</p>)}</Dialog></Popover></DialogTrigger>
+      <DialogTrigger><Button aria-label={`Details: ${label} descriptions`} {...stylex.props(styles.choice)}>Details</Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Dialog aria-label={`${label} descriptions`} {...stylex.props(styles.details)}>{choices.map(choice => <p key={choice.id} {...stylex.props(styles.detail)}><strong>{choice.id}</strong>: {choice.description}</p>)}</Dialog></Popover></DialogTrigger>
       <ToggleButton isSelected={compare} onChange={onCompare} aria-label={`Compare ${label}`} {...stylex.props(styles.choice, compare && styles.selected)}>Compare</ToggleButton>
     </div>
   </div>
