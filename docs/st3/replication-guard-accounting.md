@@ -27,7 +27,8 @@ use only a report that includes both labels and the export route for a call-shar
 Calls that fail before entering the summary handler or never complete are not in the label.
 No new endpoint, profiler enablement, stored payload or sampling service is introduced.
 
-Bluey's earlier 1,216 exports and 12.912 CPU-seconds in 300 seconds are route totals only.
-Compact-mode implementation waits for a bounded read on a reachable real node after the
+Existing aggregate export counters do not distinguish guard calls. Private incident
+measurements are retained outside the repository. Compact-mode implementation waits for a
+bounded read on a reachable real node after the
 normal Operations rollout. This baseline alone establishes neither a CPU saving nor an idle
 floor, and does not qualify the four-member, ten-minute idle goal.
