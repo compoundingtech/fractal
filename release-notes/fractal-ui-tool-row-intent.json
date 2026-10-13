@@ -14,8 +14,8 @@
     "detail": "Checkpoint rules are unchanged."
   },
   "compatibility": {
-    "status": "none",
-    "detail": "fractal-ui WorkLogCall adds optional intent. Rows without an intent keep the host title and target; recorded service rows are unchanged. Calls of kind unknown no longer appear in the default work-log rows; they are listed after Show system events \u00b7 N."
+    "status": "changed",
+    "detail": "fractal-ui WorkLogCall adds optional intent. Rows without an intent keep the host title and target; recorded service rows are unchanged. Calls of kind unknown no longer appear in the default work-log rows; they are listed after Show system events \u00b7 N, so a host that showed orphan results inline now shows them behind that disclosure."
   },
   "downtime": {
     "status": "none",
