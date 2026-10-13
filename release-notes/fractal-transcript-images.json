@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "fractal-ui transcripts render host-supplied thread images inline (prompt attachments, work-row screenshots folded with thumbnails, reply images) with explicit loading, failed, gone, too-large and unsupported states, and open them in a keyboard-accessible viewer that steps through every image in the thread with caption, counter, filmstrip and zoom",
+  "replay": {
+    "status": "none",
+    "detail": "Client-only change; no runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Additive optional kit props; existing transcripts render unchanged without images."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption introduced."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No deployed installation action required; the app does not supply images yet."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  }
+}

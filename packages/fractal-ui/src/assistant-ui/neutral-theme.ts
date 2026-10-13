@@ -114,6 +114,9 @@ const geometryVarsTheme = stylex.createTheme(geometryVars, {
   sidebarThree: '68px', workExpandedMax: 'min(18rem, 50dvh)', timelineStub: '16px',
   transcriptFrameHeight: '640px',
   estimatedMessageHeight: '160px',
+  imageInputW: '360px', imageInputH: '240px', imageTileW: '120px', imageTileH: '80px',
+  imageOpenedW: '480px', imageOpenedH: '320px', imageProseH: '400px',
+  imageThumbW: '22px', imageThumbH: '16px', viewerFilmstrip: '84px', viewerFilmTile: '64px', viewerNav: '40px',
 
 })
 

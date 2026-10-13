@@ -121,6 +121,10 @@ export const geometryVars = stylex.defineVars({
   threadViewportMin: '96px',
   polishNarrow: '440px', polishWide: '1440px',
   estimatedMessageHeight: '160px',
+  /** Transcript images: fit boxes per placement (never upscaled), folded-row thumbs and the viewer chrome. */
+  imageInputW: '360px', imageInputH: '240px', imageTileW: '120px', imageTileH: '80px',
+  imageOpenedW: '480px', imageOpenedH: '320px', imageProseH: '400px',
+  imageThumbW: '22px', imageThumbH: '16px', viewerFilmstrip: '84px', viewerFilmTile: '64px', viewerNav: '40px',
 
 })
 
