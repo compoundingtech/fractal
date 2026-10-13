@@ -760,7 +760,8 @@ export const ReadOnlyTools: Story = { render: args => <main {...stylex.props(sty
   await expect(within(work).getByRole('button', { name: 'Thinking' })).toBeVisible()
   await expect(work).toHaveTextContent('export const last = visibleRows.at(-1)')
   await expect(work).toHaveTextContent('selection retained')
-  await expect(work.querySelectorAll('[data-testid="tool-preview-actions"]')).toHaveLength(0)
+  // Read-only: the full six-line read shows above (no 4-line truncation), and no host inspector action exists.
+  await expect(within(work).queryByRole('button', { name: /^Open inspector/ })).toBeNull()
 } }
 export const ReadOnlyToolsLight: Story = { ...ReadOnlyTools, args: { scheme: 'light' } }
 const proseOnlyItems: readonly ConversationItem[] = [{ _tag: 'Text', id: 'prose/answer', role: 'assistant', text: 'A plain answer needs no work summary.', attachments: [], streaming: false, at }]
