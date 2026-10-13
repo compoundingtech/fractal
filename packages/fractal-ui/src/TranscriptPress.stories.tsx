@@ -79,7 +79,8 @@ async function pressAcross(target: HTMLElement, during: () => Promise<void>) {
   const rect = target.getBoundingClientRect()
   const init = { bubbles: true, cancelable: true, composed: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1 }
   target.dispatchEvent(new PointerEvent('pointerdown', { ...init, buttons: 1, pressure: 0.5 }))
-  target.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1, detail: 1 }))
+  // The browser's mousedown default focuses the pressed button; RAC then keeps its focused row mounted.
+  if (target.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1, detail: 1 }))) target.focus({ preventScroll: true })
   await during()
   const landed = document.elementFromPoint(init.clientX, init.clientY)!
   landed.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0, pressure: 0 }))
@@ -221,11 +222,13 @@ export const ScrollDuringPress: Story = { play: async ({ canvasElement }) => {
   viewport.scrollTop -= 100
   await settleFrames()
   // RAC recycles row elements across keys; measure the failed send by its id.
-  const failedSend = () => viewport.querySelector<HTMLElement>('[data-embrace-entry-id="turn/40"]')!
-  const top = failedSend().getBoundingClientRect().top
+  const failedSend = () => viewport.querySelector<HTMLElement>('[data-embrace-entry-id="turn/40"]')
+  const top = failedSend()!.getBoundingClientRect().top
   canvas.getByRole('button', { name: 'Insert reply above failed send' }).click()
   await settleFrames()
-  await expect(failedSend().getBoundingClientRect().top - top, 'press anchoring fought manual scrolling').toBeGreaterThan(80)
+  // Pushed below RAC's mounted window, the failed send starts where the inserted reply ends.
+  const shifted = failedSend()?.getBoundingClientRect().top ?? viewport.querySelector('[data-embrace-entry-id="turn/41"]')!.closest('[role="row"]')!.getBoundingClientRect().bottom
+  await expect(shifted - top, 'press anchoring fought manual scrolling').toBeGreaterThan(80)
   pointer(viewport, 'pointerup', 1, 'mouse')
 } }
 export const ScrollDuringPressLight: Story = { ...ScrollDuringPress, args: { scheme: 'light' } }
