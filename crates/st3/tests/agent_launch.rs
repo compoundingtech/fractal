@@ -127,7 +127,7 @@ impl RuntimeControl for Processes {
         self.exec.read_log_tail(&observation.runtime_id)
     }
 }
-fn state(root: &Path, store: Arc<Store>) -> AppState {
+pub(super) fn state(root: &Path, store: Arc<Store>) -> AppState {
     AppState {
         store,
         notify: Arc::new(Notify::new()),
@@ -189,7 +189,7 @@ fn ready_receipt(store: &Store, subject: &str, incarnation: &str) {
         .unwrap();
 }
 
-fn requested_launch() -> (Store, String, &'static str) {
+pub(super) fn requested_launch() -> (Store, String, &'static str) {
     let store = Store::open_memory("studio").unwrap();
     let subject = "agent/example/worker";
     declare(
@@ -659,6 +659,13 @@ fn requested_failure_survives_another_incarnation_and_source_replacement() {
         "runtime.action.succeeded",
         json!({"action":"start","desired_token":token,"incarnation_id":"first"}),
     );
+    ready_receipt(&store, subject, "first");
+    assert_eq!(
+        st3::agent_launch::read(&store, subject, &token)
+            .unwrap()
+            .stage,
+        "harness-ready"
+    );
     claim(
         &store,
         subject,
@@ -683,6 +690,7 @@ fn requested_failure_survives_another_incarnation_and_source_replacement() {
         "harness.observed",
         json!({"state":"ready","incarnation_id":"second"}),
     );
+    ready_receipt(&store, subject, "second");
     let status = st3::agent_launch::read(&store, subject, &token).unwrap();
     assert_eq!(status.stage, "exited");
     assert_eq!(status.exit_code, Some(17));

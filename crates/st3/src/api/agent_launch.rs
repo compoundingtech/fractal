@@ -1,4 +1,7 @@
 use super::*;
+// Coalesce the shared daemon feed without polling when it is quiet. A waiter captures
+// at most once per 500 ms after its initial read, even during unrelated event storms.
+const CAPTURE_SPACING: Duration = Duration::from_millis(500);
 #[derive(Deserialize)]
 pub(super) struct LaunchQuery {
     subject: String,
@@ -56,7 +59,7 @@ pub(super) async fn get(
         let store = state.store.clone();
         let subject = query.subject.clone();
         let token = query.token.clone();
-        let status =
+        let mut status =
             blocking_store(move || crate::agent_launch::read(&store, &subject, &token)).await?;
         let marker = crate::agent_launch::wait_marker(&status).map_err(ApiError::internal)?;
         if query.wait_ms == 0 || query.after.as_deref() != Some(marker.as_str()) {
@@ -64,17 +67,33 @@ pub(super) async fn get(
                 .map(Json)
                 .map_err(ApiError::internal);
         }
-        // At most two bounded captures per request; never retain a Store loan across await.
-        // Even an unrelated change ends this wait. The caller receives truthful unchanged
-        // state instead of an unbounded read loop chasing a busy fleet's notifications.
-        let _ = tokio::time::timeout(Duration::from_millis(query.wait_ms), changed.changed()).await;
-        let store = state.store.clone();
-        return blocking_store(move || {
-            crate::agent_launch::read(&store, &query.subject, &query.token)
-                .and_then(|status| Ok(serde_json::to_value(status)?))
-        })
-        .await
-        .map(Json);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(query.wait_ms);
+        let mut next_capture = tokio::time::Instant::now() + CAPTURE_SPACING;
+        loop {
+            // Unchanged notifications do not end the request. No database snapshot is
+            // held across either await; a quiet feed causes no additional captures.
+            match tokio::time::timeout_at(deadline, changed.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+            tokio::time::sleep_until(next_capture.min(deadline)).await;
+            changed.borrow_and_update();
+            let store = state.store.clone();
+            let subject = query.subject.clone();
+            let token = query.token.clone();
+            status =
+                blocking_store(move || crate::agent_launch::read(&store, &subject, &token)).await?;
+            let marker = crate::agent_launch::wait_marker(&status).map_err(ApiError::internal)?;
+            if query.after.as_deref() != Some(marker.as_str())
+                || tokio::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            next_capture = tokio::time::Instant::now() + CAPTURE_SPACING;
+        }
+        return serde_json::to_value(status)
+            .map(Json)
+            .map_err(ApiError::internal);
     }
     let host_id = client_host_id(host);
     let relay = state

@@ -1359,6 +1359,101 @@ impl Fixture {
     }
 }
 
+/// Launch waits must not turn unrelated daemon traffic into repeated captures.
+/// Run this control alone: these counters include every statement in the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn launch_waiters_coalesce_unrelated_event_storms() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use tower::ServiceExt;
+
+    const WAITERS: u64 = 4;
+    const WAIT_MS: u64 = 1_200;
+    // Initial capture plus at most ceil(1200/500) event-driven captures, including
+    // a dirty final partial interval. This bounds work, not just response frequency.
+    const MAX_CAPTURES: u64 = 4;
+    let root = tempfile::tempdir().unwrap();
+    let (store, token, subject) = super::agent_launch::requested_launch();
+    let state = super::agent_launch::state(root.path(), Arc::new(store));
+    let events = state.event_notify.clone();
+    let app = st3::api::router(state);
+    let path = format!("/v1/hosts/studio/agent-launch?subject={subject}&token={token}");
+    let request = |path: String| {
+        Request::get(path)
+            .header("x-st3-person", "agent/bench/cost/launch")
+            .body(Body::empty())
+            .unwrap()
+    };
+    // Warm the private router before measuring the one-capture reference.
+    let warm = app.clone().oneshot(request(path.clone())).await.unwrap();
+    assert!(warm.status().is_success());
+    to_bytes(warm.into_body(), 32_768).await.unwrap();
+    let before = work::total();
+    let response = app.clone().oneshot(request(path.clone())).await.unwrap();
+    assert!(response.status().is_success());
+    let bytes = to_bytes(response.into_body(), 32_768).await.unwrap();
+    let one = work::total() - before;
+    assert!(one.statements > 0);
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    let status = serde_json::from_value(body["value"].clone()).unwrap();
+    let marker = st3::agent_launch::wait_marker(&status).unwrap();
+    for event_ms in [100, 1] {
+        let before = work::total();
+        let started = Instant::now();
+        let mut waiting = Vec::new();
+        for _ in 0..WAITERS {
+            let app = app.clone();
+            let request = request(format!("{path}&after={marker}&wait_ms={WAIT_MS}"));
+            waiting.push(tokio::spawn(
+                async move { app.oneshot(request).await.unwrap() },
+            ));
+        }
+        let feed = events.clone();
+        let storm = tokio::spawn(async move {
+            let mut sent = 0;
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(WAIT_MS);
+            while tokio::time::Instant::now() < deadline {
+                feed.send_modify(|generation| *generation += 1);
+                sent += 1;
+                tokio::time::sleep(Duration::from_millis(event_ms)).await;
+            }
+            sent
+        });
+        for waiter in waiting {
+            let response = tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.status().is_success());
+            let body: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 32_768).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["value"], serde_json::to_value(&status).unwrap());
+        }
+        let elapsed = started.elapsed();
+        let sent = storm.await.unwrap();
+        let spent = work::total() - before;
+        assert!(elapsed >= Duration::from_millis(WAIT_MS), "{elapsed:?}");
+        assert!(sent >= if event_ms == 1 { 100 } else { 5 });
+        assert!(
+            spent.statements <= one.statements * WAITERS * MAX_CAPTURES,
+            "{spent:?}, single capture {one:?}"
+        );
+        assert!(
+            spent.vm_steps <= one.vm_steps * WAITERS * MAX_CAPTURES,
+            "{spent:?}, single capture {one:?}"
+        );
+        assert_eq!(spent.fullscan_steps, 0);
+        assert_eq!(spent.sorts, 0);
+        assert_eq!(spent.autoindex_rows, 0);
+        println!(
+            "launch-wait cost: event_ms={event_ms}, events={sent}, waiters={WAITERS}, single={one:?}, total={spent:?}, elapsed={elapsed:?}, captures_per_waiter_max={MAX_CAPTURES}"
+        );
+    }
+}
+
 /// Historical runs may grow the answer, but must not repeat the assignee's message scan.
 #[tokio::test]
 async fn mission_detail_many_finished_runs_do_not_repeat_step_history() {
