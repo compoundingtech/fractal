@@ -34,7 +34,7 @@ export function EffortPicker({ control, value, pinned, onChange, onPinnedChange,
           {compact ? <><Icon name="clock" size={12} /><RenderProfiler id="EffortValue"><span>{effortLabel(selected)}</span></RenderProfiler></> : <><RenderProfiler id="EffortValue"><span>Effort: {effortLabel(selected)}</span></RenderProfiler><Icon name="chevron-down" size={12} /></>}
         </Button>
       </Tooltip>
-      <Popover style={styles.popup}>
+      <Popover>
         <Menu onAction={key => { if (key === pinItemId) onPinnedChange(!pinned); else onChange(String(key)) }}>
           <MenuSection selectionMode="single" selectedKeys={[selected]} shouldCloseOnSelect={false}>
             <Header {...stylex.props(styles.header)}>Effort</Header>
@@ -63,5 +63,4 @@ const styles = stylex.create({
   button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
   buttonCompact: { paddingInline: s.xs, gap: s.xs2 },
   disabled: { opacity: 0.64, cursor: 'not-allowed', pointerEvents: 'none' },
-  popup: { maxWidth: g.tooltipMax, width: 'max-content' },
 })
