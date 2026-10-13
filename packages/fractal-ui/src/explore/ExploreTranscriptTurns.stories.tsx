@@ -411,6 +411,8 @@ async function assertGutter(lane: HTMLElement) {
       copy.blur()
       await waitFor(() => expect(tips()).toHaveLength(0))
       copy.scrollIntoView({ block: 'center' })
+      await new Promise<void>(resolve => lane.ownerDocument.defaultView!.requestAnimationFrame(() => lane.ownerDocument.defaultView!.requestAnimationFrame(() => resolve())))
+      await userEvent.pointer({ keys: '[MouseLeft]', target: lane.ownerDocument.body })
       await userEvent.hover(copy)
       await assertClearTime('hover')
       await userEvent.unhover(copy)
@@ -419,6 +421,12 @@ async function assertGutter(lane: HTMLElement) {
       await expect(box.left).toBeGreaterThanOrEqual(run.right + 8 - 0.5)
       await expect(box.top).toBeGreaterThanOrEqual(firstLine.top - 0.5)
       await expect(box.top).toBeLessThan(firstLine.bottom)
+      const originalTransform = gutter.style.transform
+      gutter.style.transform = `translateY(${getComputedStyle(seat.querySelector('[data-turn-content] p')!).lineHeight})`
+      try {
+        await expect(gutter.getBoundingClientRect().top, 'one-line-offset gutter must fail first-line alignment').toBeGreaterThanOrEqual(firstLine.bottom)
+      } finally { gutter.style.transform = originalTransform }
+      await expect(gutter.getBoundingClientRect().top).toBeLessThan(firstLine.bottom)
       await expect(Math.abs(run.top - previous.bottom - 8)).toBeLessThan(0.5)
     } else {
       // Fallback: one 16px row above the run, ending on the run's right edge.
