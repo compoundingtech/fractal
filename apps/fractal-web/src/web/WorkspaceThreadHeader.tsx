@@ -2,7 +2,7 @@ import * as React from 'react'
 import { VisuallyHidden } from 'react-aria-components'
 import { ThreadHeader } from '@smalltalk/fractal-ui/assistant-ui/shell'
 import { useConversationSync, useNow } from '../data/react.tsx'
-import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
+import { syncLine } from '@smalltalk/fractal-ui/assistant-ui/sync-status'
 
 /** Keep sync discoverable without spending another band on transport metadata. */
 export const WorkspaceThreadHeader = ({ agentRef, ...props }: React.ComponentProps<typeof ThreadHeader> & { readonly agentRef: string }) => {
