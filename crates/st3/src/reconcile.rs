@@ -842,6 +842,8 @@ pub struct Reconciler<R = NativeRuntime> {
     background_dispatch_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     background_entry_hook: Option<BackgroundEntryHook>,
+    #[cfg(test)]
+    background_wake_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
@@ -1009,6 +1011,8 @@ impl Reconciler<NativeRuntime> {
             background_dispatch_hook: Default::default(),
             #[cfg(test)]
             background_entry_hook: None,
+            #[cfg(test)]
+            background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
@@ -1093,6 +1097,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_dispatch_hook: Default::default(),
             #[cfg(test)]
             background_entry_hook: None,
+            #[cfg(test)]
+            background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
@@ -1405,9 +1411,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .send_modify(|generation| *generation = generation.saturating_add(1));
                 quiet_pass_started = (!changed).then_some(started);
                 if !changed {
+                    #[cfg(test)]
+                    if let Some(hook) = &self.background_wake_hook {
+                        hook(pass + 1);
+                    }
                     break;
                 }
                 if pass == 63 {
+                    #[cfg(test)]
+                    if let Some(hook) = &self.background_wake_hook {
+                        hook(pass + 1);
+                    }
                     self.notify.notify_one();
                 } else {
                     tokio::task::yield_now().await;

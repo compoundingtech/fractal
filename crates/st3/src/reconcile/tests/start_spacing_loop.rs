@@ -156,3 +156,82 @@ fn cancelled_real_blocking_queue_cannot_begin_pass_sql_or_reserve_start_history(
         assert!(task.await.unwrap_err().is_cancelled());
     });
 }
+
+async fn quiescence_pass_counts(unrelated_writes: bool) -> Vec<usize> {
+    const SUBJECTS: usize = 3;
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let workspace = tempfile::tempdir().unwrap();
+    let mut source = String::from("version 2\n");
+    for subject in 0..SUBJECTS {
+        source.push_str(&format!(
+            "exec \"quiet-{subject}\" {{ workspace \"{}\"; command \"true\"; restart \"never\" }}\n",
+            workspace.path().display()
+        ));
+    }
+    apply_source(&store, &source, "quiescence");
+    assert_eq!(store.desired_subjects().unwrap().len(), SUBJECTS);
+    let runtime = Arc::new(FakeRuntime::default());
+    let mut reconciler = Reconciler::new(
+        store.clone(),
+        runtime.clone(),
+        "node".into(),
+        Arc::new(Notify::new()),
+    );
+    reconciler.set_max_passes_per_minute(0).unwrap();
+    // Settle the fixture's own effects before measuring the startup wake.
+    for _ in 0..4 {
+        reconciler.reconcile_once().unwrap();
+    }
+    let before = store.index().unwrap();
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(store.index().unwrap(), before);
+    let snapshots = Arc::new(AtomicUsize::new(0));
+    *runtime.before_snapshot.lock().unwrap() = Some(Box::new({
+        let snapshots = snapshots.clone();
+        move || {
+            let pass = snapshots.fetch_add(1, Ordering::SeqCst);
+            if unrelated_writes && pass < 64 {
+                // Write on another thread, as replication does. Join makes the write land
+                // strictly between the pass's before/after readings, without timing races.
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    store.append_claim(&ClaimInput {
+                        subject: format!("unrelated/{pass}"),
+                        kind: "test.unrelated".into(),
+                        actor: "test".into(),
+                        fields: BTreeMap::new(),
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: None,
+                    }).unwrap();
+                }).join().unwrap();
+            }
+        }
+    }));
+    let (wakes, mut wake_rx) = mpsc::unbounded_channel();
+    reconciler.background_wake_hook = Some(Arc::new(move |passes| {
+        let _ = wakes.send(passes);
+    }));
+    let task = tokio::spawn(Arc::new(reconciler).run());
+    let first = receive(&mut wake_rx).await;
+    let mut counts = vec![first];
+    if first == 64 {
+        // No external notify: the next wake proves the cap self-notifies.
+        counts.push(receive(&mut wake_rx).await);
+    }
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    eprintln!("unrelated_writes={unrelated_writes}: passes_per_wake={counts:?}");
+    counts
+}
+
+#[tokio::test]
+async fn background_quiesces_without_concurrent_writes() {
+    assert_eq!(quiescence_pass_counts(false).await, vec![1]);
+}
+
+#[tokio::test]
+async fn background_quiesces_under_unrelated_claim_writes() {
+    let counts = quiescence_pass_counts(true).await;
+    assert!(counts.len() == 1 && counts[0] <= 2, "passes_per_wake={counts:?}");
+}
