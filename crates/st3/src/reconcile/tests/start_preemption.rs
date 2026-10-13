@@ -452,24 +452,26 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
         reconciler.runtime_observation_drops.lock().unwrap()[&desired.subject],
         2
     );
+    let fault_subject = format!("daemon/{}", reconciler.host);
+    let fault_scope = format!("runtime-observation:{}", desired.subject);
     assert!(
         !store
-            .observations_for(&desired.subject, "reconcile.fault")
+            .observations_for(&fault_subject, "reconcile.fault")
             .unwrap()
             .iter()
-            .any(|claim| claim.body["fields"]["scope"] == "runtime-observation")
+            .any(|claim| claim.body["fields"]["scope"] == fault_scope.as_str())
     );
     reconciler
         .record_member(&desired, &captured, false)
         .unwrap();
     let faults = store
-        .observations_for(&desired.subject, "reconcile.fault")
+        .observations_for(&fault_subject, "reconcile.fault")
         .unwrap();
     assert_eq!(
         faults
             .iter()
             .filter(
-                |claim| claim.body["fields"]["scope"] == "runtime-observation"
+                |claim| claim.body["fields"]["scope"] == fault_scope.as_str()
                     && claim.body["fields"]["status"] == "faulted"
             )
             .count(),
@@ -505,11 +507,11 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
     );
     assert!(
         store
-            .observations_for(&desired.subject, "reconcile.fault")
+            .observations_for(&fault_subject, "reconcile.fault")
             .unwrap()
             .iter()
             .any(
-                |claim| claim.body["fields"]["scope"] == "runtime-observation"
+                |claim| claim.body["fields"]["scope"] == fault_scope.as_str()
                     && claim.body["fields"]["status"] == "recovered"
             )
     );

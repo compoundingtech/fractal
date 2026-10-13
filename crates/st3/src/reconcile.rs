@@ -7806,14 +7806,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 0
             }
         };
-        let (target, scope) = if subject.starts_with("agent/") || subject.starts_with("exec/") {
-            (subject.to_owned(), "runtime-observation".to_owned())
-        } else {
-            (
-                format!("daemon/{}", self.host),
-                format!("runtime-observation:{subject}"),
-            )
-        };
+        let target = format!("daemon/{}", self.host);
+        let scope = format!("runtime-observation:{subject}");
         if !dropped {
             self.close_fault(&target, &scope, "a fresh runtime observation was admitted")?;
         } else if consecutive >= FAULT_AFTER_DROPS {
