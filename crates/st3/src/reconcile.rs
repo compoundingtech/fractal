@@ -17129,6 +17129,7 @@ mod tests {
     mod run_report_tests;
     mod start_spacing_loop;
     mod start_preemption;
+    mod gate_recovery_tests;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
         use super::{NativeRuntime, RuntimeControl};
