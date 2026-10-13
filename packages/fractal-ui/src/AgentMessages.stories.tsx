@@ -166,7 +166,11 @@ const textLineCount = (element: HTMLElement) => {
 }
 /** The open card is readable: its short label renders on one line, not one character per line. A squeezed card is rejected. */
 const assertReadableCard = async () => {
-  const card = document.querySelector<HTMLElement>('[role="tooltip"]')!
+  const card = await waitFor(() => {
+    const candidate = document.querySelector<HTMLElement>('[role="tooltip"]')
+    expect(candidate).toBeInstanceOf(Node)
+    return candidate!
+  }, { timeout: 3_000 })
   await expect(textLineCount(card)).toBe(1)
   card.style.width = '0px'
   try { await expect(textLineCount(card)).toBeGreaterThan(1) } finally { card.style.removeProperty('width') }
