@@ -1012,3 +1012,65 @@ fn batched_work_support_cost_reports_empty_and_all_present_4200_step_mixes() {
     assert_eq!(new_work.vm_steps, old_work.vm_steps + proof_work.vm_steps);
     assert_eq!(proof_work.fullscan_steps, 0);
 }
+
+#[test]
+fn batched_work_definition_index_preserves_nested_display_order_and_first_match() {
+    let store = fixture(3);
+    let body: String = store
+        .readers
+        .get()
+        .query_row("SELECT body FROM mission_revisions", [], |r| r.get(0))
+        .unwrap();
+    let mut mission: MissionSpec = serde_json::from_str(&body).unwrap();
+    let first = mission.display_order[0].clone();
+    let second = mission.display_order[1].clone();
+    let third = mission.display_order[2].clone();
+    let mut nested = mission.clone();
+    nested.display_order = vec![second.clone(), third.clone()];
+    nested.steps.get_mut(&second).unwrap().path = mission.steps[&first].path.clone();
+    nested.steps.get_mut(&second).unwrap().queue = Some("nested-duplicate".into());
+    nested.steps.get_mut(&third).unwrap().path = "parent/nested-child".into();
+    nested.steps.get_mut(&third).unwrap().queue_position = Some(7);
+    nested.steps.get_mut(&third).unwrap().timeout_ms = Some(31);
+    nested.steps.get_mut(&third).unwrap().fresh_context = true;
+    mission.steps.get_mut(&first).unwrap().queue = Some("parent-first".into());
+    mission.steps.get_mut(&first).unwrap().nested_mission = Some(Box::new(nested));
+    // Root second also matches a nested path, but depth-first nested entry wins.
+    mission.steps.get_mut(&second).unwrap().path = "parent/nested-child".into();
+    mission.steps.get_mut(&second).unwrap().timeout_ms = Some(99);
+    let index = DefinitionIndex::from_mission(&mission);
+    for path in [
+        mission.steps[&first].path.as_str(),
+        "parent/nested-child",
+        mission.steps[&third].path.as_str(),
+        "not-present",
+    ] {
+        let old = crate::mission::find_step(&mission, path);
+        let new = index.get(path).unwrap();
+        assert_eq!(new.is_some(), old.is_some());
+        if let (Some(old), Some(new)) = (old, new) {
+            assert_eq!(new.queue, old.queue);
+            assert_eq!(new.queue_position, old.queue_position);
+            assert_eq!(new.timeout_ms, old.timeout_ms);
+            assert_eq!(new.fresh_context, old.fresh_context);
+        }
+    }
+    // Semantic corruption of a definition: preserve matches before the broken reference,
+    // and refuse unresolved lookups beyond it. No unrelated default silently fills a row.
+    mission.display_order = vec![
+        first.clone(),
+        "missing-definition-step".into(),
+        third.clone(),
+    ];
+    let index = DefinitionIndex::from_mission(&mission);
+    assert_eq!(
+        index
+            .get(&mission.steps[&first].path)
+            .unwrap()
+            .unwrap()
+            .queue,
+        Some("parent-first".into())
+    );
+    assert!(index.get(&mission.steps[&third].path).is_err());
+    assert!(index.get("not-present").is_err());
+}

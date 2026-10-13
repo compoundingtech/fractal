@@ -54,6 +54,66 @@ struct Inputs {
     phases: BTreeMap<String, String>,
 }
 
+struct DefinitionFields {
+    queue: Option<String>,
+    queue_position: Option<u32>,
+    timeout_ms: Option<u64>,
+    fresh_context: bool,
+}
+
+#[derive(Default)]
+struct DefinitionIndex {
+    fields: BTreeMap<String, DefinitionFields>,
+    missing_reference: Option<String>,
+}
+
+impl DefinitionIndex {
+    fn from_mission(mission: &MissionSpec) -> Self {
+        let mut index = Self::default();
+        index.visit(mission);
+        index
+    }
+
+    // Match find_step's display-order depth-first traversal and its first matching path.
+    // Store only the four fields this reader uses; nested mission trees are never cloned.
+    fn visit(&mut self, mission: &MissionSpec) -> bool {
+        for id in &mission.display_order {
+            let Some(step) = mission.steps.get(id) else {
+                self.missing_reference = Some(id.clone());
+                return false;
+            };
+            self.fields
+                .entry(step.path.clone())
+                .or_insert_with(|| DefinitionFields {
+                    queue: step.queue.clone(),
+                    queue_position: step.queue_position,
+                    timeout_ms: step.timeout_ms,
+                    fresh_context: step.fresh_context,
+                });
+            if let Some(nested) = &step.nested_mission
+                && !self.visit(nested)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn get(&self, path: &str) -> Result<Option<&DefinitionFields>> {
+        if let Some(fields) = self.fields.get(path) {
+            return Ok(Some(fields));
+        }
+        // An earlier matching path remains valid. A lookup beyond the invalid display
+        // reference refuses the whole read, instead of find_step's indexing panic.
+        anyhow::ensure!(
+            self.missing_reference.is_none(),
+            "mission display order references a missing step: {}",
+            self.missing_reference.as_deref().unwrap_or_default()
+        );
+        Ok(None)
+    }
+}
+
 pub(super) fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunView>> {
     let actor = normalize_actor(actor, "agent");
     // The previous work_for_reconcile path also passed one clock to every enrichment.
@@ -65,7 +125,7 @@ pub(super) fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunVi
     MAX_SNAPSHOT_CALL_NS
         .with(|maximum| maximum.set(maximum.get().max(snapshot_started.elapsed().as_nanos())));
     let mut inputs = captured?;
-    let mut definitions = BTreeMap::<String, Option<MissionSpec>>::new();
+    let mut definitions = BTreeMap::<String, Option<DefinitionIndex>>::new();
     for view in &mut inputs.views {
         let generation = generation_id_from_subject(&view.generation);
         if !definitions.contains_key(generation) {
@@ -83,10 +143,13 @@ pub(super) fn read(store: &Store, actor: &str, at: u128) -> Result<Vec<StepRunVi
                     })
                 })
                 .transpose()?;
-            definitions.insert(generation.to_owned(), mission);
+            definitions.insert(
+                generation.to_owned(),
+                mission.as_ref().map(DefinitionIndex::from_mission),
+            );
         }
-        if let Some(mission) = definitions.get(generation).and_then(Option::as_ref)
-            && let Some(step) = crate::mission::find_step(mission, &view.step)
+        if let Some(definition) = definitions.get(generation).and_then(Option::as_ref)
+            && let Some(step) = definition.get(&view.step)?
         {
             view.queue.clone_from(&step.queue);
             view.queue_position = step.queue_position;
