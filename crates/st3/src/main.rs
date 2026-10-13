@@ -16789,7 +16789,10 @@ async fn refresh_agent_trace(
     }
     let mut source_incarnation = source_incarnation;
     let mut observed = observed;
-    loop {
+    // At most two snapshots per call: the initial transaction and one coalesced
+    // drain. Further requests remain durable for the next driver tick/writer;
+    // capture never waits for another writer or drains without a bound.
+    for _ in 0..2 {
         let lock = match lock_agent_trace(path).await {
             Ok(lock) => lock,
             Err(error) => {
@@ -16835,6 +16838,9 @@ async fn try_refresh_agent_trace(
     // An event from a predecessor provider cannot restate its model or lease after restart.
     if source_incarnation.is_some_and(|source| current_incarnation.as_deref() != Some(source))
     {
+        // This transaction consumed the request before detecting the stale
+        // observation. Restore it so the owner reconciles current lease state.
+        issuer::request_refresh(path)?;
         return Ok(());
     }
     let incarnation = current_incarnation.as_deref().unwrap_or_default();
@@ -26188,6 +26194,15 @@ mod tests {
 
     #[tokio::test]
     async fn agent_trace_completion_queued_behind_an_older_snapshot_finishes_idle() {
+        check_agent_trace_completion_race(false).await;
+    }
+
+    #[tokio::test]
+    async fn agent_trace_stale_observation_does_not_consume_queued_completion() {
+        check_agent_trace_completion_race(true).await;
+    }
+
+    async fn check_agent_trace_completion_race(stale_observation: bool) {
         use axum::{Json, Router, extract::OriginalUri};
         use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
         use st3::agent_trace::{Runtime, issuer};
@@ -26203,7 +26218,7 @@ mod tests {
             "created_at_unix_ms":0,"updated_at_unix_ms":0,
         });
         let held = Arc::new(AtomicBool::new(true));
-        let first_read = Arc::new(AtomicBool::new(true));
+        let first_read = Arc::new(AtomicBool::new(!stale_observation));
         let snapshot_read = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());
         let app = Router::new().fallback({
@@ -26252,24 +26267,52 @@ mod tests {
         let path = root.path().join("agent-trace.json");
         let runtime: Runtime = serde_json::from_value(json!({
             "type":"agent-trace-runtime/v1","who":{"agent":subject,"principal":"person/avery"},
-            "why":{"_tag":"idle"},"how":{"harness":{"tool":"omp"}},"where":{},
+            "why":{"_tag":"bound",
+                "mission":{"name":"example/repo/check","run":"mission-run/example/repo/check/abcdef0123456789abcdef0123456789"},
+                "step":{"name":"work","run":"0123456789abcdef0123456789abcdef"}},
+            "how":{"harness":{"tool":"omp"},
+                "issuance":{"_tag":"st-issued","step_run":"step-run/0123456789abcdef0123456789abcdef/work"}},
+            "where":{},
         })).unwrap();
         issuer::write_atomic(&path, &runtime).unwrap();
-        let writer = tokio::spawn({
-            let client = client.clone();
-            let path = path.clone();
-            async move { refresh_agent_trace(&client, subject, &path, Some("current"), None).await }
-        });
-        snapshot_read.notified().await;
-        let committed: StepRunView = client.post("/v1/work/complete/fixture", &json!({})).await.unwrap();
-        assert_eq!(committed.status, "verifying");
-        refresh_agent_trace(&client, subject, &path, None, None).await;
-        assert!(issuer::refresh_requested(&path).unwrap());
-        resume.notify_one();
-        tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap();
+        if stale_observation {
+            let committed: StepRunView = client.post("/v1/work/complete/fixture", &json!({})).await.unwrap();
+            assert_eq!(committed.status, "verifying");
+            // Queue completion behind a writer, then let the predecessor
+            // observation acquire the lock and consume that queued request.
+            let owner = issuer::lock(&path).unwrap();
+            refresh_agent_trace(&client, subject, &path, None, None).await;
+            assert!(issuer::refresh_requested(&path).unwrap());
+            drop(owner);
+            let observed = st_drivers::harness_context::Observed {
+                harness: st_drivers::harness_context::Harness::Omp,
+                used_tokens: None, window_tokens: None, used_percent: None,
+                model: Some("gpt-predecessor".into()), provider: Some("openai".into()),
+                cost_usd: None, session_total_tokens: None, rate_limits: Default::default(),
+                account: None, plan: None, compactions: 0, last_compaction_ms: None,
+                last_compaction_trigger: None, observed_at_ms: 0, age_ms: 0, stale: false,
+            };
+            tokio::time::timeout(Duration::from_secs(5),
+                refresh_agent_trace(&client, subject, &path, Some("previous"), Some(&observed)))
+                .await.unwrap();
+        } else {
+            let writer = tokio::spawn({
+                let client = client.clone();
+                let path = path.clone();
+                async move { refresh_agent_trace(&client, subject, &path, Some("current"), None).await }
+            });
+            snapshot_read.notified().await;
+            let committed: StepRunView = client.post("/v1/work/complete/fixture", &json!({})).await.unwrap();
+            assert_eq!(committed.status, "verifying");
+            refresh_agent_trace(&client, subject, &path, None, None).await;
+            assert!(issuer::refresh_requested(&path).unwrap());
+            resume.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap();
+        }
         let final_runtime: Runtime = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(serde_json::to_value(final_runtime.why).unwrap(), json!({"_tag":"idle"}));
         assert!(final_runtime.how.issuance.is_none());
+        assert!(final_runtime.how.model.is_none(), "a predecessor model must not be replayed");
         assert!(!issuer::refresh_requested(&path).unwrap());
         server.abort();
     }
