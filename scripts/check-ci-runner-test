@@ -148,6 +148,11 @@ check("overflow requires a qualified census", [], 'ci1-priority',EVENT='merge_gr
       MERGE_OVERFLOW='on',API_RESPONSE='not JSON')
 check("overflow cannot interpret missing token as saturation", [], 'ci1-priority',api=False,
       EVENT='merge_group',MERGE_OVERFLOW='on',GH_TOKEN='')
+for field,value in [('busy',None),('busy',0),('status','unknown'),('id',0)]:
+    row = runner('ci1-priority')
+    row[field] = value
+    check("unqualified fields cannot mean saturation", [{'runners':[row]}], 'ci1-priority',
+          EVENT='merge_group',MERGE_OVERFLOW='on')
 for values in [dict(MERGE_NEED='0'),dict(MERGE_NEED='x'),dict(RUN_ID=''),dict(RUN_ID='x')]:
     check("invalid overflow identity/minimum retains priority", [], 'ci1-priority',
           EVENT='merge_group',MERGE_OVERFLOW='on',**values)

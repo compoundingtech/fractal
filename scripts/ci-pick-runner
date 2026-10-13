@@ -62,6 +62,11 @@ def main():
     except (subprocess.SubprocessError, ValueError, TypeError, KeyError):
         unavailable("runner list unavailable or invalid")
         return
+    if (event == "merge_group" and env.get("MERGE_OVERFLOW") == "on"
+            and any(key < 1 or status not in ("online", "offline") or type(busy) is not bool
+                    for key, (status, busy, labels) in by_id.items())):
+        unavailable("unqualified merge capacity status")
+        return
     # Group 3 is the common pool. These compatibility role names are shared on both hosts.
     online = sum(status == "online" for status, busy, labels in by_id.values())
     def candidates(label):
