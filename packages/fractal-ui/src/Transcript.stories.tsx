@@ -545,6 +545,8 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
   await userEvent.click(thinkingControl)
   await expect(thinkingControl).toHaveAttribute('aria-expanded', 'true')
   const lane = canvas.getByTestId('transcript-scroll')
+  // A reader scroll: input first, as in a browser. An input-less write is a host or measurement move.
+  lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -(lane.scrollTop - 48) }))
   lane.scrollTop = 48
   lane.dispatchEvent(new Event('scroll'))
   const scrollTop = lane.scrollTop

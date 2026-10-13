@@ -57,6 +57,11 @@ export class ScrollController {
   private readonly rowByTarget = new Map<string, string>()
   private geometry = { contentHeight: 0, viewportHeight: 0 }
   private pressed: ReadingPosition | undefined
+  private pressedPointer: number | undefined
+  /** Pointers down anywhere on the page; the jump dock keeps its layout until all are released. */
+  private readonly pointers = new Set<number>()
+  /** The unread mark requested while pointers were down. */
+  private deferredUnread: boolean | undefined
   private pendingJump: { readonly key: string; readonly resolve: (result: JumpResult) => void } | undefined
   private leadingKey: string | undefined
 
@@ -64,6 +69,12 @@ export class ScrollController {
     const pending = this.pendingJump
     this.pendingJump = undefined
     pending?.resolve(result)
+  }
+
+  /** Never reflow the jump dock under an active press: the reveal waits for the last release. */
+  private setUnread(unread: boolean) {
+    if (this.pointers.size > 0) this.deferredUnread = unread
+    else this.options.setUnread(unread)
   }
 
   /** An older-navigation command owns the viewport before RAC scrolls/focuses. */
@@ -134,7 +145,7 @@ export class ScrollController {
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
     this.restoreFrame = undefined
     if (this.element !== null) scrollToEnd(this.element)
-    this.options.setUnread(false)
+    this.setUnread(false)
     this.options.save({ _tag: 'Following' })
   }
 
@@ -142,7 +153,9 @@ export class ScrollController {
   readonly attach = (element: HTMLDivElement | null) => {
     if (element === null) return
     this.element = element
-    const onUserInput = () => {
+    const onUserInput = (event: Event) => {
+      // A reader scroll or key takes ownership from a held row; a press does not.
+      if (event.type !== 'pointerdown') this.pressed = undefined
       this.finishJump({ _tag: 'Superseded' })
       this.olderNavigation = false
       this.homeNavigation = false
@@ -181,7 +194,7 @@ export class ScrollController {
       // scroll arrives before RAC applies its key navigation. New input clears it.
       if (!resized && !this.olderNavigation) this.following =
         element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_SLACK
-      if (this.following) this.options.setUnread(false)
+      if (this.following) this.setUnread(false)
       this.savePosition()
     }
     const onScrollEnd = () => {
@@ -242,15 +255,23 @@ export class ScrollController {
     })
     mutations.observe(element, { childList: true, subtree: true })
     observeMountedGeometry()
+    // Document-wide, so presses that start anywhere (a row action included) defer the dock.
+    const page = element.ownerDocument
+    const view = page.defaultView
     const press = (event: PointerEvent) => {
-      if (!(event.target instanceof Element)) return
+      this.pointers.add(event.pointerId)
+      if (!(event.target instanceof Element) || !element.contains(event.target)) return
+      // A press in the lane engages the reader: rows arriving meanwhile wait behind the jump.
+      this.following = false
+      if (this.pressed !== undefined) return
       const row = event.target.closest<HTMLElement>('[data-embrace-entry-id]')
       const key = row?.dataset['embraceEntryId']
-      if (row !== null && row !== undefined && key !== undefined && element.contains(row)) {
+      if (row !== null && row !== undefined && key !== undefined) {
         this.pressed = { key, offset: row.getBoundingClientRect().top - element.getBoundingClientRect().top }
+        this.pressedPointer = event.pointerId
       }
     }
-    const release = () => {
+    const releasePress = () => {
       if (this.pressed === undefined) return
       const held = this.pressed
       this.pressed = undefined
@@ -265,10 +286,30 @@ export class ScrollController {
         this.pendingAnchor = this.anchor
       }
     }
-    element.addEventListener('pointerdown', press, true)
-    element.ownerDocument.addEventListener('pointerup', release, true)
-    element.ownerDocument.addEventListener('pointercancel', release, true)
-    element.ownerDocument.defaultView?.addEventListener('blur', release)
+    const dock = () => {
+      if (this.pointers.size > 0 || this.deferredUnread === undefined) return
+      const unread = this.deferredUnread
+      this.deferredUnread = undefined
+      this.options.setUnread(unread)
+    }
+    const release = (event: PointerEvent) => {
+      this.pointers.delete(event.pointerId)
+      if (event.pointerId === this.pressedPointer) releasePress()
+      dock()
+    }
+    // A release the page never sees (the window blurs, the tab hides) must not latch the press or the dock.
+    const abandon = () => {
+      this.pointers.clear()
+      releasePress()
+      dock()
+    }
+    const hidden = () => { if (page.visibilityState === 'hidden') abandon() }
+    page.addEventListener('pointerdown', press, true)
+    page.addEventListener('pointerup', release, true)
+    page.addEventListener('pointercancel', release, true)
+    page.addEventListener('lostpointercapture', release, true)
+    page.addEventListener('visibilitychange', hidden)
+    view?.addEventListener('blur', abandon)
     const inputs = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const
     for (const type of inputs) element.addEventListener(type, onUserInput, { passive: true })
     element.addEventListener('scroll', onScroll, { passive: true })
@@ -280,10 +321,15 @@ export class ScrollController {
       if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
       this.restoreFrame = undefined
       for (const type of inputs) element.removeEventListener(type, onUserInput)
-      element.removeEventListener('pointerdown', press, true)
-      element.ownerDocument.removeEventListener('pointerup', release, true)
-      element.ownerDocument.removeEventListener('pointercancel', release, true)
-      element.ownerDocument.defaultView?.removeEventListener('blur', release)
+      page.removeEventListener('pointerdown', press, true)
+      page.removeEventListener('pointerup', release, true)
+      page.removeEventListener('pointercancel', release, true)
+      page.removeEventListener('lostpointercapture', release, true)
+      page.removeEventListener('visibilitychange', hidden)
+      view?.removeEventListener('blur', abandon)
+      // Detached mid-press: the saved state keeps the mark the press deferred.
+      this.pointers.clear()
+      dock()
       element.removeEventListener('scroll', onScroll)
       element.removeEventListener('scrollend', onScrollEnd)
       if (!this.restoring) this.savePosition()
@@ -463,7 +509,7 @@ export class ScrollController {
       if (start < 0 || rows.length - start !== previous.length ||
         previous.some((row, index) => row.id !== rows[start + index]?.id ||
           (row.version === undefined ? row !== rows[start + index] : row.version !== rows[start + index]?.version))) {
-        if (!this.following || this.pressed !== undefined) this.options.setUnread(true)
+        if (!this.following || this.pressed !== undefined) this.setUnread(true)
       }
     }
     if (this.restoring && this.element !== null && rows.length > 0) this.restore()
@@ -489,7 +535,7 @@ export class ScrollController {
       return
     }
     if (this.following) {
-      this.options.setUnread(false)
+      this.setUnread(false)
       if (this.element !== null) scrollToEnd(this.element)
       return
     }

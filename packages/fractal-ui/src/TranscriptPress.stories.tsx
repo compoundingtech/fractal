@@ -196,7 +196,9 @@ export const InsertAbovePressedRow: Story = { play: async ({ canvasElement }) =>
     canvas.getByRole('button', { name: 'Insert reply above failed send' }).click()
     await waitFor(() => expect(viewport.scrollHeight - height).toBeGreaterThan(80))
     await settleFrames()
-    await expect(viewport.scrollHeight - height, 'reply should reproduce the roughly 107px insertion').toBeLessThan(140)
+    // The virtual lane's scrollHeight also re-measures estimated rows; the inserted row is the insertion.
+    const inserted = await waitFor(() => { const found = viewport.querySelector('[data-embrace-entry-id="turn/41"]')?.closest<HTMLElement>('[role="row"]'); if (found == null) throw new Error('Inserted row not mounted'); return found })
+    await expect(inserted.getBoundingClientRect().height, 'reply should reproduce the roughly 107px insertion').toBeLessThan(140)
     await expect(Math.abs(row.getBoundingClientRect().top - top), 'pressed row moved under the pointer').toBeLessThanOrEqual(1)
     await expect(jump).not.toBeVisible()
   })
