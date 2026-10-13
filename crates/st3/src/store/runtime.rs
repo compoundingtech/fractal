@@ -8,6 +8,9 @@ use super::*;
 /// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct SmalltalkRuntime {
+    /// Committed launch-source invalidation, independent of append frontiers.
+    pub(crate) publication_cache_epoch: Mutex<Option<(i64, bool)>>,
+    pub(crate) publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
     /// One registry per graph. Registration alone does not certify source coverage.
     pub(crate) ivm_views: Option<Arc<smallclaims::ivm::Views>>,
     /// Receipt waits and collection sockets share this one commit observer. Publisher
@@ -133,6 +136,7 @@ impl SmalltalkRuntime {
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
         coordination::create_schema(connection)?;
+        publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
@@ -277,6 +281,7 @@ impl Runtime for SmalltalkRuntime {
             views.initialize_empty(transaction, cut)?;
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
+        publication_facts::initialize(transaction)?;
         custom::open(transaction)?;
         resources::open(transaction)?;
         glass_heads::open(transaction)?;

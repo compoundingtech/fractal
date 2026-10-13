@@ -29,6 +29,8 @@ mod github_workflow_failures;
 pub mod git_changes;
 pub(crate) mod message_subscriptions;
 mod rollouts;
+pub(crate) mod publication;
+mod publication_facts;
 mod seat_status;
 mod card_fold;
 #[cfg(test)]
@@ -3242,6 +3244,9 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -3254,6 +3259,9 @@ impl Store {
     ) -> Result<Self> {
         let smalltalk = Arc::new(SmalltalkRuntime::with_ivm_views(views));
         let graph = GraphStore::open(path, origin, smalltalk.clone())?;
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -3269,6 +3277,9 @@ impl Store {
         {
             graph.heal_replay_backoff_ms = 0;
         }
+        publication_facts::create_schema(&graph.connection.write())?;
+        graph.connection.install_transaction_maintenance(publication_facts::flush)?;
+        publication_facts::install_cache_observer(&graph, &smalltalk);
         Ok(Self { graph, smalltalk })
     }
 
@@ -9919,20 +9930,23 @@ impl Store {
                 subject.clone(),
                 intent_leaves_at(&connection, subject, at_index).map_err(internal)?,
             );
-            if current.as_ref().is_some_and(|row| row.revision == revision) {
+            let changed = current.as_ref().is_none_or(|row| row.revision != revision);
+            if changed {
+                changes.push(SubjectChange {
+                    subject: subject.clone(),
+                    change: if current.is_some() {
+                        "update"
+                    } else {
+                        "create"
+                    }
+                    .into(),
+                    old_revision: current.as_ref().map(|row| row.revision.clone()),
+                    new_revision: revision,
+                });
+            }
+            if !changed && desired.member.is_none() {
                 continue;
             }
-            changes.push(SubjectChange {
-                subject: subject.clone(),
-                change: if current.is_some() {
-                    "update"
-                } else {
-                    "create"
-                }
-                .into(),
-                old_revision: current.as_ref().map(|row| row.revision.clone()),
-                new_revision: revision,
-            });
             if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
                 Ok(current.as_ref().and_then(|row| row.member.as_deref())
                     .map(serde_json::from_str::<crate::model::MemberSpec>)
@@ -9940,39 +9954,20 @@ impl Store {
             })
                 .map_err(internal)?
             {
-                actions.push(action);
+                if changed || action.action == "restart" {
+                    actions.push(action);
+                }
             } else if desired.kind == "stop" {
                 actions.push(PlannedAction {
                     subject: subject.clone(),
                     action: "stop".into(),
                     reason: "the desired state explicitly stops this member".into(),
                 });
-            } else if let Some(member) = &desired.member {
-                // A seat restarts when its declared launch changes; say so before it does.
-                let changes = current
-                    .as_ref()
-                    .filter(|row| row.kind == "agent")
-                    .and_then(|row| row.member.as_deref())
-                    .and_then(|launched| {
-                        serde_json::from_str::<crate::model::MemberSpec>(launched).ok()
-                    })
-                    .map(|launched| member.launch_changes(&launched))
-                    .unwrap_or_default();
-                actions.push(if changes.is_empty() {
-                    PlannedAction {
-                        subject: subject.clone(),
-                        action: "observe-or-start".into(),
-                        reason: "the desired member is active".into(),
-                    }
-                } else {
-                    PlannedAction {
-                        subject: subject.clone(),
-                        action: "restart".into(),
-                        reason: format!(
-                            "the declared {} changed; a running seat restarts on its last session",
-                            changes.join(" and ")
-                        ),
-                    }
+            } else if desired.member.is_some() && changed {
+                actions.push(PlannedAction {
+                    subject: subject.clone(),
+                    action: "observe-or-start".into(),
+                    reason: "the desired member is active".into(),
                 });
             }
         }
@@ -10177,7 +10172,38 @@ impl Store {
         idempotency_key: &str,
         actor: Option<&str>,
     ) -> Result<ApplyResponse, St3Error> {
-        self.apply_as_impl(intent, expected, idempotency_key, actor, None, None)
+        self.apply_as_impl(
+            intent,
+            expected,
+            idempotency_key,
+            actor,
+            None,
+            publication::CommitChecks::default(),
+        )
+    }
+
+    /// Internal commit-time guard. Runs after subject CAS checks, before publication writes,
+    /// using the writer's current runtime and incarnation rather than preview evidence.
+    #[cfg_attr(not(test), expect(dead_code, reason = "The following refusal slice exposes this tested commit-time guard."))]
+    pub(crate) fn apply_as_checked(
+        &self,
+        intent: &NormalizedIntent,
+        expected: &BTreeMap<String, Vec<String>>,
+        key: &str,
+        actor: Option<&str>,
+        guard: &publication::Guard,
+    ) -> Result<ApplyResponse, St3Error> {
+        self.apply_as_impl(
+            intent,
+            expected,
+            key,
+            actor,
+            None,
+            publication::CommitChecks {
+                owned: None,
+                guard: Some(guard),
+            },
+        )
     }
 
     /// Atomically commit the declaration and its caller-facing completed response. Exact retries
@@ -10196,8 +10222,8 @@ impl Store {
             expected,
             key,
             None,
-            None,
             Some((response_key, &value)),
+            publication::CommitChecks::default(),
         )
     }
 
@@ -10207,9 +10233,10 @@ impl Store {
         expected: &BTreeMap<String, Vec<String>>,
         idempotency_key: &str,
         actor: Option<&str>,
-        owned: Option<&owned_sets::Options>,
         local_receipt: Option<(&str, &Value)>,
+        checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, St3Error> {
+        let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, St3Error> {
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;
@@ -10551,6 +10578,13 @@ impl Store {
                 }
                 for repair in &intent.replica_repairs {
                     operations_changed |= validate_replica_repair(transaction, repair)?;
+                }
+                if let Some(guard) = guard {
+                    let at = current_index_tx(transaction).map_err(internal)?;
+                    for desired in intent.subjects.values().filter(|desired| matches!(desired.kind.as_str(), "agent" | "stop")) {
+                        let check = publication::check(transaction, desired, at, &self.origin).map_err(internal)?;
+                        guard(desired, &check)?;
+                    }
                 }
                 let changed = desired_changed || missions_changed || operations_changed || owned_plan.is_some();
                 if !changed {
@@ -30177,6 +30211,7 @@ fn replay_graph_from_nothing_with_progress_tx(
     stage("full-replay/arrangements");
     arrangements::rebuild(transaction).map_err(internal)?;
     stage("full-replay/flush");
+    publication_facts::reset(transaction).map_err(internal)?;
     Ok(())
 }
 

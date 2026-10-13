@@ -7804,6 +7804,16 @@ fn graph_references_check(unresolved: &[String]) -> DoctorCheck {
     }
 }
 
+fn publication_evidence_check(store: &Store) -> DoctorCheck {
+    match store.publication_evidence_ready() {
+        Ok(true) => DoctorCheck { name:"publication-evidence".into(), status:"pass".into(),
+            message:"retained runtime and incarnation launch evidence is complete".into() },
+        Ok(false) => DoctorCheck { name:"publication-evidence-incomplete".into(), status:"warn".into(),
+            message:"publication evidence bootstrap or pending canonical deltas are incomplete; guarded publications refuse until complete; inspect daemon bootstrap errors if progress stops".into() },
+        Err(error) => DoctorCheck { name:"publication-evidence-unavailable".into(), status:"warn".into(), message:error.to_string() },
+    }
+}
+
 /// Held silent mail is never lost: unread past a day, it is listed for its seat.
 fn held_mail_check(store: &Store, now: u128) -> DoctorCheck {
     match store.coordination_backfill_status() {
@@ -8667,6 +8677,7 @@ fn doctor_report_with_operation_drift(
         }),
         Err(error) => checks.push(DoctorCheck { name: "mail-backlog".into(), status: "warn".into(), message: error.to_string() }),
     }
+    checks.push(publication_evidence_check(&state.store));
     checks.push(held_mail_check(&state.store, client_now_ms()));
     match delivery_probes::check(
         &state.store,
