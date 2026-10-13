@@ -125,6 +125,8 @@ export const Inbox: Story = {
     for (const entry of entries) {
       await expect(entry).not.toHaveAttribute('open')
       const summary = entry.querySelector('summary')!
+      await expect(getComputedStyle(summary).minHeight).toBe('24px')
+      await expect(summary.getBoundingClientRect().height).toBeGreaterThanOrEqual(24)
       const label = summary.querySelector<HTMLElement>('[data-needs-you-label]')!
       const chevron = summary.querySelector<HTMLElement>('[data-needs-you-chevron]')!
       await expect(getComputedStyle(label).webkitLineClamp).toBe('2')

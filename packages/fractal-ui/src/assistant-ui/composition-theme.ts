@@ -32,8 +32,6 @@ const borderVarsTheme = stylex.createTheme(borderVars, {
   glassBorder: 'rgba(0, 0, 0, 0.06)',
   controlBorder: 'rgba(0, 0, 0, 0.1)',
   focusBorder: 'rgba(0, 0, 0, 0.12)',
-  rail: 'rgba(0, 0, 0, 0.1)',
-  railStrong: 'rgba(0, 0, 0, 0.12)',
 })
 
 const accentVarsTheme = stylex.createTheme(accentVars, {
