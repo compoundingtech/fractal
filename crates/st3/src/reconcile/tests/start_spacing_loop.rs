@@ -194,15 +194,12 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
     let before = store.index().unwrap();
     reconciler.reconcile_once().unwrap();
     assert_eq!(store.index().unwrap(), before);
-    let diagnostic = BTreeMap::from([
-        ("severity".into(), Value::String("warning".into())),
-        ("code".into(), Value::String("quiescence-test".into())),
-        ("status".into(), Value::String("reachable".into())),
+    let local_fields = BTreeMap::from([
         ("reason".into(), Value::String("already recorded".into())),
     ]);
     if traffic == QuiescenceTraffic::Deduplication {
-        reconciler.record_once("daemon/node", "daemon.diagnostic", diagnostic.clone()).unwrap();
-        let claim = store.latest_observation("daemon/node", "daemon.diagnostic").unwrap().unwrap();
+        reconciler.record_once("exec/unrelated", "runtime.action.succeeded", local_fields.clone()).unwrap();
+        let claim = store.latest_observation("exec/unrelated", "runtime.action.succeeded").unwrap().unwrap();
         assert!(crate::store::local_observation_position(&claim).is_some());
     }
     let (wakes, mut wake_rx) = mpsc::unbounded_channel();
@@ -240,34 +237,34 @@ async fn quiescence_pass_counts(traffic: QuiescenceTraffic) -> Vec<usize> {
             if traffic == QuiescenceTraffic::Deduplication {
                 let before = smallclaims::touched::writes();
                 reconciler.upgrade().unwrap()
-                    .record_once("daemon/node", "daemon.diagnostic", diagnostic.clone()).unwrap();
+                    .record_once("exec/unrelated", "runtime.action.succeeded", local_fields.clone()).unwrap();
                 assert_eq!(smallclaims::touched::writes(), before);
             }
             if traffic == QuiescenceTraffic::OwnEffects && pass < 64 {
-                let mut fields = diagnostic.clone();
+                let mut fields = local_fields.clone();
                 fields.insert("reason".into(), Value::String(format!("pass {pass}")));
                 reconciler.upgrade().unwrap()
-                    .record_once("daemon/node", "daemon.diagnostic", fields).unwrap();
-            }
-            if traffic == QuiescenceTraffic::StartCompletion && pass == 0 {
-                let before = smallclaims::touched::writes();
-                let reconciler = reconciler.upgrade().unwrap();
-                let subject = store.desired_subjects().unwrap().into_iter()
-                    .find(|subject| subject.subject == "exec/quiet-0").unwrap();
-                std::thread::spawn(move || {
-                    // Use the real completion path: its signal_changed must wake run even
-                    // though these receipts are attributed only to this helper thread.
-                    reconciler.perform_start(
-                        &subject, subject.member.as_ref().unwrap(), "helper completed start",
-                    ).unwrap();
-                }).join().unwrap();
-                assert_eq!(smallclaims::touched::writes(), before);
+                    .record_once("exec/unrelated", "runtime.action.succeeded", fields).unwrap();
             }
         }
     }));
-    let task = tokio::spawn(reconciler.run());
+    let task = tokio::spawn(reconciler.clone().run());
     let first = receive(&mut wake_rx).await;
     let mut counts = vec![first];
+    if traffic == QuiescenceTraffic::StartCompletion {
+        let reconciler = reconciler.clone();
+        tokio::task::spawn_blocking(move || {
+            let subject = reconciler.store.desired_subjects().unwrap().into_iter()
+                .find(|subject| subject.subject == "exec/quiet-0").unwrap();
+            let before = smallclaims::touched::writes();
+            // Complete only after the initial pass rests. This real start path's
+            // signal_changed must supply the next wake; the test never calls notify.
+            reconciler.perform_start(
+                &subject, subject.member.as_ref().unwrap(), "helper completed start",
+            ).unwrap();
+            assert!(smallclaims::touched::writes() > before);
+        }).await.unwrap();
+    }
     if first == 64 || traffic == QuiescenceTraffic::StartCompletion {
         // The cap or the helper's real signal_changed must supply this notification.
         counts.push(receive(&mut wake_rx).await);
@@ -296,7 +293,8 @@ async fn background_quiesces_after_deduping_local_only_observations() {
 
 #[tokio::test]
 async fn background_start_completion_on_a_helper_thread_wakes_a_quiet_pass() {
-    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::StartCompletion).await, vec![1, 1]);
+    // The completion wakes a pass, which records the new observation and confirms it once.
+    assert_eq!(quiescence_pass_counts(QuiescenceTraffic::StartCompletion).await, vec![1, 2]);
 }
 
 #[tokio::test]
