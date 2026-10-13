@@ -41,7 +41,7 @@ function HeaderVariant({ width, scheme }: { width: number; scheme: Scheme }) {
   </section>
 }
 const HeaderSurface = () => <main {...stylex.props(styles.matrix)}>{variants.map(variant => <HeaderVariant key={`${variant.width}-${variant.scheme}`} {...variant} />)}</main>
-const meta = { title: 'Fractal UI/Transcript header ownership', component: HeaderSurface, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof HeaderSurface>
+const meta = { title: 'Fractal/Plugins/Conversations/Transcript header ownership', component: HeaderSurface, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof HeaderSurface>
 export default meta
 type Story = StoryObj<typeof meta>
 export const AllStates: Story = { play: async ({ canvasElement }) => {
