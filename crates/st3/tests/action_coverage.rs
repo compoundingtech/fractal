@@ -165,6 +165,161 @@ async fn cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_git_change_owner_sync_imports_real_objects_and_preserves_receipts_across_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use st3::changes::config::{Config, Repository as RepositoryConfig};
+    use st3::changes::service::Registry;
+    use st3::changes::transport::{Authentication, Repository};
+    use st3::changes::{Record, State, TrailerStatus, new_change_id};
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = st3::test_support::command("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().into()
+    }
+    let mut daemon = Daemon::new().await;
+    let source = daemon.root.path().join("source");
+    let remote = daemon.root.path().join("remote.git");
+    let reader = daemon.root.path().join("reader");
+    for directory in [&source, &remote, &reader] {
+        std::fs::create_dir(directory).unwrap();
+    }
+    git(&source, &["init", "-q"]);
+    git(&remote, &["init", "--bare", "-q"]);
+    git(&reader, &["init", "-q"]);
+    let destination = remote.to_str().unwrap();
+    git(&source, &["remote", "add", "origin", destination]);
+    git(&reader, &["remote", "add", "origin", destination]);
+    git(
+        &source,
+        &["commit", "--allow-empty", "-qm", "Synthetic base"],
+    );
+    let base = git(&source, &["rev-parse", "HEAD"]);
+    let id = new_change_id().unwrap();
+    git(
+        &source,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            &format!("Synthetic change\n\nChange-Id: {id}"),
+        ],
+    );
+    let repository = Repository::open(&source, Authentication::default()).unwrap();
+    let (source_commit, source_tree) = repository.source("HEAD").unwrap();
+    let revision = repository
+        .prepare(Record {
+            schema_version: 1,
+            change_id: id.clone(),
+            generation: 1,
+            previous_record: None,
+            source_commit,
+            source_tree,
+            base_commit: base,
+            trailer_status: TrailerStatus::Present,
+            state: State::Draft,
+            next: None,
+            depends_on: vec![],
+            actor: WORKER.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            claim: None,
+            mirror: None,
+        })
+        .unwrap();
+    repository.publish("origin", None, &revision).unwrap();
+    let configuration = Config {
+        enabled: true,
+        repositories: vec![RepositoryConfig {
+            name: "fixture/garden".into(),
+            reader_node: NODE.into(),
+            transport_directory: reader,
+            remote: "origin".into(),
+            remote_url: destination.into(),
+            pilot_started_at: "2026-01-01T00:00:00Z".into(),
+            ..Default::default()
+        }],
+    };
+    assert!(
+        daemon
+            .store()
+            .latest_indexed_git_change("fixture/garden", &id)
+            .unwrap()
+            .is_none()
+    );
+    for expected_imports in [1, 0] {
+        daemon
+            .store()
+            .install_git_change_registry(Arc::new(Registry::new(&configuration, NODE).unwrap()))
+            .unwrap();
+        let index = daemon.store().index().unwrap();
+        let sync = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &["changes", "sync", "--repository", "fixture/garden"],
+                )
+                .await,
+        );
+        assert_eq!(sync["sync"]["status"], "completed");
+        assert_eq!(sync["sync"]["import"]["indexed_objects"], expected_imports);
+        let indexed = daemon
+            .store()
+            .latest_indexed_git_change("fixture/garden", &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(indexed.revision, revision);
+        let detail = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &[
+                        "changes",
+                        "show",
+                        &id,
+                        "--repository",
+                        "fixture/garden",
+                        "--offline",
+                    ],
+                )
+                .await,
+        );
+        assert_eq!(
+            detail["item"]["last_indexed"]["revision"]["oid"],
+            revision.oid
+        );
+        assert_eq!(detail["fallback"], "pull_request");
+        assert_eq!(daemon.store().index().unwrap(), index);
+        daemon.restart().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
     if st3::test_support::supervise_test() {
         return;
