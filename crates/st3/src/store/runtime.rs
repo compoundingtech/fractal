@@ -43,6 +43,10 @@ pub struct SmalltalkRuntime {
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub(crate) agent_roster_requested_at: std::sync::atomic::AtomicU64,
+    /// Bit 0: a refresh is in flight. Bit 1: the last attempt failed.
+    pub(crate) agent_roster_attempt: std::sync::atomic::AtomicU8,
+    /// Fault retries due in this fold, and deadlines deferred to the next refresh.
+    pub(crate) agent_roster_fault_retries: Mutex<AgentRosterFaultRetries>,
     /// When an agents list read last asked for the roster, in Unix ms; 0 before the first.
     pub(crate) agent_roster_read_at: std::sync::atomic::AtomicU64,
     /// Whether the current overdue refresh request was already reported.
@@ -87,6 +91,12 @@ pub struct SmalltalkRuntime {
     pub(crate) seat_lookups: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) last_seats_read: std::sync::Mutex<BTreeSet<String>>,
+}
+
+#[derive(Default)]
+pub(crate) struct AgentRosterFaultRetries {
+    pub(crate) due: [BTreeSet<String>; 2],
+    pub(crate) pending: [BTreeSet<String>; 2],
 }
 
 #[derive(Clone)]
