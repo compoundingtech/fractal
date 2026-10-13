@@ -801,6 +801,9 @@
       {
         packages.st2 = st2;
         packages.st = st3;
+        # Release runners need a host linker for Cargo build scripts and stamp tests.
+        # The release target still links through the pinned Zig/glibc-baseline wrapper.
+        packages.release-cc = pkgs.stdenv.cc;
         packages.st3 = st3;
         packages.st3-migrate = st3;
         packages.small-talk = st3;

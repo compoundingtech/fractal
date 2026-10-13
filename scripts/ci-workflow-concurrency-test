@@ -76,10 +76,14 @@ for action in ['labeled', 'unlabeled']:
     assert policy('perf.yml', 'pull_request', 100, 42, action=action, label='ci-perf') == ('perf-42', True)
 print('passed: only ci-perf label changes enter the existing PR cancellation group')
 
-# A newer main release replaces only the pending run, preserving an active release.
+# The active main release survives newer pushes, even while a build waits for a runner.
+# GitHub retains only the newest pending successor; it starts after that active run ends.
 assert policy('release-smalltalk.yml', 'push', 100) == policy('release-smalltalk.yml', 'push', 101) == ('smalltalk-release-main', False)
 for event, ref in [('push', 'refs/tags/v1.2.3'), ('workflow_dispatch', 'refs/heads/main')]:
     first, second = policy('release-smalltalk.yml', event, 100, ref=ref), policy('release-smalltalk.yml', event, 101, ref=ref)
     assert first[0] != second[0] and not first[1] and not second[1]
 assert policy('release-smalltalk.yml', 'pull_request', 100, 42, ref='refs/pull/42/merge')[1]
-print('passed: superseded pending main releases replaced; active, tag and pinned manual releases preserved')
+release = (ROOT / '.github/workflows/release-smalltalk.yml').read_text()
+assert release.index('nix build .#release-cc') < release.index('name: Test installer')
+assert 'packages.release-cc = pkgs.stdenv.cc;' in (ROOT / 'flake.nix').read_text()
+print('passed: newest pending main release retained; active, tag and pinned manual releases preserved; host compiler provided')
