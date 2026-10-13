@@ -354,7 +354,7 @@ mission "trace-check" state="ready" {
             let log = std::fs::read_to_string(
                 root.path().join("state/st3/driver-api-warnings.log")).unwrap();
             assert!(log.contains("agent_trace_omitted"), "{log}");
-            assert!(log.contains("Connection refused"), "{log}");
+            assert!(log.contains("connection refused"), "{log}");
             assert!(!path.exists(), "failed capture leaves no stale trace");
             continue;
         }
