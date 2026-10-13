@@ -28178,6 +28178,122 @@ mission "waiting" state="ready" {
         assert!(store.attention_items(None).unwrap().is_empty());
     }
 
+    #[test]
+    fn an_unstarted_cancelled_loop_has_no_fault_but_started_and_failed_loops_do() {
+        for case in ["queued-cancel", "started-cancel", "unstarted-fail"] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(
+                &store,
+                r#"
+    version 2
+    resource "never" { kind "custom.test.loop-result" }
+    mission "hold" state="ready" {
+      goal "Hold the successor outside admission."
+      step "hold" {
+    agentless
+    gate "released" { field "state" "resource/never" is "ready" }
+      }
+    }
+    mission "looping" state="ready" {
+      goal "Wait in a bounded loop."
+      loop "review" {
+    max-rounds 3
+    until { gate "done" { field "state" "resource/never" is "done" } }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "wait" {
+        agentless
+        gate "released" { field "state" "resource/never" is "ready" }
+      }
+    }
+      }
+    }
+    "#,
+                "cancel-loop-missions",
+            );
+            let start = |id: &str, mission: &str, after: Option<&str>| {
+                let revision = store.mission_spec(mission, None).unwrap().unwrap().revision;
+                let after = after.map_or(String::new(), |id| format!("  after {id:?}\n"));
+                let source = format!(
+                    "version 2\nmission-run {id:?} {{\n  mission \"mission/{mission}@{revision}\"\n  workspace \"/tmp\"\n  requester \"person/operator\"\n{after}}}\n",
+                );
+                apply_source(&store, &source, &format!("start-{id}"));
+            };
+            start("predecessor", "hold", None);
+            start(
+                "successor",
+                "looping",
+                (case == "queued-cancel").then_some("predecessor"),
+            );
+            let reconciler = Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            if case != "unstarted-fail" {
+                for _ in 0..10 {
+                    reconciler.reconcile_once().unwrap();
+                }
+            }
+            let run = store.mission_run("successor").unwrap().unwrap();
+            let step = run.steps.iter().find(|step| step.step == "review").unwrap();
+            let child = store.mission_run_for_parent_step(&step.subject).unwrap();
+            assert_eq!(child.is_some(), case == "started-cancel", "{case}");
+            if case == "queued-cancel" {
+                assert_eq!(step.status, "pending");
+                assert_eq!(
+                    run.steps
+                        .iter()
+                        .find(|step| step.step == "after-run")
+                        .unwrap()
+                        .status,
+                    "working"
+                );
+            }
+            if case == "unstarted-fail" {
+                store
+                    .set_step_state(&step.subject, "failed", Some("invalid loop input"))
+                    .unwrap();
+            } else {
+                store
+                    .request_mission_run_cancellation(&run.id, "no longer needed")
+                    .unwrap();
+            }
+            // Read during cancellation, before terminal cleanup closes the run's items.
+            // Checking only after cleanup would miss the spurious fault's lifetime.
+            let items = store.fault_items(Some("person/operator")).unwrap();
+            if case == "queued-cancel" {
+                assert!(
+                    items.is_empty(),
+                    "An unstarted queued loop raised a fault: {items:?}"
+                );
+                for _ in 0..5 {
+                    reconciler.reconcile_once().unwrap();
+                    assert!(
+                        store
+                            .fault_items(Some("person/operator"))
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+                assert_eq!(
+                    store.mission_run("successor").unwrap().unwrap().status,
+                    "cancelled"
+                );
+                assert!(
+                    store
+                        .mission_run_for_parent_step(&step.subject)
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                assert_eq!(items.len(), 1, "{case}: {items:?}");
+                assert_eq!(items[0].title, "Loop `review` stopped");
+            }
+        }
+    }
+
     fn stopping_loop_run(
         requester: &str,
         round: &str,
