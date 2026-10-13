@@ -1085,7 +1085,7 @@ async fn dial_peer<B: Backend>(
                     .cloned();
                 if let Some(offered) = offered
                     && let Ok(current) = backend
-                        .export(auth.fleet_id(), &ReplicationInventory::default(), true, &[])
+                        .guard_summary(auth.fleet_id())
                         .await
                 {
                     // The other side already knows this inventory and is draining both
