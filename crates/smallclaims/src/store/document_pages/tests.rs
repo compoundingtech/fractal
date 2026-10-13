@@ -1053,7 +1053,7 @@ fn isolated_blob_boundary_explains_the_retained_one_step_difference() {
         let conn = store.readers.get();
         let scope = SqliteWorkScope::start();
         let result = conn
-            .prepare_cached(&sql)
+            .prepare_cached(sql)
             .unwrap()
             .query_map(
                 params![
