@@ -58,18 +58,19 @@ const year = (at: number, zone: HumanTimeZone): string =>
 
 /** Local clock time, e.g. `14:02` (en-GB) or `2:02 PM` (en-US). */
 export const formatClockTime = (at: number, zone: HumanTimeZone = {}): string =>
-  formatter(zone, 'clock', { hour: 'numeric', minute: '2-digit' }).format(at)
+  Number.isFinite(at) ? formatter(zone, 'clock', { hour: 'numeric', minute: '2-digit' }).format(at) : '—'
 
 /** A calendar date without time: `6 Oct`, or `6 Oct 2025` outside the current year. */
-export const formatDate = (at: number, now: number, zone: HumanTimeZone = {}): string =>
-  year(at, zone) === year(now, zone)
+export const formatDate = (at: number, now: number, zone: HumanTimeZone = {}): string => {
+  if (!Number.isFinite(at) || !Number.isFinite(now)) return '—'
+  return year(at, zone) === year(now, zone)
     ? formatter(zone, 'date', { day: 'numeric', month: 'short' }).format(at)
     : formatter(zone, 'date-year', { day: 'numeric', month: 'short', year: 'numeric' }).format(at)
+}
 
 /**
  * A civil day: `today`, `yesterday`, weekday within six days, then the calendar date.
- * For date-only `YYYY-MM-DD` input, callers must construct local midnight of that civil
- * date (not parse the bare string as UTC), in the same viewer zone used to format it.
+ * For date-only `YYYY-MM-DD` input, use `civilDate` with the same viewer zone.
  */
 export const formatDay = (at: number, now: number, zone: HumanTimeZone = {}): string => {
   if (!Number.isFinite(at) || !Number.isFinite(now)) return '—'
@@ -88,7 +89,7 @@ export const formatExactDay = (at: number, zone: HumanTimeZone = {}): string =>
 
 /** Machine-readable civil date in the formatting zone, never a fabricated UTC instant. */
 export const formatDayValue = (at: number, zone: HumanTimeZone = {}): string =>
-  new Date(calendarDay(at, zone) * DAY).toISOString().slice(0, 10)
+  Number.isFinite(at) ? new Date(calendarDay(at, zone) * DAY).toISOString().slice(0, 10) : '—'
 
 const weekdayClock = (at: number, zone: HumanTimeZone): string =>
   `${formatter(zone, 'weekday', { weekday: 'short' }).format(at)} ${formatClockTime(at, zone)}`
@@ -113,7 +114,7 @@ export const formatRelative = (at: number, now: number, zone: HumanTimeZone = {}
 
 /** Header time for input cards (E41): `14:02` today, `Mon 14:02` this week, else `6 Oct`. */
 export const formatClock = (at: number, now: number, zone: HumanTimeZone = {}): string => {
-  if (!Number.isFinite(at)) return '—'
+  if (!Number.isFinite(at) || !Number.isFinite(now)) return '—'
   const days = calendarDay(now, zone) - calendarDay(at, zone)
   return days === 0 ? formatClockTime(at, zone) : days > 0 && days < 7 ? weekdayClock(at, zone) : formatDate(at, now, zone)
 }
@@ -128,4 +129,28 @@ export const formatExact = (at: number, zone: HumanTimeZone = {}): string =>
 export const instant = (value: number | string | undefined | null): number | undefined => {
   const at = typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : Number.NaN
   return Number.isFinite(at) ? at : undefined
+}
+
+/**
+ * A YYYY-MM-DD civil date anchored inside that day in the viewer's zone, not UTC midnight.
+ * This representative instant is only for day formatters / kind="day"; it reports no clock time.
+ * Missing, invalid, or skipped civil dates return undefined.
+ */
+export const civilDate = (value: string, zone: HumanTimeZone = {}): number | undefined => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined
+  const noon = Date.parse(`${value}T12:00:00Z`)
+  if (!Number.isFinite(noon) || new Date(noon).toISOString().slice(0, 10) !== value) return undefined
+  const requestedDay = Math.floor(noon / DAY)
+  // Search civil-day boundaries rather than shifting by 24h: the zone's offset can
+  // change between the UTC anchor and the requested day (including skipped days).
+  let low = noon - 2 * DAY
+  let high = noon + 2 * DAY
+  while (low <= high) {
+    const at = low + Math.floor((high - low) / 2)
+    const actualDay = calendarDay(at, zone)
+    if (actualDay === requestedDay) return at
+    if (actualDay < requestedDay) low = at + 1
+    else high = at - 1
+  }
+  return undefined
 }

@@ -2,7 +2,9 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Tooltip, TooltipTriggerStateContext, type TooltipTriggerState } from 'react-aria-components'
 import { useHover } from 'react-aria'
-import { surfaceVars as sf, textVars as tx, typeVars as t, radiusVars as r, spaceVars as s } from '../assistant-ui/composition-tokens.stylex'
+import { geometryNumbers } from '../assistant-ui/composition-tokens.stylex'
+import { tooltipStyles } from '../assistant-ui/composition/Controls'
+import { ThemePortal } from '../assistant-ui/taste/ThemePortal'
 import { formatClock, formatDay, formatDayValue, formatDuration, formatExact, formatExactDay, formatRelative, type HumanTimeZone } from './human-time'
 import { useClockLabel, useHumanTimeZone } from './clock'
 
@@ -42,7 +44,7 @@ export const HumanTime = React.memo(function HumanTime({ at, kind = 'relative', 
   const visibleLabel = `${prefix}${label}${suffix}`
   const ref = React.useRef<HTMLTimeElement>(null)
   const tip = useHoverTooltip(tooltip && exactText !== undefined)
-  return <>
+  return <ThemePortal>
     <time
       ref={ref}
       dateTime={exact === undefined ? undefined : kind === 'day' ? formatDayValue(at, zone) : new Date(at).toISOString()}
@@ -54,9 +56,9 @@ export const HumanTime = React.memo(function HumanTime({ at, kind = 'relative', 
       {...stylex.props(styles.time, style)}
     >{visibleLabel}</time>
     {tip.state.isOpen && <TooltipTriggerStateContext.Provider value={tip.state}>
-      <Tooltip triggerRef={ref} placement="top" offset={6} {...stylex.props(styles.tooltip)}>{exactText}</Tooltip>
+      <Tooltip triggerRef={ref} placement="top" offset={geometryNumbers.tooltipOffset} {...stylex.props(tooltipStyles.tooltip, styles.tooltip)}>{exactText}</Tooltip>
     </TooltipTriggerStateContext.Provider>}
-  </>
+  </ThemePortal>
 })
 
 /**
@@ -80,5 +82,5 @@ const useHoverTooltip = (enabled: boolean): { readonly state: TooltipTriggerStat
 const styles = stylex.create({
   time: { fontVariantNumeric: 'tabular-nums', outline: 'none' },
   // RAC supplies placement only after measuring the real mounted anchor.
-  tooltip: { visibility: { default: 'hidden', ':is([data-placement])': 'visible' }, zIndex: 50, borderRadius: r.control, backgroundColor: tx.fg, color: sf.raised, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, whiteSpace: 'nowrap' },
+  tooltip: { visibility: { default: 'hidden', ':is([data-placement])': 'visible' }, width: 'max-content' },
 })

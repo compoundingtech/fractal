@@ -7,7 +7,7 @@ import stylex from '@stylexjs/unplugin'
 
 const server = await createServer({ configFile: false, root: new URL('../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true } })
 after(() => server.close())
-const { formatDuration, formatRelative, formatDay, formatDayValue, formatExactDay, formatClock, formatClockTime, formatExact, instant } = await server.ssrLoadModule('/src/time/human-time.ts')
+const { civilDate, formatDate, formatDuration, formatRelative, formatDay, formatDayValue, formatExactDay, formatClock, formatClockTime, formatExact, instant } = await server.ssrLoadModule('/src/time/human-time.ts')
 const zone = { locale: 'en-GB', timeZone: 'Europe/Berlin' }
 const at = Date.parse
 const now = at('2026-10-14T14:00:00Z')
@@ -65,4 +65,41 @@ test('instant rejects missing and unusable input while preserving machine instan
   assert.equal(instant('2026-10-12T12:02:00Z'), at('2026-10-12T12:02:00Z'))
   assert.equal(instant(42), 42)
   for (const value of [undefined, null, 'invalid', NaN, Infinity]) assert.equal(instant(value), undefined)
+})
+test('non-finite timestamp and observation clock return safe placeholders', () => {
+  for (const invalid of [NaN, Infinity, -Infinity]) {
+    for (const format of [formatClock, formatDate, formatDay, formatRelative]) {
+      assert.equal(format(now, invalid, zone), '—')
+      assert.equal(format(invalid, now, zone), '—')
+    }
+    assert.equal(formatClockTime(invalid, zone), '—')
+    assert.equal(formatDayValue(invalid, zone), '—')
+  }
+})
+test('civil date entry respects pinned zones across UTC boundaries and DST', () => {
+  for (const timeZone of ['America/New_York', 'Pacific/Kiritimati', 'Pacific/Pago_Pago', 'Europe/Berlin']) {
+    const pinned = { ...zone, timeZone }
+    for (const date of ['2026-10-12', '2026-03-29', '2026-10-25']) {
+      const value = civilDate(date, pinned)
+      assert.equal(formatDayValue(value, pinned), date)
+      assert.equal(formatDay(value, value, pinned), 'today')
+    }
+  }
+  const pinned = { ...zone, timeZone: 'America/New_York' }
+  const value = civilDate('2026-10-12', pinned)
+  assert.equal(formatDay(value, at('2026-10-12T05:00:00Z'), pinned), 'today')
+  assert.equal(formatExactDay(value, pinned), 'Mon, 12 Oct 2026')
+  for (const date of ['', 'invalid', '2026-02-30', '2026-13-01', '2026-1-1']) assert.equal(civilDate(date, pinned), undefined)
+})
+test('civil date resolution follows Norfolk offset changes and rejects skipped Apia day', () => {
+  const norfolk = { ...zone, timeZone: 'Pacific/Norfolk' }
+  for (const date of ['2026-10-03', '2026-10-04', '2026-10-05', '2026-04-04', '2026-04-05', '2026-04-06']) {
+    const value = civilDate(date, norfolk)
+    assert.ok(Number.isFinite(value), `valid Norfolk date ${date}`)
+    assert.equal(formatDayValue(value, norfolk), date)
+    assert.equal(formatDay(value, value, norfolk), 'today')
+  }
+  const apia = { ...zone, timeZone: 'Pacific/Apia' }
+  assert.equal(civilDate('2011-12-30', apia), undefined)
+  for (const date of ['2011-12-29', '2011-12-31']) assert.equal(formatDayValue(civilDate(date, apia), apia), date)
 })

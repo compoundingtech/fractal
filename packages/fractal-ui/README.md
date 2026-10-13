@@ -13,8 +13,11 @@ Use `HumanTime` from `./human-time` for leaf-clock labels, and pure formatters f
 `./human-time/format` for clock-driven string projections. `kind="day"` represents
 date-only sources: today / yesterday / weekday within six calendar days / date.
 Its tooltip and accessible description contain only the exact date, never an invented
-time. Construct `YYYY-MM-DD` civil dates as local midnight (`new Date(date + 'T00:00:00')`),
-not by parsing the bare UTC date string; the instant and formatting zone must agree.
+time. Use `civilDate('2026-10-12', zone)` from `./human-time/format` with the same
+zone supplied to `HumanClockProvider` (for example `{ locale: 'en-GB', timeZone:
+'America/New_York' }`). It returns an instant inside the requested civil day, or
+`undefined` for unusable input; use it only with day formatters / `kind="day"`.
+Neither bare ISO-date parsing nor machine-local midnight respects a pinned zone.
 `aria-label` is a name prefix; `HumanTime` appends the complete visible text, including
 visible prefix/suffix, exactly once. Callers must not repeat the formatted value.
 String projections must receive a ticking `now`; the host may intentionally pause an
@@ -45,6 +48,7 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Human time**: all four kinds and unreported time, pinned to New York, at 440/1440 in light/dark plus a host-theme tooltip and a fake-timer live tick.
 
 ## Families
 
