@@ -3,7 +3,7 @@
 // Agents stay declared in KDL as seats today. A step names the seat that does it, exactly as
 // `assigned-to` does. Everything else is ordinary Effect:
 //
-//   retries          Effect.retry(step, Schedule...)        each attempt is a new op: build, build~2
+//   retries          Effect.retry(step, Schedule...)        each attempt is a new op: build, build.2
 //   timeouts         Effect.timeout / timeoutOrElse          the deadline is a durable timer op
 //   escalation       escalateAfter(...) below                 a timeout whose fallback asks a person
 //   on-failure       Effect.catchTag("StepFailed", ...)       or onError / ensuring for cleanup
@@ -11,7 +11,7 @@
 //   parallel steps   Effect.all([...], { concurrency })       ops open together; first failure cancels the rest
 
 import { Duration, Effect } from "effect"
-import { opEffect, ScopeRef } from "./engine.ts"
+import { opEffect, ScopeRef, TimerNameRef } from "./engine.ts"
 import type { AskDeclined, GateFailed, StepFailed, WaitFailed } from "./errors.ts"
 import type { Json } from "./history.ts"
 
@@ -107,11 +107,28 @@ export const scope =
   <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
     Effect.flatMap(ScopeRef, (outer) => Effect.provideService(self, ScopeRef, [...outer, name]))
 
-// A deadline whose fallback is a person's decision, not a failure.
+// Name the timers Effect opens inside (retry delays, timeouts): timerName("build-backoff")
+// gives build-backoff, build-backoff.2, ... instead of a count shared with every other timer.
+export const timerName =
+  (name: string) =>
+  <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    Effect.provideService(self, TimerNameRef, name)
+
+// A named durable sleep.
+export const sleep = (id: string, duration: Duration.Input): Effect.Effect<void> =>
+  Effect.sleep(duration).pipe(timerName(id))
+
+// A deadline whose fallback is a person's decision, not a failure. The deadline is its own named
+// timer, so a replay or a new version finds it by name.
 export const escalateAfter =
-  <B, E2, R2>(after: Duration.Input, escalate: () => Effect.Effect<B, E2, R2>) =>
+  <B, E2, R2>(name: string, after: Duration.Input, escalate: () => Effect.Effect<B, E2, R2>) =>
   <A, E, R>(self: Effect.Effect<A, E, R>): Effect.Effect<A | B, E | E2, R | R2> =>
-    Effect.timeoutOrElse(self, { duration: after, orElse: escalate })
+    Effect.raceFirst(
+      Effect.map(self, (value) => ({ late: false as const, value })),
+      Effect.as(sleep(name, after), { late: true as const })
+    ).pipe(
+      Effect.flatMap((r): Effect.Effect<A | B, E2, R2> => (r.late ? escalate() : Effect.succeed(r.value)))
+    )
 
 export interface MissionDefinition<I> {
   readonly name: string

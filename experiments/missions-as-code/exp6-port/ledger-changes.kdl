@@ -1,0 +1,61 @@
+version 2
+
+// Sanitized from a real fleet mission. Its steps are three slices of work; the path every slice
+// takes to main (build, CI, fix on failure, an intake GO, the curator's queue, merge) is not in
+// the graph at all. It lives in the constraint prose below, which the worker must follow by hand.
+// Names and text are invented; the structure is exact.
+
+mission "orchard/ledger-changes" state="ready" report-to="agent/orchard/factory" stalled-after="2h" {
+  completion { when "all-steps-exhausted" }
+
+  goal "A change is identified and tracked in the ledger alone, readable and claimable without the hosting API."
+
+  constraint "Read document doc/orchard/factory/sdlc first. Design first and verify against the real host before building."
+
+  constraint "Builds and tests on grove only. Small pull requests with tests, the existing suites green, an intake GO from agent/orchard/intake, then send the pull request and the GO to agent/orchard/curator, which queues it; never arm auto-merge yourself. When CI fails, fix it and go back through intake. When the queue ejects a pull request, fix it and send it to the curator again."
+
+  constraint "Your workspace starts empty: make it a worktree of orchard/app at origin/main on a new branch before anything else."
+
+  agent "builder" {
+    identity "ledger-builder"
+    description "Makes a change and its place in the pipeline live in the ledger."
+    host "grove"
+    workspace "/srv/orchard/ledger-changes" create=#true
+    harness "codex" {
+      model "example-model"
+      effort "high"
+    }
+    restart "always"
+  }
+
+  step "design" timeout="8h" {
+    title "Change model verified on the real host"
+    assigned-to "agent/${ST_MISSION_RUN}/ledger-builder"
+    goal "The change model is stored as document orchard/ledger-changes/design, verified on a scratch repository, with an intake GO on it."
+  }
+
+  step "reads" timeout="10h" {
+    title "list and show from the ledger"
+    assigned-to "agent/${ST_MISSION_RUN}/ledger-builder"
+    goal "On main and deployed: list, show and claim from the ledger, with tests for concurrent claims."
+    depends-on {
+      step "design" completed
+    }
+  }
+
+  step "mirror" timeout="10h" {
+    title "Pull requests as a mirror of changes"
+    assigned-to "agent/${ST_MISSION_RUN}/ledger-builder"
+    goal "On main and deployed: a change can be mirrored to a pull request, and a pull request's state never sets a change's state."
+    depends-on {
+      step "reads" completed
+    }
+  }
+
+  finally {
+    step "stop-builder" timeout="30m" {
+      agentless
+      stop "agent/${ST_MISSION_RUN}/ledger-builder"
+    }
+  }
+}

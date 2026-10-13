@@ -1,0 +1,44 @@
+flowchart TD
+  subgraph g0["parallel (unbounded)"]
+    op1
+    op2
+  end
+  start(("start"))
+  op1["step build<br/>[retry { times: 2, schedule: Schedule.exponential('1 minute') }]<br/>builder"]
+  op2["step docs<br/>builder"]
+  op3["step review<br/>reviewer"]
+  op4["ask review-overdue<br/>person/wren"]
+  branch5{"answer.id === 'reassign'"}
+  op6["step review-reassigned<br/>fixer"]
+  exit7(["fail { _tag: 'Stopped', reason: 'a person stopped the change' }"])
+  loop8[["for (let round = 1; round <= 3; round++) ×3"]]
+  op9["gate round-${round}/ci<br/>[failure as value]"]
+  branch10{"ci._tag === 'Success'"}
+  exit11(["return { shipped: true, rounds: round, review: review.summary }"])
+  op12["step round-${round}/fix<br/>fixer"]
+  exit13(["fail { _tag: 'CiNeverPassed' as const, rounds: 3 }"])
+  op14["step report-failure<br/>[ignore]<br/>builder"]
+  failure15{"any of 7 ops above fails"}
+  exit16(["fail"])
+  branch5 -->|"yes"| op6
+  branch5 -->|"no"| exit7
+  op4 --> branch5
+  op3 ==>|"review-deadline after 4 hours"| op4
+  op1 --> op3
+  op2 --> op3
+  branch10 -->|"yes"| exit11
+  op9 --> branch10
+  branch10 -->|"no"| op12
+  loop8 -->|"round"| op9
+  op12 -.->|"next"| loop8
+  op3 --> loop8
+  op6 --> loop8
+  loop8 -->|"done"| exit13
+  failure15 ==>|"on failure"| op14
+  op14 --> exit16
+  start --> op1
+  start --> op2
+  op1 -.->|"reads"| op3
+  op2 -.->|"reads"| op3
+  op4 -.->|"reads"| branch5
+  op9 -.->|"reads"| branch10

@@ -1,0 +1,22 @@
+[package]
+name = "mission-bridge"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: this experiment is not part of the st build.
+[workspace]
+
+[features]
+quickjs = ["dep:rquickjs"]
+boa = ["dep:boa_engine"]
+v8 = ["dep:deno_core"]
+
+[dependencies]
+rquickjs = { version = "0.14.0", optional = true }
+boa_engine = { version = "0.22.0", optional = true }
+deno_core = { version = "0.412.0", optional = true }
+serde_json = "1"
+
+[profile.release]
+debug = false

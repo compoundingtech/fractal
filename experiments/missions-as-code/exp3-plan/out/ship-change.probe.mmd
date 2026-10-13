@@ -1,0 +1,74 @@
+flowchart TD
+  n0(("start"))
+  n1["step build"]
+  n2["step docs"]
+  n3["timer build-backoff 1m"]
+  n4["step report-failure"]
+  n5["step review"]
+  n6["timer review-deadline 240m"]
+  n7["step build.2"]
+  n8["gate round-1/ci"]
+  n9["ask review-overdue"]
+  n10["timer build-backoff.2 2m"]
+  n11["step round-1/fix"]
+  n12["step review-reassigned"]
+  n13["step build.3"]
+  n14["gate round-2/ci"]
+  n15["step round-2/fix"]
+  n16["gate round-3/ci"]
+  n17["step round-3/fix"]
+  n0 --> n1
+  n0 --> n2
+  n1 -->|"fail"| n3
+  n18(["cancel build"])
+  n2 -->|"fail"| n18
+  n2 -->|"fail"| n4
+  n2 -->|"ok"| n5
+  n2 -->|"ok"| n6
+  n19(["cancel build-backoff"])
+  n2 -->|"fail"| n19
+  n3 -->|"fire"| n7
+  n20(["end failed"])
+  n4 -->|"ok"| n20
+  n4 -->|"fail"| n20
+  n21(["cancel review-deadline"])
+  n5 -->|"ok"| n21
+  n5 -->|"ok"| n8
+  n5 -->|"fail"| n21
+  n5 -->|"fail"| n4
+  n22(["cancel review"])
+  n6 -->|"fire"| n22
+  n6 -->|"fire"| n9
+  n23(["cancel build.2"])
+  n2 -->|"fail"| n23
+  n7 -->|"fail"| n10
+  n24(["end completed"])
+  n8 -->|"ok"| n24
+  n8 -->|"fail"| n11
+  n9 -->|"answer:reassign"| n12
+  n9 -->|"answer:stop"| n4
+  n9 -->|"fail"| n4
+  n7 -->|"ok"| n5
+  n7 -->|"ok"| n6
+  n25(["cancel build-backoff.2"])
+  n2 -->|"fail"| n25
+  n10 -->|"fire"| n13
+  n11 -->|"ok"| n14
+  n11 -->|"fail"| n4
+  n12 -->|"ok"| n8
+  n12 -->|"fail"| n4
+  n26(["cancel build.3"])
+  n2 -->|"fail"| n26
+  n27(["cancel docs"])
+  n13 -->|"fail"| n27
+  n13 -->|"fail"| n4
+  n14 -->|"ok"| n24
+  n14 -->|"fail"| n15
+  n13 -->|"ok"| n5
+  n13 -->|"ok"| n6
+  n15 -->|"ok"| n16
+  n15 -->|"fail"| n4
+  n16 -->|"ok"| n24
+  n16 -->|"fail"| n17
+  n17 -->|"ok"| n4
+  n17 -->|"fail"| n4

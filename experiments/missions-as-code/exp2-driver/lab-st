@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# st against the throwaway lab instance, with none of the calling seat's identity in the env.
+exec env -i HOME="$HOME" USER="$USER" PATH="$PATH" LANG=C.UTF-8 ST_INSTANCE="${LAB_INSTANCE:-maclab}" \
+  "${LAB_ST:-$HOME/.local/bin/st3}" "$@"

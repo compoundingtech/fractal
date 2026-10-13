@@ -1,0 +1,84 @@
+flowchart TD
+  subgraph g0["ignore"]
+    op34
+  end
+  start(("start"))
+  op1["step design<br/>builder"]
+  loop2[["for (let round = 1; round <= 3; round++) ×3"]]
+  op3["step design-${round}/design-intake<br/>intake"]
+  branch4{"verdict.summary.startsWith('GO')"}
+  exit5(["break"])
+  branch6{"round === 3"}
+  exit7(["fail new NeverLanded({ slice: 'design', passes: 3 })"])
+  op8["step design-${round}/revise-design<br/>builder"]
+  loop9[["for (const slice of ['reads', 'mirror'] as const) ×2"]]
+  op10["step <slice><br/>builder"]
+  op11["step land-${slice}/open-pull-request<br/>builder"]
+  loop12[["for (let pass = 1; pass <= 3; pass++) ×3"]]
+  loop13[["for (let round = 1; ; round++) (unbounded)"]]
+  op14["gate land-${slice}/pass-${pass}/ci-${round}/ci<br/>[failure as value]"]
+  branch15{"ci._tag === 'Success'"}
+  exit16(["return round"])
+  branch17{"round === 3"}
+  exit18(["fail new CiNeverGreen({ branch, reason: ci.failure.reason })"])
+  op19["step land-${slice}/pass-${pass}/ci-${round}/fix-ci<br/>builder"]
+  op20["step land-${slice}/pass-${pass}/intake<br/>intake"]
+  branch21{"!verdict.summary.startsWith('GO')"}
+  op22["step land-${slice}/pass-${pass}/address-intake<br/>builder"]
+  exit23(["return false"])
+  op24["step land-${slice}/pass-${pass}/queue<br/>curator"]
+  op25["wait land-${slice}/pass-${pass}/merged<br/>[failure as value]"]
+  branch26{"merged._tag === 'Success'"}
+  exit27(["return true"])
+  op28["step land-${slice}/pass-${pass}/fix-ejection<br/>builder"]
+  exit29(["return false"])
+  branch30{"landed"}
+  exit31(["return pr"])
+  exit32(["fail new NeverLanded({ slice, passes: 3 })"])
+  exit33(["return { shipped }"])
+  op34["step stop-builder"]
+  finally35{"when the block above ends, however it ends"}
+  branch4 -->|"yes"| exit5
+  op3 --> branch4
+  branch6 -->|"yes"| exit7
+  branch4 -->|"no"| branch6
+  branch6 -->|"no"| op8
+  loop2 -->|"round"| op3
+  op8 -.->|"next"| loop2
+  op1 --> loop2
+  branch15 -->|"yes"| exit16
+  op14 --> branch15
+  branch17 -->|"yes"| exit18
+  branch15 -->|"no"| branch17
+  branch17 -->|"no"| op19
+  loop13 -->|"round"| op14
+  op19 -.->|"next"| loop13
+  loop13 -->|"exit"| op20
+  exit16 --> op20
+  op22 --> exit23
+  branch21 -->|"yes"| op22
+  op20 --> branch21
+  branch21 -->|"no"| op24
+  op24 --> op25
+  branch26 -->|"yes"| exit27
+  op25 --> branch26
+  branch26 -->|"no"| op28
+  op28 --> exit29
+  branch30 -->|"yes"| exit31
+  exit23 --> branch30
+  exit27 --> branch30
+  exit29 --> branch30
+  loop12 -->|"round"| loop13
+  branch30 -.->|"next"| loop12
+  op11 --> loop12
+  loop12 -->|"done"| exit32
+  op10 --> op11
+  loop9 -->|"round"| op10
+  exit31 -.->|"next"| loop9
+  loop2 -->|"done"| loop9
+  exit5 --> loop9
+  loop9 -->|"done"| exit33
+  finally35 ==>|"finally"| op34
+  start --> op1
+  op3 -.->|"reads"| branch4
+  op3 -.->|"reads"| op8

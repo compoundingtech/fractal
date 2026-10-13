@@ -1,0 +1,159 @@
+version 2
+
+// Sanitized from a real fleet mission: two pull-request jobs in a strict queue, each a nested
+// mission with an exec gate, a bounded "until green" fix loop that raises attention when it is
+// exhausted, a message on success and a final message either way. Names, commands and goal text
+// are invented; the structure is exact.
+
+mission "orchard/refresh-then-answer" state="ready" {
+  completion { when "all-steps-exhausted" }
+  goal "Refresh Linden's pull request 210 first, then answer the review bot on 233, in that order and never at the same time."
+
+  queue "jobs" {
+    step "refresh-210" {
+      mission "refresh-210" {
+        completion { when "all-steps-exhausted" }
+        goal "Bring pull request 210 up to date with main so Wren can try it, without changing what it is."
+
+        constraint "210 is Linden's draft and conflicts with main. Merge main in, fix the conflicts, and leave it closer to ready."
+        constraint "Preserve the intent of every conflicted hunk. Resolve conflicts; do not redesign or tidy."
+        constraint "Merge main into the branch. Do not rebase and do not force-push: the branch is shared."
+        constraint "Do not mark it ready, do not merge it, and do not answer any review thread on it."
+        constraint "Comment on 210 when done: what was merged, how each conflict was decided, and what still fails."
+
+        step "merge-main" timeout="4h" {
+          assigned-to "agent/orchard/standing/gardener"
+          goal "Merge origin/main into the branch in a worktree of its own, resolve every conflict so both sides survive, and push."
+          goal "Decide each conflicting hunk from what the code is for, not from which side is newer."
+          gate "210 is no longer conflicting" {
+            exec #"for i in $(seq 30); do M=$(gh pr view 210 --repo orchard/app --json mergeable --jq .mergeable); [ "$M" != UNKNOWN ] && break; sleep 10; done; test "$M" = MERGEABLE"#
+            host "grove"
+            workspace "${ST_WORKSPACE}"
+            time-limit "20m"
+          }
+        }
+
+        loop "green" timeout="8h" {
+          depends-on { step "merge-main" completed }
+          max-rounds 3
+          until {
+            gate "every check passes on 210" {
+              exec #"gh pr checks 210 --repo orchard/app --watch --fail-fast --interval 60"#
+              host "grove"
+              workspace "${ST_WORKSPACE}"
+              time-limit "90m"
+            }
+          }
+          round {
+            completion { when "all-steps-exhausted" }
+            step "fix" timeout="4h" {
+              assigned-to "agent/orchard/standing/gardener"
+              goal "Make the checks pass: type errors, lint and tests the merge broke."
+              goal "Read ${loop.feedback} when it is not empty: it holds the checks that failed."
+              goal "Fix the code that is wrong, not the test that reports it, unless main deliberately changed what the test asserts."
+            }
+          }
+          on-exhausted {
+            fail
+            attention "210 is not green after three rounds" {
+              reviewer "person/wren"
+              severity "error"
+            }
+          }
+        }
+
+        step "tell-chief" timeout="20m" {
+          agentless
+          depends-on { step "green" completed }
+          message "210-refreshed" {
+            to "agent/orchard/standing/chief"
+            title "210 has main merged in and its checks pass"
+            content "Linden's branch is up to date with main and green. Nothing was merged and no thread was touched."
+          }
+        }
+
+        finally {
+          step "tell-chief-finished" timeout="20m" {
+            agentless
+            message "refresh-210-finished" {
+              to "agent/orchard/standing/chief"
+              title "orchard/refresh-210 finished"
+              content "The refresh run reached its final phase."
+            }
+          }
+        }
+      }
+    }
+    step "answer-233" {
+      mission "answer-233" {
+        completion { when "all-steps-exhausted" }
+        goal "Decide which of the review bot's findings on 233 are real, fix those, and leave every thread answered and resolved."
+
+        constraint "A finding is valid only when it names a real defect or gap in this diff. Never change code to satisfy a finding you judge wrong."
+        constraint "Answer every thread with the fix and its commit, or why it will not change. Then resolve it."
+        constraint "Do not merge and leave every other pull request alone."
+
+        step "answer" timeout="4h" {
+          assigned-to "agent/orchard/standing/gardener"
+          goal "Read each finding against the diff, decide fix or no fix, make the fixes with tests, and push."
+          goal "Answer and resolve all three threads."
+          gate "no review-bot thread is left unresolved on 233" {
+            exec #"test "$(./scripts/unresolved-bot-threads 233)" -eq 0"#
+            host "grove"
+            workspace "${ST_WORKSPACE}"
+            time-limit "20m"
+          }
+        }
+
+        loop "green" timeout="6h" {
+          depends-on { step "answer" completed }
+          max-rounds 3
+          until {
+            gate "every check passes on 233" {
+              exec #"gh pr checks 233 --repo orchard/app --watch --fail-fast --interval 60"#
+              host "grove"
+              workspace "${ST_WORKSPACE}"
+              time-limit "60m"
+            }
+          }
+          round {
+            completion { when "all-steps-exhausted" }
+            step "make-green" timeout="2h" {
+              assigned-to "agent/orchard/standing/gardener"
+              goal "Fix whatever the checks report and push again."
+              goal "Read ${loop.feedback} when it is not empty: it holds the checks that failed."
+            }
+          }
+          on-exhausted {
+            fail
+            attention "233 is not green after answering the review bot" {
+              reviewer "person/wren"
+              severity "error"
+            }
+          }
+        }
+
+        step "tell-chief" timeout="20m" {
+          agentless
+          depends-on { step "green" completed }
+          message "answer-233-answered" {
+            to "agent/orchard/standing/chief"
+            title "The review bot's findings on 233 are answered"
+            content "Every thread on 233 is answered and resolved and the checks pass. Nothing is merged."
+          }
+        }
+
+        finally {
+          step "tell-chief-finished" timeout="20m" {
+            agentless
+            message "answer-233-finished" {
+              to "agent/orchard/standing/chief"
+              title "orchard/answer-233 finished"
+              content "The answer run reached its final phase."
+            }
+          }
+        }
+      }
+    }
+  }
+}

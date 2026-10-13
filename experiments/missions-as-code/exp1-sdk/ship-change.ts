@@ -2,7 +2,7 @@
 // All names are invented. The seats are declared in KDL today (see ../exp6-port/seats.kdl).
 
 import { Effect, Schedule } from "effect"
-import { ask, escalateAfter, gate, mission, scope, step, type StepFailed, type StepResult } from "../sdk/mission.ts"
+import { ask, escalateAfter, gate, mission, scope, step, timerName, type StepFailed, type StepResult } from "../sdk/mission.ts"
 
 interface Stopped {
   readonly _tag: "Stopped"
@@ -19,9 +19,11 @@ export default mission("orchard/ship-change", (input: { change: string; repo: st
     const [build, docs] = yield* Effect.all(
       [
         // Retry: a transient build failure gets two more attempts, 1m then 2m apart.
-        // Each attempt is its own op (build, build~2, build~3) and the waits are durable timers.
+        // Each attempt is its own op (build, build.2, build.3) and the waits are durable timers
+        // named build-backoff, build-backoff.2.
         step("build", { title: "Build the change", goal: `Build ${input.change}.`, assignedTo: builder }).pipe(
-          Effect.retry({ times: 2, schedule: Schedule.exponential("1 minute") })
+          Effect.retry({ times: 2, schedule: Schedule.exponential("1 minute") }),
+          timerName("build-backoff")
         ),
         step("docs", { title: "Update the docs", goal: `Document ${input.change}.`, assignedTo: builder })
       ],
@@ -35,7 +37,7 @@ export default mission("orchard/ship-change", (input: { change: string; repo: st
       assignedTo: reviewer,
       context: { build: build.evidence as any, docs: docs.summary }
     }).pipe(
-      escalateAfter("4 hours", () =>
+      escalateAfter("review-deadline", "4 hours", () =>
         ask("review-overdue", {
           for: "person/wren",
           title: "The review is overdue",

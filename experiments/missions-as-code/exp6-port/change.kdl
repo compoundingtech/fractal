@@ -1,0 +1,49 @@
+version 2
+
+// Sanitized from a real fleet mission (a reviewed change: implement, verify, open a pull
+// request, a person approves, merge). Names and goal text are invented; the structure is exact.
+
+mission "orchard/change" state="ready" {
+  input "request" kind="text"
+  completion { when "all-steps-exhausted" }
+  goal "Land one reviewed orchard change."
+
+  step "implement" timeout="6h" {
+    assigned-to "agent/orchard/standing/steward"
+    goal "Implement this request in the steward's worktree: ${input.request}. Add focused tests."
+  }
+
+  step "verify" timeout="3h" {
+    assigned-to "agent/orchard/standing/steward"
+    depends-on { step "implement" completed }
+    goal "Run the focused tests, the full unit suite and the model-free evals. Record exact evidence."
+  }
+
+  step "open-pull-request" timeout="1h" {
+    assigned-to "agent/orchard/standing/steward"
+    depends-on { step "verify" completed }
+    goal "Push the branch and open a short pull request. Publish it as the declared pull-request resource."
+    produces {
+      resource "mission-run/${ST_MISSION_RUN}/pull-request" {
+        kind "vcs.pull-request"
+        state "ready"
+      }
+    }
+  }
+
+  step "approve-merge" timeout="24h" {
+    agentless
+    depends-on { step "open-pull-request" completed }
+    gate "Wren approves the exact pull request" type="human" {
+      reviewer "person/wren"
+      question "Is this orchard pull request ready to merge?"
+      review "resource/mission-run/${ST_MISSION_RUN}/pull-request"
+    }
+  }
+
+  step "merge" timeout="2h" {
+    assigned-to "agent/orchard/standing/steward"
+    depends-on { step "approve-merge" completed }
+    goal "Read every review and CI result. Fix defects, get another approval if the pull request changes, and merge the approved change."
+  }
+}

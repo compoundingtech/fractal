@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Run an st command against the lab instance from outside this seat's process tree, so the lab
+# daemon sees a plain local caller (the test person, or a stand-in agent) instead of this seat.
+# Lab only: the real daemon binds every process under a seat to that seat, as it should.
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+spool="$(mktemp -d "${TMPDIR:-/var/tmp}/lab-as.XXXXXX")"
+printf '%q ' "$@" > "$spool/cmd"
+setsid -f env -i HOME="$HOME" USER="$USER" PATH="$PATH" bash -c \
+  "cd '$here' && ./lab-st $(cat "$spool/cmd") > '$spool/out' 2>&1; echo \$? > '$spool/status'"
+for _ in $(seq 1 600); do [ -f "$spool/status" ] && break; sleep 0.1; done
+cat "$spool/out"
+status="$(cat "$spool/status" 2>/dev/null || echo 124)"
+rm -rf "$spool"
+exit "$status"

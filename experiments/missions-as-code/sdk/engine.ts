@@ -83,7 +83,9 @@ export class Engine {
     sleep: (duration) => {
       const ms = Duration.toMillis(duration)
       if (ms <= 0) return Effect.void
-      return Effect.suspend(() => opEffect("timer", "timer", { ms, fireAt: this.now + ms }, { ms })).pipe(
+      return Effect.withFiber((fiber) =>
+        opEffect("timer", fiber.getRef(TimerNameRef), { ms, fireAt: this.now + ms }, { ms })
+      ).pipe(
         Effect.asVoid,
         Effect.orDie
       )
@@ -118,12 +120,13 @@ export class Engine {
   }
 
   // Op IDs are the author's name inside the current scope. A name used again in the same scope
-  // (a retry, a loop without its own scope) gets ~2, ~3, ... in the order the program asks.
+  // (a retry, a loop without its own scope) gets .2, .3, ... in the order the program asks. The
+  // suffix uses only characters st allows in a subject name.
   allocate(scope: ReadonlyArray<string>, name: string): string {
     const base = [...scope, name].join("/")
     const n = (this.counters.get(base) ?? 0) + 1
     this.counters.set(base, n)
-    return n === 1 ? base : `${base}~${n}`
+    return n === 1 ? base : `${base}.${n}`
   }
 
   register(op: string, kind: OpKind, spec: Json, hash: string, resume: OpState["resume"]): void {
@@ -179,6 +182,13 @@ export class Engine {
 
 export const EngineRef = Context.Reference<Engine | undefined>("missions-as-code/Engine", {
   defaultValue: () => undefined
+})
+
+// The name Clock.sleep gives the timers it opens. Effect.timeout and Effect.retry open timers
+// through Clock.sleep, so without a name they are counted (timer, timer.2, ...), and a count
+// changes meaning when another path opens a timer first. timerName(...) in mission.ts names them.
+export const TimerNameRef = Context.Reference<string>("missions-as-code/TimerName", {
+  defaultValue: () => "timer"
 })
 
 export const ScopeRef = Context.Reference<ReadonlyArray<string>>("missions-as-code/Scope", {

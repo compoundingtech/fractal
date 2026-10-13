@@ -20,17 +20,17 @@ test("parallel steps open together and the happy path completes", () => {
   const trace = simulate(shipChange, input, happy)
   assert.deepEqual(trace.decisions[0]!.commands.map((c) => c.op), ["build", "docs"])
   assert.deepEqual(trace.decisions.at(-1)!.status, { state: "completed", value: { shipped: true, rounds: 1, review: "review" } })
-  assert.deepEqual(scheduled(trace.log), ["step build", "step docs", "step review", "timer timer", "gate round-1/ci"])
+  assert.deepEqual(scheduled(trace.log), ["step build", "step docs", "step review", "timer review-deadline", "gate round-1/ci"])
   // The escalation timer was cancelled once the review answered.
-  assert.ok(trace.log.some((l) => l.endsWith("cancel timer")))
+  assert.ok(trace.log.some((l) => l.endsWith("cancel review-deadline")))
 })
 
 test("a failing build retries with durable backoff", () => {
   const trace = simulate(shipChange, input, (op, kind, spec) =>
-    op === "build" || op === "build~2" ? { after: 5 * minute, error: { reason: "flaky linker" } } : happy(op, kind, spec)
+    op === "build" || op === "build.2" ? { after: 5 * minute, error: { reason: "flaky linker" } } : happy(op, kind, spec)
   )
   assert.deepEqual(scheduled(trace.log).slice(0, 6), [
-    "step build", "step docs", "timer timer", "step build~2", "timer timer~2", "step build~3"
+    "step build", "step docs", "timer build-backoff", "step build.2", "timer build-backoff.2", "step build.3"
   ])
   // Backoff is 1m then 2m, measured on the durable clock.
   const timers = trace.history.filter((e) => e.type === "scheduled" && e.kind === "timer")
@@ -45,7 +45,7 @@ test("an overdue review escalates to a person and the answer reroutes the work",
     return happy(op, kind, spec)
   })
   const log = trace.log.join("\n")
-  assert.match(log, /\+04:20 completed timer\n\+04:20 cancel review\n\+04:20 schedule ask review-overdue/)
+  assert.match(log, /\+04:20 completed review-deadline\n\+04:20 cancel review\n\+04:20 schedule ask review-overdue/)
   assert.ok(scheduled(trace.log).includes("step review-reassigned"))
   assert.equal(trace.decisions.at(-1)!.status.state, "completed")
 })

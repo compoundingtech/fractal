@@ -1,0 +1,468 @@
+{
+  "mission": "orchard/ship-change",
+  "plan": {
+    "type": "wrap",
+    "inner": {
+      "type": "frame",
+      "name": "Effect.gen",
+      "body": {
+        "type": "seq",
+        "items": [
+          {
+            "type": "parallel",
+            "items": [
+              {
+                "type": "wrap",
+                "inner": {
+                  "type": "wrap",
+                  "inner": {
+                    "type": "op",
+                    "kind": "step",
+                    "id": "build",
+                    "idForm": "literal",
+                    "title": "Build the change",
+                    "assignedTo": "builder",
+                    "uses": [],
+                    "at": "ship-change.ts:24"
+                  },
+                  "annotations": [
+                    {
+                      "type": "retry",
+                      "detail": "{ times: 2, schedule: Schedule.exponential(\"1 minute\") }"
+                    }
+                  ]
+                },
+                "annotations": [
+                  {
+                    "type": "timer-name",
+                    "detail": "build-backoff"
+                  }
+                ]
+              },
+              {
+                "type": "op",
+                "kind": "step",
+                "id": "docs",
+                "idForm": "literal",
+                "title": "Update the docs",
+                "assignedTo": "builder",
+                "uses": [],
+                "at": "ship-change.ts:28"
+              }
+            ],
+            "concurrency": "unbounded"
+          },
+          {
+            "type": "wrap",
+            "inner": {
+              "type": "op",
+              "kind": "step",
+              "id": "review",
+              "idForm": "literal",
+              "title": "Review the change",
+              "assignedTo": "reviewer",
+              "uses": [
+                "build",
+                "docs"
+              ],
+              "at": "ship-change.ts:34"
+            },
+            "annotations": [
+              {
+                "type": "escalate",
+                "detail": "review-deadline after 4 hours",
+                "handler": {
+                  "type": "seq",
+                  "items": [
+                    {
+                      "type": "op",
+                      "kind": "ask",
+                      "id": "review-overdue",
+                      "idForm": "literal",
+                      "title": "The review is overdue",
+                      "assignedTo": "person/wren",
+                      "uses": [],
+                      "at": "ship-change.ts:41"
+                    },
+                    {
+                      "type": "branch",
+                      "condition": "answer.id === \"reassign\"",
+                      "uses": [
+                        "review-overdue"
+                      ],
+                      "arms": [
+                        {
+                          "label": "yes",
+                          "body": {
+                            "type": "op",
+                            "kind": "step",
+                            "id": "review-reassigned",
+                            "idForm": "literal",
+                            "title": "Review the change",
+                            "assignedTo": "fixer",
+                            "uses": [],
+                            "at": "ship-change.ts:52"
+                          }
+                        },
+                        {
+                          "label": "no",
+                          "body": {
+                            "type": "exit",
+                            "outcome": "fail",
+                            "text": "{ _tag: \"Stopped\", reason: \"a person stopped the change\" }"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "type": "loop",
+            "header": "for (let round = 1; round <= 3; round++)",
+            "bound": 3,
+            "uses": [],
+            "body": {
+              "type": "seq",
+              "items": [
+                {
+                  "type": "wrap",
+                  "inner": {
+                    "type": "wrap",
+                    "inner": {
+                      "type": "op",
+                      "kind": "gate",
+                      "id": "round-${round}/ci",
+                      "idForm": "template",
+                      "uses": [],
+                      "at": "ship-change.ts:61"
+                    },
+                    "annotations": [
+                      {
+                        "type": "result",
+                        "detail": "failure becomes a value"
+                      }
+                    ]
+                  },
+                  "annotations": [
+                    {
+                      "type": "scope",
+                      "detail": "round-${round}"
+                    }
+                  ]
+                },
+                {
+                  "type": "branch",
+                  "condition": "ci._tag === \"Success\"",
+                  "uses": [
+                    "round-${round}/ci"
+                  ],
+                  "arms": [
+                    {
+                      "label": "yes",
+                      "body": {
+                        "type": "exit",
+                        "outcome": "return",
+                        "text": "{ shipped: true, rounds: round, review: review.summary }"
+                      }
+                    },
+                    {
+                      "label": "no",
+                      "body": {
+                        "type": "seq",
+                        "items": []
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "wrap",
+                  "inner": {
+                    "type": "op",
+                    "kind": "step",
+                    "id": "round-${round}/fix",
+                    "idForm": "template",
+                    "title": "Fix CI, round ${round}",
+                    "assignedTo": "fixer",
+                    "uses": [],
+                    "at": "ship-change.ts:66"
+                  },
+                  "annotations": [
+                    {
+                      "type": "scope",
+                      "detail": "round-${round}"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "exit",
+            "outcome": "fail",
+            "text": "{ _tag: \"CiNeverPassed\" as const, rounds: 3 }"
+          }
+        ]
+      }
+    },
+    "annotations": [
+      {
+        "type": "on-failure",
+        "detail": "then fail",
+        "handler": {
+          "type": "wrap",
+          "inner": {
+            "type": "op",
+            "kind": "step",
+            "id": "report-failure",
+            "idForm": "literal",
+            "title": "Report why the change stopped",
+            "assignedTo": "builder",
+            "uses": [],
+            "at": "ship-change.ts:74"
+          },
+          "annotations": [
+            {
+              "type": "ignore",
+              "detail": "failure ignored"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "diagnostics": [],
+  "graph": {
+    "nodes": [
+      {
+        "id": "start",
+        "label": "start",
+        "shape": "start"
+      },
+      {
+        "id": "op1",
+        "label": "step build\n[retry { times: 2, schedule: Schedule.exponential(\"1 minute\") }]\nbuilder",
+        "shape": "op",
+        "kind": "step"
+      },
+      {
+        "id": "op2",
+        "label": "step docs\nbuilder",
+        "shape": "op",
+        "kind": "step"
+      },
+      {
+        "id": "op3",
+        "label": "step review\nreviewer",
+        "shape": "op",
+        "kind": "step"
+      },
+      {
+        "id": "op4",
+        "label": "ask review-overdue\nperson/wren",
+        "shape": "op",
+        "kind": "ask"
+      },
+      {
+        "id": "branch5",
+        "label": "answer.id === \"reassign\"",
+        "shape": "decision"
+      },
+      {
+        "id": "op6",
+        "label": "step review-reassigned\nfixer",
+        "shape": "op",
+        "kind": "step"
+      },
+      {
+        "id": "exit7",
+        "label": "fail { _tag: \"Stopped\", reason: \"a person stopped the change\" }",
+        "shape": "exit"
+      },
+      {
+        "id": "loop8",
+        "label": "for (let round = 1; round <= 3; round++) ×3",
+        "shape": "loop"
+      },
+      {
+        "id": "op9",
+        "label": "gate round-${round}/ci\n[failure as value]",
+        "shape": "op",
+        "kind": "gate"
+      },
+      {
+        "id": "branch10",
+        "label": "ci._tag === \"Success\"",
+        "shape": "decision"
+      },
+      {
+        "id": "exit11",
+        "label": "return { shipped: true, rounds: round, review: review.summary }",
+        "shape": "exit"
+      },
+      {
+        "id": "op12",
+        "label": "step round-${round}/fix\nfixer",
+        "shape": "op",
+        "kind": "step"
+      },
+      {
+        "id": "exit13",
+        "label": "fail { _tag: \"CiNeverPassed\" as const, rounds: 3 }",
+        "shape": "exit"
+      },
+      {
+        "id": "op14",
+        "label": "step report-failure\n[ignore]\nbuilder",
+        "shape": "op",
+        "kind": "step"
+      },
+      {
+        "id": "failure15",
+        "label": "any of 7 ops above fails",
+        "shape": "decision"
+      },
+      {
+        "id": "exit16",
+        "label": "fail",
+        "shape": "exit"
+      }
+    ],
+    "edges": [
+      {
+        "from": "branch5",
+        "to": "op6",
+        "label": "yes",
+        "kind": "order"
+      },
+      {
+        "from": "branch5",
+        "to": "exit7",
+        "label": "no",
+        "kind": "order"
+      },
+      {
+        "from": "op4",
+        "to": "branch5",
+        "kind": "order"
+      },
+      {
+        "from": "op3",
+        "to": "op4",
+        "label": "review-deadline after 4 hours",
+        "kind": "handler"
+      },
+      {
+        "from": "op1",
+        "to": "op3",
+        "kind": "order"
+      },
+      {
+        "from": "op2",
+        "to": "op3",
+        "kind": "order"
+      },
+      {
+        "from": "branch10",
+        "to": "exit11",
+        "label": "yes",
+        "kind": "order"
+      },
+      {
+        "from": "op9",
+        "to": "branch10",
+        "kind": "order"
+      },
+      {
+        "from": "branch10",
+        "to": "op12",
+        "kind": "order",
+        "label": "no"
+      },
+      {
+        "from": "loop8",
+        "to": "op9",
+        "label": "round",
+        "kind": "order"
+      },
+      {
+        "from": "op12",
+        "to": "loop8",
+        "kind": "loop-back",
+        "label": "next"
+      },
+      {
+        "from": "op3",
+        "to": "loop8",
+        "kind": "order"
+      },
+      {
+        "from": "op6",
+        "to": "loop8",
+        "kind": "order"
+      },
+      {
+        "from": "loop8",
+        "to": "exit13",
+        "kind": "order",
+        "label": "done"
+      },
+      {
+        "from": "failure15",
+        "to": "op14",
+        "label": "on failure",
+        "kind": "handler"
+      },
+      {
+        "from": "op14",
+        "to": "exit16",
+        "kind": "order"
+      },
+      {
+        "from": "start",
+        "to": "op1",
+        "kind": "order"
+      },
+      {
+        "from": "start",
+        "to": "op2",
+        "kind": "order"
+      },
+      {
+        "from": "op1",
+        "to": "op3",
+        "kind": "data",
+        "label": "reads"
+      },
+      {
+        "from": "op2",
+        "to": "op3",
+        "kind": "data",
+        "label": "reads"
+      },
+      {
+        "from": "op4",
+        "to": "branch5",
+        "kind": "data",
+        "label": "reads"
+      },
+      {
+        "from": "op9",
+        "to": "branch10",
+        "kind": "data",
+        "label": "reads"
+      }
+    ],
+    "groups": [
+      {
+        "label": "parallel (unbounded)",
+        "members": [
+          "op1",
+          "op2"
+        ]
+      }
+    ]
+  }
+}
