@@ -798,7 +798,6 @@ export type Agent = typeof Agent.Type
 export type AgentEncoded = typeof Agent.Encoded
 
 export const AgentDeclaration = /*#__PURE__*/ (() => Schema.Struct({
-  "accountable": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^person/[A-Za-z0-9_.-]+$", "u")))),
   "id": Id,
   "kdl": Schema.String,
   "revision": Schema.String,
@@ -1024,6 +1023,141 @@ export const ArrangementPage = /*#__PURE__*/ (() => Schema.Struct({
 export type ArrangementPage = typeof ArrangementPage.Type
 export type ArrangementPageEncoded = typeof ArrangementPage.Encoded
 
+export const AssistantAgentItem = /*#__PURE__*/ (() => Schema.Struct({
+  "current_mission_id": Schema.OptionFromNullOr(Schema.String),
+  "current_run_id": Schema.OptionFromNullOr(Schema.String),
+  "id": Id,
+  /** Null when undeclared. */
+  "lifecycle": Schema.OptionFromNullOr(Schema.Literals(["standing","owner","bounded","unknown"])).annotate({ description: "Null when undeclared." }),
+  "runtime_state": Schema.Literals(["desired","starting","running","waiting","stopped","failed","suspended","unknown"]),
+  /** Null when the agent has not been observed. */
+  "updated_at": Schema.OptionFromNullOr(Timestamp).annotate({ description: "Null when the agent has not been observed." })
+}).annotate({ identifier: "AssistantAgentItem" }))()
+export type AssistantAgentItem = typeof AssistantAgentItem.Type
+export type AssistantAgentItemEncoded = typeof AssistantAgentItem.Encoded
+
+export const AssistantAgentPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("assistant.agents"),
+  "filters": Schema.Record(Schema.String, Schema.Never),
+  "items": Schema.Array(AssistantAgentItem),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo
+}).annotate({ identifier: "AssistantAgentPage" }))()
+export type AssistantAgentPage = typeof AssistantAgentPage.Type
+export type AssistantAgentPageEncoded = typeof AssistantAgentPage.Encoded
+
+/** Concrete person identity, never a session actor or a deployment-specific fixed person. */
+export const PersonId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))).annotate({ identifier: "PersonId", description: "Concrete person identity, never a session actor or a deployment-specific fixed person." }))()
+export type PersonId = typeof PersonId.Type
+export type PersonIdEncoded = typeof PersonId.Encoded
+
+export const AssistantAttentionItem = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": Schema.OptionFromNullOr(Schema.String),
+  /** Every custom.* kind collapses to custom; any other unrecognized source kind is unknown. */
+  "attention_kind": Schema.Literals(["human-gate","launch-approval","revision-approval","unread-message","person-step","agent-request","fault","harness-login","harness-prompt","custom","unknown"]).annotate({ description: "Every custom.* kind collapses to custom; any other unrecognized source kind is unknown." }),
+  "episode": Schema.String,
+  "id": Id,
+  "mission_id": Schema.OptionFromNullOr(Schema.String),
+  "mission_run_id": Schema.OptionFromNullOr(Schema.String),
+  "person_id": PersonId,
+  "revision": Revision,
+  "waiting_since": Timestamp
+}).annotate({ identifier: "AssistantAttentionItem" }))()
+export type AssistantAttentionItem = typeof AssistantAttentionItem.Type
+export type AssistantAttentionItemEncoded = typeof AssistantAttentionItem.Encoded
+
+export const AssistantAttentionPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("assistant.attention"),
+  "filters": Schema.Record(Schema.String, Schema.Never),
+  "items": Schema.Array(AssistantAttentionItem),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo
+}).annotate({ identifier: "AssistantAttentionPage" }))()
+export type AssistantAttentionPage = typeof AssistantAttentionPage.Type
+export type AssistantAttentionPageEncoded = typeof AssistantAttentionPage.Encoded
+
+export const AssistantContentRange = /*#__PURE__*/ (() => Schema.Struct({
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AssistantContentRange" }))()
+export type AssistantContentRange = typeof AssistantContentRange.Type
+export type AssistantContentRangeEncoded = typeof AssistantContentRange.Encoded
+
+export const AssistantConversationContent = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "kind": Schema.Literal("assistant-conversation-content"),
+  "next_range": Schema.OptionFromNullOr(AssistantContentRange),
+  "reference": Schema.String,
+  "returned_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "revision": Revision,
+  "session_id": Id,
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "text": Schema.String,
+  "truncated": Schema.Boolean
+}).annotate({ identifier: "AssistantConversationContent" }))()
+export type AssistantConversationContent = typeof AssistantConversationContent.Type
+export type AssistantConversationContentEncoded = typeof AssistantConversationContent.Encoded
+
+export const TerminalId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:terminal)/[^\\s]+$", "u"), "terminal").annotate({ identifier: "TerminalId" }))()
+export type TerminalId = typeof TerminalId.Type
+export type TerminalIdEncoded = typeof TerminalId.Encoded
+
+export const AssistantTerminalContent = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "incarnation_id": Schema.String,
+  "kind": Schema.Literal("assistant-terminal-content"),
+  "returned_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "screen_revision": Revision,
+  "terminal_id": TerminalId,
+  "text": Schema.String,
+  "truncated": Schema.Boolean
+}).annotate({ identifier: "AssistantTerminalContent" }))()
+export type AssistantTerminalContent = typeof AssistantTerminalContent.Type
+export type AssistantTerminalContentEncoded = typeof AssistantTerminalContent.Encoded
+
+export const AssistantContentPage = /*#__PURE__*/ (() => Schema.Union([
+  AssistantConversationContent,
+  AssistantTerminalContent
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "AssistantContentPage" }))()
+export type AssistantContentPage = typeof AssistantContentPage.Type
+export type AssistantContentPageEncoded = typeof AssistantContentPage.Encoded
+
+/** Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes. */
+export const AssistantResponseBytes = /*#__PURE__*/ (() => Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384)).annotate({ identifier: "AssistantResponseBytes", description: "Inclusive bound on the entire JSON envelope. Omitted means the grant pin's default_response_bytes; an explicit value must not exceed the pin's max_response_bytes." }))()
+export type AssistantResponseBytes = typeof AssistantResponseBytes.Type
+export type AssistantResponseBytesEncoded = typeof AssistantResponseBytes.Encoded
+
+export const AssistantConversationContentRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "end": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "reference": Schema.String.check(Schema.isMinLength(1)),
+  "revision": Revision,
+  "session_id": Id,
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AssistantConversationContentRequest" }))()
+export type AssistantConversationContentRequest = typeof AssistantConversationContentRequest.Type
+export type AssistantConversationContentRequestEncoded = typeof AssistantConversationContentRequest.Encoded
+
+export const AssistantTerminalContentRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_id": AgentId,
+  "incarnation_id": Schema.String.check(Schema.isMinLength(1)),
+  "max_response_bytes": optionalKey(AssistantResponseBytes),
+  "screen_revision": Revision,
+  "terminal_id": TerminalId
+}).annotate({ identifier: "AssistantTerminalContentRequest" }))()
+export type AssistantTerminalContentRequest = typeof AssistantTerminalContentRequest.Type
+export type AssistantTerminalContentRequestEncoded = typeof AssistantTerminalContentRequest.Encoded
+
+/** Disjoint content queries: conversation range or terminal screen; mixing their fields is denied. */
+export const AssistantContentRequest = /*#__PURE__*/ (() => Schema.Union([
+  AssistantConversationContentRequest,
+  AssistantTerminalContentRequest
+], { mode: "oneOf" }).annotate({ identifier: "AssistantContentRequest", description: "Disjoint content queries: conversation range or terminal screen; mixing their fields is denied." }))()
+export type AssistantContentRequest = typeof AssistantContentRequest.Type
+export type AssistantContentRequestEncoded = typeof AssistantContentRequest.Encoded
+
 export const AssistantMinimalReadMode = /*#__PURE__*/ (() => Schema.Literals(["approval-once"]).annotate({ identifier: "AssistantMinimalReadMode" }))()
 export type AssistantMinimalReadMode = typeof AssistantMinimalReadMode.Type
 export type AssistantMinimalReadModeEncoded = typeof AssistantMinimalReadMode.Encoded
@@ -1032,6 +1166,26 @@ export const AssistantPrincipal = /*#__PURE__*/ (() => Schema.Literals(["assista
 export type AssistantPrincipal = typeof AssistantPrincipal.Type
 export type AssistantPrincipalEncoded = typeof AssistantPrincipal.Encoded
 
+/** Unpadded base64url encoding of a raw 32-byte Ed25519 public key. */
+export const Ed25519PublicKey = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_-]{43}$", "u"))).annotate({ identifier: "Ed25519PublicKey", description: "Unpadded base64url encoding of a raw 32-byte Ed25519 public key." }))()
+export type Ed25519PublicKey = typeof Ed25519PublicKey.Type
+export type Ed25519PublicKeyEncoded = typeof Ed25519PublicKey.Encoded
+
+/** Public pins only. The attestor key signs SCG read proofs and is pinned independently of the shim key; the two MUST differ. Budgets only lower the contract defaults; default_response_bytes <= max_response_bytes. */
+export const AssistantReadTrust = /*#__PURE__*/ (() => Schema.Struct({
+  "attestor_public_key": Ed25519PublicKey,
+  /** Budget for a read that sends no max_response_bytes. */
+  "default_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(4096)).annotate({ description: "Budget for a read that sends no max_response_bytes." }),
+  /** Equals the grant issuer: the daemon-configured owning person. */
+  "issuer": PersonId,
+  "key_id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
+  /** Ceiling for an explicit max_response_bytes. */
+  "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384)).annotate({ description: "Ceiling for an explicit max_response_bytes." }),
+  "shim_public_key": Ed25519PublicKey
+}).annotate({ identifier: "AssistantReadTrust", description: "Public pins only. The attestor key signs SCG read proofs and is pinned independently of the shim key; the two MUST differ. Budgets only lower the contract defaults; default_response_bytes <= max_response_bytes." }))()
+export type AssistantReadTrust = typeof AssistantReadTrust.Type
+export type AssistantReadTrustEncoded = typeof AssistantReadTrust.Encoded
+
 export const AssistantScope = /*#__PURE__*/ (() => Schema.Literals(["read.assistant.summary","read.assistant.attention","read.assistant.missions","read.assistant.agents","read.assistant.conversation","read.assistant.terminal"]).annotate({ identifier: "AssistantScope" }))()
 export type AssistantScope = typeof AssistantScope.Type
 export type AssistantScopeEncoded = typeof AssistantScope.Encoded
@@ -1039,11 +1193,6 @@ export type AssistantScopeEncoded = typeof AssistantScope.Encoded
 export const AssistantSenderClass = /*#__PURE__*/ (() => Schema.Literals(["external-assistant"]).annotate({ identifier: "AssistantSenderClass" }))()
 export type AssistantSenderClass = typeof AssistantSenderClass.Type
 export type AssistantSenderClassEncoded = typeof AssistantSenderClass.Encoded
-
-/** Concrete person identity, never a session actor or a deployment-specific fixed person. */
-export const PersonId = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))).annotate({ identifier: "PersonId", description: "Concrete person identity, never a session actor or a deployment-specific fixed person." }))()
-export type PersonId = typeof PersonId.Type
-export type PersonIdEncoded = typeof PersonId.Encoded
 
 export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
   "consent_evidence": Schema.Literal("axe:igubz7"),
@@ -1059,6 +1208,8 @@ export const AssistantGrant = /*#__PURE__*/ (() => Schema.Struct({
   "minimal_read_mode": AssistantMinimalReadMode,
   "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
   "principal": AssistantPrincipal,
+  /** Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied. */
+  "read_trust": optionalKey(AssistantReadTrust),
   "recipient_allowlist": Schema.Array(Schema.String.check(Schema.isPattern(new RegExp("^agent/.+$", "u")))).check(Schema.isMaxLength(0)),
   "revoked": Schema.Boolean,
   "scopes": Schema.Array(AssistantScope).check(Schema.isMinLength(1)).check(Schema.isUnique()),
@@ -1078,6 +1229,44 @@ export const AssistantGrantPolicy = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "AssistantGrantPolicy" }))()
 export type AssistantGrantPolicy = typeof AssistantGrantPolicy.Type
 export type AssistantGrantPolicyEncoded = typeof AssistantGrantPolicy.Encoded
+
+export const AssistantMissionItem = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_ids": Schema.Array(Schema.String),
+  "blocked_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "id": Id,
+  "phase": Schema.Literals(["draft","ready","running","standing","blocked","completed","failed","cancelled","retired","unknown"]),
+  /** Null when the source revision is not identifier-shaped. */
+  "revision": Schema.OptionFromNullOr(Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(256))).annotate({ description: "Null when the source revision is not identifier-shaped." }),
+  "run_id": Schema.OptionFromNullOr(Schema.String),
+  "step_counts": Schema.Struct({ "completed": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
+  "updated_at": Timestamp
+}).annotate({ identifier: "AssistantMissionItem" }))()
+export type AssistantMissionItem = typeof AssistantMissionItem.Type
+export type AssistantMissionItemEncoded = typeof AssistantMissionItem.Encoded
+
+export const AssistantMissionPage = /*#__PURE__*/ (() => Schema.Struct({
+  "collection": Schema.Literal("assistant.missions"),
+  "filters": Schema.Record(Schema.String, Schema.Never),
+  "items": Schema.Array(AssistantMissionItem),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo
+}).annotate({ identifier: "AssistantMissionPage" }))()
+export type AssistantMissionPage = typeof AssistantMissionPage.Type
+export type AssistantMissionPageEncoded = typeof AssistantMissionPage.Encoded
+
+/** Opaque, snapshot-bound page/event cursor. */
+export const Cursor = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinLength(8)).check(Schema.isMaxLength(2048)).pipe(Schema.brand("st3/Cursor")).annotate({ identifier: "Cursor", description: "Opaque, snapshot-bound page/event cursor." }))()
+export type Cursor = typeof Cursor.Type
+export type CursorEncoded = typeof Cursor.Encoded
+
+/** Metadata query. Every value travels as one scalar query string; duplicates and unknown fields are denied; no person parameter exists. */
+export const AssistantPageRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "cursor": optionalKey(Cursor),
+  "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))),
+  "max_response_bytes": optionalKey(AssistantResponseBytes)
+}).annotate({ identifier: "AssistantPageRequest", description: "Metadata query. Every value travels as one scalar query string; duplicates and unknown fields are denied; no person parameter exists." }))()
+export type AssistantPageRequest = typeof AssistantPageRequest.Type
+export type AssistantPageRequestEncoded = typeof AssistantPageRequest.Encoded
 
 export const AssistantPairedSession = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
@@ -1105,6 +1294,38 @@ export const AssistantPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "AssistantPairingBegin" }))()
 export type AssistantPairingBegin = typeof AssistantPairingBegin.Type
 export type AssistantPairingBeginEncoded = typeof AssistantPairingBegin.Encoded
+
+export const AssistantProjection = /*#__PURE__*/ (() => Schema.Literals(["summary","attention","missions","agents","conversation-content","terminal-content"]).annotate({ identifier: "AssistantProjection" }))()
+export type AssistantProjection = typeof AssistantProjection.Type
+export type AssistantProjectionEncoded = typeof AssistantProjection.Encoded
+
+/** Owner-only trusted-local provisioning at the grant's authoritative origin; accepting it increments policy_revision. Omitted budgets pin 4096 and 16384; default_response_bytes <= max_response_bytes. */
+export const AssistantReadTrustRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "api_version": Schema.Literal("st3.client.v0"),
+  "attestor_public_key": Ed25519PublicKey,
+  "default_response_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(4096))),
+  "issuer": PersonId,
+  "key_id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
+  "max_response_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(16384))),
+  "shim_public_key": Ed25519PublicKey
+}).annotate({ identifier: "AssistantReadTrustRequest", description: "Owner-only trusted-local provisioning at the grant's authoritative origin; accepting it increments policy_revision. Omitted budgets pin 4096 and 16384; default_response_bytes <= max_response_bytes." }))()
+export type AssistantReadTrustRequest = typeof AssistantReadTrustRequest.Type
+export type AssistantReadTrustRequestEncoded = typeof AssistantReadTrustRequest.Encoded
+
+export const AssistantSummary = /*#__PURE__*/ (() => Schema.Struct({
+  "as_of": Timestamp,
+  "counts": Schema.Struct({ "agent_states": Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "attention": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_states": Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
+  "kind": Schema.Literal("assistant-summary")
+}).annotate({ identifier: "AssistantSummary" }))()
+export type AssistantSummary = typeof AssistantSummary.Type
+export type AssistantSummaryEncoded = typeof AssistantSummary.Encoded
+
+/** Summary query: only the response budget; the person is always the grant issuer. */
+export const AssistantSummaryRequest = /*#__PURE__*/ (() => Schema.Struct({
+  "max_response_bytes": optionalKey(AssistantResponseBytes)
+}).annotate({ identifier: "AssistantSummaryRequest", description: "Summary query: only the response budget; the person is always the grant issuer." }))()
+export type AssistantSummaryRequest = typeof AssistantSummaryRequest.Type
+export type AssistantSummaryRequestEncoded = typeof AssistantSummaryRequest.Encoded
 
 export const Attachment = /*#__PURE__*/ (() => Schema.Struct({
   "blob": Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u"))),
@@ -1242,11 +1463,6 @@ export const Capability = /*#__PURE__*/ (() => Schema.Struct({
 export type Capability = typeof Capability.Type
 export type CapabilityEncoded = typeof Capability.Encoded
 
-/** Opaque, snapshot-bound page/event cursor. */
-export const Cursor = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinLength(8)).check(Schema.isMaxLength(2048)).pipe(Schema.brand("st3/Cursor")).annotate({ identifier: "Cursor", description: "Opaque, snapshot-bound page/event cursor." }))()
-export type Cursor = typeof Cursor.Type
-export type CursorEncoded = typeof Cursor.Encoded
-
 export const Capabilities = /*#__PURE__*/ (() => Schema.Struct({
   "capabilities": Schema.Array(Capability),
   "event_cursor": Cursor,
@@ -1254,8 +1470,7 @@ export const Capabilities = /*#__PURE__*/ (() => Schema.Struct({
   "grant_id": optionalKey(Id),
   "grant_kind": optionalKey(Schema.Literals(["person","assistant"])),
   "kind": Schema.Literal("capabilities"),
-  "limits": Schema.Struct({ "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), /** The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096. */
-"max_message_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))).annotate({ description: "The longest message body in UTF-8 bytes this daemon takes; absent on older daemons, which take 4096." }), "max_page_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1024)), "max_wait_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
+  "limits": Schema.Struct({ "max_arrangement_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_folders": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_key_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_name_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_operations": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_placements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangement_resource_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_arrangements": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_event_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_glass_body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_depth": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glass_nodes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_glasses": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "max_page_items": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "max_response_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1024)), "max_wait_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
   /** Compile-time build identity of the responding daemon; absent on older servers. */
   "machine_version": optionalKey(Schema.String).annotate({ description: "Compile-time build identity of the responding daemon; absent on older servers." }),
   "minimal_read_mode": optionalKey(AssistantMinimalReadMode),
@@ -1296,7 +1511,6 @@ export type ClientConnections = typeof ClientConnections.Type
 export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","agents","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
 "subject": optionalKey(ArrangementId) }),
@@ -1307,7 +1521,7 @@ export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
 export type CollectionCommand = typeof CollectionCommand.Type
 export type CollectionCommandEncoded = typeof CollectionCommand.Encoded
 
-export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary","clients","usage","machines","devices","sessions","terminals"]).annotate({ identifier: "CollectionName" }))()
+export const CollectionName = /*#__PURE__*/ (() => Schema.Literals(["missions","attention","agents","work","glasses","arrangements","summary"]).annotate({ identifier: "CollectionName" }))()
 export type CollectionName = typeof CollectionName.Type
 export type CollectionNameEncoded = typeof CollectionName.Encoded
 
@@ -1343,28 +1557,6 @@ export const ConversationHeader = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ConversationHeader", description: "Optional conversation header on timeline pages and delta responses (conversation-blocks.v1). A field is absent when neither source has it; `working` comes only from the register and the register wins over the transcript once live." }))()
 export type ConversationHeader = typeof ConversationHeader.Type
 export type ConversationHeaderEncoded = typeof ConversationHeader.Encoded
-
-export const ConnectedClient = /*#__PURE__*/ (() => Schema.Struct({
-  "actor": Schema.String,
-  "client": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
-  "connected": Schema.Boolean,
-  "device_id": optionalKey(Schema.String),
-  "device_name": optionalKey(Schema.String),
-  "follows": Schema.Array(Schema.String),
-  "id": Id,
-  "kind": Schema.Literal("connected-client"),
-  "last_seen": Timestamp,
-  "member": Schema.String,
-  "operational": optionalKey(Operational),
-  "person": Schema.String,
-  "revision": Revision,
-  "since": Timestamp,
-  "streams": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "updated_at": Timestamp,
-  "via": Schema.Literals(["local","gateway","tailscale"])
-}).annotate({ identifier: "ConnectedClient" }))()
-export type ConnectedClient = typeof ConnectedClient.Type
-export type ConnectedClientEncoded = typeof ConnectedClient.Encoded
 
 export const Device = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": optionalKey(AssistantMinimalReadMode), "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": Id, "policy_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "principal": optionalKey(Schema.Never), "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": optionalKey(Schema.Never), "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp }),
@@ -1690,10 +1882,6 @@ export type MachineEncoded = typeof Machine.Encoded
 
 export const Message = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment)),
-  /** The length in UTF-8 bytes of the whole text, with body_ref. */
-  "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "The length in UTF-8 bytes of the whole text, with body_ref." }),
-  /** Present when content is only the start of a longer message; read the whole text with message-body.get. */
-  "body_ref": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^blob/[0-9a-f]{64}$", "u")))).annotate({ description: "Present when content is only the start of a longer message; read the whole text with message-body.get." }),
   "content": Schema.String,
   "from": Id,
   "id": Id,
@@ -1985,7 +2173,7 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
+  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -1993,102 +2181,10 @@ export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
 export type UnknownResource = typeof UnknownResource.Type
 export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 
-export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
-  "account": Schema.String,
-  "account_ref": optionalKey(Schema.String),
-  "driver": Schema.String,
-  "five_hour_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "five_hour_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  "host": Schema.String,
-  /** The source named a provider identity or declared account; independent of quota freshness. Absent on older servers. */
-  "identified": optionalKey(Schema.Boolean).annotate({ description: "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." }),
-  "measured_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "measured_by": Schema.String,
-  "plan": optionalKey(Schema.String),
-  "seats": Schema.Array(Schema.String),
-  "weekly_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
-  "weekly_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
-}).annotate({ identifier: "UsageLimit" }))()
-export type UsageLimit = typeof UsageLimit.Type
-export type UsageLimitEncoded = typeof UsageLimit.Encoded
-
-export const UsagePricingRates = /*#__PURE__*/ (() => Schema.Struct({
-  "cache_read": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_1h": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_5m": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "input": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
-  "output": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePricingRates" }))()
-export type UsagePricingRates = typeof UsagePricingRates.Type
-export type UsagePricingRatesEncoded = typeof UsagePricingRates.Encoded
-
-/** Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown. */
-export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
-  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_source": Schema.Literals(["provider_reported","computed","unpriced"]),
-  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "price_table_id": optionalKey(Schema.String),
-  "price_table_version": optionalKey(Schema.String),
-  "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
-  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
-export type UsagePricing = typeof UsagePricing.Type
-export type UsagePricingEncoded = typeof UsagePricing.Encoded
-
-export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
-  "account": optionalKey(Schema.String),
-  "agent": Id,
-  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "host": optionalKey(Schema.String),
-  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "mission_run": optionalKey(Id),
-  "model": optionalKey(Schema.String),
-  "native_session_id": optionalKey(Schema.String),
-  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "pricing": optionalKey(Schema.String),
-  "pricing_provenance": optionalKey(Schema.Array(UsagePricing)),
-  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "step": optionalKey(Id),
-  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsageRow" }))()
-export type UsageRow = typeof UsageRow.Type
-export type UsageRowEncoded = typeof UsageRow.Encoded
-
-export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
-  "agent_messages": optionalKey(AgentMessageEstimate),
-  "limits": optionalKey(Schema.Array(UsageLimit)),
-  "rows": Schema.Array(UsageRow),
-  "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-}).annotate({ identifier: "UsagePeriod" }))()
-export type UsagePeriod = typeof UsagePeriod.Type
-export type UsagePeriodEncoded = typeof UsagePeriod.Encoded
-
-export const Usage = /*#__PURE__*/ (() => Schema.Struct({
-  "id": Id,
-  "kind": Schema.Literal("usage"),
-  "operational": optionalKey(Operational),
-  "revision": Revision,
-  "updated_at": Timestamp,
-  "value": UsagePeriod
-}).annotate({ identifier: "Usage" }))()
-export type Usage = typeof Usage.Type
-export type UsageEncoded = typeof Usage.Encoded
-
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
-  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read","dismissed"]),
+  "outcome": Schema.Literals(["accept","decline","request_changes","selected","custom","feedback","read"]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])
 }).annotate({ identifier: "PersonAnswer" }))()
@@ -2142,8 +2238,6 @@ export const Work = /*#__PURE__*/ (() => Schema.Struct({
   "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "revision": Revision,
   "state": WorkState,
-  /** Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match. */
-  "submitted_incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Submitting incarnation for this attempt. Missing or null means unknown, including legacy work.submitted claims; never compare unknown as a match." }),
   "timeout_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).pipe(Schema.decodeTo(Schema.Duration.check(durationMillisRange), wholeUnits(1))), NULL_NONE),
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "updated_at": Timestamp,
@@ -2153,8 +2247,6 @@ export type Work = typeof Work.Type
 export type WorkEncoded = typeof Work.Encoded
 
 export const Resource = /*#__PURE__*/ (() => Schema.Union([
-  ConnectedClient,
-  Usage,
   Summary,
   Attention,
   Message,
@@ -2205,10 +2297,6 @@ export const TerminalFacts = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "TerminalFacts" }))()
 export type TerminalFacts = typeof TerminalFacts.Type
 export type TerminalFactsEncoded = typeof TerminalFacts.Encoded
-
-export const TerminalId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:terminal)/[^\\s]+$", "u"), "terminal").annotate({ identifier: "TerminalId" }))()
-export type TerminalId = typeof TerminalId.Type
-export type TerminalIdEncoded = typeof TerminalId.Encoded
 
 export const TerminalColor = /*#__PURE__*/ (() => Schema.Union([
   Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255)),
@@ -2756,7 +2844,6 @@ export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
 export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   "attachments": optionalKey(Schema.Array(Attachment)),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
-  "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "from": optionalKey(ParticipantRef),
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
@@ -2902,25 +2989,6 @@ export const ConversationSearch = /*#__PURE__*/ (() => Schema.Struct({
 export type ConversationSearch = typeof ConversationSearch.Type
 export type ConversationSearchEncoded = typeof ConversationSearch.Encoded
 
-/** A person's current advisory note. It never assigns work, grants authority or satisfies a gate. */
-export const DirectiveNote = /*#__PURE__*/ (() => Schema.Struct({
-  "author": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
-  "expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
-  "person": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/\\s]+$", "u"))),
-  "revision": Schema.String,
-  /** At most 4096 UTF-8 bytes; whitespace-only text is refused. */
-  "text": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(4096)).annotate({ description: "At most 4096 UTF-8 bytes; whitespace-only text is refused." }),
-  "time": Timestamp
-}).annotate({ identifier: "DirectiveNote", description: "A person's current advisory note. It never assigns work, grants authority or satisfies a gate." }))()
-export type DirectiveNote = typeof DirectiveNote.Type
-export type DirectiveNoteEncoded = typeof DirectiveNote.Encoded
-
-export const DirectiveNotes = /*#__PURE__*/ (() => Schema.Struct({
-  "notes": Schema.Array(DirectiveNote)
-}).annotate({ identifier: "DirectiveNotes" }))()
-export type DirectiveNotes = typeof DirectiveNotes.Type
-export type DirectiveNotesEncoded = typeof DirectiveNotes.Encoded
-
 export const DocumentContent = /*#__PURE__*/ (() => Schema.Struct({
   "bytes": Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(255))),
   "reference": Schema.String
@@ -2968,7 +3036,7 @@ export type MailBacklog = typeof MailBacklog.Type
 export type MailBacklogEncoded = typeof MailBacklog.Encoded
 
 export const Page = /*#__PURE__*/ (() => Schema.Struct({
-  "collection": Schema.String.check(Schema.makeFilter((value: string) => value !== "resources", { expected: "a string other than \"resources\"" })),
+  "collection": Schema.String.check(Schema.makeFilter((value: string) => !new RegExp("^(?:resources|assistant\\.(?:attention|missions|agents))$", "u").test(value), { expected: "a string not matching ^(?:resources|assistant\\.(?:attention|missions|agents))$" })),
   "filters": Schema.Record(Schema.String, Schema.String),
   "items": Schema.Array(Resource),
   "kind": Schema.Literal("page"),
@@ -3089,17 +3157,98 @@ export const TimelinePage = /*#__PURE__*/ (() => Schema.Struct({
 export type TimelinePage = typeof TimelinePage.Type
 export type TimelinePageEncoded = typeof TimelinePage.Encoded
 
+export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
+  "account": Schema.String,
+  "account_ref": optionalKey(Schema.String),
+  "driver": Schema.String,
+  "five_hour_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "five_hour_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  "host": Schema.String,
+  /** The source named a provider identity or declared account; independent of quota freshness. Absent on older servers. */
+  "identified": optionalKey(Schema.Boolean).annotate({ description: "The source named a provider identity or declared account; independent of quota freshness. Absent on older servers." }),
+  "measured_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "measured_by": Schema.String,
+  "plan": optionalKey(Schema.String),
+  "seats": Schema.Array(Schema.String),
+  "weekly_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  "weekly_resets_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))
+}).annotate({ identifier: "UsageLimit" }))()
+export type UsageLimit = typeof UsageLimit.Type
+export type UsageLimitEncoded = typeof UsageLimit.Encoded
+
+export const UsagePricingRates = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_read": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_1h": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_5m": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "input": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output": Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePricingRates" }))()
+export type UsagePricingRates = typeof UsagePricingRates.Type
+export type UsagePricingRatesEncoded = typeof UsagePricingRates.Encoded
+
+/** Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown. */
+export const UsagePricing = /*#__PURE__*/ (() => Schema.Struct({
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_source": Schema.Literals(["provider_reported","computed","unpriced"]),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "price_table_id": optionalKey(Schema.String),
+  "price_table_version": optionalKey(Schema.String),
+  "rates_usd_per_million_tokens": optionalKey(UsagePricingRates),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePricing", description: "Cumulative contribution on claims; period contribution on usage reads. Provider-reported costs have no disclosed price table or rates. Missing provenance on historical claims is unknown." }))()
+export type UsagePricing = typeof UsagePricing.Type
+export type UsagePricingEncoded = typeof UsagePricing.Encoded
+
+export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
+  "account": optionalKey(Schema.String),
+  "agent": Id,
+  "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cached_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "host": optionalKey(Schema.String),
+  "input_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "mission_run": optionalKey(Id),
+  "model": optionalKey(Schema.String),
+  "native_session_id": optionalKey(Schema.String),
+  "output_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "pricing": optionalKey(Schema.String),
+  "pricing_provenance": optionalKey(Schema.Array(UsagePricing)),
+  "reported_cost_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "step": optionalKey(Id),
+  "total_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsageRow" }))()
+export type UsageRow = typeof UsageRow.Type
+export type UsageRowEncoded = typeof UsageRow.Encoded
+
+export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
+  "agent_messages": optionalKey(AgentMessageEstimate),
+  "limits": optionalKey(Schema.Array(UsageLimit)),
+  "rows": Schema.Array(UsageRow),
+  "since_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "until_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsagePeriod" }))()
+export type UsagePeriod = typeof UsagePeriod.Type
+export type UsagePeriodEncoded = typeof UsagePeriod.Encoded
+
 export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
+  "value": Schema.Union([Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
 
-/** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. */
-export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","message-too-large","message-store-full","long-message-signature-unsupported","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer." }))()
+/** Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
+export const ErrorCode = /*#__PURE__*/ (() => openEnum(["attention-migrated","arrangement-exists","arrangement-folder-exists","arrangement-retired","arrangement-limit","arrangement-folder-deleted","arrangement-cycle","arrangement-body-too-large","arrangement-owner-forbidden","invalid-arrangement-subject","invalid-arrangement-action","invalid-arrangement-operations","invalid-arrangement-folder","invalid-arrangement-name","invalid-arrangement-key","invalid-subject-reference","not-found","forbidden","unsupported-capability","validation-failed","idempotency-conflict","issuer-required","stale-fence","cursor-gap","page-cursor-expired","rate-limited","runtime-not-local","runtime-authority-indeterminate","remote-unavailable","terminal-unavailable","terminal-ended","timeline-history-incomplete","projection-detail-too-large","projection-detail-invalid-source","conversation-content-invalidated","transcript-unavailable","blob-too-large","unsupported-media-type","blob-content-mismatch","blob-quota-exceeded","blob-not-found","blob-expired","response-budget-exceeded","content-not-text","internal"]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. Arrangement admission and validation refusals are non-retryable. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
 export type ErrorCodeEncoded = typeof ErrorCode.Encoded
 
@@ -3139,16 +3288,6 @@ export const HostRepositories = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "HostRepositories" }))()
 export type HostRepositories = typeof HostRepositories.Type
 export type HostRepositoriesEncoded = typeof HostRepositories.Encoded
-
-export const MessageBody = /*#__PURE__*/ (() => Schema.Struct({
-  "bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  /** False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent. */
-  "complete": optionalKey(Schema.Boolean).annotate({ description: "False when the machine that sent the message could not be reached; text is then the preview and a note saying where the rest is. Read it as true when absent." }),
-  "message": Schema.String,
-  "text": Schema.String
-}).annotate({ identifier: "MessageBody" }))()
-export type MessageBody = typeof MessageBody.Type
-export type MessageBodyEncoded = typeof MessageBody.Encoded
 
 export const ObservationAccepted = /*#__PURE__*/ (() => Schema.Struct({
   "accepted": Schema.Literal(true)
@@ -3244,7 +3383,7 @@ export type PairingCompleteEncoded = typeof PairingComplete.Encoded
 export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   /** Resource family. */
-  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","summary","connected-client","usage"]).annotate({ description: "Resource family." }),
+  "kind": openEnum(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","summary"]).annotate({ description: "Resource family." }),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -3259,3 +3398,35 @@ export const ResourcesFilter = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ResourcesFilter" }))()
 export type ResourcesFilter = typeof ResourcesFilter.Type
 export type ResourcesFilterEncoded = typeof ResourcesFilter.Encoded
+
+/** Signed with Ed25519 by the pinned attestor over UTF-8 `st3.scg-read.v1\n` followed by the canonical JSON of this payload (recursively sorted object keys, compact, integers only). */
+export const ScgReadAuthorizationPayload = /*#__PURE__*/ (() => Schema.Struct({
+  "approval_id": Schema.String.check(Schema.isMinLength(1)),
+  "assistant_id": AssistantPrincipal,
+  "execution_id": Schema.String.check(Schema.isMinLength(1)),
+  "expires_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "grant_id": Id,
+  "identity": Schema.Literal("chatgpt"),
+  "issuer": PersonId,
+  "key_id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)),
+  "max_response_bytes": AssistantResponseBytes,
+  /** Persisted atomically on first acceptance; any replay is denied. */
+  "nonce": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(128)).annotate({ description: "Persisted atomically on first acceptance; any replay is denied." }),
+  /** Every exact decoded query parameter, including cursor, range and max_response_bytes when sent. */
+  "parameters": Schema.Record(Schema.String, Schema.String).annotate({ description: "Every exact decoded query parameter, including cursor, range and max_response_bytes when sent." }),
+  "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  "projection": AssistantProjection,
+  /** Lowercase hex SHA-256 of canonical JSON {"method":"GET","parameters":<decoded map>,"path":<exact path>}. */
+  "request_digest": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u"))).annotate({ description: "Lowercase hex SHA-256 of canonical JSON {\"method\":\"GET\",\"parameters\":<decoded map>,\"path\":<exact path>}." })
+}).annotate({ identifier: "ScgReadAuthorizationPayload", description: "Signed with Ed25519 by the pinned attestor over UTF-8 `st3.scg-read.v1\\n` followed by the canonical JSON of this payload (recursively sorted object keys, compact, integers only)." }))()
+export type ScgReadAuthorizationPayload = typeof ScgReadAuthorizationPayload.Type
+export type ScgReadAuthorizationPayloadEncoded = typeof ScgReadAuthorizationPayload.Encoded
+
+/** Sent as unpadded base64url JSON in the `x-st3-scg-read-authorization` header. */
+export const ScgReadAuthorization = /*#__PURE__*/ (() => Schema.Struct({
+  "payload": ScgReadAuthorizationPayload,
+  /** Unpadded base64url Ed25519 signature (64 bytes). */
+  "signature": Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_-]{86}$", "u"))).annotate({ description: "Unpadded base64url Ed25519 signature (64 bytes)." })
+}).annotate({ identifier: "ScgReadAuthorization", description: "Sent as unpadded base64url JSON in the `x-st3-scg-read-authorization` header." }))()
+export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
+export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
