@@ -513,6 +513,10 @@ fn bytecode(store: &Store, name: Option<&str>, prefix: Option<&str>, after: Opti
 #[test]
 fn filtered_document_pages_keep_warmed_work_flat_with_unrelated_earlier_names() {
     let store = node();
+    // Fix the blob lookup's terminal-key boundary before both measurements. This name
+    // is below every request and its actual content hash f11a... is above all the target
+    // hashes and c270... (the growth content). The selected document rows stay unchanged.
+    bind(&store, "doc/anchor", "anchor-12", 999, "anchor", None);
     for n in 0..4 {
         bind(
             &store,
@@ -596,4 +600,85 @@ fn filtered_document_pages_keep_warmed_work_flat_with_unrelated_earlier_names() 
             "old={old_before:?}->{old_after:?}"
         );
     }
+}
+
+#[test]
+fn isolated_blob_boundary_explains_the_retained_one_step_difference() {
+    let store = node();
+    for n in 0..4 {
+        bind(
+            &store,
+            &format!("doc/target/{n}"),
+            &format!("target-{n}"),
+            1000 + n,
+            "targets",
+            None,
+        );
+    }
+    // Retained f04 history/prefix statement: remove only the newly required index hints.
+    // Probe changes only blobs, never documents, so it isolates the lookup's boundary.
+    let sql = query(false, true, true, true, true, false)
+        .replace(" INDEXED BY document_canonical_latest", "")
+        .replace(" INDEXED BY sqlite_autoindex_blobs_1", "");
+    let execute = || {
+        let conn = store.readers.get();
+        let scope = SqliteWorkScope::start();
+        let result = conn
+            .prepare_cached(&sql)
+            .unwrap()
+            .query_map(
+                params![
+                    None::<String>,
+                    "doc/target/",
+                    None::<String>,
+                    None::<u64>,
+                    "doc/target/",
+                    "doc/target0",
+                    5
+                ],
+                decode,
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (serde_json::to_value(result).unwrap(), scope.finish())
+    };
+    execute();
+    let (before_rows, before) = execute();
+    let insert_blob = |content: &str| {
+        let hash = hex::encode(Sha256::digest(content.as_bytes()));
+        store
+            .connection
+            .write()
+            .execute(
+                "INSERT INTO blobs(hash,bytes,size) VALUES(?1,?2,?3)",
+                params![hash, content.as_bytes(), content.len()],
+            )
+            .unwrap();
+    };
+    insert_blob("unrelated");
+    execute();
+    let (one_rows, one) = execute();
+    for n in 0..512 {
+        insert_blob(&format!("only-blob-{n}"));
+    }
+    execute();
+    let (many_rows, many) = execute();
+    println!("document-page isolated blob boundary BEFORE={before:?} ONE={one:?} MANY={many:?}");
+    assert_eq!(before_rows, one_rows);
+    assert_eq!(one_rows, many_rows);
+    assert_eq!(before.statements, 1);
+    assert_eq!(one.statements, 1);
+    assert_eq!(many.statements, 1);
+    assert_eq!(one.vm_steps, before.vm_steps + 1);
+    assert_eq!(many.vm_steps, one.vm_steps);
+    assert_eq!(
+        (
+            before.fullscan_steps,
+            one.fullscan_steps,
+            many.fullscan_steps
+        ),
+        (0, 0, 0)
+    );
+    assert_eq!((before.sorts, one.sorts, many.sorts), (0, 0, 0));
 }

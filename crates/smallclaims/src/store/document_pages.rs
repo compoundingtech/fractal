@@ -35,6 +35,8 @@ fn query(
     // Required order index: document_index::initialize installs it before every normal
     // Store reader pool (including upgrades). A missing index is a prepare error. Pin it
     // because named/current queries otherwise choose the (name,hash) PK and add a sort.
+    // The normal blobs.hash PK is also required: ANALYZE of a small blob table can
+    // otherwise choose a table scan for every selected document.
     // Current-only rows already satisfy the latest predicate. Avoid computing it a second
     // time for the returned boolean. History still reports each row's actual latest flag.
     let latest = if history {
@@ -45,7 +47,8 @@ fn query(
     let mut sql = format!(
         "SELECT d.name,d.hash,b.size,d.created_index,{latest},
         d.binding_claim_id,c.accepted_at_unix_ms,c.actor,c.origin
-        FROM documents d INDEXED BY document_canonical_latest CROSS JOIN blobs b CROSS JOIN claims c
+        FROM documents d INDEXED BY document_canonical_latest
+        CROSS JOIN blobs b INDEXED BY sqlite_autoindex_blobs_1 CROSS JOIN claims c
         WHERE b.hash=d.hash AND c.id=d.binding_claim_id"
     );
     if named {
