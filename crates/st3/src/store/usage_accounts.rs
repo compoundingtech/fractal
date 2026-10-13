@@ -111,6 +111,16 @@ impl<'a> Attribution<'a> {
 }
 
 impl Store {
+    /// The rows of the month so far. Credits need each series at the month's two ends and nothing
+    /// between, so this seeks two boundaries, not the daily ones the planning estimate reads.
+    fn month_rows(&self, month_start: u64, until_ms: u64) -> Result<Vec<Value>> {
+        self.read_snapshot(|_| {
+            let boundaries = BTreeSet::from([month_start, until_ms]);
+            let rows = super::usage_period::boundary_rows(&self.readers.get(), &boundaries)?;
+            Ok(Self::usage_period_data_from_rows(rows.into_iter().map(Ok), month_start, until_ms)?.0)
+        })
+    }
+
     /// The usage of a period against the declared accounts: every row and limit, and each
     /// account's credits used so far in the calendar month of `until_ms`.
     pub fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<AttributedUsage> {
@@ -124,7 +134,7 @@ impl Store {
         let month_start = month_start_ms(until_ms);
         let mut month_rows = if declared.iter().any(|account| account.monthly_credits_usd.is_some())
         {
-            let (mut rows, _) = self.usage_period_data(month_start, until_ms)?;
+            let mut rows = self.month_rows(month_start, until_ms)?;
             attribution.attribute(&connection, &mut rows);
             rows
         } else {
