@@ -26,6 +26,19 @@ st agents show agent/garden/worker
 
 When repeated failed starts have parked a seat, a person's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the seat parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
+A refine-loop gate does not remain silently `starting` after its runtime disappears.
+The owning host waits for any live launch operation rather than starting a duplicate.
+Once no launch remains in flight, it records the gate runtime as `vanished`, reports
+`gate-runtime-missing`, and follows the declaration's restart policy. A gate with
+`restart "never"` carries an actionable member fault instead of silently waiting
+for readiness forever. Step-produced gates also fail their producing step.
+If a completed or abandoned start still lacks exact proof that its producer cannot
+publish a runtime later, launch admission stays held and the gate carries a durable
+member fault explaining the missing runtime and start operation. Inspect the owning
+round's report and the runtime owner before explicitly restarting it; restarting
+the daemon is not proof that a detached producer has ended. Explicit stops remain
+stopped, and explicit restart requests retain their existing single-attempt semantics.
+
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
 ```sh

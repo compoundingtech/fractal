@@ -164,6 +164,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
                 store.owned_desired_guard(&prepared.subject)?;
+                if store.is_loop_gate(&prepared.subject)? {
+                    anyhow::ensure!(store.loop_gate_ready_at(&prepared.subject)?.is_some(),
+                        "round gate work is no longer ready");
+                }
                 anyhow::ensure!(store.selected_desired_token(&subject)? == prepared.selected_token,
                     "declaration changed before launch");
                 anyhow::ensure!(prepared.requests_retained(&store)?,
@@ -177,6 +181,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut backend_entered = false;
             let result = caught(|| {
                 guard()?;
+                let gate_ready_at = if store.is_loop_gate(&prepared.subject)? {
+                    store.loop_gate_ready_at(&prepared.subject)?
+                } else {
+                    None
+                };
                 backend_entered = true;
                 runtime.start_guarded(&prepared.launch_member, &guard)?;
                 let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
@@ -191,6 +200,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     },
                     None => (false, observation_error),
                 };
+                if verified && let Some(ready_at) = gate_ready_at {
+                    crate::reconcile_telemetry::record_loop_gate_start_latency(ready_at);
+                }
                 Ok((incarnation, verified, verification_error))
             });
             let mut result = match result {

@@ -704,11 +704,21 @@ attribution also remains unchanged.
 | `st.reconcile.wakes` | Counter | `{wake}` | `cause` from the 17-value wake registry |
 | `st.fifo.depth` | Observable u64 gauge | `{item}` | `queue=writer`, `conversation`, or `terminal_emulation` |
 | `st.fifo.oldest_age` | Observable f64 gauge | `s` | `queue=writer`, `conversation`, or `terminal_emulation` |
+| `st.loop.gate.agents.idle` | u64 gauge | `{agent}` | none |
+| `st.loop.gate.start.latency` | Histogram | `s` | none |
 
 Every metric attribute is a constant closed value, never an identity.
-These instruments contribute at most `17 + 2 + 3 + 3 = 25` attribute series;
+These instruments contribute at most `17 + 2 + 3 + 3 + 1 + 1 = 27` attribute series;
 histogram bucket count is separate. Duration uses the seconds buckets above,
 and metrics are independent of trace sampling.
+
+Round gate agents are declared with their round but start only when unclaimed
+gate work is ready. The idle gauge counts local round gate agents whose runtime
+is observed running and whose current harness is idle; each pass records zero
+when there are none. The latency histogram records the time from the ready work
+state to a verified runtime start. Failed or unverified launches do not add a
+latency sample. Queue wait and backend launch time are included. Agent, mission,
+round, and work identities are not metric labels.
 
 FIFO gauges describe only pending items in these in-process channels:
 
