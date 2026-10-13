@@ -4,8 +4,7 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-const LATEST: &str =
-    "SELECT n.hash FROM documents n WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1";
+const LATEST: &str = "SELECT n.hash FROM documents n INDEXED BY document_canonical_latest WHERE n.name=d.name ORDER BY n.binding_key DESC LIMIT 1";
 
 // Core documents.name and document_canonical_latest use BINARY. Compare Unicode scalar
 // successors in that same UTF-8 byte order; skip the surrogate gap and carry past a maximal
@@ -80,7 +79,13 @@ fn query(
     }
     // Fixed slot 7 keeps the binding arity fixed even when earlier slots are unused. Values
     // are always bound: the statement cache has a finite set of shapes, not one per prefix.
-    sql.push_str(" ORDER BY d.name,d.binding_key DESC LIMIT ?7");
+    // Name is constant in a named page. Omitting that constant ordering term preserves
+    // the same version order and avoids a redundant sort under analyzed statistics.
+    sql.push_str(if named {
+        " ORDER BY d.binding_key DESC LIMIT ?7"
+    } else {
+        " ORDER BY d.name,d.binding_key DESC LIMIT ?7"
+    });
     sql
 }
 
