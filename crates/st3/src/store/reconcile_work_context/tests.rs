@@ -240,31 +240,109 @@ fn batched_work_metadata_reads_new_owner_and_definition_on_each_call() {
 
 #[test]
 fn batched_work_metadata_keeps_real_person_blockers_and_responses() {
-    let (store, _origin, input) = person_work::tests::fixture();
-    let before = parity(&store, &input.actor, now_ms());
-    let ask = store.ask_person(&input).unwrap();
-    let blocked = parity(&store, &input.actor, now_ms());
-    assert_ne!(
-        serde_json::to_value(before).unwrap(),
-        serde_json::to_value(blocked).unwrap()
-    );
-    store
-        .finish_person_step(
-            &crate::model::PersonStepResponse {
-                delegation: None,
-                subject: ask.subject,
-                actor: "person/avery".into(),
-                summary: "Friday".into(),
-                evidence: Vec::new(),
-                episode: None,
-                answer: None,
-                idempotency_key: "batch-person-done".into(),
-            },
-            false,
-        )
-        .unwrap();
-    let answered = parity(&store, &input.actor, now_ms());
-    assert!(answered.iter().any(|view| !view.person_answers.is_empty()));
+    for cancelled in [false, true] {
+        let (store, _origin, input) = person_work::tests::fixture();
+        let before = parity(&store, &input.actor, now_ms());
+        let ask = store.ask_person(&input).unwrap();
+        let blocked = parity(&store, &input.actor, now_ms());
+        assert_ne!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(blocked).unwrap()
+        );
+        store
+            .finish_person_step(
+                &crate::model::PersonStepResponse {
+                    delegation: None,
+                    subject: ask.subject,
+                    actor: if cancelled {
+                        input.actor.clone()
+                    } else {
+                        "person/avery".into()
+                    },
+                    summary: "Friday".into(),
+                    evidence: Vec::new(),
+                    episode: None,
+                    answer: None,
+                    idempotency_key: "batch-person-done".into(),
+                },
+                cancelled,
+            )
+            .unwrap();
+        let answered = parity(&store, &input.actor, now_ms());
+        assert!(answered.iter().any(|view| !view.person_answers.is_empty()));
+        // The ask itself reads its own response, whereas the originating step reads by origin.
+        let own = store
+            .step_run(
+                &answered
+                    .iter()
+                    .flat_map(|v| &v.person_answers)
+                    .next()
+                    .unwrap()
+                    .ask,
+            )
+            .unwrap()
+            .unwrap();
+        let connection = store.readers.get();
+        assert!(support(&connection, std::slice::from_ref(&own)).unwrap()[0].1);
+        let mut own_old = own.clone();
+        let mut own_new = own.clone();
+        person_work::enrich_responses(&connection, &mut own_old).unwrap();
+        if support(&connection, std::slice::from_ref(&own_new)).unwrap()[0].1 {
+            person_work::enrich_responses(&connection, &mut own_new).unwrap();
+        }
+        assert_eq!(
+            serde_json::to_value(own_old).unwrap(),
+            serde_json::to_value(own_new).unwrap()
+        );
+        drop(connection);
+        let at = now_ms();
+        store.connection.write().execute(
+            "UPDATE claims SET accepted_at_unix_ms=?1 WHERE kind IN ('work.person-done','work.person-cancelled')",
+            [(at + 10_000).to_string()],
+        ).unwrap();
+        // Unlike handoff, the existing response helper has no clock filter: an admitted
+        // response after `at` still enriches. The broad request proof must retain it.
+        assert!(
+            parity(&store, &input.actor, at)
+                .iter()
+                .any(|v| !v.person_answers.is_empty())
+        );
+        let request = store
+            .latest_claim(&own.subject, Some("work.person-asked"))
+            .unwrap()
+            .unwrap();
+        store
+            .connection
+            .write()
+            .execute(
+                "UPDATE claims SET body=json_set(body,'$.fields.origin_attempt',?2) WHERE id=?1",
+                params![request.id, 99],
+            )
+            .unwrap();
+        let stale = parity(&store, &input.actor, at);
+        assert!(stale.iter().all(|v| v.person_answers.is_empty()));
+        assert!(
+            support(&store.readers.get(), &stale)
+                .unwrap()
+                .iter()
+                .any(|row| row.1)
+        );
+        // Reader-only corruption/retraction fixture: an answer without its joined request
+        // cannot enrich either path. This does not claim production retraction/replay coverage.
+        store
+            .connection
+            .write()
+            .execute("DELETE FROM claims WHERE kind='work.person-asked'", [])
+            .unwrap();
+        let orphaned = parity(&store, &input.actor, now_ms());
+        assert!(orphaned.iter().all(|view| view.person_answers.is_empty()));
+        assert!(
+            support(&store.readers.get(), &orphaned)
+                .unwrap()
+                .iter()
+                .all(|row| !row.1)
+        );
+    }
 }
 
 #[test]
@@ -289,7 +367,7 @@ fn batched_work_metadata_reduces_whole_read_statements_on_128_1000_4200_steps() 
             serde_json::to_value(old).unwrap()
         );
         // This fixture has one exact run/generation pair and one pinned definition.
-        let batched_statements = 2;
+        let batched_statements = 2 + count.div_ceil(CHUNK) as u64;
         println!(
             "{count}-step first calls (after fixture setup, not cold database): old {first_old_work:?} {first_old_time:?}; new {first_new_work:?} {first_new_time:?}; warm old: {old_work:?} {old_time:?}; warm new: {new_work:?} {new_time:?}"
         );
@@ -302,7 +380,7 @@ fn batched_work_metadata_reduces_whole_read_statements_on_128_1000_4200_steps() 
         assert!(new_work.statements > 0);
         assert_eq!(
             old_work.statements,
-            new_work.statements + 2 * count as u64 - batched_statements
+            new_work.statements + 4 * count as u64 - batched_statements
         );
         assert!(
             new_work.vm_steps < old_work.vm_steps,
@@ -315,7 +393,7 @@ fn batched_work_metadata_reduces_whole_read_statements_on_128_1000_4200_steps() 
 fn batched_work_metadata_plan_seeks_run_generation_root_and_definition() {
     let store = fixture(129);
     let connection = store.readers.get();
-    for query in [OWNERS, DEFINITIONS, PHASES] {
+    for query in [OWNERS, DEFINITIONS, PHASES, SUPPORT] {
         let plan = connection
             .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
             .unwrap()
@@ -333,8 +411,10 @@ fn batched_work_metadata_plan_seeks_run_generation_root_and_definition() {
             vec!["runs", "generations", "roots"]
         } else if query == DEFINITIONS {
             vec!["generations", "runs", "revisions"]
-        } else {
+        } else if query == PHASES {
             vec!["mission_runs"]
+        } else {
+            vec!["released", "asked", "origin"]
         } {
             assert!(
                 plan.iter()
@@ -486,6 +566,27 @@ fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
             .iter()
             .any(|view| view.carried_claimant.as_deref() == Some(ACTOR))
     );
+    // Equal owner pairs repeat across chunks, beside two valid generations of one run
+    // and a missing owner for only one input. None and old-generation cancellation stay exact.
+    let mut requested = vec![views[0].clone(); 257];
+    requested[126] = carried.clone();
+    requested[128] = handed.clone();
+    requested[255].run = "mission-run/missing-owner".into();
+    let at = now_ms();
+    let connection = store.readers.get();
+    let selected = owners(&connection, &requested).unwrap();
+    assert!(selected[126].is_some() && selected[128].is_some());
+    assert!(selected[255].is_none());
+    for (view, owner) in requested.iter().zip(selected) {
+        let mut old = view.clone();
+        let mut new = view.clone();
+        apply_effective_step_state(&connection, &mut old, at).unwrap();
+        apply_effective_step_state_with_owner(&connection, &mut new, at, owner).unwrap();
+        assert_eq!(
+            serde_json::to_value(old).unwrap(),
+            serde_json::to_value(new).unwrap()
+        );
+    }
     println!("real handoff and revision/carry parity seed={SEED:#x}");
 }
 
@@ -552,4 +653,223 @@ fn batched_work_metadata_snapshot_survives_second_writer_and_next_call_sees_clai
         .unwrap()
         .unwrap();
     assert_eq!(state.body["fields"]["status"], "completed");
+}
+
+fn declare_handoff_actors(store: &Store) {
+    let agents = crate::graph::parse_internal_intent(
+        "version 2\nagent \"alder.worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"alder.peer\" { workspace \"/tmp\"; command \"true\" }", "alder").unwrap();
+    store.apply_internal(&agents, "support-actors").unwrap();
+}
+
+fn claim_for_handoff(store: &Store, subject: &str) {
+    store.set_step_state(subject, "ready", None).unwrap();
+    store
+        .work_action(
+            subject,
+            "claim",
+            &WorkRequest {
+                actor: Some(ACTOR.into()),
+                incarnation: Some("support-worker-one".into()),
+                summary: None,
+                reason: None,
+                evidence: Vec::new(),
+                idempotency_key: "support-worker-claim".into(),
+            },
+        )
+        .unwrap();
+}
+
+fn handoff_to_peer(store: &Store, subject: &str) {
+    store
+        .handoff_work(
+            subject,
+            &crate::model::WorkHandoffRequest {
+                actor: ACTOR.into(),
+                incarnation: Some("support-worker-one".into()),
+                to: "agent/alder.peer".into(),
+                note: "Continue this exact step.".into(),
+                evidence: Vec::new(),
+                idempotency_key: "support-transfer".into(),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn batched_work_support_keeps_handoff_attempt_clock_ack_and_retracted_inputs() {
+    const PEER: &str = "agent/alder.peer";
+    let store = fixture(2);
+    declare_handoff_actors(&store);
+    let initial = parity(&store, ACTOR, now_ms());
+    assert!(
+        support(&store.readers.get(), &initial)
+            .unwrap()
+            .iter()
+            .all(|row| *row == (false, false))
+    );
+    let subject = &initial[SEED as usize % initial.len()].subject;
+    claim_for_handoff(&store, subject);
+    handoff_to_peer(&store, subject);
+    let release = store
+        .latest_claim(subject, Some("work.released"))
+        .unwrap()
+        .unwrap();
+    let note = release.body["fields"]["handoff_message"].as_str().unwrap();
+    store
+        .acknowledge_work(
+            subject,
+            &crate::model::WorkAcknowledgeRequest {
+                actor: PEER.into(),
+                message: note.into(),
+            },
+        )
+        .unwrap();
+    // Reader-only edge fixtures retain the genuine transfer's bodies and positions. Their
+    // timestamp/attempt variations exercise the original helper filters, not producer policy.
+    let at = now_ms() + 10_000;
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+            params![release.id, (at + 1).to_string()],
+        )
+        .unwrap();
+    let future = parity(&store, PEER, at);
+    assert!(
+        future
+            .iter()
+            .all(|v| !v.constraints.iter().any(|s| s.contains("Handoff from")))
+    );
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE claims SET accepted_at_unix_ms=?2 WHERE id=?1",
+            params![release.id, at.to_string()],
+        )
+        .unwrap();
+    store.connection.write().execute(
+        "UPDATE claims SET accepted_at_unix_ms=?2 WHERE subject=?1 AND kind='work.progress' AND json_extract(body,'$.fields.handoff_acknowledged') IS NOT NULL",
+        params![subject, (at + 1).to_string()],
+    ).unwrap();
+    let unacknowledged = parity(&store, PEER, at);
+    assert!(unacknowledged.iter().any(|v| {
+        v.constraints
+            .iter()
+            .any(|s| s.contains("awaiting acknowledgment"))
+    }));
+    let acknowledged = parity(&store, PEER, at + 1);
+    assert!(
+        acknowledged
+            .iter()
+            .any(|v| v.constraints.iter().any(|s| s.contains("(acknowledged)")))
+    );
+    // Expired lease and a release from another attempt keep the positive-presence path.
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE step_runs SET lease_expires_at_unix_ms=?2 WHERE subject=?1",
+            params![subject, (at - 1).to_string()],
+        )
+        .unwrap();
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE claims SET body=json_set(body,'$.fields.attempt',?2) WHERE id=?1",
+            params![release.id, initial[0].attempt + 1],
+        )
+        .unwrap();
+    let stale = parity(&store, PEER, at + 1);
+    assert!(
+        stale
+            .iter()
+            .all(|v| !v.constraints.iter().any(|s| s.contains("Handoff from")))
+    );
+    assert!(
+        support(&store.readers.get(), &stale)
+            .unwrap()
+            .iter()
+            .any(|row| row.0)
+    );
+    store
+        .connection
+        .write()
+        .execute("DELETE FROM claims WHERE id=?1", [&release.id])
+        .unwrap();
+    let orphan_ack = parity(&store, PEER, at + 1);
+    assert!(
+        support(&store.readers.get(), &orphan_ack)
+            .unwrap()
+            .iter()
+            .all(|row| !row.0)
+    );
+}
+
+#[test]
+fn batched_work_support_snapshot_keeps_absence_across_a_second_writer_handoff() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+    add_run(&store, 2, "batch-work");
+    declare_handoff_actors(&store);
+    let initial = parity(&store, ACTOR, now_ms());
+    claim_for_handoff(&store, &initial[0].subject);
+    let at = now_ms();
+    let before = parity(&store, ACTOR, at);
+    assert!(
+        support(&store.readers.get(), &before)
+            .unwrap()
+            .iter()
+            .all(|row| !row.0)
+    );
+    let subject = initial[0].subject.clone();
+    let (enter, entered) = std::sync::mpsc::sync_channel(1);
+    let (done, completed) = std::sync::mpsc::sync_channel(1);
+    let writer_store = Arc::clone(&store);
+    let writer = std::thread::spawn(move || {
+        entered.recv().unwrap();
+        // Normal admitted transfer on the Store's writer connection, distinct from this
+        // thread's pinned reader. No authority/effect decision uses the absence proof.
+        handoff_to_peer(&writer_store, &subject);
+        done.send(()).unwrap();
+    });
+    AFTER_SUPPORT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            enter.send(()).unwrap();
+            completed
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("writer waited on pinned support proof");
+        }));
+    });
+    let captured = read(&store, ACTOR, at);
+    writer.join().unwrap();
+    assert_eq!(
+        serde_json::to_value(captured.unwrap()).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    let next = parity(&store, ACTOR, now_ms());
+    assert_eq!(next.len(), before.len() - 1);
+    let recipient = parity(&store, "agent/alder.peer", now_ms());
+    assert!(
+        recipient
+            .iter()
+            .any(|v| v.constraints.iter().any(|s| s.contains("Handoff from")))
+    );
+}
+
+#[test]
+fn batched_work_support_query_errors_refuse_the_whole_read() {
+    let store = fixture(1);
+    parity(&store, ACTOR, now_ms());
+    // The existing schema installs this index before opening readers. A corrupt schema
+    // is a hard prepare failure, never a waiver or a fallback to a table scan/helper skip.
+    store
+        .connection
+        .write()
+        .execute("DROP INDEX claims_person_ask_origin_step_index", [])
+        .unwrap();
+    let error = read(&store, ACTOR, now_ms()).unwrap_err();
+    assert!(error.to_string().contains("no such index"), "{error}");
 }

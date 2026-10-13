@@ -7,6 +7,7 @@ const CHUNK: usize = 128;
 thread_local! {
     static MAX_SNAPSHOT_CALL_NS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
     static AFTER_OWNERS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_SUPPORT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 // LEFT JOIN keeps missing owner rows equivalent to the old optional lookup. json_each is
@@ -31,6 +32,21 @@ const DEFINITIONS: &str = "SELECT requested.value, revisions.body
 
 const PHASES: &str = "SELECT id, phase FROM mission_runs
     WHERE id IN (SELECT value FROM json_each(?1) AS requested)";
+
+// These are conservative existence proofs, not lifecycle/authority decisions. Any release
+// keeps the original handoff reader; any ask on/for the step keeps the response reader.
+// The readers still decide attempts and accepted-time/ack boundaries. Responses join an ask;
+// orphan answers cannot enrich a view. No proof survives this snapshot or skips a present input.
+// The origin index is installed by Store's schema before readers become available.
+const SUPPORT: &str = "SELECT requested.key,
+    EXISTS(SELECT 1 FROM claims AS released
+           WHERE released.subject=requested.value AND released.kind='work.released'),
+    (EXISTS(SELECT 1 FROM claims AS asked
+            WHERE asked.subject=requested.value AND asked.kind='work.person-asked')
+     OR EXISTS(SELECT 1 FROM claims AS origin INDEXED BY claims_person_ask_origin_step_index
+               WHERE origin.kind='work.person-asked'
+                 AND json_extract(origin.body,'$.fields.origin_step')=requested.value))
+    FROM json_each(?1) AS requested";
 
 struct Inputs {
     views: Vec<StepRunView>,
@@ -142,10 +158,19 @@ fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
                 .collect::<rusqlite::Result<Vec<_>>>()?,
         );
     }
-    for (view, owner) in views.iter_mut().zip(owners) {
+    let support = support(&connection, &views)?;
+    #[cfg(test)]
+    if let Some(after) = AFTER_SUPPORT.with(|hook| hook.borrow_mut().take()) {
+        after();
+    }
+    for ((view, owner), (has_release, has_ask)) in views.iter_mut().zip(owners).zip(support) {
         apply_effective_step_state_with_owner(&connection, view, at, owner)?;
-        adhoc_work::enrich_handoff(&connection, view, at)?;
-        person_work::enrich_responses(&connection, view)?;
+        if has_release {
+            adhoc_work::enrich_handoff(&connection, view, at)?;
+        }
+        if has_ask {
+            person_work::enrich_responses(&connection, view)?;
+        }
         view.carried_claimant = carried.get(&view.subject).cloned();
     }
     Ok(Inputs {
@@ -153,6 +178,35 @@ fn inputs(store: &Store, actor: &str, at: u128) -> Result<Inputs> {
         definitions,
         phases,
     })
+}
+
+fn support(connection: &Connection, views: &[StepRunView]) -> Result<Vec<(bool, bool)>> {
+    let mut support = Vec::with_capacity(views.len());
+    for chunk in views.chunks(CHUNK) {
+        let subjects = chunk.iter().map(|view| &view.subject).collect::<Vec<_>>();
+        let rows = connection
+            .prepare_cached(SUPPORT)?
+            .query_map([serde_json::to_string(&subjects)?], |row| {
+                Ok((
+                    row.get::<_, usize>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            rows.len() == chunk.len(),
+            "work support batch lost an input row"
+        );
+        for (expected, (ordinal, release, ask)) in rows.into_iter().enumerate() {
+            anyhow::ensure!(
+                ordinal == expected,
+                "work support batch changed input order"
+            );
+            support.push((release, ask));
+        }
+    }
+    Ok(support)
 }
 
 fn owners(
