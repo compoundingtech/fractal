@@ -108,7 +108,7 @@ function Block({ block, previous, turn, kind, meta, placement, marker = false }:
     return () => observer.disconnect()
   }, [expanded, meta, placement, block.id, block.sender, turn, kind])
   const time = <time data-turn-time dateTime={block.at} {...stylex.props(styles.time)}>{clock(block.at)}</time>
-  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, (meta === 'M1' || placed) && styles.inlineCopy, (meta === 'M1' || placed) && styles.rowCopy, meta === 'M1' && !seat && styles.layeredCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? `${copied ? 'Copied · ' : ''}${exact(block.at)}` : copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
+  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, (meta === 'M1' || placed) && styles.inlineCopy, (meta === 'M1' || placed) && styles.rowCopy, ((meta === 'M1' && !seat) || gutter !== undefined) && styles.layeredCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{meta === 'M3' ? `${copied ? 'Copied · ' : ''}${exact(block.at)}` : copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
   // Copy leads the meta side, so at rest its hidden slot reads as free space beside the identity, not a hole
   // between the kind word and the time.
   const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{meta === 'M1' ? copy : null}{kind === 'K1' ? <span data-input-kind>{block.kind}{!block.verified ? ' · Unverified' : ''}</span> : null}{meta === 'M1' ? <span data-meta-time>{time}</span> : null}</span>
@@ -251,9 +251,10 @@ const styles = stylex.create({
   inlineCopy: { position: 'static', minHeight: 0, padding: 0, backgroundColor: surface.transparent },
   // The seat row is one 16px meta line; Copy keeps a 24px hit area by overhanging it equally above and below.
   rowCopy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.controlSm, minHeight: g.controlSm, marginBlock: `calc((${t.metaLeading} - ${g.controlSm}) / 2)` },
-  // Header Copy draws its 14px glyph in a 16px slot but hits across 24x24: the box overhangs the slot equally on every
-  // side and is layered above its neighbours so the overhang stays hittable.
-  layeredCopy: { position: 'relative', zIndex: 1, marginInline: `calc(-1 * ${s.xs})` },
+  // Header and gutter Copy draw a 14px glyph in a 16px slot but hit across 24x24: the box overhangs the slot equally on
+  // every side and is layered above its neighbours so the overhang stays hittable. Relative positioning must not pick up
+  // the overlay Copy's top offset.
+  layeredCopy: { position: 'relative', zIndex: 1, top: 0, marginInline: `calc(-1 * ${s.xs})` },
   // Header metadata never yields: the kind word (Unverified is the only non-silent state), Copy and time keep their
   // width, and only the sender's identity run narrows.
   // The extra 2px on top of the header's 6px gap keeps 8px between the identity and the metadata.
@@ -417,6 +418,8 @@ function headerFaults(header: HTMLElement) {
   for (const copy of header.querySelectorAll<HTMLElement>('[data-copy]')) {
     const box = copy.getBoundingClientRect()
     if (box.width < 24 || box.height < 24) faults.push('header Copy under 24x24')
+    const row = (meta ?? header).getBoundingClientRect()
+    if (Math.abs(box.top + box.height / 2 - (row.top + row.height / 2)) > 1) faults.push('header Copy off its row centre')
   }
   for (const trigger of header.querySelectorAll<HTMLElement>('[data-agent-id-trigger]')) faults.push(...identityFaults(trigger, header))
   return faults
