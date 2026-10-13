@@ -106,6 +106,7 @@ impl SmalltalkRuntime {
         unread_mail::create_schema(connection)?;
         // The remaining initial DDL has no backfill transaction. Keep existing-store
         // upgrade progress unchanged, and commit this chunk only for a fresh store.
+        // These helpers must not control transactions, change connection PRAGMAs or VACUUM.
         let transaction = if fresh {
             Some(connection.unchecked_transaction()?)
         } else {
@@ -231,6 +232,7 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn create_schema_for_fresh_store(&self, connection: &Connection) -> Result<()> {
+        // Store-open calls this in autocommit after the core installation has committed.
         // Existing stores use the per-statement path, preserving completed upgrade indexes.
         install_initial_schema(connection, true)?;
         self.finish_schema(connection, true)
@@ -576,21 +578,41 @@ mod schema_install_tests {
         assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')", [], |row| row.get::<_, bool>(0)).unwrap());
     }
 
-    #[test]
-    fn failed_late_fresh_install_rolls_back_only_its_chunk() {
+    fn late_install_error_fixture() -> (Connection, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(smallclaims::store::SCHEMA)
             .unwrap();
-        connection.execute_batch("CREATE TABLE coordination_sends(fixture TEXT); INSERT INTO coordination_sends VALUES('preserved');").unwrap();
-        let error = SmalltalkRuntime::default()
+        connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved');").unwrap();
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = reached.clone();
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(context.action, AuthAction::CreateTable { table_name } if table_name == "coordination_sends") {
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Authorization::Deny;
+            }
+            Authorization::Allow
+        }));
+        (connection, reached)
+    }
+
+    #[test]
+    fn failed_late_fresh_install_rolls_back_only_its_chunk() {
+        use rusqlite::hooks::{AuthContext, Authorization};
+        let (connection, reached) = late_install_error_fixture();
+        SmalltalkRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap_err();
-        assert!(error.to_string().contains("sent_ms"), "{error:#}");
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        assert!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the injected late failure must run"
+        );
         assert!(connection.is_autocommit());
         assert_eq!(
             connection
-                .query_row("SELECT fixture FROM coordination_sends", [], |row| {
+                .query_row("SELECT value FROM fixture_marker", [], |row| {
                     row.get::<_, String>(0)
                 })
                 .unwrap(),
@@ -617,19 +639,20 @@ mod schema_install_tests {
 
     #[test]
     fn failed_late_populated_install_keeps_completed_ddl() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(smallclaims::store::SCHEMA)
-            .unwrap();
-        connection.execute_batch("CREATE TABLE coordination_sends(fixture TEXT); INSERT INTO coordination_sends VALUES('preserved');").unwrap();
-        let error = SmalltalkRuntime::default()
+        use rusqlite::hooks::{AuthContext, Authorization};
+        let (connection, reached) = late_install_error_fixture();
+        SmalltalkRuntime::default()
             .create_schema(&connection)
             .unwrap_err();
-        assert!(error.to_string().contains("sent_ms"), "{error:#}");
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        assert!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the injected late failure must run"
+        );
         assert!(connection.is_autocommit());
         assert_eq!(
             connection
-                .query_row("SELECT fixture FROM coordination_sends", [], |row| {
+                .query_row("SELECT value FROM fixture_marker", [], |row| {
                     row.get::<_, String>(0)
                 })
                 .unwrap(),
@@ -673,6 +696,12 @@ mod schema_install_tests {
                     operation: TransactionOperation::Begin,
                 } => Some("begin".into()),
                 AuthAction::CreateTable { table_name } => Some(format!("table:{table_name}")),
+                AuthAction::Pragma { pragma_name, .. }
+                    if pragma_name.eq_ignore_ascii_case("journal_mode")
+                        || pragma_name.eq_ignore_ascii_case("foreign_keys") =>
+                {
+                    Some(format!("connection-pragma:{pragma_name}"))
+                }
                 _ => None,
             };
             if let Some(event) = event {
@@ -717,6 +746,23 @@ mod schema_install_tests {
                 .unwrap(),
             "commit"
         );
+        let start = events[..first]
+            .iter()
+            .rposition(|event| event == "begin")
+            .unwrap();
+        let end = events[last + 1..]
+            .iter()
+            .position(|event| event == "commit")
+            .unwrap()
+            + last
+            + 1;
+        assert!(
+            !events[start..=end]
+                .iter()
+                .any(|event| event.starts_with("connection-pragma:")),
+            "connection PRAGMAs must remain outside the fresh late chunk: {events:?}"
+        );
+        // VACUUM or a nested BEGIN in any helper makes the real fresh install above fail.
         assert!(connection.is_autocommit());
     }
 

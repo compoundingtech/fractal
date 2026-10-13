@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "changed",
-    "detail": "Fresh startup performs fewer durable commits. Existing-store startup receives no sync reduction, and no deadline or retry changes."
+    "detail": "Fresh stores perform fewer durable commits; populated-store startup is unchanged. Paired same-host real-sync timing controls demonstrate the reduction; they are not failure-rate or flake-repair claims. Full native cohort acceptance evidence is reported in the PR."
   },
   "manual": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "An error or crash in the fresh late runtime DDL chunk rolls it back while preserving earlier committed chunks and data. Populated-store upgrades retain completed statements."
+    "detail": "An error or crash in the fresh late DDL chunk rolls it back while preserving earlier committed chunks and data. Schema/version are unchanged, so an older binary can open the store normally. Populated upgrades retain completed statements."
   }
 }
