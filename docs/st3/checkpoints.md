@@ -8,8 +8,8 @@ Older or unstamped members advertise only the package version and show `not adve
 revision. JSON status includes a `machine_version` map of participants with advertised revisions,
 omitted when none are available. Pending checkpoint `builds` still names each member's seal build.
 Agreement inputs and proof identities are unchanged. Startup revisions replicate to every fleet
-member and contain no secret. An identity longer than 128 bytes refuses startup with an error
-identifying the compile-time build stamp.
+member and contain no secret. Both native and Nix stamp generators reject identities longer than
+128 bytes before producing a release binary. Startup also checks that bound as a defensive guard.
 
 A fleet's replicated claim log only grows, because every node holds every claim. Most of what it
 holds is old observation: a seat's state a minute ago, a diagnostic that has since repeated, a usage
