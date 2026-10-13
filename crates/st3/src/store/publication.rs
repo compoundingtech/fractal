@@ -5,6 +5,12 @@ use crate::publication::{Interruption, interruption};
 
 pub(crate) type Guard = dyn Fn(&DesiredSubject, &Check) -> Result<(), St3Error> + Sync;
 
+#[derive(Default)]
+pub(crate) struct CommitChecks<'a> {
+    pub owned: Option<&'a owned_sets::Options>,
+    pub guard: Option<&'a Guard>,
+}
+
 pub(crate) struct Check {
     #[cfg_attr(
         not(test),

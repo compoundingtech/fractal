@@ -10003,7 +10003,14 @@ impl Store {
         idempotency_key: &str,
         actor: Option<&str>,
     ) -> Result<ApplyResponse, St3Error> {
-        self.apply_as_impl(intent, expected, idempotency_key, actor, None, None, None)
+        self.apply_as_impl(
+            intent,
+            expected,
+            idempotency_key,
+            actor,
+            None,
+            publication::CommitChecks::default(),
+        )
     }
 
     /// Internal commit-time guard. Runs after subject CAS checks, before publication writes,
@@ -10017,7 +10024,17 @@ impl Store {
         actor: Option<&str>,
         guard: &publication::Guard,
     ) -> Result<ApplyResponse, St3Error> {
-        self.apply_as_impl(intent, expected, key, actor, None, None, Some(guard))
+        self.apply_as_impl(
+            intent,
+            expected,
+            key,
+            actor,
+            None,
+            publication::CommitChecks {
+                owned: None,
+                guard: Some(guard),
+            },
+        )
     }
 
     /// Atomically commit the declaration and its caller-facing completed response. Exact retries
@@ -10036,9 +10053,8 @@ impl Store {
             expected,
             key,
             None,
-            None,
             Some((response_key, &value)),
-            None,
+            publication::CommitChecks::default(),
         )
     }
 
@@ -10048,10 +10064,10 @@ impl Store {
         expected: &BTreeMap<String, Vec<String>>,
         idempotency_key: &str,
         actor: Option<&str>,
-        owned: Option<&owned_sets::Options>,
         local_receipt: Option<(&str, &Value)>,
-        guard: Option<&publication::Guard>,
+        checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, St3Error> {
+        let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, St3Error> {
                 message_subscriptions::validate_publisher(transaction, intent, actor)?;

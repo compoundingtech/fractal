@@ -1445,9 +1445,11 @@ impl Store {
             &options.expected_subjects,
             &key,
             Some(actor),
-            Some(options),
             None,
-            None,
+            publication::CommitChecks {
+                owned: Some(options),
+                guard: None,
+            },
         )
     }
 }

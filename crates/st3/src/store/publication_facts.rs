@@ -629,15 +629,13 @@ mod tests {
                 }
                 let page = std::time::Instant::now();
                 let tx = scratch.transaction().unwrap();
-                let mut processed = 0;
-                for (index, id) in &batch {
+                for (processed, (index, id)) in batch.iter().enumerate() {
                     if processed > 0 && page.elapsed() >= std::time::Duration::from_millis(10) {
                         break;
                     }
                     sync_from_source(&tx, &source, id).unwrap();
                     cursor = *index;
                     count += 1;
-                    processed += 1;
                 }
                 tx.commit().unwrap();
                 holds.push(page.elapsed().as_micros());
