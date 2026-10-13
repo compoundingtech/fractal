@@ -1196,6 +1196,21 @@ impl Reconciler<NativeRuntime> {
     }
 }
 
+/// The daemon's environment for every launch. The access mode is the install's and always wins; any
+/// other value, such as `ST_SEAT_PRIORITY`, is a default that a seat's own declaration replaces.
+fn overlay_runtime_environment(
+    member: &mut BTreeMap<String, String>,
+    runtime: &BTreeMap<String, String>,
+) {
+    for (key, value) in runtime {
+        if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV {
+            member.insert(key.clone(), value.clone());
+        } else {
+            member.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+}
+
 impl<R: RuntimeControl> Reconciler<R> {
     /// An unticked setup box makes Codex ask: its seats launch with Codex's own approval defaults.
     pub fn with_codex_asks(mut self, asks: bool) -> Self {
@@ -1207,6 +1222,15 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     pub fn with_access_mode(mut self, mode: st_drivers::access::AccessMode) -> Self {
         self.runtime_environment.insert(st_drivers::access::MODE_ENV.into(), mode.as_str().into());
+        self
+    }
+
+    /// The priority every seat and exec task starts at unless it declares its own
+    /// `ST_SEAT_PRIORITY`. Applies to launches after this call.
+    pub fn with_seat_priority(mut self, priority: st_runtime::SeatPriority) -> Self {
+        st_runtime::set_configured_seat_priority(priority);
+        self.runtime_environment
+            .insert(st_runtime::PRIORITY_ENV.into(), priority.as_str().into());
         self
     }
 
@@ -6105,16 +6129,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             );
         }
         let mut launch_member = member.clone();
-        for (key, value) in &self.runtime_environment {
-            if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV {
-                launch_member.environment.insert(key.clone(), value.clone());
-                continue;
-            }
-            launch_member
-                .environment
-                .entry(key.clone())
-                .or_insert_with(|| value.clone());
-        }
+        overlay_runtime_environment(&mut launch_member.environment, &self.runtime_environment);
         if launch_member.terminal {
             launch_member.terminal_size = self.launch_geometry()?;
         }
@@ -17112,6 +17127,19 @@ fn now_ms() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_seats_own_priority_replaces_the_installs() {
+        use super::overlay_runtime_environment;
+        use st_runtime::PRIORITY_ENV;
+        let runtime = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "background".to_string())]);
+        let mut plain = std::collections::BTreeMap::new();
+        overlay_runtime_environment(&mut plain, &runtime);
+        assert_eq!(plain[PRIORITY_ENV], "background");
+        let mut declared = std::collections::BTreeMap::from([(PRIORITY_ENV.to_string(), "normal".to_string())]);
+        overlay_runtime_environment(&mut declared, &runtime);
+        assert_eq!(declared[PRIORITY_ENV], "normal");
+    }
+
     mod channel_recovery;
     mod differential;
     mod doctor_eligibility_tests;

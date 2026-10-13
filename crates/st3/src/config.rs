@@ -18,6 +18,9 @@ pub struct Config {
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<st_drivers::access::AccessMode>,
+    /// How seats rank against the daemon for CPU and IO. Absent means `background`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seat_priority: Option<st_runtime::SeatPriority>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
@@ -356,6 +359,7 @@ impl Default for Config {
         Self {
             node: host_name(),
             access_mode: None,
+            seat_priority: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
@@ -382,6 +386,10 @@ impl Default for Config {
 impl Config {
     pub fn active_access_mode(&self) -> st_drivers::access::AccessMode {
         self.access_mode.unwrap_or_default()
+    }
+
+    pub fn active_seat_priority(&self) -> st_runtime::SeatPriority {
+        self.seat_priority.unwrap_or_default()
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
@@ -804,6 +812,18 @@ mod tests {
         let config: Config = toml::from_str("node=\"example\"\n").unwrap();
         assert!(config.work_root.is_none());
         assert!(!toml::to_string(&config).unwrap().contains("work_root"));
+    }
+
+    #[test]
+    fn seat_priority_defaults_to_background_and_accepts_normal() {
+        use st_runtime::SeatPriority;
+        assert_eq!(Config::default().active_seat_priority(), SeatPriority::Background);
+        let background: Config = toml::from_str("seat_priority=\"background\"").unwrap();
+        assert_eq!(background.active_seat_priority(), SeatPriority::Background);
+        let normal: Config = toml::from_str("seat_priority=\"normal\"").unwrap();
+        assert_eq!(normal.active_seat_priority(), SeatPriority::Normal);
+        assert!(toml::from_str::<Config>("seat_priority=\"high\"").is_err());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_priority"));
     }
 
     #[test]

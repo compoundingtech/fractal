@@ -413,7 +413,7 @@ impl PtyRuntime {
             ]);
         }
         arguments.push(OsString::from("--"));
-        arguments.extend(crate::work_prefix().into_iter().map(OsString::from));
+        arguments.extend(crate::work_prefix(env).into_iter().map(OsString::from));
         match launch {
             Launch::Shell(source) => {
                 arguments.extend([OsString::from("sh"), OsString::from("-c"), source.into()]);
