@@ -80,6 +80,9 @@ pub struct World {
     /// Each account's freshest limits reading, from the same read.
     #[serde(skip)]
     pub usage_limits: Vec<st3_client::UsageLimit>,
+    /// Every declared account, so the Usage tab lists the same accounts on every screen.
+    #[serde(skip)]
+    pub usage_accounts: Vec<st3_client::UsageAccount>,
     #[serde(skip)]
     pub agent_messages: Option<st3_client::AgentMessageEstimate>,
     /// The clients connected to this member now and those seen in the last few minutes.
