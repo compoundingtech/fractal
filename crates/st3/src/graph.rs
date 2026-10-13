@@ -1225,6 +1225,7 @@ fn parse_host(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: "host".into(),
             desired: canonical_node(&normalized)?,
@@ -1461,9 +1462,15 @@ fn parse_agent(
 
     let mut desired = canonical_node(node)?;
     normalize_agent_under(&mut desired, &host, context.owner_run.as_deref());
+    let accountable = st3_schema::accountable::from_desired(&desired)
+        .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
+    if accountable.is_some() && context.owner_run.is_some() {
+        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+    }
     insert_subject(
         context,
         DesiredSubject {
+            accountable,
             subject: subject.clone(),
             kind: "agent".into(),
             desired,
@@ -1517,6 +1524,7 @@ fn parse_agent(
         insert_subject(
             context,
             DesiredSubject {
+                accountable: None,
                 subject: task_subject,
                 kind: child.name().value().into(),
                 desired: canonical_node(child)?,
@@ -1593,6 +1601,7 @@ fn parse_standalone_member(
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired: canonical_node(node)?,
@@ -1636,6 +1645,7 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject,
             kind: kind.into(),
             desired: canonical_node(node)?,
@@ -1847,6 +1857,7 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
     insert_subject(
         context,
         DesiredSubject {
+            accountable: None,
             subject: subject.clone(),
             kind: "stop".into(),
             desired: json!({ "stop": subject }),
@@ -2839,6 +2850,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "bind-terminal",
         "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
@@ -2881,12 +2893,21 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "bind-terminal",
         "one-shot",
         "handles-faults",
+        "accountable",
         "mission-authority",
         "queue-authority",
         "seat-authority",
         "agent-authority",
     ] {
         unique_child(document, child)?;
+    }
+    if let Some(accountable) = unique_child(document, "accountable")? {
+        ensure_no_properties(accountable)?;
+        ensure_no_children(accountable)?;
+        let person = one_string(accountable)?;
+        if !st3_schema::accountable::person(&person) {
+            return Err(St3Error::new("invalid-accountable-root", "accountable must name one concrete person/NAME"));
+        }
     }
     if let Some(lifecycle) = unique_child(document, "lifecycle")? {
         ensure_no_properties(lifecycle)?;
@@ -4286,7 +4307,14 @@ fn validate_string_map(node: &KdlNode, environment: bool) -> Result<(), St3Error
 }
 
 pub(crate) fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Error> {
-    if node.name().value() == "account" {
+    validate_deferred_declaration_in(node, None)
+}
+
+/// `parent` is the enclosing node's name. An `account "NAME"` inside a harness block names an
+/// account a root declaration owns, the same reference a top-level seat makes, so a mission's agent
+/// may carry it; an `account` that declares one must stay at the root.
+fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Result<(), St3Error> {
+    if node.name().value() == "account" && parent != Some("harness") {
         return Err(St3Error::new(
             "account-inside-mission",
             "an account declaration must be at the root",
@@ -4301,7 +4329,7 @@ pub(crate) fn validate_deferred_declaration(node: &KdlNode) -> Result<(), St3Err
     }
     if let Some(children) = node.children() {
         for child in children.nodes() {
-            validate_deferred_declaration(child)?;
+            validate_deferred_declaration_in(child, Some(node.name().value()))?;
         }
     }
     Ok(())
@@ -5780,6 +5808,63 @@ version 2
             parse_intent(&unknown_field, "node").unwrap_err().code,
             "unknown-child"
         );
+    }
+
+    #[test]
+    fn a_missions_agent_names_an_account_the_way_a_top_level_seat_does() {
+        let mission = |harness_body: &str| {
+            format!(
+                r#"
+version 2
+
+mission "pinned" state="ready" {{
+  goal "Run on an account."
+  step "start" {{
+    agentless
+    agent "worker" {{
+      workspace "/tmp/example"
+      harness "claude" {{
+        model "claude-sonnet-5"
+        {harness_body}
+      }}
+    }}
+  }}
+}}
+"#
+            )
+        };
+        for body in [r#"account "example/claude-2""#, r#"account-pool "person/example""#] {
+            let source = mission(body);
+            parse_intent(&source, "node").unwrap_or_else(|error| panic!("{body}: {error:?}"));
+            parse_execution_intent(&source, "node", "run-1")
+                .unwrap_or_else(|error| panic!("{body} in a run: {error:?}"));
+        }
+
+        // The same reference at the top level is what a seat already does.
+        let top = r#"
+version 2
+
+agent "seat" {
+  workspace "/tmp/example"
+  harness "claude" {
+    model "claude-sonnet-5"
+    account "example/claude-2"
+  }
+}
+"#;
+        parse_intent(top, "node").unwrap();
+
+        // Declaring an account, in a step or beside a harness, stays root-only.
+        let declared = mission(r#"account "example/claude-2""#).replace(
+            "agentless",
+            "agentless\n    account \"example/claude-3\" {\n      provider \"anthropic\"\n    }",
+        );
+        assert_eq!(parse_intent(&declared, "node").unwrap_err().code, "account-inside-mission");
+        let beside = mission("").replace(
+            "      harness \"claude\"",
+            "      account \"example/claude-3\"\n      harness \"claude\"",
+        );
+        assert_eq!(parse_intent(&beside, "node").unwrap_err().code, "account-inside-mission");
     }
 
     #[test]

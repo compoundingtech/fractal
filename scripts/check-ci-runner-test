@@ -14,7 +14,7 @@ import itertools
 ROOT = Path(__file__).resolve().parent.parent
 workflow = (ROOT / ".github/workflows/fleet.yml").read_text()
 picker = workflow.split("  pick-runner:\n", 1)[1].split("  namespace-capacity:\n", 1)[0]
-assert "if: vars.CI1_RUNNERS == 'on'" in picker, "ci1 must ship disabled"
+assert "vars.CI1_RUNNERS == 'on'" in picker, "general PR picking remains opt-in"
 # Read this generated YAML block scalar without adding a YAML dependency to the CI shell.
 script = textwrap.dedent(picker.split("        run: |\n", 1)[1].split("\n      - ", 1)[0])
 bash = shutil.which("bash")
@@ -80,8 +80,8 @@ check("busy and offline runners do not count", [{"runners": [runner(busy=True), 
 check("three free slots serve both shards and canaries", [{"runners": [runner() for _ in range(3)] + [runner(busy=True), runner(status="offline")]}],
       {'ci1': ['ci1'], 'ci1_secondary': ['ci1'], 'ci1_mail': ['ci1']})
 check("merge-only runner excluded from PRs", [{"runners": [runner("ci1-merge")]}])
-check("merge groups wait for their reserved pool", [{"runners": [runner("ci1-merge", busy=True)]}], "ci1-merge", EVENT="merge_group")
-check("merge groups need no status token", [], "ci1-merge", EVENT="merge_group", GH_TOKEN="", api=False)
+check("merge groups wait for their reserved pool", [], 'ci1-priority', api=False, EVENT='merge_group')
+check("merge groups need no status token", [], 'ci1-priority', api=False, EVENT='merge_group')
 check("runner list spans API pages", [{"runners": [runner(busy=True)]}, {"runners": [runner()]}], "ci1")
 check("API failure falls back", idle, API_EXIT="1")
 check("invalid API response falls back", idle, API_RESPONSE="not JSON")
@@ -94,10 +94,10 @@ check("priority cannot bypass the fork boundary", idle, PR_LABELS='["ci-priority
 check("unrelated labels preserve normal routing", idle, "ci1", PR_LABELS='["area:ci"]')
 check("malformed labels preserve normal routing", idle, "ci1", PR_LABELS='invalid')
 
-check("priority merge group cannot queue behind priority PRs", [], "ci1-merge", EVENT="merge_group", GH_REPO_TOKEN="stand-in", QUEUE_REF="refs/heads/gh-readonly-queue/main/pr-42-" + "a"*40, API_LABEL_RESPONSE='["ci-priority"]')
-check("ordinary merge group retains reserved merge capacity", [], "ci1-merge", EVENT="merge_group", GH_REPO_TOKEN="stand-in", QUEUE_REF="refs/heads/gh-readonly-queue/main/pr-42-" + "a"*40, API_LABEL_RESPONSE='["area:ci"]')
-check("merge-label API failure retains reserved capacity", [], "ci1-merge", EVENT="merge_group", GH_REPO_TOKEN="stand-in", QUEUE_REF="refs/heads/gh-readonly-queue/main/pr-42-" + "a"*40, API_EXIT="1")
-check("malformed queue ref never requests a PR", [], "ci1-merge", EVENT="merge_group", GH_REPO_TOKEN="stand-in", QUEUE_REF="refs/heads/unrelated")
+check("priority merge group cannot queue behind priority PRs", [], 'ci1-priority', api=False, EVENT='merge_group')
+check("ordinary merge group retains reserved merge capacity", [], 'ci1-priority', api=False, EVENT='merge_group')
+check("merge-label API failure retains reserved capacity", [], 'ci1-priority', api=False, EVENT='merge_group')
+check("malformed queue ref never requests a PR", [], 'ci1-priority', api=False, EVENT='merge_group')
 
 four = [{'runners': [runner() for _ in range(4)]}]
 check("configured primary minimum permits all three jobs", four,
@@ -105,66 +105,38 @@ check("configured primary minimum permits all three jobs", four,
 check("primary minimum does not strand three idle general runners", [{'runners': [runner() for _ in range(3)]}],
       {'ci1_secondary': ['ci1'], 'ci1_mail': ['ci1']}, NEED='4')
 check("one extra slot serves second shard before canaries", idle, {'ci1_secondary': ['ci1']}, NEED='4')
-check("one general slot cannot be promised to two jobs", idle, "ci1-merge", EVENT='merge_group', NEED='4')
-check("two general slots let merge primary and secondary start", [{'runners': [runner(), runner()]}],
-      {'ci1': ['ci1-merge'], 'ci1_secondary': ['ci1']}, EVENT='merge_group', NEED='4')
+check("one general slot cannot be promised to two jobs", [], 'ci1-priority', api=False, EVENT='merge_group')
+check("two general slots let merge primary and secondary start", [], 'ci1-priority', api=False, EVENT='merge_group')
 check("priority primary leaves general slots for extra tests", four,
       {'ci1': ['ci1-priority'], 'ci1_secondary': ['ci1'], 'ci1_mail': ['ci1']}, PR_LABELS='["ci-priority"]', NEED='4')
 check("reserved workers never count as extra general capacity", [{'runners': [runner('ci1-priority'), runner('ci1-merge')]}],
       'ci1-priority', PR_LABELS='["ci-priority"]')
 check("status lookup failure preserves priority primary", four, 'ci1-priority', PR_LABELS='["ci-priority"]', API_EXIT='1')
-check("invalid status response preserves merge primary", four, 'ci1-merge', EVENT='merge_group', API_RESPONSE='not JSON')
+check("invalid status response preserves merge primary", [], 'ci1-priority', api=False, EVENT='merge_group')
 
-# Whole-group overflow chooses Namespace when admission cannot retain PR headroom.
-check("busy merge pool overflows", [{'runners': [runner('ci1-merge', busy=True)]}],
-      EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("missing status token overflows instead of queueing locally", [], api=False,
-      EVENT='merge_group', MERGE_LOCAL_ONLY='', GH_TOKEN='')
-check("failed runner lookup overflows", [], EVENT='merge_group', MERGE_LOCAL_ONLY='', API_EXIT='1')
-check("malformed runner lookup overflows", [], EVENT='merge_group', MERGE_LOCAL_ONLY='', API_RESPONSE='not JSON')
-check("five dedicated workers retain two PR slots", [{'runners': [runner('ci1-merge') for _ in range(5)] + [runner() for _ in range(2)]}],
-      {'merge_ci1': ['ci1-merge']}, EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("one PR slot is not enough", [{'runners': [runner('ci1-merge') for _ in range(5)] + [runner()]}],
-      EVENT='merge_group', MERGE_LOCAL_ONLY='')
-mixed = [runner() for _ in range(5)]
-for item in mixed: item['labels'].append({'name': 'ci1-merge'})
-check("five mixed workers allocate at most two consumers while retaining two PR slots", [{'runners': mixed}], {'merge_primary': ['ci1-merge'], 'merge_mail': ['ci1-merge']}, EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("five mixed plus two general workers admit a group", [{'runners': mixed + [runner(), runner()]}],
-      {'merge_ci1': ['ci1-merge']}, EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("duplicated API runner IDs never inflate capacity", [{'runners': mixed}, {'runners': mixed}],
-      {'merge_primary': ['ci1-merge'], 'merge_mail': ['ci1-merge']}, EVENT='merge_group', MERGE_LOCAL_ONLY='')
-priority = [runner('ci1-priority') for _ in range(7)]
-for item in priority: item['labels'].extend([{'name': 'ci1-merge'}, {'name': 'ci1'}])
-check("priority-only workers remain reserved", [{'runners': priority}], EVENT='merge_group', MERGE_LOCAL_ONLY='')
-
-# Partial routing charges every local job against general headroom, even when
-# dedicated workers are idle: a ci1-merge label can also select a mixed worker.
-check("two dedicated and three general idle slots serve only the primary consumer", [{"runners": [runner('ci1-merge') for _ in range(2)] + [runner() for _ in range(3)]}],
-      {'merge_primary': ['ci1-merge']}, EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("two dedicated and four general idle slots serve primary and mail", [{"runners": [runner('ci1-merge') for _ in range(2)] + [runner() for _ in range(4)]}],
-      {'merge_primary': ['ci1-merge'], 'merge_mail': ['ci1-merge']}, EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("two dedicated but no general headroom must not borrow PR capacity", [{"runners": [runner('ci1-merge') for _ in range(2)] + [runner() for _ in range(2)]}],
-      EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("one merge worker cannot be offered to two consumers", [{"runners": [runner('ci1-merge')] + [runner() for _ in range(4)]}],
-      {'merge_primary': ['ci1-merge']}, EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("no idle merge label never routes partial consumers", [{"runners": [runner() for _ in range(5)] + [runner('ci1-merge', busy=True)]}],
-      EVENT='merge_group', MERGE_LOCAL_ONLY='')
-check("priority-labelled mixed worker cannot provide partial capacity", [{"runners": priority + [runner() for _ in range(4)]}],
-      EVENT='merge_group', MERGE_LOCAL_ONLY='')
+# Merge admission must not consult a busy/missing/malformed runner snapshot.
+for token, pages, response in [('', [], ''), ('fixture', [], 'not JSON'),
+                               ('fixture', [{'runners': [runner(busy=True)]}], '')]:
+    check('merge owns priority regardless of idle/API metadata', pages, 'ci1-priority',
+          api=False, EVENT='merge_group', GH_TOKEN=token, API_RESPONSE=response)
 
 # Supporting PR jobs must never spend ordinary work on priority/merge capacity.
 import re
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", workflow.split("\njobs:\n", 1)[1]))
-required_priority = "(github.event_name == 'merge_group' || github.event_name == 'pull_request') && 1 || 2"
-for job in ("linux-clippy", "linux-fleet-compat", "genie-freshness", "typescript-client", "isolation-vm", "perf-cost"):
+required_priority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
+for job in ("linux-clippy", "linux-fleet-compat", "isolation-vm", "perf-cost"):
     assert "outputs.ci1" not in blocks[job], (job, "supporting job consumes reserved cores")
-    assert (required_priority if job != "perf-cost" else "github.event_name == 'merge_group' && 1 || 2") in blocks[job], (job, "required PR checks share merge priority; optional cost stays separate")
+    assert (required_priority if job != "perf-cost" else "github.event_name == 'merge_group' && 1 || 3") in blocks[job], (job, "merge precedes PR; optional cost stays separate")
     assert "github.run-id=" in blocks[job], (job, "prevent cross-run assignment")
-    if job in ("genie-freshness", "typescript-client", "isolation-vm"):
+    if job == 'isolation-vm':
         assert "namespace-profile-linux-x86-64;job.priority={1};github.run-id=" in blocks[job], (job, "profile controls must be inline")
         assert "namespace-features:" not in blocks[job], (job, "separate feature labels are unsupported with profiles")
     else:
         assert "namespace-features:github.run-id=" in blocks[job], (job, "shape labels need a separate features label")
+for job in ('genie-freshness', 'typescript-client'):
+    assert 'runs-on: ubuntu-latest' in blocks[job], (job, 'light checks must not consume reserved or Namespace capacity')
+    assert 'namespace-profile-' not in blocks[job] and 'namespace-features:' not in blocks[job] and 'cargo-cache' not in blocks[job], job
+    assert 'Keep valid same-source build outputs' not in blocks[job] and 'build-snapshot' not in blocks[job], job
 for job, output in [('linux-tests-shard-2', 'ci1_secondary'), ('mail-redelivery-canaries', 'ci1_mail')]:
     assert f'outputs.{output}) ||' in blocks[job], (job, 'extra jobs need their own idle-slot output')
     assert not re.search(r'outputs\.ci1\b', blocks[job]), (job, 'extra jobs must never take the primary reserved lane')
@@ -194,16 +166,27 @@ assert 'CI_TEST_PARTITION' not in canaries, "every required canary must run"
 assert 'mail_redelivery' not in blocks['linux-tests'] and 'scripts/ci-mail-redelivery-canaries' not in blocks['linux-tests'], "canaries cannot serialize the primary shard"
 assert 'needs.mail-redelivery-canaries.result' in blocks['linux-gate'], "failures and skips must still fail the Linux gate"
 assert "job.priority={1}" in blocks["linux-tests"] and "github.run-id={0}" in blocks["linux-tests"], "event priority and evaluated run id in Namespace fallback"
-for path in ("perf.yml", "main-upkeep.yml", "public-repo.yml", "release-daily.yml", "release-portable.yml", "release-smalltalk.yml"):
+performance = (ROOT / ".github/workflows/perf.yml").read_text()
+assert "nscloud-ubuntu-24.04-amd64-8x16-with-features;job.priority=3" in performance
+assert "github.run-id=" in performance
+for path in ("main-upkeep.yml",):
     generated = (ROOT / ".github/workflows" / path).read_text()
-    assert ";job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}" in generated, (path, "non-merge Linux work keeps the second class")
+    assert ";job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in generated, (path, "non-merge Linux work keeps the second class")
     assert "github.run-id=" in generated, (path, "avoid nondeterministic runner pickup")
     assert ";job.priority=10" not in generated, path
 for path in ("public-repo.yml", "release-daily.yml", "release-portable.yml", "release-smalltalk.yml", "macos.yml"):
     generated = (ROOT / ".github/workflows" / path).read_text()
     assert "namespace-features:" not in generated, (path, "profile workflows must use inline controls")
 release = (ROOT / ".github/workflows/release-smalltalk.yml").read_text()
-assert "${{ matrix.runner }};github.run-id=${{ github.run_id }}" in release, "both release profile matrix entries need evaluated inline affinity"
+assert "github.event_name != 'pull_request' && 'ci1-priority' || matrix.runner" in release
+assert 'runner: macos-15' in release and 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}' in release
+assert 'namespace-profile-macos' not in release, 'native Mac releases must not depend on saturated Namespace'
+assert 'ubuntu-latest' in release, 'installer checks and assembly stay off compiler capacity'
+release_blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", release.split("\njobs:\n", 1)[1]))
+for job in ('assemble', 'publish'):
+    assert 'runs-on: ubuntu-latest' in release_blocks[job], (job, 'artifact verification must not wait for a compiler runner')
+assert 'runs-on: [ci1-priority]' in (ROOT / '.github/workflows/release-portable.yml').read_text()
+assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/release-daily.yml').read_text()
 assert "linux-tests-shard-2" in blocks["linux-gate"], "both shards must be required"
 assert 'CI_TEST_PARTITION: "hash:1/2"' in blocks["linux-tests"]
 assert 'CI_TEST_PARTITION: "hash:2/2"' in blocks["linux-tests-shard-2"]
@@ -221,29 +204,18 @@ def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', part
     expression = expression.replace('github.event_name', repr(event)).replace('github.run_id', '123').replace('vars.CI_MERGE_NAMESPACE_PROFILE', repr(profile)).replace('vars.CI_MERGE_CI1', repr(merge_ci1))
     return eval(expression.replace('&&', ' and ').replace('||', ' or '), {'__builtins__': {}}, {'fromJSON': json.loads, 'format': lambda template, *args: template.format(*args)})
 
-for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'genie-freshness', 'typescript-client', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
-    assert route(job, 'merge_group', merge_ci1='on') == ['ci1-merge'], job
-    assert route(job, 'merge_group', 'queue-reserved', '["ci1"]', merge_ci1='on') == ['ci1-merge'], (job, 'configured reservation overrides picked general slots')
-    assert route(job, 'merge_group', 'queue-reserved') == ['namespace-profile-queue-reserved;job.priority=1;github.run-id=123'], job
-    assert route(job, 'merge_group', merge_picked='["ci1-merge"]') == ['ci1-merge'], (job, 'one admitted group uses the same local pool for every job')
-    merge_fallback = route(job, 'merge_group')
-    assert 'job.priority=1' in merge_fallback[0] and any('github.run-id=123' in label for label in merge_fallback), job
+for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
+    for switch in ('', 'off', 'on'):
+        for profile in ('', 'queue-reserved'):
+            assert route(job, 'merge_group', profile, '["ci1"]', merge_ci1=switch) == ['ci1-priority'], (job, 'merge must never overflow to Namespace')
     for event in ('pull_request', 'workflow_dispatch'):
         ordinary = route(job, event)
         assert ordinary == route(job, event, 'queue-reserved', merge_ci1='on'), (job, 'PRs cannot consume reserved profile')
-        assert f"job.priority={1 if event == 'pull_request' else 2}" in ordinary[0], (job, 'required PRs share merge class; manual work remains second')
-    if job in ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
-        assert route(job, 'merge_group', 'queue-reserved', '["ci1-merge"]') == ['namespace-profile-queue-reserved;job.priority=1;github.run-id=123'], (job, 'no individual picked lane may override whole-group admission')
-for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'genie-freshness', 'typescript-client', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
-    selected = route(job, 'merge_group', partial_primary='["ci1-merge"]', partial_mail='["ci1-merge"]')
-    assert (selected == ['ci1-merge']) == (job in ('linux-tests', 'mail-redelivery-canaries')), (job, 'partial allocation must not reach the producer or supporting jobs')
-    assert route(job, 'pull_request', partial_primary='["ci1-merge"]', partial_mail='["ci1-merge"]') == route(job, 'pull_request'), (job, 'merge consumer allocation cannot reach PRs')
-assert 'outputs.merge_primary' in blocks['linux-tests']
-assert 'outputs.merge_mail' in blocks['mail-redelivery-canaries']
-assert 'outputs.merge_primary' not in blocks['linux-test-build']
+        assert f"job.priority={2 if event == 'pull_request' else 3}" in ordinary[0], (job, 'ordinary fallback retains its queue class')
+assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/public-repo.yml').read_text()
 assert required_priority not in blocks['perf-cost'], 'optional cost must not join required PR priority'
-assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }}" in blocks['perf-cost']
-print('passed: required PR and merge checks share priority; optional/manual remain second; reservations, shapes and affinity preserved')
+assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in blocks['perf-cost']
+print('passed: release/merge precede PR checks, then optional/manual; reservations, shapes and affinity preserved')
 
 # Exercise the actual generated step predicates, including restoring ordinary behavior.
 cache_conditions = re.findall(

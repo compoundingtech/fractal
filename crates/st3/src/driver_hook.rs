@@ -243,6 +243,7 @@ fn live_claude_label(env: &dyn HookEnv, identity: &str) -> Result<String> {
         let desired = serde_json::json!({"display_name": display_name});
         Ok(crate::mailbox::seat_label(
             &crate::model::DesiredSubject {
+                accountable: None,
                 subject,
                 kind: "agent".into(),
                 desired,

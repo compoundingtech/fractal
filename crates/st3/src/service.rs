@@ -1,5 +1,7 @@
 //! Install the st daemon as a native user service.
 
+use crate::{cli_print as print, cli_println as println};
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,12 +18,59 @@ use crate::config::Config;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod install;
 
+
+/// The names the service manager knows this install by. An instance has its own, so installing,
+/// restarting or removing it can never act on the default install's service.
+struct ServiceNames {
+    service: String,
+    replication_service: String,
+    label: String,
+    replication_label: String,
+}
+
+/// A service-manager command. The manager belongs to the real user session, so an instance's
+/// own `XDG_*` directories are put back for it.
+pub(crate) fn host_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    crate::instance::as_host(&mut command);
+    command
+}
+
+fn service_names() -> &'static ServiceNames {
+    static NAMES: std::sync::OnceLock<ServiceNames> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| match crate::instance::current() {
+        Some(instance) => ServiceNames {
+            service: instance.systemd_service(),
+            replication_service: instance.systemd_replication_service(),
+            label: instance.launchd_label(),
+            replication_label: instance.launchd_replication_label(),
+        },
+        None => ServiceNames {
+            service: "st3.service".into(),
+            replication_service: "st3-replication.service".into(),
+            label: "com.compoundingtech.st3".into(),
+            replication_label: "com.compoundingtech.st3.replication".into(),
+        },
+    })
+}
+
 #[cfg(any(target_os = "linux", test))]
-const SERVICE_NAME: &str = "st3.service";
+fn service_name() -> &'static str {
+    &service_names().service
+}
+
 #[cfg(any(target_os = "linux", test))]
-const REPLICATION_SERVICE_NAME: &str = "st3-replication.service";
-const SERVICE_LABEL: &str = "com.compoundingtech.st3";
-const REPLICATION_SERVICE_LABEL: &str = "com.compoundingtech.st3.replication";
+fn replication_service_name() -> &'static str {
+    &service_names().replication_service
+}
+
+fn service_label() -> &'static str {
+    &service_names().label
+}
+
+fn replication_service_label() -> &'static str {
+    &service_names().replication_label
+}
 pub const DEFAULT_MEMORY_MAX_MB: u64 = 1024;
 
 #[derive(Clone, Debug, Serialize)]
@@ -42,7 +91,9 @@ pub struct ServiceStatus {
 pub struct ServiceSpec {
     exe: PathBuf,
     config: Config,
+    config_path: Option<PathBuf>,
     memory_max_mb: u64,
+    read_cache_kib: Option<usize>,
 }
 
 impl ServiceSpec {
@@ -68,7 +119,9 @@ impl ServiceSpec {
         Ok(Self {
             exe: exe.into(),
             config,
+            config_path: None,
             memory_max_mb,
+            read_cache_kib: None,
         })
     }
 
@@ -85,8 +138,18 @@ impl ServiceSpec {
             "--client-gateway-socket".into(),
             self.config.client_gateway_socket.display().to_string(),
         ];
+        if let Some(path) = &self.config_path {
+            arguments.extend(["--config".into(), path.display().to_string()]);
+        }
         if let Some(pty_root) = &self.config.pty_root {
             arguments.extend(["--pty-root".into(), pty_root.display().to_string()]);
+        }
+        // Downloaded archives and setup put pty next to st3. A service must remain
+        // usable before ~/.local/bin has been added to the login shell's PATH.
+        if let Some(pty) = self.exe.parent().map(|parent| parent.join("pty"))
+            .filter(|pty| pty.is_file())
+        {
+            arguments.extend(["--pty-binary".into(), pty.display().to_string()]);
         }
         self.push_fleet_arguments(&mut arguments);
         arguments
@@ -127,12 +190,19 @@ impl ServiceSpec {
             "--socket".into(),
             self.config.socket.display().to_string(),
         ];
+        if let Some(path) = &self.config_path {
+            arguments.extend(["--config".into(), path.display().to_string()]);
+        }
         self.push_fleet_arguments(&mut arguments);
         arguments
     }
 }
 
-pub fn install(mut config: Config) -> Result<()> {
+pub fn install(config: Config) -> Result<()> {
+    install_from_config_path(config, None)
+}
+
+pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) -> Result<()> {
     crate::node_identity::resolve(&mut config)?;
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
@@ -162,9 +232,12 @@ pub fn install(mut config: Config) -> Result<()> {
     ) {
         crate::peer::FleetAuth::load(fleet_id, secret)?;
     }
-    let spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    let mut spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    spec.read_cache_kib = crate::read_cache::override_kib();
+    spec.config_path = config_path.map(|path| absolute_from(&current, path));
     if spec.config.access_mode.is_some() {
-        spec.config.initialize_install_config(&Config::default_path())?;
+        let path = spec.config_path.clone().unwrap_or_else(Config::default_path);
+        spec.config.initialize_install_config(&path)?;
     }
     install_native_service(&spec)?;
     println!("installed");
@@ -430,12 +503,13 @@ fn status_native_service() -> Result<ServiceStatusReport> {
 
 #[cfg(target_os = "linux")]
 fn restart_native_service(config: &Config) -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", REPLICATION_SERVICE_NAME])
-        .status();
-    run_command("systemctl", &["--user", "restart", SERVICE_NAME])?;
+    optional_systemd_command(
+        replication_service_name(),
+        &["--user", "stop", replication_service_name()],
+    )?;
+    run_command("systemctl", &["--user", "restart", service_name()])?;
     if config.fleet_id.is_some() {
-        run_command("systemctl", &["--user", "start", REPLICATION_SERVICE_NAME])?;
+        run_command("systemctl", &["--user", "start", replication_service_name()])?;
     }
     wait_for_service_sockets(config)
 }
@@ -447,17 +521,52 @@ fn uninstall_native_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn stop_native_service() -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", REPLICATION_SERVICE_NAME])
-        .status();
-    run_command("systemctl", &["--user", "stop", SERVICE_NAME])
+    optional_systemd_command(
+        replication_service_name(),
+        &["--user", "stop", replication_service_name()],
+    )?;
+    run_command("systemctl", &["--user", "stop", service_name()])
+}
+
+#[cfg(target_os = "linux")]
+fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
+    let output = host_command("systemctl")
+        .args(arguments)
+        .output()
+        .with_context(|| format!("run systemctl {}", arguments.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // A unit file may be gone while its service remains loaded. Only the manager can
+    // establish that a failed stop/disable addressed an absent, inactive unit.
+    let status = host_command("systemctl")
+        .args([
+            "--user",
+            "show",
+            name,
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--no-pager",
+        ])
+        .output()
+        .with_context(|| format!("check whether {name} is absent"))?;
+    let states = String::from_utf8_lossy(&status.stdout);
+    anyhow::ensure!(
+        states.lines().any(|line| line == "LoadState=not-found")
+            && states.lines().any(|line| line == "ActiveState=inactive"),
+        "systemctl {} failed with {}: {}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn start_native_service() -> Result<()> {
-    run_command("systemctl", &["--user", "start", SERVICE_NAME])?;
+    run_command("systemctl", &["--user", "start", service_name()])?;
     if replication_systemd_user_unit_path()?.exists() {
-        run_command("systemctl", &["--user", "start", REPLICATION_SERVICE_NAME])?;
+        run_command("systemctl", &["--user", "start", replication_service_name()])?;
     }
     Ok(())
 }
@@ -478,8 +587,8 @@ fn status_native_service() -> Result<ServiceStatusReport> {
     Ok(ServiceStatusReport {
         manager: "launchd-user",
         services: vec![
-            launchd_service_status(SERVICE_LABEL, &launch_agent_path()?)?,
-            launchd_service_status(REPLICATION_SERVICE_LABEL, &replication_launch_agent_path()?)?,
+            launchd_service_status(service_label(), &launch_agent_path()?)?,
+            launchd_service_status(replication_service_label(), &replication_launch_agent_path()?)?,
         ],
     })
 }
@@ -495,7 +604,7 @@ fn launchd_service_status(label: &str, plist: &Path) -> Result<ServiceStatus> {
         });
     }
     let target = format!("{}/{label}", launch_domain());
-    let output = Command::new("launchctl")
+    let output = host_command("launchctl")
         .args(["print", &target])
         .output()
         .with_context(|| format!("run launchctl print {target}"))?;
@@ -528,13 +637,13 @@ fn parse_launchd_state(output: &str) -> String {
 #[cfg(target_os = "macos")]
 fn restart_native_service(config: &Config) -> Result<()> {
     let domain = launch_domain();
-    let replication_service = format!("{domain}/{REPLICATION_SERVICE_LABEL}");
-    let _ = Command::new("launchctl")
+    let replication_service = format!("{domain}/{}", replication_service_label());
+    let _ = host_command("launchctl")
         .args(["bootout", &replication_service])
         .status();
     run_command(
         "launchctl",
-        &["kickstart", "-k", &format!("{domain}/{SERVICE_LABEL}")],
+        &["kickstart", "-k", &format!("{domain}/{}", service_label())],
     )?;
     if config.fleet_id.is_some() {
         let plist = replication_launch_agent_path()?;
@@ -548,18 +657,18 @@ fn restart_native_service(config: &Config) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn uninstall_native_service() -> Result<()> {
-    let service = format!("{}/{SERVICE_LABEL}", launch_domain());
-    let _ = Command::new("launchctl")
+    let service = format!("{}/{}", launch_domain(), service_label());
+    let _ = host_command("launchctl")
         .args(["bootout", &service])
         .status();
-    let _ = Command::new("launchctl")
+    let _ = host_command("launchctl")
         .args(["disable", &service])
         .status();
-    let replication_service = format!("{}/{REPLICATION_SERVICE_LABEL}", launch_domain());
-    let _ = Command::new("launchctl")
+    let replication_service = format!("{}/{}", launch_domain(), replication_service_label());
+    let _ = host_command("launchctl")
         .args(["bootout", &replication_service])
         .status();
-    let _ = Command::new("launchctl")
+    let _ = host_command("launchctl")
         .args(["disable", &replication_service])
         .status();
     let plist = launch_agent_path()?;
@@ -575,15 +684,15 @@ fn uninstall_native_service() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn stop_native_service() -> Result<()> {
-    let _ = Command::new("launchctl")
+    let _ = host_command("launchctl")
         .args([
             "bootout",
-            &format!("{}/{REPLICATION_SERVICE_LABEL}", launch_domain()),
+            &format!("{}/{}", launch_domain(), replication_service_label()),
         ])
         .status();
     run_command(
         "launchctl",
-        &["bootout", &format!("{}/{SERVICE_LABEL}", launch_domain())],
+        &["bootout", &format!("{}/{}", launch_domain(), service_label())],
     )
 }
 
@@ -597,7 +706,7 @@ fn start_native_service() -> Result<()> {
     )?;
     run_command(
         "launchctl",
-        &["kickstart", &format!("{domain}/{SERVICE_LABEL}")],
+        &["kickstart", &format!("{domain}/{}", service_label())],
     )?;
     let replication_plist = replication_launch_agent_path()?;
     if replication_plist.exists() {
@@ -613,7 +722,7 @@ fn start_native_service() -> Result<()> {
             "launchctl",
             &[
                 "kickstart",
-                &format!("{domain}/{REPLICATION_SERVICE_LABEL}"),
+                &format!("{domain}/{}", replication_service_label()),
             ],
         )?;
     }
@@ -635,15 +744,15 @@ fn status_systemd_user() -> Result<ServiceStatusReport> {
     Ok(ServiceStatusReport {
         manager: "systemd-user",
         services: vec![
-            systemd_service_status(SERVICE_NAME)?,
-            systemd_service_status(REPLICATION_SERVICE_NAME)?,
+            systemd_service_status(service_name())?,
+            systemd_service_status(replication_service_name())?,
         ],
     })
 }
 
 #[cfg(target_os = "linux")]
 fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
-    let output = Command::new("systemctl")
+    let output = host_command("systemctl")
         .args([
             "--user",
             "show",
@@ -685,12 +794,11 @@ fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
 
 #[cfg(target_os = "linux")]
 fn uninstall_systemd_user() -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", SERVICE_NAME])
-        .status();
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", REPLICATION_SERVICE_NAME])
-        .status();
+    optional_systemd_command(service_name(), &["--user", "disable", "--now", service_name()])?;
+    optional_systemd_command(
+        replication_service_name(),
+        &["--user", "disable", "--now", replication_service_name()],
+    )?;
     let unit_path = systemd_user_unit_path()?;
     if unit_path.exists() {
         fs::remove_file(unit_path)?;
@@ -747,7 +855,7 @@ fn launch_agent_path() -> Result<PathBuf> {
     Ok(
         PathBuf::from(env::var_os("HOME").context("HOME is not set")?)
             .join("Library/LaunchAgents")
-            .join(format!("{SERVICE_LABEL}.plist")),
+            .join(format!("{}.plist", service_label())),
     )
 }
 
@@ -756,7 +864,7 @@ fn replication_launch_agent_path() -> Result<PathBuf> {
     Ok(
         PathBuf::from(env::var_os("HOME").context("HOME is not set")?)
             .join("Library/LaunchAgents")
-            .join(format!("{REPLICATION_SERVICE_LABEL}.plist")),
+            .join(format!("{}.plist", replication_service_label())),
     )
 }
 
@@ -767,24 +875,20 @@ fn launch_domain() -> String {
 
 #[cfg(target_os = "linux")]
 fn systemd_user_unit_path() -> Result<PathBuf> {
-    let base = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    Ok(base
+    // systemd reads units from the real user config directory, never an instance's.
+    Ok(crate::instance::host_config_home()
         .context("HOME and XDG_CONFIG_HOME are not set")?
         .join("systemd/user")
-        .join(SERVICE_NAME))
+        .join(service_name()))
 }
 
 #[cfg(target_os = "linux")]
 fn replication_systemd_user_unit_path() -> Result<PathBuf> {
-    let base = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    Ok(base
+    // systemd reads units from the real user config directory, never an instance's.
+    Ok(crate::instance::host_config_home()
         .context("HOME and XDG_CONFIG_HOME are not set")?
         .join("systemd/user")
-        .join(REPLICATION_SERVICE_NAME))
+        .join(replication_service_name()))
 }
 
 fn wait_for_service_sockets(config: &Config) -> Result<()> {
@@ -829,7 +933,11 @@ pub fn render_systemd_user_unit(spec: &ServiceSpec) -> String {
         .map(|argument| systemd_quote_arg(argument))
         .collect::<Vec<_>>()
         .join(" ");
+    let cache_environment = spec.read_cache_kib
+        .map(|kib| format!("Environment=SMALLCLAIMS_READ_CACHE_KIB={kib}\n"))
+        .unwrap_or_default();
     let weight = st_runtime::LIVE_WEIGHT;
+    let instance_environment = systemd_instance_environment();
     format!(
         "[Unit]\n\
 Description=st claims graph daemon\n\
@@ -839,7 +947,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
-Restart=on-failure\n\
+{instance_environment}{cache_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
 CPUWeight={weight}\n\
@@ -851,6 +959,18 @@ MemoryMax={}M\n\
 WantedBy=default.target\n",
         spec.memory_max_mb,
     )
+}
+
+/// The lines that start an instance's daemon inside the instance. Empty for the default install.
+fn systemd_instance_environment() -> String {
+    systemd_environment_lines(&crate::instance::service_environment())
+}
+
+fn systemd_environment_lines(variables: &[(String, String)]) -> String {
+    variables
+        .iter()
+        .map(|(name, value)| format!("Environment={}\n", systemd_quote_arg(&format!("{name}={value}"))))
+        .collect()
 }
 
 pub fn render_systemd_replication_unit(spec: &ServiceSpec) -> String {
@@ -871,6 +991,7 @@ fn render_systemd_program_unit(
         .map(|argument| systemd_quote_arg(argument))
         .collect::<Vec<_>>()
         .join(" ");
+    let instance_environment = systemd_instance_environment();
     format!(
         "[Unit]\n\
 Description={description}\n\
@@ -880,7 +1001,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
-Restart=on-failure\n\
+{instance_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
 CPUWeight=100\n\
@@ -895,7 +1016,7 @@ WantedBy=default.target\n",
 
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
     render_launchd_program_plist(
-        SERVICE_LABEL,
+        service_label(),
         &spec.program_arguments(),
         "st3.stdout.log",
         "st3.stderr.log",
@@ -906,7 +1027,7 @@ pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
 
 pub fn render_launchd_replication_plist(spec: &ServiceSpec) -> String {
     render_launchd_program_plist(
-        REPLICATION_SERVICE_LABEL,
+        replication_service_label(),
         &spec.replication_program_arguments(),
         "st3-replication.stdout.log",
         "st3-replication.stderr.log",
@@ -927,6 +1048,13 @@ fn render_launchd_program_plist(
         .iter()
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
+    let mut environment = crate::instance::service_environment();
+    if label == service_label()
+        && let Some(kib) = spec.read_cache_kib
+    {
+        environment.push(("SMALLCLAIMS_READ_CACHE_KIB".to_owned(), kib.to_string()));
+    }
+    let instance_environment = plist_environment(&environment);
     let stdout = spec.config.state_dir.join("logs").join(stdout_name);
     let stderr = spec.config.state_dir.join("logs").join(stderr_name);
     format!(
@@ -936,7 +1064,7 @@ fn render_launchd_program_plist(
 <dict>\n\
   <key>Label</key><string>{label}</string>\n\
   <key>ProgramArguments</key>\n  <array>\n{arguments}  </array>\n\
-  <key>RunAtLoad</key><true/>\n\
+{instance_environment}  <key>RunAtLoad</key><true/>\n\
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n\
   <key>ProcessType</key><string>{process_type}</string>\n\
   <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>8192</integer></dict>\n\
@@ -947,6 +1075,17 @@ fn render_launchd_program_plist(
         xml_escape(&stdout.display().to_string()),
         xml_escape(&stderr.display().to_string()),
     )
+}
+
+fn plist_environment(variables: &[(String, String)]) -> String {
+    if variables.is_empty() {
+        return String::new();
+    }
+    let entries = variables
+        .iter()
+        .map(|(name, value)| format!("<key>{}</key><string>{}</string>", xml_escape(name), xml_escape(value)))
+        .collect::<String>();
+    format!("  <key>EnvironmentVariables</key><dict>{entries}</dict>\n")
 }
 
 fn xml_escape(value: &str) -> String {
@@ -985,6 +1124,36 @@ fn systemd_quote_arg(argument: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::PeerConfig;
+
+    #[test]
+    fn reader_cache_override_is_persisted_for_the_daemon_on_both_platforms() -> Result<()> {
+        let mut spec = ServiceSpec::new("/usr/bin/st3", Config::default(), 1024)?;
+        assert!(!render_systemd_user_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        assert!(!render_launchd_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        spec.read_cache_kib = Some(1024);
+        assert!(render_systemd_user_unit(&spec)
+            .contains("Environment=SMALLCLAIMS_READ_CACHE_KIB=1024\n"));
+        assert!(render_launchd_plist(&spec).contains(
+            "<key>EnvironmentVariables</key><dict><key>SMALLCLAIMS_READ_CACHE_KIB</key><string>1024</string></dict>"
+        ));
+        assert!(!render_systemd_replication_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        assert!(!render_launchd_replication_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        Ok(())
+    }
+
+    #[test]
+    fn setup_service_pins_the_config_and_sibling_pty() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("st3");
+        fs::write(root.path().join("pty"), b"fixture")?;
+        let mut spec = ServiceSpec::new(executable, Config::default(), 1024)?;
+        spec.config_path = Some(root.path().join("custom/config.toml"));
+        let arguments = spec.program_arguments();
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--config" && pair[1].ends_with("custom/config.toml")));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--pty-binary" && pair[1].ends_with("/pty")));
+        assert!(spec.replication_program_arguments().contains(&"--config".into()));
+        Ok(())
+    }
 
     #[test]
     fn membership_units_carry_no_peer_fleet_or_secret_arguments() -> Result<()> {
@@ -1200,5 +1369,41 @@ mod tests {
             },
         ]);
         assert_eq!(ids, ["running".to_owned()].into_iter().collect());
+    }
+
+    #[test]
+    fn an_instances_units_carry_its_environment_and_the_default_units_carry_none() {
+        let instance = crate::instance::Instance::new(Path::new("/home/example"), "try").unwrap();
+        let mut variables = vec![("ST_INSTANCE".to_owned(), "try".to_owned())];
+        variables.extend(
+            instance
+                .environment()
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.display().to_string())),
+        );
+        variables.push(("ST_INSTANCE_HOST_XDG_RUNTIME_DIR".into(), String::new()));
+        let unit = systemd_environment_lines(&variables);
+        assert!(unit.contains("Environment=ST_INSTANCE=try\n"), "{unit}");
+        assert!(unit.contains("Environment=XDG_STATE_HOME=/home/example/.st-instance/try/state\n"), "{unit}");
+        assert!(unit.contains("Environment=CODEX_HOME=/home/example/.st-instance/try/codex\n"), "{unit}");
+        assert!(unit.contains("Environment=ST_INSTANCE_HOST_XDG_RUNTIME_DIR=\n"), "{unit}");
+        let plist = plist_environment(&variables);
+        assert!(plist.contains("<key>ST_INSTANCE</key><string>try</string>"), "{plist}");
+        assert!(plist.contains("<key>XDG_RUNTIME_DIR</key><string>/home/example/.st-instance/try/run</string>"), "{plist}");
+        assert_eq!(systemd_environment_lines(&[]), "");
+        assert_eq!(plist_environment(&[]), "");
+        // Values with systemd specifiers cannot expand into something else.
+        assert_eq!(
+            systemd_environment_lines(&[("A".into(), "100%$HOME".into())]),
+            "Environment=\"A=100%%$$HOME\"\n"
+        );
+    }
+
+    #[test]
+    fn the_default_install_keeps_its_service_names() {
+        assert_eq!(service_name(), "st3.service");
+        assert_eq!(replication_service_name(), "st3-replication.service");
+        assert_eq!(service_label(), "com.compoundingtech.st3");
+        assert_eq!(replication_service_label(), "com.compoundingtech.st3.replication");
     }
 }
