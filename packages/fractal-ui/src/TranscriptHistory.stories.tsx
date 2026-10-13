@@ -175,7 +175,8 @@ async function focusHistoryKeyboardRow(lane: HTMLElement, id?: number): Promise<
       const rectangle = candidate.getBoundingClientRect()
       if (rectangle.height > 0 && rectangle.bottom > viewport.top && rectangle.top < viewport.bottom) { target = candidate; break }
     }
-    await expect(target !== null, 'History keyboard setup: active RAC row').toBe(true)
+    const wanted = id === undefined ? undefined : lane.querySelector<HTMLElement>(`[data-embrace-entry-id="history/${id}"]`)
+    await expect(target !== null, `History keyboard setup: active RAC row ${id ?? 'any'} (top ${lane.scrollTop}, lane ${Math.round(viewport.top)}-${Math.round(viewport.bottom)}, row ${wanted == null ? 'unmounted' : `${Math.round(wanted.getBoundingClientRect().top)}-${Math.round(wanted.getBoundingClientRect().bottom)} ${getComputedStyle(wanted).pointerEvents}`})`).toBe(true)
     if (target === null) return
     if (document.activeElement !== target) target.focus({ preventScroll: true })
     await expect(document.activeElement, 'History keyboard setup: RAC row focus identity').toBe(target)
