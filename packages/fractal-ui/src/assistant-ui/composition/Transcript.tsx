@@ -162,7 +162,7 @@ export function ToolDetailPreview({ call, onOpen }: { readonly call: WorkLogCall
   const command = readableCommand(call)
   const showOutput = recorded !== undefined || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
-    <p>{call.summary ?? call.title} · {call.status}</p>
+    <p>{call.intent ?? call.summary ?? call.title} · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>

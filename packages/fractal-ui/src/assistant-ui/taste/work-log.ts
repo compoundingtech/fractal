@@ -183,7 +183,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
     const displayedCommand = kind === 'run' ? (detail === undefined ? undefined : failedCommandSource(detail)) ?? command : command
     return [{
       id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input, kind, displayedCommand),
-      intent: toolString(call.input, ['i', 'description', 'summary']).trim() || undefined,
+      intent: ['i', 'description', 'summary'].map(key => toolString(call.input, [key]).trim()).find(value => value !== ''),
       // Empty input carries nothing to inspect, so it does not make a row expandable.
       rawInput: typeof call.input === 'string' ? call.input || undefined : call.input === undefined || call.input === null || typeof call.input === 'object' && Object.keys(call.input).length === 0 ? undefined : JSON.stringify(call.input, null, 2),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,

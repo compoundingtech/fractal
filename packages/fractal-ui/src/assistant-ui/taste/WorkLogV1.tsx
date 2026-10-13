@@ -89,7 +89,7 @@ function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
   const [rawOpen, setRawOpen] = React.useState(false)
   const output = workLogOutputText(call)
   return <>
-    <p>{call.summary ?? call.title} · {call.status}</p>
+    <p>{call.intent ?? call.summary ?? call.title} · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.call, styles.rawTrigger)}>Show raw input/output</Button>

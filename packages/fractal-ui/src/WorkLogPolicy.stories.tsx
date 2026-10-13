@@ -21,7 +21,7 @@ const PolicySurface = ({ scheme = 'dark', width = 1440, omitServiceFacts = false
   const [intentRecorded, setIntentRecorded] = React.useState(true)
   const service = serviceCall(ready)
   const intentCalls: readonly WorkLogCall[] = [
-    { ...call, id: 'sample-intent', status: 'success', argsSummary: 'pnpm test release', ...(intentRecorded ? { intent: 'Check release readiness' } : {}) },
+    { ...call, id: 'sample-intent', status: 'success', argsSummary: 'pnpm test release', summary: 'Run the release suite', ...(intentRecorded ? { intent: 'Check release readiness' } : {}) },
     { ...call, id: 'sample-intent-fallback', status: 'success', argsSummary: 'pnpm test release' },
     { ...call, id: 'sample-wait-intent', kind: 'wait', title: 'wait', status: 'success', intent: 'Await design review' },
   ]
@@ -63,6 +63,9 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const intent = canvasElement.querySelector<HTMLElement>('[data-item-id="sample-intent"]')!
   await expect(intent.querySelector('[data-tool-intent]')).toHaveTextContent('Check release readiness')
   await expect(intent.querySelector('[data-tool-secondary]')).toHaveTextContent('Run command pnpm test release')
+  // The recorded intent also heads the expanded detail, ahead of the call's own summary.
+  await expect(intent).toHaveTextContent('Check release readiness · success')
+  await expect(intent).not.toHaveTextContent('Run the release suite')
   await expect(canvasElement.querySelector('[data-item-id="sample-wait-intent"] [data-tool-intent]')).toHaveTextContent('Await design review')
   await expect(canvasElement.querySelector('[data-item-id="sample-wait-intent"] [data-tool-secondary]')).toHaveTextContent('Wait for results')
   await expect(canvasElement.querySelector('[data-item-id="sample-intent-fallback"] [data-tool-intent]')).toBeNull()
@@ -73,6 +76,7 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(canvasElement.querySelector('[data-item-id="sample-intent"]')).toBe(intent)
   await expect(intent.querySelector('[data-call-title]')).toHaveTextContent('Search for matches pnpm test release')
   await expect(intent).not.toHaveTextContent('Check release readiness')
+  await expect(intent).toHaveTextContent('Run the release suite · success')
   await userEvent.click(canvas.getByRole('button', { name: 'Restore recorded intent' }))
   await waitFor(() => expect(intent.querySelector('[data-tool-intent]')).toHaveTextContent('Check release readiness'))
 }

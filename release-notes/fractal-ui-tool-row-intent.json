@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Transcript tool rows lead with the call's human intent, followed by the kind's verb and target in muted secondary text. The intent comes from the call's own i, description or summary, and a host-recorded intent replaces it. Unclassified results stay behind one Show system events disclosure instead of joining the default rows.",
+  "summary": "Transcript tool rows lead with the call's human intent, followed by the kind's verb and target in muted secondary text, and the expanded detail is headed by the same intent. The intent comes from the call's own i, description or summary, and a host-recorded intent replaces it. Unclassified results stay behind one Show system events disclosure instead of joining the default rows.",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "fractal-ui WorkLogCall adds optional intent. Rows without an intent keep the host title and target; recorded service rows are unchanged."
+    "detail": "fractal-ui WorkLogCall adds optional intent. Rows without an intent keep the host title and target; recorded service rows are unchanged. Calls of kind unknown no longer appear in the default work-log rows; they are listed after Show system events \u00b7 N."
   },
   "downtime": {
     "status": "none",

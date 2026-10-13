@@ -212,4 +212,6 @@ test('a call carries its own intent from i, description or summary, never from i
   // Control: without an intent key, or with only whitespace, nothing is invented from the tool name or command.
   assert.equal(intentOf({ command: 'pnpm test release' }).intent, undefined)
   assert.equal(intentOf({ i: '   ', command: 'pnpm test release' }).intent, undefined)
+  // A blank i falls through to the next intent key instead of hiding it.
+  assert.equal(intentOf({ i: ' ', description: 'Review rows' }).intent, 'Review rows')
 })
