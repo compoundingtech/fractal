@@ -775,7 +775,7 @@ mod tests {
                 INSERT INTO main.claims(store_index,id,batch_id,subject,origin,kind,body,predecessors,accepted_at_unix_ms)
                   SELECT store_index,id,batch_id,subject,origin,kind,body,'[]',accepted_at_unix_ms FROM matching.claims;
                 INSERT INTO main.replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
-                  SELECT 'fixture:'||source.rowid,batch.origin,batch.replica_sequence,'fixture',source.position,X'',source.state,source.claim_id,'0'
+                  SELECT 'fixture:'||source.rowid,batch.origin,batch.replica_sequence,'fixture:'||source.rowid,source.position,X'',source.state,source.claim_id,'0'
                   FROM matching.replica_records source JOIN matching.claims claim ON claim.id=source.claim_id
                   JOIN matching.batches batch ON batch.id=claim.batch_id;
                 INSERT INTO main.local_observations(id,subject,kind,body,after_store_index,observed_at_unix_ms)
