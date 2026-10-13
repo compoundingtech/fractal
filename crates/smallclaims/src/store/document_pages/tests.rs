@@ -455,6 +455,61 @@ fn measured(
     work
 }
 
+fn bytecode(store: &Store, name: Option<&str>, prefix: Option<&str>, after: Option<(&str, u64)>) {
+    // Diagnostics outside every work scope. Preserve full opcode operands; print both
+    // Results before asserting so an EXPLAIN error is retained with the work counts.
+    type Opcode = (i64, String, i64, i64, i64, Option<String>, i64);
+    fn explain(
+        conn: &Connection,
+        sql: &str,
+        values: &[&dyn rusqlite::ToSql],
+    ) -> rusqlite::Result<Vec<Opcode>> {
+        conn.prepare(&format!("EXPLAIN {sql}"))?
+            .query_map(values, |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })?
+            .collect()
+    }
+    let cursor = after.map(|v| v.0);
+    let index = after.map(|v| v.1);
+    let lower = match (prefix.filter(|s| !s.is_empty()), cursor) {
+        (Some(p), Some(c)) => Some(p.max(c)),
+        (p, c) => p.or(c),
+    };
+    let upper = prefix.and_then(prefix_end);
+    let sql = query(
+        name.is_some(),
+        prefix.is_some(),
+        lower.is_some(),
+        upper.is_some(),
+        true,
+        after.is_some(),
+    );
+    let conn = store.readers.get();
+    let old = explain(
+        &conn,
+        OLD,
+        &[&name, &true, &prefix, &cursor, &index, &5_i64],
+    );
+    let new = explain(
+        &conn,
+        &sql,
+        &[&name, &prefix, &cursor, &index, &lower, &upper, &5_i64],
+    );
+    println!(
+        "document-page bytecode name={name:?} prefix={prefix:?} cursor={after:?} OLD={old:?} NEW={new:?}"
+    );
+    plans(store, name, prefix, true, after);
+}
+
 #[test]
 fn filtered_document_pages_keep_warmed_work_flat_with_unrelated_earlier_names() {
     let store = node();
@@ -475,6 +530,7 @@ fn filtered_document_pages_keep_warmed_work_flat_with_unrelated_earlier_names() 
         (None, Some("doc/target/"), Some(("doc/target/0", 0))),
     ];
     let before = shapes.map(|(name, prefix, after)| {
+        bytecode(&store, name, prefix, after);
         for use_old in [true, false] {
             measured(&store, use_old, name, prefix, after);
         }
@@ -494,6 +550,7 @@ fn filtered_document_pages_keep_warmed_work_flat_with_unrelated_earlier_names() 
         );
     }
     let after_work = shapes.map(|(name, prefix, after)| {
+        bytecode(&store, name, prefix, after);
         for use_old in [true, false] {
             measured(&store, use_old, name, prefix, after);
         }
@@ -502,6 +559,29 @@ fn filtered_document_pages_keep_warmed_work_flat_with_unrelated_earlier_names() 
             measured(&store, false, name, prefix, after),
         )
     });
+    // A second growth point is diagnostic, not a relaxed bound. The original exact-flat
+    // assertions below still govern the first 512 additions, including a one-step delta.
+    for n in 512..1024 {
+        bind(
+            &store,
+            &format!("doc/before/{n:04}"),
+            "unrelated",
+            2000 + n,
+            "population",
+            None,
+        );
+    }
+    let twice_work = shapes.map(|(name, prefix, after)| {
+        bytecode(&store, name, prefix, after);
+        for use_old in [true, false] {
+            measured(&store, use_old, name, prefix, after);
+        }
+        (
+            measured(&store, true, name, prefix, after),
+            measured(&store, false, name, prefix, after),
+        )
+    });
+    println!("document-page diagnostic after1024={twice_work:?}");
     println!("document-page before={before:?} after={after_work:?}");
     for ((old_before, new_before), (old_after, new_after)) in before.into_iter().zip(after_work) {
         assert!(new_before.statements > 0 && new_before.vm_steps > 0);
