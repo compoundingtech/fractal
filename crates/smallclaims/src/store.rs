@@ -7727,7 +7727,6 @@ impl Store {
                 .transpose()?
                 .unwrap_or_default();
             let mut inventory_aligned = status.projection_digests.is_empty();
-            let mut live_settled = false;
             if !status.projection_digests.is_empty() {
                 status.graph_digest = Some(projection_digest::root(&status.projection_digests));
                 let peer_inventory: Option<String> = connection
@@ -7739,7 +7738,7 @@ impl Store {
                     .optional()?;
                 inventory_aligned =
                     peer_inventory.as_deref() == Some(snapshot.inventory.digest.as_str());
-                live_settled = !projection_deferred
+                let live_settled = !projection_deferred
                     && !unsealed_local
                     && status.schema_digest.as_deref() == Some(registry_digest.as_str())
                     && waiting_claims == 0;
