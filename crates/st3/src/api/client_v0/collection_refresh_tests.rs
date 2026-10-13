@@ -5,6 +5,10 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Reads = Arc<Mutex<BTreeMap<String, usize>>>;
 
+/// The longest a paced reread can wait after the last: its interval, then at most one more to
+/// reach the store's shared reread grid ([`collection_windows::Windows::reread_boundary`]).
+const PACED_REREAD_MAX: Duration = COLLECTION_REREAD_INTERVAL.saturating_mul(2);
+
 /// [`Fixture::open_with`]'s gate: reads refuse as not ready, read rows, or refuse as revoked.
 const NOT_READY: u8 = 0;
 const READY: u8 = 1;
@@ -144,7 +148,7 @@ impl Fixture {
 
     /// No frame arrives for longer than a paced reread can take.
     async fn quiet(&mut self) {
-        let until = tokio::time::Instant::now() + COLLECTION_REREAD_INTERVAL + Duration::from_millis(500);
+        let until = tokio::time::Instant::now() + PACED_REREAD_MAX + Duration::from_millis(500);
         while let Ok(message) = tokio::time::timeout_at(until, self.socket.next()).await {
             if let Message::Text(text) = message.unwrap().unwrap() {
                 panic!("unexpected frame: {text}");
@@ -173,9 +177,9 @@ impl Fixture {
 
     /// [`Self::frame`] under a paused clock, whose timeout would fire as soon as a read waits
     /// on the blocking pool. The clock moves in short steps meanwhile, as it would, so a paced
-    /// reread comes due; three seconds cover the reread interval twice.
+    /// reread comes due; six seconds cover the longest paced wait twice.
     async fn paused_frame(&mut self) -> Value {
-        for _ in 0..30 {
+        for _ in 0..60 {
             if let Some(frame) = self.paused_settle(Duration::from_millis(200)).await {
                 return frame;
             }
@@ -190,7 +194,7 @@ impl Fixture {
         if let Some(frame) = self.paused_settle(Duration::from_millis(500)).await {
             panic!("unexpected frame: {frame}");
         }
-        self.paused_advance(COLLECTION_REREAD_INTERVAL + Duration::from_millis(500)).await;
+        self.paused_advance(PACED_REREAD_MAX + Duration::from_millis(500)).await;
         if let Some(frame) = self.paused_settle(Duration::from_millis(500)).await {
             panic!("unexpected frame: {frame}");
         }
@@ -445,7 +449,7 @@ fn apply(held: &mut BTreeMap<String, Held>, frame: &Value) {
 /// cut, so every held window has caught up with the store.
 async fn settle(fixture: &mut Fixture, held: &mut BTreeMap<String, Held>) {
     loop {
-        match tokio::time::timeout(COLLECTION_REREAD_INTERVAL + Duration::from_millis(700),
+        match tokio::time::timeout(PACED_REREAD_MAX + Duration::from_millis(700),
             fixture.socket.next()).await
         {
             Ok(message) => {
