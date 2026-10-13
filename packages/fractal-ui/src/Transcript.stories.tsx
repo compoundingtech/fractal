@@ -545,8 +545,13 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
   await userEvent.click(thinkingControl)
   await expect(thinkingControl).toHaveAttribute('aria-expanded', 'true')
   const lane = canvas.getByTestId('transcript-scroll')
+  // A reader scroll: input first, as in a browser, and finished before items arrive.
+  // An input-less write is a host or measurement move.
+  // The kit targets ES2022: no Promise.withResolvers.
+  const scrolled = new Promise<void>(resolve => lane.addEventListener('scrollend', () => resolve(), { once: true }))
+  lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -(lane.scrollTop - 48) }))
   lane.scrollTop = 48
-  lane.dispatchEvent(new Event('scroll'))
+  await scrolled
   const scrollTop = lane.scrollTop
   await expect(scrollTop).toBeGreaterThan(0)
   const retained = [turn, prompt, answerRow, work, tool, thinking]
@@ -581,6 +586,21 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
   } finally { observer.disconnect() }
 } }
 export const AppendedItemsLight: Story = { ...AppendedItems, args: { scheme: 'light' } }
+/** RAC's ScrollView holds its content at `pointer-events: none` for 300 ms after each scroll, the lane's own follow writes included. A row clicked right after a follow scroll must still take the click. */
+export const ClickDuringFollow: Story = { render: args => <AppendedItemsStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const lane = await canvas.findByTestId('transcript-scroll')
+  const tool = await canvas.findByRole('button', { name: /^read src\/rows\.ts\b/ })
+  await waitFor(() => expect(lane.scrollHeight - lane.clientHeight - lane.scrollTop).toBeLessThanOrEqual(1))
+  // The package lib is ES2022 (no Promise.withResolvers).
+  const followed = new Promise(resolve => lane.addEventListener('scroll', resolve, { once: true }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Append tool' }))
+  await followed
+  await expect(getComputedStyle(lane.firstElementChild!).pointerEvents, 'the follow scroll holds RAC content inert').toBe('none')
+  await userEvent.click(tool)
+  await expect(tool).toHaveAttribute('aria-expanded', 'true')
+} }
+export const ClickDuringFollowLight: Story = { ...ClickDuringFollow, args: { scheme: 'light' } }
 
 const strandedPrompt: TextItem = { _tag: 'Text', id: 'stranded/prompt', role: 'user', text: 'Summarize the retained rows.', attachments: [], streaming: false, at }
 const strandedItems: readonly ConversationItem[] = [
