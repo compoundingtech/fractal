@@ -310,9 +310,18 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
         })
         if (target === 'pointer-retry') await userEvent.click(retry)
         else {
-          await focusHistoryKeyboardRow(lane)
-          for (let index = 0; index < 60 && document.activeElement !== retry; index++) await userEvent.tab()
-          await expect(retry).toHaveFocus()
+          // Tab from the boundary row itself: RAC's DOM order can lag its visual order after a scroll,
+          // so the first row in the DOM may sit below the boundary and Tab would move away from Retry.
+          await waitFor(() => {
+            const row = [...lane.querySelectorAll<HTMLElement>('[data-testid="history-retry"]')].find(candidate => historyElementIsActionable(candidate, lane))?.closest<HTMLElement>('[role="row"]')
+            if (row == null) throw new Error('History setup: boundary row')
+            row.focus({ preventScroll: true })
+            if (document.activeElement !== row) throw new Error('History setup: boundary row focus')
+          })
+          // RAC may recycle the boundary row's element while tabbing; match the control, not the node.
+          const isRetry = () => document.activeElement?.matches('[data-testid="history-retry"]') === true
+          for (let index = 0; index < 60 && !isRetry(); index++) await userEvent.tab()
+          await expect(document.activeElement).toHaveAttribute('data-testid', 'history-retry')
           await userEvent.keyboard('{Enter}')
         }
         await waitFor(() => expect(root.getAttribute('data-page'), detector).toBe('Loading'))
