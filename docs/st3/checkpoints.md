@@ -1,5 +1,16 @@
 # Checkpoints and trimming
 
+`st replication checkpoint status` shows each participant's `machine_version` advertised at
+its last daemon start, including its source revision and dirty marker. This is startup metadata,
+which may differ from the build that produced a checkpoint seal. A daemon republishes its version
+on every start; status selects its latest own-origin `daemon.started` claim in canonical order.
+Older or unstamped members advertise only the package version and show `not advertised` for the
+revision. JSON status includes a `machine_version` map of participants with advertised revisions,
+omitted when none are available. Pending checkpoint `builds` still names each member's seal build.
+Agreement inputs and proof identities are unchanged. Startup revisions replicate to every fleet
+member and contain no secret. Native Cargo, archive release and Nix stamp generators reject identities longer than
+128 bytes before producing a release binary. Startup also checks that bound as a defensive guard.
+
 A fleet's replicated claim log only grows, because every node holds every claim. Most of what it
 holds is old observation: a seat's state a minute ago, a diagnostic that has since repeated, a usage
 reading that a later reading includes. A checkpoint is how every node of a fleet agrees to delete
