@@ -63,7 +63,8 @@ const rows = {
 type Args = { readonly scheme: Scheme }
 function Sidebar({ row, scheme }: { readonly row: Row; readonly scheme: Scheme }) {
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
-    <nav aria-label="Agents" data-frame-rows {...stylex.props(styles.sidebar)}><SidebarAgentRow item={row} now={now} actions={{ select: () => undefined }} /></nav>
+    {/* Tree-hosted row, as the app's agent folders render it; keyboard focus reaches the row's hover-card trigger. */}
+    <nav aria-label="Agents" data-frame-rows {...stylex.props(styles.sidebar)}><SidebarAgentRow item={row} now={now} inTree /></nav>
   </ThemePortal></main>
 }
 
