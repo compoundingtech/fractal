@@ -109,6 +109,8 @@ type SeatRetention = (u128, Option<String>, BTreeSet<String>);
 // stop go ahead. Each check is a pass: at 10 s, held seats were the most frequent wake on a busy
 // member. A held seat stops at most a minute after its last reason goes.
 const SEAT_RETENTION_CHECK_MS: u128 = 60_000;
+// Report a retained stop after this age; this is never a termination deadline.
+const STOP_DEFERRAL_FAULT_MS: u128 = 15 * 60 * 1000;
 // Run cleanup ends this long after it began even if an owned runtime never reports stopped.
 const CLEANUP_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const DECLARED_CHECKOUT_LIMIT: usize = 4096;
@@ -5360,18 +5362,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             && let Some(run) = subject.owner_run.as_deref()
             && let Some(reason) = self.seat_retention(&subject.subject, run)?
         {
-            self.record_once(
-                &subject.subject,
-                "harness.diagnostic",
-                BTreeMap::from([
-                    ("severity".into(), Value::String("warning".into())),
-                    ("status".into(), Value::String("waiting".into())),
-                    ("code".into(), Value::String("stop-deferred".into())),
-                    ("reason".into(), Value::String(reason)),
-                ]),
-            )?;
+            self.report_stop_deferral(subject, &reason, observation.as_ref())?;
             return Ok(());
         }
+        self.clear_stop_deferral(&subject.subject)?;
         let local_actual = self.store.runtime_observations_at(&subject.subject, u64::MAX)?
             .remove(&self.host);
         let incarnation = observation.as_ref().and_then(|o| o.incarnation_id.as_deref())
@@ -5386,6 +5380,145 @@ impl<R: RuntimeControl> Reconciler<R> {
             timeout,
             observation.as_ref(),
         )?;
+        Ok(())
+    }
+
+    /// Keep the deferral's age across unrelated diagnostics and daemon restarts. The desired
+    /// revision and incarnation fence each episode; an old stop cannot age a new process.
+    fn report_stop_deferral(
+        &self,
+        subject: &DesiredSubject,
+        reason: &str,
+        observation: Option<&RuntimeObservation>,
+    ) -> Result<()> {
+        let token = self.store.selected_desired_token(&subject.subject)?;
+        let incarnation = observation.and_then(|item| item.incarnation_id.as_deref());
+        let previous = self.store.latest_stop_deferral(&subject.subject)?;
+        let evidence = token.iter().cloned().collect::<Vec<_>>();
+        let since = previous
+            .as_ref()
+            .filter(|claim| {
+                claim.body["fields"]["code"] == "stop-deferred"
+                    && claim.body["fields"]["incarnation_id"].as_str() == incarnation
+                    && claim.body["evidence"] == serde_json::json!(evidence)
+            })
+            .map_or_else(now_ms, |claim| {
+                claim.body["fields"]["observed_since_ms"]
+                    .as_u64()
+                    .map(u128::from)
+                    .unwrap_or(claim.accepted_at_unix_ms)
+            });
+        let mut fields = BTreeMap::from([
+            ("severity".into(), Value::String("warning".into())),
+            ("status".into(), Value::String("waiting".into())),
+            ("code".into(), Value::String("stop-deferred".into())),
+            ("reason".into(), Value::String(reason.into())),
+            ("observed_since_ms".into(), serde_json::json!(since as u64)),
+        ]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+        }
+        // Compare this diagnostic family, not the newest unrelated harness diagnostic.
+        if !previous.as_ref().is_some_and(|claim| {
+            claim.body["fields"] == serde_json::json!(fields)
+                && claim.body["evidence"] == serde_json::json!(evidence)
+        }) {
+            if let Some(previous) = previous.as_ref() {
+                self.recover_stop_deferral(previous)?;
+            }
+            self.record_once_with_evidence(
+                &subject.subject,
+                "harness.diagnostic",
+                fields,
+                evidence,
+            )?;
+        }
+        // A final step may defer before its run is terminal. Only terminal owners need this
+        // fault; ordinary running missions keep their existing behavior.
+        let Some(run) = subject
+            .owner_run
+            .as_deref()
+            .map(|run| self.store.mission_run(run))
+            .transpose()?
+            .flatten()
+            .filter(|run| {
+                run.phase == "terminal"
+                    || matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
+            })
+        else {
+            return Ok(());
+        };
+        let deadline = since.saturating_add(STOP_DEFERRAL_FAULT_MS);
+        if now_ms() < deadline {
+            self.arm_restart(&format!("stop-deferral:{}", subject.subject), deadline);
+            return Ok(());
+        }
+        let diagnostic = self
+            .store
+            .latest_stop_deferral(&subject.subject)?
+            .context("the retained stop has no deferral diagnostic")?;
+        if self
+            .store
+            .pending_stop_deferral_failure(&diagnostic)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let episode = format!("stop-deferred:{}", diagnostic.id);
+        let detail = format!(
+            "`{}` still runs after `{}` became terminal: {reason}. Its stop has been deferred for at least 15 minutes. Read or archive the retained mail, or complete or hand off the other run's work, to let the pending stop proceed. To end the seat explicitly, run `st agents stop {} --as ACTOR`; that ends its driver and children even if mail or work remains. This fault clears when retention ends or the runtime stops.",
+            subject.subject, run.subject, subject.subject,
+        );
+        self.store.record_runtime_failure(
+            &episode,
+            &AttentionRequest {
+                reviewer: "person/operator".into(),
+                title: "A terminal run's seat is still retained".into(),
+                reason: detail,
+                severity: "warning".into(),
+                targets: vec![subject.subject.clone()],
+                actor: RECONCILER_ACTOR.into(),
+                idempotency_key: episode.clone(),
+            },
+            "stop-deferred",
+        )?;
+        self.signal_changed();
+        Ok(())
+    }
+
+    fn clear_stop_deferral(&self, seat: &str) -> Result<()> {
+        let Some(diagnostic) = self
+            .store
+            .latest_stop_deferral(seat)?
+            .filter(|claim| claim.body["fields"]["code"] == "stop-deferred")
+        else {
+            return Ok(());
+        };
+        self.record_once(
+            seat,
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("severity".into(), Value::String("warning".into())),
+                ("status".into(), Value::String("resolved".into())),
+                ("code".into(), Value::String("stop-deferral-cleared".into())),
+                (
+                    "reason".into(),
+                    Value::String("the stop is no longer deferred".into()),
+                ),
+            ]),
+        )?;
+        self.recover_stop_deferral(&diagnostic)
+    }
+
+    fn recover_stop_deferral(&self, diagnostic: &crate::model::ClaimRecord) -> Result<()> {
+        if let Some(failure) = self.store.pending_stop_deferral_failure(diagnostic)? {
+            self.store.recover_operational_failure(
+                &format!("stop-deferred:{}", diagnostic.id),
+                "the deferral ended or its retention reason changed",
+                &format!("stop-deferral-recovered:{}", failure.id),
+            )?;
+            self.signal_changed();
+        }
         Ok(())
     }
 
@@ -30517,6 +30650,14 @@ version 2
             "the seat still holds work for another run"
         );
 
+        let seat = format!("agent/{run_id}/worker");
+        age_stop_deferral(&store, &seat);
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        let faults = store.fault_items(None).unwrap();
+        assert_eq!(faults.len(), 1);
+        assert!(faults[0].detail.contains("the seat holds work for another run"));
+
         // The other run's work ends, and the stop goes ahead.
         let elsewhere = store
             .seat_work_in_other_runs(&format!("agent/{run_id}/worker"), &run_id)
@@ -30528,6 +30669,7 @@ version 2
         reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
+        assert!(store.fault_items(None).unwrap().is_empty());
     }
 
     /// A run whose final step stops a seat that holds an unread message, with the seat live.
@@ -30615,6 +30757,14 @@ mission "held-stop" state="ready" {
             .unwrap();
         assert_eq!(stop.status, "completed", "{:?}", stop.blocked_reason);
         assert_eq!(run.status, "completed");
+        let seat = format!("agent/{run_id}/worker");
+        let desired = store.desired_subjects_named(std::slice::from_ref(&seat)).unwrap().remove(0);
+        assert_eq!(desired.kind, "stop");
+        assert_eq!(desired.owner_step.as_deref(), Some(stop.subject.as_str()));
+        assert!(reconciler.runtime.stops.lock().unwrap().is_empty());
+        let diagnostic = store.latest_claim(&seat, Some("harness.diagnostic")).unwrap().unwrap();
+        assert_eq!(diagnostic.body["fields"]["code"], "stop-deferred");
+        assert_eq!(diagnostic.body["fields"]["reason"], "the seat holds a message nobody has read");
         assert!(
             !store
                 .claims_for(&format!("agent/{run_id}/worker"), Some("runtime.reconcile-decision"))
@@ -30623,6 +30773,344 @@ mission "held-stop" state="ready" {
                 .any(|claim| claim.body.to_string().contains("invalid-claim-field")),
             "the deferral diagnostic is a valid claim"
         );
+    }
+
+    fn age_stop_deferral(store: &Store, seat: &str) -> u64 {
+        let diagnostic = store.latest_stop_deferral(seat).unwrap().unwrap();
+        let mut fields: BTreeMap<String, Value> =
+            serde_json::from_value(diagnostic.body["fields"].clone()).unwrap();
+        fields.insert(
+            "observed_since_ms".into(),
+            serde_json::json!((now_ms() - STOP_DEFERRAL_FAULT_MS - 1) as u64),
+        );
+        let aged = store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: "harness.diagnostic".into(),
+                actor: None,
+                fields,
+                evidence: serde_json::from_value(diagnostic.body["evidence"].clone()).unwrap(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        aged.store_index
+    }
+
+    #[test]
+    fn an_aged_stop_deferral_is_visible_without_stopping_the_seat() {
+        let (store, reconciler, run_id) = run_with_a_final_stop_of_a_held_seat();
+        for _ in 0..20 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let seat = format!("agent/{run_id}/worker");
+        assert!(store.fault_items(None).unwrap().is_empty());
+        let before = age_stop_deferral(&store, &seat);
+        // Restarting the daemon preserves the age from the diagnostic, rather than starting
+        // another fifteen-minute reporting window.
+        let runtime = reconciler.runtime.clone();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        )
+        .skipping_unneeded(true);
+        let events = reconciler.event_notify.subscribe();
+        let stop = store
+            .desired_subjects_named(std::slice::from_ref(&seat))
+            .unwrap()
+            .remove(0);
+        let observation = runtime.ptys.lock().unwrap()[0].clone();
+        reconciler
+            .report_stop_deferral(
+                &stop,
+                "the seat holds a message nobody has read",
+                Some(&observation),
+            )
+            .unwrap();
+        assert!(
+            events.has_changed().unwrap(),
+            "the reporting deadline publishes the new fault to subscribers"
+        );
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert!(runtime.kills.lock().unwrap().is_empty());
+        let faults = store.fault_items(None).unwrap();
+        assert_eq!(faults.len(), 1);
+        assert_eq!(faults[0].subject, seat);
+        assert!(
+            faults[0]
+                .detail
+                .contains("the seat holds a message nobody has read")
+        );
+        assert!(faults[0].detail.contains("15 minutes"));
+        assert!(
+            faults[0]
+                .detail
+                .contains(&format!("st agents stop {seat} --as ACTOR"))
+        );
+        assert!(
+            store
+                .stop_deferral_faults_for(std::slice::from_ref(&seat), before)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .stop_deferral_faults_for(std::slice::from_ref(&seat), store.index().unwrap())
+                .unwrap()[&seat],
+            faults[0].detail
+        );
+        let failure_count = store
+            .claims_for(&seat, Some("operational.failure"))
+            .unwrap()
+            .len();
+        let diagnostic_id = store.latest_stop_deferral(&seat).unwrap().unwrap().id;
+        // Other diagnostics do not reset the age or raise a second fault.
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.clone(),
+                kind: "harness.diagnostic".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("severity".into(), Value::String("warning".into())),
+                    ("code".into(), Value::String("fixture-unrelated".into())),
+                    (
+                        "reason".into(),
+                        Value::String("an unrelated diagnostic".into()),
+                    ),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(
+            store.latest_stop_deferral(&seat).unwrap().unwrap().id,
+            diagnostic_id
+        );
+        assert_eq!(
+            store
+                .claims_for(&seat, Some("operational.failure"))
+                .unwrap()
+                .len(),
+            failure_count
+        );
+        assert_eq!(store.fault_items(None).unwrap().len(), 1);
+        // Existing mail handling releases the stop. The reporting threshold never did.
+        for (kind, status) in [
+            ("message.staged", "staged"),
+            ("message.delivered", "delivered"),
+            ("message.read", "read"),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "message/held".into(),
+                    kind: kind.into(),
+                    actor: Some(seat.clone()),
+                    fields: BTreeMap::from([("status".into(), Value::String(status.into()))]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        reconciler.seat_retention.lock().unwrap().clear();
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.stops.lock().unwrap().len(), 1);
+        assert!(store.fault_items(None).unwrap().is_empty());
+        assert!(
+            store
+                .stop_deferral_faults_for(&[seat], store.index().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .claims_for(&faults[0].subject, Some("operational.recovered"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn stop_deferral_reports_each_of_seventeen_retained_seats() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let agents = (0..17).map(|i| format!("  agent \"worker-{i}\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\" }}\n")).collect::<String>();
+        let stops = (0..17)
+            .map(|i| format!("    stop \"agent/${{ST_MISSION_RUN}}/worker-{i}\"\n"))
+            .collect::<String>();
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nmission \"orchid\" state=\"ready\" {{\n goal \"Retain seventeen seats.\"\n{agents} step \"work\" {{ assigned-to \"person/test\" }}\n finally {{ step \"stop-workers\" {{ agentless\n{stops} }} }}\n}}\n"
+            ),
+            "publish-seventeen",
+        );
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "orchid".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-seventeen".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let seats = store.desired_subjects_for_owner_run(&run.subject).unwrap();
+        assert_eq!(seats.len(), 17);
+        for (i, seat) in seats.iter().enumerate() {
+            let member = seat.member.as_ref().unwrap();
+            let incarnation = format!("held-{i}");
+            runtime.ptys.lock().unwrap().push(RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation.clone()),
+            });
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.subject.clone(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        (
+                            "runtime_id".into(),
+                            Value::String(member.runtime_id.clone()),
+                        ),
+                        ("host".into(), Value::String("node".into())),
+                        ("incarnation_id".into(), Value::String(incarnation)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("message/held-{i}"),
+                    kind: "message.sent".into(),
+                    actor: Some("person/test".into()),
+                    fields: BTreeMap::from([
+                        ("from".into(), Value::String("person/test".into())),
+                        ("to".into(), Value::String(seat.subject.clone())),
+                        ("content".into(), Value::String("read me".into())),
+                        ("status".into(), Value::String("sent".into())),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        let work = run.steps.iter().find(|step| step.step == "work").unwrap();
+        store
+            .set_step_state(&work.subject, "completed", None)
+            .unwrap();
+        for _ in 0..20 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(
+            store.mission_run(&run.id).unwrap().unwrap().phase,
+            "terminal"
+        );
+        for seat in &seats {
+            age_stop_deferral(&store, &seat.subject);
+        }
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert_eq!(store.fault_items(None).unwrap().len(), 17);
+        assert_eq!(
+            store
+                .stop_deferral_faults_for(
+                    &seats
+                        .iter()
+                        .map(|seat| seat.subject.clone())
+                        .collect::<Vec<_>>(),
+                    store.index().unwrap()
+                )
+                .unwrap()
+                .len(),
+            17
+        );
+    }
+
+    #[test]
+    fn stopped_and_replaced_runtimes_hide_their_aged_deferral_before_reconciliation() {
+        for transition in ["stopped", "new-incarnation", "new-declaration"] {
+            let (store, reconciler, run_id) = run_with_a_final_stop_of_a_held_seat();
+            for _ in 0..20 {
+                reconciler.reconcile_once().unwrap();
+            }
+            let seat = format!("agent/{run_id}/worker");
+            age_stop_deferral(&store, &seat);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(store.fault_items(None).unwrap().len(), 1);
+            let before = store.index().unwrap();
+            if transition == "new-declaration" {
+                apply_source(
+                    &store,
+                    &format!("version 2\nstop {seat:?}\n"),
+                    "explicit-stop",
+                );
+            } else {
+                // Folded actual state includes fault fields; copy only the runtime receipt.
+                let actual = store
+                    .latest_claim(&seat, Some("runtime.observed"))
+                    .unwrap()
+                    .unwrap();
+                let mut fields: BTreeMap<String, Value> =
+                    serde_json::from_value(actual.body["fields"].clone()).unwrap();
+                if transition == "stopped" {
+                    fields.insert("status".into(), Value::String("stopped".into()));
+                } else {
+                    fields.insert(
+                        "incarnation_id".into(),
+                        Value::String("replacement-incarnation".into()),
+                    );
+                }
+                store
+                    .append_claim(&ClaimInput {
+                        subject: seat.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: None,
+                        fields,
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .stop_deferral_faults_for(std::slice::from_ref(&seat), before)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }
+            assert!(
+                store
+                    .stop_deferral_faults_for(&[seat], store.index().unwrap())
+                    .unwrap()
+                    .is_empty(),
+                "{transition}"
+            );
+            assert!(store.fault_items(None).unwrap().is_empty(), "{transition}");
+        }
     }
 
     #[test]
