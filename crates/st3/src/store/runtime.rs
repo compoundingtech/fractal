@@ -118,6 +118,7 @@ pub(crate) struct AgentResourcesEntry {
 
 impl SmalltalkRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
+        runtime_starts::create_schema(connection)?;
         connection.execute_batch(git_changes::SCHEMA)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
@@ -858,7 +859,7 @@ mod schema_install_tests {
                 reader
                     .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                     .unwrap(),
-                18
+                st3_schema::STORAGE_VERSION
             );
             assert_eq!(
                 recovered
