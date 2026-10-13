@@ -175,6 +175,38 @@ pub struct WaitWake {
 }
 
 impl Store {
+    /// Refuse unless `actor`'s incarnation holds a live lease on `subject`, as a work action
+    /// would, before a wait sets anything up outside the step.
+    pub(crate) fn check_work_holder(
+        &self,
+        subject: &str,
+        actor: &str,
+        incarnation: Option<&str>,
+    ) -> Result<(), St3Error> {
+        let subject = normalize_step_run(subject);
+        let actor = normalize_actor(actor, "agent");
+        let step = self
+            .step_run(&subject)
+            .map_err(internal)?
+            .ok_or_else(|| St3Error::new("work-not-found", format!("no step run `{subject}`")))?;
+        let holds = matches!(step.status.as_str(), "claimed" | "working")
+            && step.claimant.as_deref() == Some(actor.as_str())
+            && step.claim_expires_at_unix_ms.is_some_and(|expiry| expiry > now_ms());
+        if !holds {
+            return Err(St3Error::new(
+                "work-not-claimed",
+                format!("`{actor}` does not hold an active lease for `{subject}`"),
+            ));
+        }
+        if incarnation.is_some_and(|incarnation| step.claim_incarnation.as_deref() != Some(incarnation)) {
+            return Err(St3Error::new(
+                "wrong-work-incarnation",
+                format!("another `{actor}` incarnation holds `{subject}`"),
+            ));
+        }
+        Ok(())
+    }
+
     /// The open declared wait of a held step's attempt.
     pub(crate) fn declared_wait(
         &self,

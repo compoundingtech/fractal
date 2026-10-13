@@ -194,12 +194,12 @@ pub(super) async fn watch(
 }
 
 /// A declared wait on a pull request wakes its seat through a watch: the wait sets one, with the
-/// default deadline, unless the seat already watches the thread.
+/// default deadline, unless the seat already watches the thread. Returns whether it set one.
 pub(super) async fn watch_for_wait(
     state: &AppState,
     actor: &str,
-    thread: ThreadRef,
-) -> Result<(), ApiError> {
+    thread: &ThreadRef,
+) -> Result<bool, ApiError> {
     if !actor.starts_with("agent/") {
         return Err(bad(
             "watch-needs-a-seat",
@@ -210,16 +210,17 @@ pub(super) async fn watch_for_wait(
     let subject = thread.watch(actor);
     let watched = {
         let store = store.clone();
-        blocking_action(move || store.live_watch(&subject).map_err(St3Error::from).map(|watch| watch.is_some()))
+        blocking_action(move || store.live_watch(&subject).map(|watch| watch.is_some()))
             .await?
     };
     if watched {
-        return Ok(());
+        return Ok(false);
     }
     let until = deadline(None)?;
-    let github = read_thread(&thread).await?;
-    watchable(&thread, &github)?;
+    let github = read_thread(thread).await?;
+    watchable(thread, &github)?;
     let actor = actor.to_owned();
+    let thread = thread.clone();
     blocking_action(move || {
         if !store.seat_live(&actor)? {
             return Err(St3Error::new(
@@ -231,7 +232,7 @@ pub(super) async fn watch_for_wait(
     })
     .await?;
     signal_changed(state);
-    Ok(())
+    Ok(true)
 }
 
 /// A comment or review GitHub answered with: its kind, ID, link and author.
