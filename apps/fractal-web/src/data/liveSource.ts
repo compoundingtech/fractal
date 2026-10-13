@@ -836,10 +836,11 @@ export const liveSource = ({
           if (earlier.length > 0 || !page.page.has_more) {
             if (!reachedBoundary) throw new Error('The loaded history boundary is no longer in this session. Reconnect the conversation and try again.')
             const before = timeline.size
-            timeline.prepend(earlier, page.page.has_more)
+            const truncated = !page.page.has_more && chunk.entries.some(entry => entry.type === 'truncation')
+            timeline.prepend(earlier, page.page.has_more || truncated)
             incrDebug('Wf.conversationEntries', timeline.size - before)
             historyCursor = next
-            historyLoad = undefined
+            historyLoad = truncated ? { _tag: 'Failed', detail: 'The history response omitted earlier messages. Loaded history is retained; try again to read the missing boundary.' } : undefined
             publishPending()
             return
           }

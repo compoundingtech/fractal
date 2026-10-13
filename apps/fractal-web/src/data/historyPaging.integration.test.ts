@@ -3,16 +3,22 @@ import { decodeConversationChunk } from '@st3/sdk/effect'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { expect, it } from 'vitest'
 import { liveSource } from './liveSource.ts'
+import { conversationHistory } from '../web/conversationHistory.ts'
 
 const snapshot = { id: 'snapshot/history', created_at: '2026-01-15T12:00:00Z', host_id: 'host/example', projection_version: 'client-projection.v0', store_index: 1 }
 const entry = (sequence: number, text: string): TimelineEntry => ({ id: `timeline-entry/${sequence}`, sequence, revision: 1, type: 'content', role: 'assistant', final: true, timestamp: snapshot.created_at, body: { text, media_type: 'text/markdown' } })
 
-it.each(['omitted', 'null'] as const)('uses native session/cursors and terminal %s cursors, keeps concurrent output, and retries without losing loaded data', async terminalCursor => {
+it.each([
+  { terminalCursor: 'omitted', truncated: false },
+  { terminalCursor: 'null', truncated: false },
+  { terminalCursor: 'omitted', truncated: true },
+])('uses native session/cursors and terminal $terminalCursor cursors, truncated=$truncated, without losing loaded data', async ({ terminalCursor, truncated }) => {
   let socket: CollectionSocket | undefined
   const commands: CollectionCommand[] = []
   const requests: URL[] = []
   let settle: (() => void) | undefined
   let fail = false
+  const truncation = { id: 'timeline-entry/truncated', sequence: 0, revision: 1, type: 'truncation', role: 'system', final: true, timestamp: snapshot.created_at, body: { reason: 'response-limit', omitted_from_sequence: 0, omitted_to_sequence: 0, fetchable: false } }
   const fetcher: typeof fetch = async input => {
     const url = new URL(String(input))
     if (url.pathname === '/v1/client/capabilities') return Response.json({ api_version: 'st3.client.v0', snapshot, value: { kind: 'capabilities', capabilities: [], event_cursor: 'cursor/current', limits: { max_page_items: 100, max_event_items: 100, max_wait_ms: 1000, max_response_bytes: 65536 }, schemas: ['client-v0'], session_actor: 'person/operator', transport: 'fabric-loopback' } })
@@ -21,7 +27,7 @@ it.each(['omitted', 'null'] as const)('uses native session/cursors and terminal 
       await new Promise<void>(resolve => { settle = resolve })
       if (fail) return Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unavailable', message: 'History service unavailable', retryable: true, request_id: 'request/history', details: {} }, { status: 503 })
     }
-    return Response.json({ api_version: 'st3.client.v0', snapshot, value: { kind: 'timeline-page', session_id: `session/${url.pathname.split('/').at(-2)}`, items: url.searchParams.has('cursor') ? [entry(1, 'Earlier result'), entry(2, 'Boundary result')] : [entry(2, 'Boundary result'), entry(3, 'Recent result')], page: { limit: 100, has_more: !url.searchParams.has('cursor'), ...(!url.searchParams.has('cursor') ? { next_cursor: 'cursor/older' } : terminalCursor === 'null' ? { next_cursor: null } : {}) } } })
+    return Response.json({ api_version: 'st3.client.v0', snapshot, value: { kind: 'timeline-page', session_id: `session/${url.pathname.split('/').at(-2)}`, items: url.searchParams.has('cursor') ? [...(truncated ? [truncation] : []), entry(1, 'Earlier result'), entry(2, 'Boundary result')] : [entry(2, 'Boundary result'), entry(3, 'Recent result')], page: { limit: 100, has_more: !url.searchParams.has('cursor'), ...(!url.searchParams.has('cursor') ? { next_cursor: 'cursor/older' } : terminalCursor === 'null' ? { next_cursor: null } : {}) } } })
   }
   const live = liveSource({ options: { baseUrl: 'http://gateway.example', maxFollows: 4, fetch: fetcher, socket: () => {
     socket = { onopen: null, onmessage: null, onclose: null, onerror: null, close() {}, send(data) { commands.push(JSON.parse(String(data)) as CollectionCommand) } }
@@ -55,8 +61,10 @@ it.each(['omitted', 'null'] as const)('uses native session/cursors and terminal 
     await expect.poll(() => requests.length).toBe(4)
     settle!()
     await retry
-    expect(page().hasOlder).toBe(false)
-    expect(page().historyLoad).toBeUndefined()
+    expect(page().hasOlder).toBe(truncated)
+    expect(page().historyLoad?._tag).toBe(truncated ? 'Failed' : undefined)
+    const mapped = conversationHistory({ _tag: 'Observed', freshness: 'live', value: page() }, () => live.source.loadEarlierConversation!(ref))
+    expect(mapped._tag).toBe(truncated ? 'Failed' : 'Complete')
     expect(page().items.map(item => item.id)).toEqual(['timeline-entry/1', 'timeline-entry/2', 'timeline-entry/3', 'timeline-entry/4'])
     expect(requests.every(url => url.pathname === '/v1/client/sessions/history/timeline')).toBe(true)
     expect(requests[1]!.searchParams.get('cursor')).toBe('cursor/older')
