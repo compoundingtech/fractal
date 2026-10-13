@@ -52,7 +52,7 @@ function InlineCodeStory({ scheme, narrow, revision }: Args) {
   const embraceOptions = React.useMemo(() => ({ messages: embraceItems, isRunning: false, onNew: async () => {} }), [])
   return <main {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' ? lightTheme : embraceDarkTheme)}>
     <section aria-label="Transcript example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={transcriptOptions}><Transcript title="Inline code" turns={turns} sync={{ _tag: 'Live', since: clock }} now={clock} observedAt={clock} /></EmbraceRuntimeProvider></section>
-    <section aria-label="Embrace thread example"><EmbraceRuntimeProvider options={embraceOptions}><EmbraceThread items={embraceItems} embrace="E3" composer={false} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Embrace thread example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={embraceOptions}><EmbraceThread items={embraceItems} embrace="E3" composer={false} /></EmbraceRuntimeProvider></section>
     <section aria-label="Markdown preview example"><EmbraceMarkdownPreview markdown="The preview keeps `preview-span` as code." /></section>
   </main>
 }
@@ -121,7 +121,7 @@ async function expectPlain(row: Element | null, literal: string) {
   await expect(row!.textContent).toContain(`\`${literal}\``)
 }
 
-async function verify(canvasElement: HTMLElement, revision: number) {
+async function verify(canvasElement: HTMLElement, revision: number, fresh: boolean) {
   const canvas = within(canvasElement)
   const transcript = canvas.getByRole('region', { name: 'Transcript example' })
   const lane = within(transcript)
@@ -151,17 +151,24 @@ async function verify(canvasElement: HTMLElement, revision: number) {
   await expect(inlineCodeMismatches(fake, 'fgSoft').length).toBeGreaterThan(0)
   fake.remove()
 
-  // The collapsed preview cuts the span: a literal backtick, never invented code.
+  // The collapsed preview cuts the span: a literal backtick, never invented code. A re-render may keep it expanded.
   const cut = transcript.querySelector<HTMLElement>('[data-item-id="inline/cut-prompt"]')!
-  const expand = within(cut).getByRole('button', { name: 'Show full message' })
-  await expect(cut.querySelector('code')).toBeNull()
-  await expect(cut.textContent).toContain('`cut-sp')
-  await userEvent.click(expand)
+  const expand = within(cut).getByRole('button', { name: /^Show (full message|less)$/ })
+  if (fresh) await expect(expand).toHaveAttribute('aria-expanded', 'false')
+  if (expand.getAttribute('aria-expanded') === 'false') {
+    await expect(cut.querySelector('code')).toBeNull()
+    await expect(cut.textContent).toContain('`cut-sp')
+    await userEvent.click(expand)
+  }
   await expect(expand).toHaveAttribute('aria-expanded', 'true')
   await expectInlineCode(cut, 'cut-span-value', '[data-testid="user-message"]', 'fg')
 
-  await userEvent.click(lane.getByRole('button', { name: /Worked for 24s/ }))
-  await userEvent.click(lane.getByRole('button', { name: 'Thinking' }))
+  // Work and thinking folds may already be open (settled multi-turn work, or state kept across the re-render); open each only when collapsed.
+  const worked = lane.queryByRole('button', { name: /Worked for/ })
+  if (worked?.getAttribute('aria-expanded') === 'false') await userEvent.click(worked)
+  const thinking = lane.getByRole('button', { name: 'Thinking' })
+  if (thinking.getAttribute('aria-expanded') === 'false') await userEvent.click(thinking)
+  await expect(thinking).toHaveAttribute('aria-expanded', 'true')
   await expectInlineCode(transcript, 'remark', '[data-testid="thinking-entry"]', 'fgSoft')
 
   const embrace = canvas.getByRole('region', { name: 'Embrace thread example' })
@@ -174,10 +181,10 @@ async function verify(canvasElement: HTMLElement, revision: number) {
 
 export const Dark1440: Story = { play: async ({ mount, args, canvasElement }) => {
   await mount()
-  await verify(canvasElement, args.revision)
+  await verify(canvasElement, args.revision, true)
   const next = args.revision + 1
   await mount(<InlineCodeStory {...args} revision={next} />)
-  await verify(canvasElement, next)
+  await verify(canvasElement, next, false)
 } }
 export const Light1440: Story = { ...Dark1440, args: { scheme: 'light' } }
 export const Dark440: Story = { ...Dark1440, args: { narrow: true } }
