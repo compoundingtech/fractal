@@ -4,7 +4,7 @@ set -euo pipefail
 : "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the root mission run}"
 root="mission-run/$ST_MISSION_RUN"
 work="$(env -u ST_AGENT st3 work ls --all --json)"
-root_view="$(env -u ST_AGENT st3 --json mission show "$root")"
+root_view="$(env -u ST_AGENT st3 --json missions show "$root")"
 producer="$(jq -r '.steps[] | select(.step == "lift-mission-document") | .subject' <<<"$root_view")"
 publisher="$(jq -r '.steps[] | select(.step == "lift-mission-document/work/publish-ready-graph-mission") | .subject' <<<"$root_view")"
 consumer="$(jq -r '.steps[] | select(.step == "execute-lifted-mission") | .subject' <<<"$root_view")"
