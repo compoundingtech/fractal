@@ -5633,6 +5633,13 @@ impl Store {
     /// writer, and only when there are such batches.
     pub fn seal_local_batches(&self) -> Result<()> {
         self.recover_sealing_frontier()?;
+        self.seal_local_batches_after_frontier()
+    }
+
+    /// Seal the batches written after the sealing frontier, without the once-per-process search
+    /// for batches skipped behind it. That search walks every batch; whoever seals for a
+    /// snapshot runs it, and lowering the frontier then seals what it found.
+    fn seal_local_batches_after_frontier(&self) -> Result<()> {
         // Capture the target once; concurrent writes belong to the next pass.
         let target = max_batch_rowid(&self.readers.get())?;
         while self.seal_local_batch_chunk(target)? {}
@@ -6417,7 +6424,10 @@ impl Store {
 
     pub fn validate_replication_backlog(&self) -> Result<ReplicationAdmission> {
         // Seed and sign local batches first, so local membership claims decide admission.
-        self.replication_snapshot()?;
+        // Admission needs no replication snapshot: building one in a fresh process reads every
+        // envelope, and the daemon runs this before it serves. The first export builds it.
+        self.seal_local_batches_after_frontier()?;
+        self.judge_claims(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self

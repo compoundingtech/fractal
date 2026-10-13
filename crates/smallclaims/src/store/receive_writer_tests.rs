@@ -676,6 +676,58 @@ fn an_old_sealing_frontier_recovers_skipped_batches_once_after_reopen() {
     assert_eq!(reopened.seeded_batch_rowid.load(Ordering::Acquire), cursor);
 }
 
+/// The daemon validates the backlog before it serves. A fresh process has no replication
+/// snapshot, and building one, with the sealing recovery search, reads every envelope and batch:
+/// fifteen seconds of restart on a two-million-envelope store. Admission needs neither.
+#[test]
+fn startup_admission_seals_new_batches_without_a_snapshot_or_recovery_search() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cedar.sqlite3");
+    let local = {
+        let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+        store.bind_fleet(FLEET).unwrap();
+        let exchange = page(&node("birch"), &node("cedar-view"), 3);
+        store
+            .receive_replication_exchange("birch", FLEET, &exchange)
+            .unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: "note/written-before-serving".into(),
+                kind: "example.note".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    // The restarted daemon: pending envelopes and an unsealed local batch, nothing cached.
+    let store = Store::open(&path, "cedar", Arc::new(Plain)).unwrap();
+    store.bind_fleet(FLEET).unwrap();
+
+    assert_eq!(store.validate_replication_backlog().unwrap().valid, 3);
+
+    let sealed: i64 = store
+        .readers
+        .get()
+        .query_row(
+            "SELECT COUNT(*) FROM replica_envelopes
+             WHERE batch_id=(SELECT batch_id FROM claims WHERE id=?1)",
+            [&local.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sealed, 1, "admission sealed the local batch first");
+    assert!(store.replication_snapshot.lock().unwrap().is_none());
+    assert!(*store.sealing_recovery.try_lock().unwrap());
+
+    // The first export after serving builds both.
+    store.replication_snapshot().unwrap();
+    assert!(store.replication_snapshot.lock().unwrap().is_some());
+    assert!(!*store.sealing_recovery.try_lock().unwrap());
+}
+
 fn recovery_note(store: &Store, subject: &str) -> crate::claim::ClaimRecord {
     store
         .append_claim(&ClaimInput {
