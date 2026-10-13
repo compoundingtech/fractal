@@ -15608,7 +15608,7 @@ subscription "watch/source" {
             .unwrap();
         state
             .store
-            .receive_replication_exchange_asking("edge", FLEET, &exchange, true)
+            .receive_replication_exchange("edge", FLEET, &exchange)
             .unwrap();
         state
             .store
@@ -16039,7 +16039,7 @@ subscription "watch/source" {
             let exchange = edge.export_replication_exchange(FLEET, &inventory).unwrap();
             state
                 .store
-                .receive_replication_exchange("edge", FLEET, &exchange)
+                .receive_replication_exchange_asking("edge", FLEET, &exchange, true)
                 .unwrap();
             exchange.envelopes.len() as u64
         };

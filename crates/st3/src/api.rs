@@ -21147,7 +21147,7 @@ agent "good" {{ workspace {:?}; command "true" }}
         let source = Store::open_memory("cedar").unwrap();
         source.bind_fleet(FLEET).unwrap();
         let exchange = source.export_replication_summary(FLEET).unwrap();
-        let mut events = state.event_notify.subscribe();
+        let events = state.event_notify.subscribe();
         let app = router(state.clone());
         for carrier in ["fabric", "fabric", "loopback"] {
             let (status, response) = json_request(
