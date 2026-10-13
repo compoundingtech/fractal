@@ -1541,7 +1541,7 @@ impl Deref for ReadGuard<'_> {
         // Cheap queries can finish before the normal progress interval. Once cancelled,
         // the next operation on this guard must fail too, including a cached statement.
         if crate::read_budget::interrupted() {
-            connection.progress_handler(1, Some(|| true));
+            connection.progress_handler(1, Some(crate::read_budget::interrupted));
         }
         connection
     }
