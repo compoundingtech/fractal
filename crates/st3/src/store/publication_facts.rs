@@ -17,6 +17,7 @@ ON local_publication_claims(subject,kind,origin,incarnation,sort_key);
 CREATE INDEX IF NOT EXISTS local_publication_runtime_lookup
 ON local_publication_claims(subject,kind,origin,sort_key);
 CREATE TABLE IF NOT EXISTS local_publication_pending (claim_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS local_publication_batches (batch_id TEXT PRIMARY KEY, cursor INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_publication_starts (
     observation_id INTEGER PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -73,14 +74,12 @@ CREATE TRIGGER IF NOT EXISTS publication_claim_insert AFTER INSERT ON claims
 WHEN NEW.kind IN ('runtime.observed','runtime.action.succeeded') BEGIN
     INSERT OR IGNORE INTO local_publication_pending VALUES(NEW.id);
 END;
-CREATE TRIGGER IF NOT EXISTS publication_claim_delete AFTER DELETE ON claims BEGIN
+DROP TRIGGER IF EXISTS publication_claim_delete;
+CREATE TRIGGER publication_claim_delete AFTER DELETE ON claims BEGIN
     DELETE FROM local_publication_claims WHERE claim_id=OLD.id;
     DELETE FROM local_publication_pending WHERE claim_id=OLD.id;
-    INSERT OR IGNORE INTO local_publication_pending
-    SELECT claims.id FROM claims INDEXED BY claims_batch_index
-    WHERE claims.batch_id=OLD.batch_id AND claims.store_index>OLD.store_index
-      AND claims.kind IN ('runtime.observed','runtime.action.succeeded')
-      AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id);
+    INSERT INTO local_publication_batches VALUES(OLD.batch_id,0)
+      ON CONFLICT(batch_id) DO UPDATE SET cursor=0;
 END;
 CREATE TRIGGER IF NOT EXISTS publication_claim_update
 AFTER UPDATE OF subject,kind,origin,body,accepted_at_unix_ms,batch_id,store_index ON claims
@@ -179,6 +178,7 @@ fn cache_epoch(connection: &Connection) -> Result<(i64, bool)> {
     Ok(connection.prepare_cached(
         "SELECT generation,COALESCE((SELECT phase=3 FROM local_publication_bootstrap WHERE singleton=1),0)
             AND NOT EXISTS(SELECT 1 FROM local_publication_pending)
+            AND NOT EXISTS(SELECT 1 FROM local_publication_batches)
          FROM local_publication_launch_epoch WHERE singleton=1"
     )?.query_row([], |row| Ok((row.get(0)?,row.get(1)?)))?)
 }
@@ -252,6 +252,54 @@ fn sync_from_source(transaction: &Transaction<'_>, source: &Connection, id: &str
 /// the commit-driven background worker finishes it without a history fold or polling.
 pub(super) fn flush(transaction: &Transaction<'_>) -> Result<()> {
     let started = std::time::Instant::now();
+    // Deleting a legacy batch member changes later fallback canonical positions.
+    // Coalesce that invalidation per batch, then repair it in bounded durable pages.
+    // Never rescan the remaining batch in each row's delete trigger.
+    let batch: Option<(String, i64)> = transaction.prepare_cached(
+        "SELECT batch_id,cursor FROM local_publication_batches WHERE batch_id>='' ORDER BY batch_id LIMIT 1"
+    )?.query_row([], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    if let Some((batch_id, cursor)) = batch {
+        let rows = transaction
+            .prepare_cached(
+                "SELECT store_index,id,kind FROM claims INDEXED BY claims_batch_index
+             WHERE batch_id=?1 AND store_index>?2 ORDER BY store_index LIMIT ?3",
+            )?
+            .query_map(params![batch_id, cursor, PAGE], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut through = cursor;
+        let mut processed = 0;
+        for (index, id, kind) in &rows {
+            if processed > 0 && started.elapsed() >= std::time::Duration::from_millis(10) {
+                break;
+            }
+            if matches!(
+                kind.as_str(),
+                "runtime.observed" | "runtime.action.succeeded"
+            ) {
+                sync(transaction, id)?;
+            }
+            through = *index;
+            processed += 1;
+        }
+        if processed == rows.len() && rows.len() < PAGE {
+            transaction.execute(
+                "DELETE FROM local_publication_batches WHERE batch_id=?1",
+                [&batch_id],
+            )?;
+        } else {
+            transaction.execute(
+                "UPDATE local_publication_batches SET cursor=?2 WHERE batch_id=?1",
+                params![batch_id, through],
+            )?;
+        }
+        return Ok(());
+    }
     let pending = transaction
         .prepare_cached("SELECT claim_id FROM local_publication_pending WHERE claim_id>='' ORDER BY claim_id LIMIT ?1")?
         .query_map([PAGE], |row| row.get::<_, String>(0))?
@@ -273,7 +321,8 @@ pub(super) fn ready(connection: &Connection) -> Result<bool> {
     Ok(connection
         .prepare_cached(
             "SELECT COALESCE((SELECT phase=3 FROM local_publication_bootstrap WHERE singleton=1),0)
-            AND NOT EXISTS(SELECT 1 FROM local_publication_pending)",
+            AND NOT EXISTS(SELECT 1 FROM local_publication_pending)
+            AND NOT EXISTS(SELECT 1 FROM local_publication_batches)",
         )?
         .query_row([], |row| row.get(0))?)
 }
@@ -372,7 +421,7 @@ impl Store {
         let mut connection = self.connection.write_background();
         let transaction = connection.transaction()?;
         let pending: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM local_publication_pending)",
+            "SELECT EXISTS(SELECT 1 FROM local_publication_pending) OR EXISTS(SELECT 1 FROM local_publication_batches)",
             [],
             |row| row.get(0),
         )?;
@@ -389,7 +438,7 @@ impl Store {
 pub(super) fn reset(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         "DELETE FROM local_publication_claims;
-        DELETE FROM local_publication_starts; DELETE FROM local_publication_pending;
+        DELETE FROM local_publication_starts; DELETE FROM local_publication_pending; DELETE FROM local_publication_batches;
         DELETE FROM local_publication_bootstrap;",
     )?;
     initialize(transaction)
@@ -701,7 +750,7 @@ mod tests {
         );
         let bytes:u64=connection.query_row("SELECT sum(pgsize) FROM dbstat WHERE name IN
             ('local_publication_claims','local_publication_claims_lookup','local_publication_runtime_lookup',
-             'local_publication_starts','local_publication_starts_lookup','local_publication_pending','local_publication_bootstrap','local_publication_launch_epoch')",[],|row|row.get(0)).unwrap();
+             'local_publication_starts','local_publication_starts_lookup','local_publication_pending','local_publication_bootstrap','local_publication_launch_epoch','local_publication_batches')",[],|row|row.get(0)).unwrap();
         println!("publication census derived_bytes={bytes}");
     }
 
@@ -783,6 +832,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore = "native delete counters: run alone with --ignored --test-threads=1 --nocapture"]
+    fn publication_facts_native_delete_cost() {
+        use smallclaims::sqlite::work;
+        for after in [false, true] {
+            for (batch_size, total_rows) in [(1, 100), (1000, 1000)] {
+                for runtime in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let path = root.path().join("delete.db");
+                    let baseline = (!after).then(|| {
+                        GraphStore::open(&path, "node", Arc::new(SmalltalkRuntime::default()))
+                            .unwrap()
+                    });
+                    let revised = after.then(|| Store::open(&path, "node").unwrap());
+                    let graph = baseline
+                        .as_ref()
+                        .unwrap_or_else(|| &revised.as_ref().unwrap().graph);
+                    if !after {
+                        let names=graph.readers.get().prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND name LIKE 'publication_%'").unwrap()
+                            .query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                        let writer = graph.connection.write();
+                        for name in names {
+                            writer
+                                .execute_batch(&format!("DROP TRIGGER {name}"))
+                                .unwrap();
+                        }
+                    }
+                    let mut ids = Vec::new();
+                    {
+                        let mut writer = graph.connection.write();
+                        let tx = writer.transaction().unwrap();
+                        let mut batch = None;
+                        for i in 0..total_rows {
+                            let kind = if runtime {
+                                "runtime.observed"
+                            } else {
+                                "runtime.action.requested"
+                            };
+                            let fields = if runtime {
+                                json!({"status":"running","incarnation_id":format!("delete-{i}")})
+                            } else {
+                                json!({"action":"screen"})
+                            };
+                            let row = append_claim_tx(
+                                &tx,
+                                "node",
+                                "agent/example/worker",
+                                kind,
+                                None,
+                                &json!({"fields":fields}),
+                                &[],
+                                batch.as_deref(),
+                            )
+                            .unwrap();
+                            if batch_size > 1 {
+                                batch = Some(row.batch_id);
+                            }
+                            ids.push(row.id);
+                        }
+                        tx.commit().unwrap();
+                    }
+                    if let Some(store) = &revised {
+                        finish(store);
+                    }
+                    let mut costs = work::SqliteWork::default();
+                    let mut holds = Vec::new();
+                    // One native delete statement per chunk, including maintenance and commit observer.
+                    for chunk in ids.chunks(100) {
+                        let mut writer = graph.connection.write();
+                        let before = work::total();
+                        let started = std::time::Instant::now();
+                        let tx = writer.transaction().unwrap();
+                        let arguments = std::iter::repeat_n("?", chunk.len())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        tx.execute(
+                            &format!("DELETE FROM claims WHERE id IN ({arguments})"),
+                            rusqlite::params_from_iter(chunk),
+                        )
+                        .unwrap();
+                        tx.commit().unwrap();
+                        drop(writer);
+                        holds.push(started.elapsed().as_micros());
+                        let cost = work::total() - before;
+                        costs.vm_steps += cost.vm_steps;
+                        costs.statements += cost.statements;
+                        if let Some(store) = &revised {
+                            finish(store);
+                        }
+                    }
+                    holds.sort();
+                    println!(
+                        "publication delete after={after} runtime={runtime} batch_size={batch_size} rows={total_rows} chunk=100: vm_per_row={} statements={} chunk_hold_median_us={} chunk_hold_max_us={}",
+                        costs.vm_steps / total_rows as u64,
+                        costs.statements,
+                        holds[holds.len() / 2],
+                        holds.last().unwrap()
+                    );
+                    if let Some(store) = &revised {
+                        oracle(store);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn publication_facts_batch_deletion_coalesces_and_repairs_legacy_positions() {
+        let store = Store::open_memory("node").unwrap();
+        let mut ids = Vec::new();
+        {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            let mut batch = None;
+            for i in 0..1000 {
+                let row = append_claim_tx(
+                    &tx,
+                    "node",
+                    "agent/example/worker",
+                    "runtime.observed",
+                    None,
+                    &json!({"fields":{"status":"running","incarnation_id":format!("batch-{i}")}}),
+                    &[],
+                    batch.as_deref(),
+                )
+                .unwrap();
+                batch = Some(row.batch_id);
+                ids.push(row.id);
+            }
+            tx.commit().unwrap();
+        }
+        finish(&store);
+        let mut writer = store.connection.write();
+        let tx = writer.transaction().unwrap();
+        for id in &ids[..500] {
+            tx.execute("DELETE FROM claims WHERE id=?1", [id]).unwrap();
+        }
+        assert_eq!(
+            tx.query_row(
+                "SELECT count(*) FROM local_publication_batches",
+                [],
+                |row| row.get::<_, usize>(0)
+            )
+            .unwrap(),
+            1
+        );
+        tx.commit().unwrap();
+        drop(writer);
+        assert!(!store.publication_evidence_ready().unwrap());
+        finish(&store);
+        oracle(&store);
     }
 
     #[test]
