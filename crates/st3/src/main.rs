@@ -6690,6 +6690,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     run_checkpoints(activation_store, context).await;
                 }
             });
+            spawn_publication_evidence(store.clone());
             startup_telemetry.serving();
             startup.serving();
             eprintln!("st: local API listening at {}", config.socket.display());
@@ -25770,6 +25771,51 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
             }
         }
     }
+}
+
+/// Commit notifications drive exact-delta maintenance after the API has bound.
+/// Each bootstrap page yields the FIFO writer; malformed source stops the job and
+/// leaves a durable incomplete state for doctor, rather than retrying a local defect.
+fn spawn_publication_evidence(store: Arc<Store>) {
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = store.observe_commits(move |connection| {
+        if connection.is_autocommit() {
+            changed.send_replace(());
+        }
+    });
+    tokio::spawn(async move {
+        let _observer = observer;
+        loop {
+            receiver.borrow_and_update();
+            let read_store = store.clone();
+            match tokio::task::spawn_blocking(move || read_store.publication_evidence_ready()).await
+            {
+                Ok(Ok(true)) => {
+                    if receiver.changed().await.is_err() {
+                        return;
+                    }
+                }
+                Ok(Ok(false)) => {
+                    let page_store = store.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        page_store.advance_publication_evidence()
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => tokio::task::yield_now().await,
+                        error => {
+                            eprintln!("st3: publication evidence bootstrap stopped: {error:?}");
+                            return;
+                        }
+                    }
+                }
+                error => {
+                    eprintln!("st3: publication evidence status failed: {error:?}");
+                    return;
+                }
+            }
+        }
+    });
 }
 
 async fn migrate_event_payloads(store: Arc<Store>) {

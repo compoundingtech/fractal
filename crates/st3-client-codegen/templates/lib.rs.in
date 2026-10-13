@@ -1253,8 +1253,8 @@ impl Client {
         self.list_internal_with_filters("agents", cursor, limit, history, &[("status", status)])
             .await
     }
-    /// The agents list as of this request: the daemon waits briefly for a roster at least as
-    /// new as the request instead of answering from the newest one it has published.
+    /// Fresh agents: request a refresh and wait briefly for its publication. Return the last
+    /// publication at once only after a failed latest attempt with no newer attempt in flight.
     pub async fn agents_list_fresh(
         &self,
         status: Option<&str>,

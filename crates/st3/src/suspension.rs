@@ -112,8 +112,8 @@ impl Suspension {
     }
 }
 
-/// Describe a publication using the same declared-launch boundary as suspension lineage.
-/// Manual deferral is available only to owned-set publication; this introduces no guard.
+/// Describe a publication against its running launch, or its existing suspension lineage.
+/// Manual deferral is available only to owned-set publication; this introduces no policy.
 pub(crate) fn publication_action(
     store: &Store,
     next: &crate::model::DesiredSubject,
@@ -124,7 +124,7 @@ pub(crate) fn publication_action(
         return Ok(None);
     }
     let Some(hold) = current(store, &next.subject)?.filter(Suspension::holds_seat) else {
-        return Ok(None);
+        return store.publication_action(next);
     };
     let suspension = hold
         .suspend_operation_id
