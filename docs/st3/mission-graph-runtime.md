@@ -496,7 +496,9 @@ The loop has no built-in Git behavior. A failed keep or discard mission stops th
 
 `on-exhausted` defaults to `fail`. It can contain `succeed` or one human gate instead.
 
-Every loop that stops short raises one attention item: a loop that fails at exhaustion or in its
+Cancelling a loop before its first round starts, including a run still waiting on `after`,
+does not raise a stopped-loop item. Failures still raise an item even before the first round.
+Every loop that starts and stops short raises one attention item: a loop that fails at exhaustion or in its
 human review, and a loop that a cancelled round or a failed keep or discard branch stops. The item
 targets the loop and its run. It names the cause and the command that continues or ends the loop:
 `st work retry STEP` for a failed step, which runs the next round, or `st missions cancel RUN` and
