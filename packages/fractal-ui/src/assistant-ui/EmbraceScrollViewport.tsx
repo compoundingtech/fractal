@@ -440,8 +440,11 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     let viewportHeight = viewport.clientHeight
     // Intent is independent of scroll events: at the top edge there may be
     // nothing left to scroll, but the reader can still request the next page.
+    // With neither scrollable nor loadable content above, the gesture moves
+    // nothing and is not reading: following stays attached.
     const olderGesture = (home = false) => {
-      controller.read(home)
+      const source = current.current
+      if (viewport.scrollTop > 0 || source._tag === 'More' || source._tag === 'Loading') controller.read(home)
       prefetch(true)
     }
     let draggingScrollbar = false

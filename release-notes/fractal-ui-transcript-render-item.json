@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "fractal-ui Transcript accepts a host renderItem that presents chosen messages and events itself",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No tables, columns, indexes or triggers." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Only packages/fractal-ui changes. TranscriptProps gains an optional renderItem(item) callback. When it returns a node, the kit renders that node inside the message root for the item; when it returns undefined, or the host omits the prop, the kit presentation is unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}
