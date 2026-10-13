@@ -1367,6 +1367,39 @@ fn conversation_stream_error(id: &str, error: &ApiError) -> Value {
         "retryable":client_error_retryable(error.status, Some(&error.code))})
 }
 
+/// Attribute re-OPENs without changing the frames or replay cursor clients receive.
+fn record_conversation_reopen(
+    id: &str, session_id: &str, remote: bool, reason: &str, code: &str, bytes: usize,
+) {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.reopen",
+        st.subscription.id = id,
+        st.session.id = session_id,
+        st.remote = remote,
+        st.conversation.reopen.reason = reason,
+        st.error.code = code,
+        st.page.bytes = bytes,
+    ).entered();
+}
+
+fn conversation_replay_gap(session_id: &str, reason: &str, message: &str) -> ApiError {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.replay_gap",
+        st.session.id = session_id,
+        st.conversation.gap.reason = reason,
+    ).entered();
+    ApiError {
+        status: StatusCode::GONE,
+        code: "cursor-gap".into(),
+        message: message.into(),
+        details: Box::new(serde_json::Map::from_iter([(
+            "full_resync".into(), Value::Bool(true),
+        )])),
+    }
+}
+
 /// Follow a conversation with no subscription time. The collections socket calls
 /// [`follow_conversation_since`]; this form is for the tests that exercise the follower itself.
 #[cfg(test)]
@@ -1487,7 +1520,9 @@ async fn follow_conversation_since(
                             frame["header"] = header.clone();
                         }
                         // Too much changed for one frame: send the newest page instead.
-                        if frame_bytes(&frame) > CLIENT_MAX_RESPONSE_BYTES {
+                        let bytes = frame_bytes(&frame);
+                        if bytes > CLIENT_MAX_RESPONSE_BYTES {
+                            record_conversation_reopen(&id, &session_id, remote.is_some(), "delta-oversize", "", bytes);
                             break;
                         }
                         if queue.send(|| outbox.send((id.clone(), generation, frame))).is_err() {
@@ -1499,9 +1534,11 @@ async fn follow_conversation_since(
                 Err(error)
                     if matches!(error.code.as_str(), "cursor-gap" | "page-cursor-expired") =>
                 {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "replay-gap", &error.code, 0);
                     break;
                 }
                 Err(error) if client_error_retryable(error.status, Some(&error.code)) => {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "retryable-error", &error.code, 0);
                     tokio::time::sleep(COLLECTION_REREAD_INTERVAL).await;
                     break;
                 }
@@ -6996,28 +7033,18 @@ fn conversation_read_now_unbounded(
             || position.local_position > local_latest
             || position.native_sequence > native_latest
         {
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the conversation cursor is outside the bounded replay window".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "cursor-outside-window",
+                "the conversation cursor is outside the bounded replay window",
+            ));
         }
         if position.source_generation != source_generation {
             // Already-delivered entries changed in place under unchanged sequences, which a
             // sequence-filtered delta cannot carry: send the authoritative newest page.
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the transcript was rewritten in place; refresh the newest conversation page".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "source-generation",
+                "the transcript was rewritten in place; refresh the newest conversation page",
+            ));
         }
     }
     let mut changed_indexes = BTreeSet::new();
@@ -7082,14 +7109,10 @@ fn conversation_read_now_unbounded(
     if retention_changed {
         // A covering interval can remove a projection-only availability notice.
         // The delta protocol cannot delete it: send an authoritative page instead.
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "transcript retention changed; refresh the newest conversation page".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(), Value::Bool(true),
-            )])),
-        });
+        return Err(conversation_replay_gap(
+            session_id, "retention-changed",
+            "transcript retention changed; refresh the newest conversation page",
+        ));
     }
     let mut items = all
         .iter()
@@ -7124,7 +7147,7 @@ fn conversation_read_now_unbounded(
             .cmp(&b["timestamp"].as_str())
             .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
     });
-    if message_indexes.iter().any(|index| {
+    let missing_message_pair = message_indexes.iter().any(|index| {
         ![
             index.saturating_mul(4),
             index.saturating_mul(4).saturating_add(1),
@@ -7135,23 +7158,20 @@ fn conversation_read_now_unbounded(
                 .iter()
                 .any(|item| item["sequence"].as_u64() == Some(*sequence))
         })
-    }) || explicit_ids
-        .iter()
-        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)))
-        || (all.len() == 200
-            && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
-                native_oldest.is_some_and(|first| first > native)
-            }))
-    {
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "the conversation exceeded its bounded replay window".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(),
-                Value::Bool(true),
-            )])),
+    });
+    let missing_explicit_id = explicit_ids.iter()
+        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)));
+    let native_window_gap = all.len() == 200
+        && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
+            native_oldest.is_some_and(|first| first > native)
         });
+    if missing_message_pair || missing_explicit_id || native_window_gap {
+        let reason = if missing_message_pair { "message-pair" }
+            else if missing_explicit_id { "explicit-id" }
+            else { "native-window" };
+        return Err(conversation_replay_gap(
+            session_id, reason, "the conversation exceeded its bounded replay window",
+        ));
     }
     let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
@@ -19112,11 +19132,19 @@ mission "example/zero-run" state="ready" {
                 &path,
                 format!("{header}\n{question}\n{}\n{reply}\n", failed(Some(retry))),
             ).unwrap();
-            let gap = conversation_read_now(&state, &session, &session_id, Some(&cursor))
-                .unwrap_err();
+            let mut gap = None;
+            let spans = crate::otel::capture_test_spans(|| {
+                gap = Some(conversation_read_now(&state, &session, &session_id, Some(&cursor))
+                    .unwrap_err());
+            });
+            let gap = gap.unwrap();
             assert_eq!(gap.status, StatusCode::GONE);
             assert_eq!(gap.code, "cursor-gap");
             assert_eq!(gap.details["full_resync"], true);
+            assert!(spans.iter().any(|span| span.name == "st.conversation.replay_gap"
+                && span.attributes.iter().any(|field|
+                    field.key.as_str() == "st.conversation.gap.reason"
+                        && field.value.as_str() == "source-generation")));
             // The follower's reload carries the updated presentation under the same sequence.
             let reloaded = newest_page();
             let (sequence, view) = error_view(&reloaded).expect("the settled turn keeps its error block");
