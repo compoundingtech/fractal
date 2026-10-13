@@ -470,13 +470,13 @@ mod tests {
             serde_json::json!({"version": 1, "subject": "attention/x", "at_unix_ms": now_ms()});
         let future =
             serde_json::json!({"version": 2, "subject": "agent/a/b", "at_unix_ms": now_ms()});
-        let stale = write("0001.json", &stale.to_string(), 0o600);
-        let junk = write("0002.json", "not json", 0o600);
-        let bad = write("0003.json", &bad_subject.to_string(), 0o600);
-        let open = write("0004.json", &fresh.to_string(), 0o644);
-        let newer = write("0005.json", &future.to_string(), 0o600);
-        let good = write("0006.json", &fresh.to_string(), 0o600);
-        let huge = write("0007.json", &"x".repeat(MAX_BYTES as usize + 1), 0o600);
+        let stale = write("stale.json", &stale.to_string(), 0o600);
+        let junk = write("junk.json", "not json", 0o600);
+        let bad = write("bad.json", &bad_subject.to_string(), 0o600);
+        let open = write("open.json", &fresh.to_string(), 0o644);
+        let newer = write("newer.json", &future.to_string(), 0o600);
+        let good = write("good.json", &fresh.to_string(), 0o600);
+        let huge = write("huge.json", &"x".repeat(MAX_BYTES as usize + 1), 0o600);
 
         let mut inbox = Inbox::new(Some(dir.clone()));
         inbox.read();
@@ -484,7 +484,7 @@ mod tests {
             .waiting()
             .map(|(request, _)| request.id.clone())
             .collect::<Vec<_>>();
-        assert_eq!(ids, ["0006"]);
+        assert_eq!(ids, ["good"]);
         for gone in [stale, junk, bad, open, newer, huge] {
             assert!(!gone.exists(), "{}", gone.display());
         }
