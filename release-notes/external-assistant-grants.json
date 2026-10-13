@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Only the daemon-configured owning person through the trusted-local CLI manages assistant grants; absent owner configuration fails closed. Deployment owner identity stays in external configuration, never a hardcoded public identity. Explicit closed read scopes, disclosure consent, bounded expiry and approval-once policy do not confer person authority or message permission."
+    "detail": "Only the daemon-configured owning person through the trusted-local CLI manages assistant grants; absent owner configuration fails closed. Server-established harness and native-peer provenance prevents forged owner headers from enabling grant inspection or owner assistant-device enumeration; paired person devices cannot administer grants even over Unix. Deployment owner identity stays in external configuration, never a hardcoded public identity. Explicit closed read scopes, disclosure consent, bounded expiry and approval-once policy do not confer person authority or message permission."
   },
   "compatibility": {
     "status": "changed",
