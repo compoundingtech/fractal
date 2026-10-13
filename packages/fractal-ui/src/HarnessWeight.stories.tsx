@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import axe from 'axe-core'
 import { HarnessNotice } from './assistant-ui/composition/HarnessNotice'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
@@ -53,6 +53,24 @@ export const Dark: Story = {
     const read = within(canvas.getByTestId('harness-weight-row')).getByRole('button', { name: 'Read summary' })
     await userEvent.click(read)
     await expect(read).toHaveAttribute('aria-expanded', 'true')
+    await expect(canvasElement.querySelector('[title]')).toBeNull()
+    const timestamp = canvasElement.querySelector<HTMLTimeElement>('time')!
+    const fullDate = new Date(timestamp.dateTime).toLocaleString()
+    await expect(timestamp).toHaveAttribute('tabindex', '0')
+    await expect(timestamp).toHaveAccessibleDescription(fullDate)
+    const documentCanvas = within(canvasElement.ownerDocument.body)
+    await userEvent.hover(timestamp)
+    await expect(await documentCanvas.findByRole('tooltip')).toHaveTextContent(fullDate)
+    await userEvent.unhover(timestamp)
+    await waitFor(() => expect(documentCanvas.queryByRole('tooltip')).toBeNull())
+    await userEvent.click(timestamp)
+    await userEvent.tab({ shift: true })
+    await userEvent.tab()
+    await expect(timestamp).toHaveFocus()
+    await expect(getComputedStyle(timestamp).outlineStyle).toBe('solid')
+    await expect(await documentCanvas.findByRole('tooltip')).toHaveTextContent(fullDate)
+    await userEvent.tab()
+    await waitFor(() => expect(documentCanvas.queryByRole('tooltip')).toBeNull())
     const contrast = await axe.run(canvasElement, { runOnly: { type: 'rule', values: ['color-contrast'] } })
     await expect(contrast.violations).toEqual([])
   },

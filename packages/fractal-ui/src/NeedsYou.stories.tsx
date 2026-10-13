@@ -40,6 +40,21 @@ const assertAttentionComposition = async (root: HTMLElement) => {
   for (const dock of root.querySelectorAll<HTMLElement>('aside[data-fractal-card]')) await expect(dock.querySelector('button svg[data-icon="question"]')).not.toBeNull()
 }
 
+const assertKeyboardRing = async (target: HTMLElement) => {
+  await expect(getComputedStyle(target).outlineStyle).toBe('none')
+  await userEvent.tab({ shift: true })
+  await userEvent.tab()
+  await expect(target).toHaveFocus()
+  await expect(getComputedStyle(target).outlineStyle).toBe('solid')
+  await expect(getComputedStyle(target).outlineWidth).toBe('2px')
+}
+
+const assertBlockGap = async (target: HTMLElement) => {
+  await expect(getComputedStyle(target).display).toBe('flex')
+  await expect(getComputedStyle(target).flexDirection).toBe('column')
+  await expect(getComputedStyle(target).rowGap).toBe('8px')
+}
+
 const meta = {
   title: 'Fractal/Plugins/Questions/Needs you',
   parameters: { layout: 'fullscreen' },
@@ -80,6 +95,8 @@ export const DockDimensions: Story = {
     await expect(toggle).toHaveAttribute('aria-expanded', 'true')
     await expect(within(canvas.getByRole('region', { name: 'Pinned request' })).getByRole('button', { name: 'Open terminal' })).toBeVisible()
     await expect(toggle).toHaveFocus()
+    await assertBlockGap(dock)
+    await assertKeyboardRing(toggle)
     await assertDockScale()
     await userEvent.keyboard('{Enter}')
     await expect(canvas.queryByRole('region', { name: 'Pinned request' })).toBeNull()
@@ -108,18 +125,31 @@ export const Inbox: Story = {
     for (const entry of entries) {
       await expect(entry).not.toHaveAttribute('open')
       const summary = entry.querySelector('summary')!
-      await expect(getComputedStyle(summary).webkitLineClamp).toBe('2')
-      await expect(summary.getBoundingClientRect().height).toBeLessThanOrEqual(parseFloat(getComputedStyle(summary).lineHeight) * 2 + 1)
+      const label = summary.querySelector<HTMLElement>('[data-needs-you-label]')!
+      const chevron = summary.querySelector<HTMLElement>('[data-needs-you-chevron]')!
+      await expect(getComputedStyle(label).webkitLineClamp).toBe('2')
+      await expect(label.getBoundingClientRect().height).toBeLessThanOrEqual(parseFloat(getComputedStyle(label).lineHeight) * 2 + 1)
+      await expect(chevron.querySelector('svg')).toHaveAttribute('data-icon', 'chevron-right')
+      await expect(chevron.getBoundingClientRect().width).toBe(16)
+      await expect(getComputedStyle(chevron).transform).toBe('matrix(1, 0, 0, 1, 0, 0)')
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) await expect(getComputedStyle(chevron).transitionDuration).toBe('0s')
     }
+    await assertBlockGap(inbox)
     await expect(within(inbox).getByText('Host body · ask-release-2')).not.toBeVisible()
     await userEvent.click(entries[1]!.querySelector('summary')!)
     await expect(entries[1]).toHaveAttribute('open')
     await expect(within(entries[1]!).getByText('Host body · ask-release-2')).toBeVisible()
     await expect(within(entries[0]!).getByText('Host body · ask-release-1')).not.toBeVisible()
+    await assertBlockGap(entries[1]!)
+    await assertBlockGap(entries[1]!.querySelector('div')!)
+    await waitFor(() => expect(getComputedStyle(entries[1]!.querySelector('[data-needs-you-chevron]')!).transform).toBe('matrix(0, 1, -1, 0, 0, 0)'))
+    await assertKeyboardRing(entries[1]!.querySelector('summary')!)
     await userEvent.click(within(entries[1]!).getByRole('button', { name: 'Show in thread' }))
     await expect(onShowInThread).toHaveBeenCalledWith('ask-release-2')
+    await assertKeyboardRing(within(entries[1]!).getByRole('button', { name: 'Show in thread' }))
     await userEvent.click(within(entries[1]!).getByRole('button', { name: 'Open terminal' }))
     await expect(onOpenTerminal).toHaveBeenCalledWith('ask-release-2')
+    await assertKeyboardRing(within(entries[1]!).getByRole('button', { name: 'Open terminal' }))
     const plain = canvas.getByRole('region', { name: 'Needs you inbox without terminal' })
     await userEvent.click(plain.querySelector('summary')!)
     await expect(within(plain).getByRole('button', { name: 'Show in thread' })).toBeVisible()

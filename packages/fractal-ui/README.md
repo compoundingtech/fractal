@@ -39,6 +39,8 @@ Stories:
 
 Both surfaces use shared Fractal composition palette, type, spacing, radius and geometry tokens directly, inheriting the nearest ancestor's StyleX theme. The dock and inbox entries own the attention Card frame (attention hairline, 8/12 padding); hosted bodies omit theirs, so frames never nest. `NeedsYouBar` owns its 12px, medium-weight, 24px-high toggle with the shared SVG `question` glyph; the title truncates before the action label. Hosts composing repeated surfaces may pass `ariaLabel` to name each landmark by its context. `CompositionFrames` mounts both surfaces together and rejects nested frames and a missing dock glyph; `DockDimensions` rejects an oversized toggle.
 
+Dock controls, inbox summaries and actions show the tokenized 2px accent ring for keyboard focus, not pointer clicks. Inbox summaries keep a 12px SVG chevron in a 16px slot beside the two-line label; opening rotates it, with no transition under reduced motion. Card stacks, entry bodies and expanded dock bodies use 8px block gaps. The focused plays assert these computed styles and the closed sibling negative control. Harness-notice timestamps expose their full date through the kit Tooltip on hover and keyboard focus, with a persistent screen-reader description and no native `title`.
+
 The shared Markdown nesting/quote rules require `rail` and `railStrong` in both composition schemes and the neutral theme. Markdown uses the shared 8-unit sibling rhythm with no outer margins, and `tone="foreground"` requests foreground ink for prose that needs it.
 
 ## Families
