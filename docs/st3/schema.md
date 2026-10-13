@@ -5,7 +5,7 @@ This file is generated from `st3-schema`.
 Schema: `st3.v1`
 Digest: `8557d6faef36d92821aa027f3c0271879f815f5096cf8a1ecc2dd0068a4e021e`
 Storage version: `19`
-Storage digest: `214817be635b865e7738400cde39c5b1273d1eaa10065e58460d1790d72068ff`
+Storage digest: `2be4e9770c070ebcaf5d07d9f58a246777cdc917f9b34c019abe2e17080c99c6`
 
 ## Subject families
 

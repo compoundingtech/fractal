@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Document unresolved native producer recovery and verify late PTY retirement",
+  "replay": {
+    "status": "none",
+    "detail": "No projection replay or launch replay is introduced."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "The existing storage version remains 19. The authoritative schema documentation now carries the same runtime-state rollback guidance as its generated document; its documentation digest changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No replicated claim or checkpoint rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Old PTY producer errors remain unresolved unless exact operation-owned retirement or producer closure is proved. No producer option or PTY pin change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional restart beyond the already classified ledger upgrade."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "For a returned native producer error with START OPEN, publish ordinary stop, preserve the operation ledger and runtime records, inspect start-revocation-unverified, and escalate to Operations. An old PTY producer that never publishes has no supported command to prove closure and release the seat; deployment with that residual liveness limit requires the producer-contract decision."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The previously classified consistent database, runtime-record and matching-binary restoration procedure applies. PID absence, elapsed time, daemon restart or ledger deletion do not prove closure."
+  }
+}
