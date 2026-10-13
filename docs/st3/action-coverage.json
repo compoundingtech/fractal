@@ -1965,9 +1965,10 @@
       "command": "st terminals expose-fabric",
       "description": "Let fleet peers attach this host's terminals PTY to PTY over Fabric.",
       "tests": [
+        "crates/st3/tests/terminal_attach.rs::expose_fabric_points_fabric_at_the_daemons_terminal_socket",
         "crates/st3/tests/terminal_attach.rs::a_terminal_another_host_owns_attaches_pty_to_pty_over_fabric"
       ],
-      "verification": "existing CLI integration"
+      "verification": "real CLI with a recording fabric; attach through the daemon's terminal socket"
     },
     {
       "command": "st terminals input-client",

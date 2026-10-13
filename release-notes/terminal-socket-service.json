@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Serve Fabric terminal attaches from the st daemon's terminal socket instead of a process per tunnel",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, replay or projection change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, index or trigger changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "The route line, subject tag check and kernel incarnation proof are unchanged; Fabric peer grants remain the authority for access."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The daemon listens on STATE_DIR/run/terminals.sock (mode 0600) and serves each tunnel on its own thread and runtime. `st terminals expose-fabric` now runs `fabric expose st3/pty/FLEET --socket` with that path and no longer takes `--st`. Dialing clients are unchanged. Exposures made earlier keep running `st terminals serve-fabric`, which still works."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "The daemon binds the new socket at startup; a failure to bind it is reported and leaves the daemon serving, with attaches from other hosts using the client gateway."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "On each host that exposes terminals over Fabric, run `st terminals expose-fabric` once after upgrading to replace the exec exposure with the socket exposure. Peer grants in peers.toml stay as they are."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No new persistent state. To go back, run `fabric expose st3/pty/FLEET --exec -- ST terminals serve-fabric --stdio --pty-root PTY_ROOT` as before."
+  }
+}

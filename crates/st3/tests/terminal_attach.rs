@@ -3,9 +3,9 @@
 //! behind an HTTP endpoint through the daemon's WebSocket. When the daemon, at whichever endpoint,
 //! is down or does not answer within a second, it attaches to the subject's newest PTY session on
 //! this host without st. A terminal another host owns is attached PTY to PTY over Fabric, through
-//! `st terminals serve-fabric` on the owner, and through the client gateway only when Fabric
-//! cannot reach it. Each test owns a daemon, in process or stand-in, and a stand-in PTY session
-//! that reports which process attached to it.
+//! the owner daemon's terminal socket (or `st terminals serve-fabric` for an earlier exposure),
+//! and through the client gateway only when Fabric cannot reach it. Each test owns a daemon, in
+//! process or stand-in, and a stand-in PTY session that reports which process attached to it.
 
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
@@ -707,7 +707,7 @@ fn fabric_shim(root: &Path, tunnel: Option<&Path>) {
         format!(
             "#!/bin/sh\necho \"$@\" >> '{calls}'\ncase \"$1\" in\n  \
              peers) printf '{OWNER_NODE}\\towner-node\\tst3/pty/{FLEET_ID}\\n';;\n  \
-             dial) {dial};;\n  *) exit 1;;\nesac\n",
+             dial) {dial};;\n  expose) echo exposed;;\n  *) exit 1;;\nesac\n",
             calls = root.join("fabric-calls").display(),
         ),
     )
@@ -715,14 +715,36 @@ fn fabric_shim(root: &Path, tunnel: Option<&Path>) {
     std::fs::set_permissions(&fabric, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// The owner's end of a Fabric tunnel at `socket`: for the first tunnel, run
-/// `st terminals serve-fabric` over the owner's PTY root with the tunnel on its stdin and stdout,
-/// as Fabric's exec exposure does. Returns that process's pid.
-fn fabric_tunnel(socket: &Path, owner_pty_root: &Path) -> std::thread::JoinHandle<Option<u32>> {
+/// How the owner's Fabric serves the PTY protocol.
+#[derive(Clone, Copy)]
+enum Exposure {
+    /// `st terminals expose-fabric`: Fabric forwards each tunnel to the st daemon's terminal
+    /// socket.
+    Socket,
+    /// An exposure made by an earlier `expose-fabric`: Fabric runs `st terminals serve-fabric`
+    /// with the tunnel on its stdin and stdout.
+    Exec,
+}
+
+/// The owner's end of a Fabric tunnel at `socket`, serving the first tunnel through `exposure`
+/// over the owner's PTY root. Returns the pid of the process that served it.
+fn fabric_tunnel(
+    socket: &Path,
+    owner_pty_root: &Path,
+    exposure: Exposure,
+) -> std::thread::JoinHandle<Option<u32>> {
     let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let binary = test_bin!("st3-fixture").to_path_buf();
     let pty_root = owner_pty_root.to_path_buf();
+    // The owner's daemon serves its terminal socket in this process, as `st up` does in its own.
+    let terminal_socket = socket.with_file_name("owner-terminals.sock");
+    if let Exposure::Socket = exposure {
+        std::mem::forget(
+            st3::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root.clone())
+                .unwrap(),
+        );
+    }
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(10);
         let tunnel = loop {
@@ -738,20 +760,52 @@ fn fabric_tunnel(socket: &Path, owner_pty_root: &Path) -> std::thread::JoinHandl
             }
         };
         tunnel.set_nonblocking(false).unwrap();
-        let mut serve = st3::test_support::command(binary)
-            .env_remove("ST_AGENT")
-            .env_remove("PTY_SESSION")
-            .args(["terminals", "serve-fabric", "--stdio", "--pty-root"])
-            .arg(&pty_root)
-            .stdin(std::os::fd::OwnedFd::from(tunnel.try_clone().unwrap()))
-            .stdout(std::os::fd::OwnedFd::from(tunnel))
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let pid = serve.id();
-        serve.wait().unwrap();
-        Some(pid)
+        match exposure {
+            Exposure::Socket => {
+                forward(
+                    tunnel,
+                    std::os::unix::net::UnixStream::connect(&terminal_socket).unwrap(),
+                );
+                Some(std::process::id())
+            }
+            Exposure::Exec => {
+                let mut serve = st3::test_support::command(binary)
+                    .env_remove("ST_AGENT")
+                    .env_remove("PTY_SESSION")
+                    .args(["terminals", "serve-fabric", "--stdio", "--pty-root"])
+                    .arg(&pty_root)
+                    .stdin(std::os::fd::OwnedFd::from(tunnel.try_clone().unwrap()))
+                    .stdout(std::os::fd::OwnedFd::from(tunnel))
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap();
+                let pid = serve.id();
+                serve.wait().unwrap();
+                Some(pid)
+            }
+        }
     })
+}
+
+/// Forward bytes both ways between `tunnel` and `service` until both directions end, passing
+/// each end on as a half-close, as Fabric's socket exposure does.
+fn forward(tunnel: std::os::unix::net::UnixStream, service: std::os::unix::net::UnixStream) {
+    let one_way = |mut from: std::os::unix::net::UnixStream,
+                   mut to: std::os::unix::net::UnixStream| {
+        std::thread::spawn(move || {
+            let mut bytes = [0_u8; 16 * 1024];
+            while let Ok(count @ 1..) = from.read(&mut bytes) {
+                if to.write_all(&bytes[..count]).is_err() {
+                    break;
+                }
+            }
+            let _ = to.shutdown(std::net::Shutdown::Write);
+        })
+    };
+    let input = one_way(tunnel.try_clone().unwrap(), service.try_clone().unwrap());
+    let output = one_way(service, tunnel);
+    input.join().unwrap();
+    output.join().unwrap();
 }
 
 /// Run `st terminals attach` as a person against `endpoint`, with this test's config and state.
@@ -791,13 +845,25 @@ async fn a_terminal_another_host_owns_attaches_pty_to_pty_over_fabric() {
     if st3::test_support::supervise_test() {
         return;
     }
+    attach_over_fabric(Exposure::Socket).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_terminal_another_host_owns_attaches_over_an_earlier_exec_exposure() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    attach_over_fabric(Exposure::Exec).await;
+}
+
+async fn attach_over_fabric(exposure: Exposure) {
     let root = tempfile::tempdir().unwrap();
     let state = remote_terminal(root.path(), &incarnation(CREATED_AT));
     let socket = root.path().join("st3.sock");
     let server = serve_unix(state, &socket).await;
     let tunnel = root.path().join("tunnel.sock");
     fabric_shim(root.path(), Some(&tunnel));
-    let owner = fabric_tunnel(&tunnel, &root.path().join("owner-pty"));
+    let owner = fabric_tunnel(&tunnel, &root.path().join("owner-pty"), exposure);
     let session = owner_session(root.path(), CREATED_AT);
 
     let output = remote_attach(root.path(), socket.to_str().unwrap()).await;
@@ -810,7 +876,7 @@ async fn a_terminal_another_host_owns_attaches_pty_to_pty_over_fabric() {
     assert_eq!(
         attached.pid,
         Some(served as i32),
-        "the owner's `st terminals serve-fabric` must hold the PTY connection"
+        "the owner's st daemon, or its `st terminals serve-fabric`, must hold the PTY connection"
     );
     let calls = std::fs::read_to_string(root.path().join("fabric-calls")).unwrap();
     assert!(
@@ -836,7 +902,7 @@ async fn a_replaced_pty_session_on_another_host_receives_nothing_over_fabric() {
     let server = serve_unix(state, &socket).await;
     let tunnel = root.path().join("tunnel.sock");
     fabric_shim(root.path(), Some(&tunnel));
-    let owner = fabric_tunnel(&tunnel, &root.path().join("owner-pty"));
+    let owner = fabric_tunnel(&tunnel, &root.path().join("owner-pty"), Exposure::Socket);
     let session = owner_session(root.path(), CREATED_AT);
 
     let output = remote_attach(root.path(), socket.to_str().unwrap()).await;
@@ -894,4 +960,40 @@ async fn a_terminal_another_host_owns_falls_back_to_the_client_gateway_without_f
         "nothing reached the owner's session"
     );
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expose_fabric_points_fabric_at_the_daemons_terminal_socket() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    remote_terminal(root.path(), &incarnation(CREATED_AT));
+    fabric_shim(root.path(), None);
+    let mut command = st3::test_support::command(test_bin!("st3-fixture").to_path_buf());
+    command
+        .env_remove("ST_AGENT")
+        .env_remove("ST_MISSION_RUN")
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .env("PATH", recording_pty(root.path()))
+        .args(["terminals", "expose-fabric"]);
+    let output = command.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let socket = std::path::absolute(st3::config::terminal_socket(
+        &root.path().join("state/st3"),
+    ))
+    .unwrap();
+    let calls = std::fs::read_to_string(root.path().join("fabric-calls")).unwrap();
+    assert_eq!(
+        calls,
+        format!("expose st3/pty/{FLEET_ID} --socket {}\n", socket.display()),
+        "Fabric forwards each tunnel to the daemon, not to a process of its own"
+    );
+    assert!(stdout.contains(&socket.display().to_string()), "{stdout}");
 }

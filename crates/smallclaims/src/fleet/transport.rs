@@ -236,13 +236,15 @@ impl Fabric {
             .map(|_| ())
     }
 
-    /// Expose `argv` to trusted peers under `protocol`: Fabric runs it once for each incoming
-    /// tunnel, with the tunnel on its stdin and stdout. Fabric keeps the exposure in its own
-    /// configuration, so it outlives this process and any st daemon.
-    pub async fn expose_exec(&self, protocol: &str, argv: &[&str]) -> Result<()> {
-        let mut arguments = vec!["expose", protocol, "--exec", "--"];
-        arguments.extend_from_slice(argv);
-        run(&self.program, &arguments).await.map(|_| ())
+    /// Expose the Unix socket at `socket` to trusted peers under `protocol`: Fabric opens one
+    /// connection to it for each incoming tunnel and forwards bytes both ways. Fabric keeps the
+    /// exposure in its own configuration, so it outlives this process, and repeating it replaces
+    /// any earlier exposure of `protocol`.
+    pub async fn expose_socket(&self, protocol: &str, socket: &Path) -> Result<()> {
+        let socket = socket.to_str().context("the socket path is not UTF-8")?;
+        run(&self.program, &["expose", protocol, "--socket", socket])
+            .await
+            .map(|_| ())
     }
 
     /// The trusted peers in Fabric's `peers.toml`, as NodeID and local name.
@@ -532,7 +534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pty_route_exposes_a_command_and_dials_a_unix_socket() {
+    async fn a_pty_route_exposes_a_socket_and_dials_a_unix_socket() {
         let root = tempfile::tempdir().unwrap();
         let log = root.path().join("calls");
         let fabric = Fabric::new(shim(
@@ -545,7 +547,7 @@ mod tests {
             ),
         ));
         fabric
-            .expose_exec("st3/pty/x", &["/bin/st", "terminals", "serve-fabric"])
+            .expose_socket("st3/pty/x", Path::new("/run/st/terminals.sock"))
             .await
             .unwrap();
         assert_eq!(
@@ -562,7 +564,7 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap();
         assert_eq!(
             calls,
-            "expose st3/pty/x --exec -- /bin/st terminals serve-fabric\npeers\n\
+            "expose st3/pty/x --socket /run/st/terminals.sock\npeers\n\
              dial node-b st3/pty/x\n"
         );
 
