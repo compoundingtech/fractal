@@ -22,18 +22,38 @@ export const simulate = (
   program: Program,
   input: Json,
   script: Script,
-  options: { start?: number; maxRounds?: number } = {}
+  options: {
+    start?: number
+    maxRounds?: number
+    // Resume an existing run (a crash, or a new version) instead of starting one.
+    history?: ReadonlyArray<HistoryEvent>
+    decide?: (program: Program, history: ReadonlyArray<HistoryEvent>) => Decision
+  } = {}
 ): Trace => {
-  const start = options.start ?? 1_700_000_000_000
-  const history: Array<HistoryEvent> = [
-    { type: "started", at: start, program: program.name, version: program.version, input }
-  ]
+  const start = options.history?.[0]?.at ?? options.start ?? 1_700_000_000_000
+  const decideWith = options.decide ?? decide
+  const history: Array<HistoryEvent> = options.history
+    ? [...options.history]
+    : [{ type: "started", at: start, program: program.name, version: program.version, input }]
   const decisions: Array<Decision> = []
   const log: Array<string> = []
   const pending = new Map<string, { at: number; event: HistoryEvent }>()
-  let now = start
+  let now = history.at(-1)!.at
+  const finished = new Set(history.flatMap((e) => (e.type === "completed" || e.type === "failed" || e.type === "cancelled" ? [e.op] : [])))
   for (let round = 0; round < (options.maxRounds ?? 500); round++) {
-    const decision = decide(program, history)
+    const decision = decideWith(program, history)
+    // On a resumed run, ops already scheduled get their outcome from the script now.
+    for (const open of decision.open) {
+      if (!open.scheduled || pending.has(open.op) || finished.has(open.op)) continue
+      const outcome: Outcome =
+        open.kind === "timer" ? { after: Math.max(0, (open.spec as any).fireAt - now), value: null } : script(open.op, open.kind, open.spec)
+      if (outcome === "never") continue
+      const at = now + outcome.after
+      pending.set(open.op, {
+        at,
+        event: "error" in outcome ? { type: "failed", at, op: open.op, error: outcome.error } : { type: "completed", at, op: open.op, value: outcome.value }
+      })
+    }
     decisions.push(decision)
     if (decision.divergence) {
       log.push(`diverged at ${decision.divergence.at}: ${decision.divergence.op}: ${decision.divergence.reason}`)
@@ -43,6 +63,10 @@ export const simulate = (
       if (command.type === "schedule") {
         history.push({ type: "scheduled", at: now, op: command.op, kind: command.kind, hash: command.hash })
         log.push(`${t(now - start)} schedule ${command.kind} ${command.op}`)
+        if (command.kind === "marker") {
+          finished.add(command.op)
+          continue
+        }
         if (command.kind === "timer") {
           const fireAt = (command.spec as any).fireAt as number
           pending.set(command.op, { at: fireAt, event: { type: "completed", at: fireAt, op: command.op, value: null } })
@@ -59,6 +83,7 @@ export const simulate = (
         })
       } else {
         pending.delete(command.op)
+        finished.add(command.op)
         history.push({ type: "cancelled", at: now, op: command.op })
         log.push(`${t(now - start)} cancel ${command.op}`)
       }
@@ -75,6 +100,7 @@ export const simulate = (
       break
     }
     pending.delete(next[0])
+    finished.add(next[0])
     now = next[1].at
     history.push(next[1].event)
     log.push(`${t(now - start)} ${next[1].event.type} ${next[0]}`)

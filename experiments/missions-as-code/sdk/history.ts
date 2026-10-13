@@ -14,6 +14,7 @@ export type OpKind =
   | "ask" // a person's answer to a structured question
   | "wait" // a graph condition such as a merged pull request or a passing CI check
   | "timer" // a durable sleep; Effect.sleep, Effect.timeout and Schedule delays all use it
+  | "marker" // patched(id): records that a run took a code path added by a later version
 
 export type HistoryEvent =
   | { type: "started"; at: number; program: string; version: string; input: Json }
@@ -23,8 +24,9 @@ export type HistoryEvent =
   | { type: "completed"; at: number; op: string; value: Json }
   | { type: "failed"; at: number; op: string; error: OpError }
   | { type: "cancelled"; at: number; op: string }
-  // A running program moved to another version; see experiment 4.
-  | { type: "upgraded"; at: number; version: string }
+  // A running program moved to another version; see experiment 4. `accepted` lists finished ops
+  // the new version defines differently, whose recorded results stand.
+  | { type: "upgraded"; at: number; version: string; accepted?: ReadonlyArray<string> }
 
 export interface OpError {
   readonly reason: string
@@ -67,6 +69,8 @@ export interface Decision {
   readonly commands: ReadonlyArray<Command>
   // Present when the history does not replay through this program.
   readonly divergence?: Divergence
+  // With onChangedSpec: "report", ops whose definition differs from what the history scheduled.
+  readonly changes?: ReadonlyArray<{ op: string; kind: OpKind; settled: boolean }>
   // Deterministic counters, useful for measuring per-step cost.
   readonly stats: { events: number; ops: number; drains: number }
 }

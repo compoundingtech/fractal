@@ -99,6 +99,15 @@ export type Condition =
 export const waitFor = (id: string, condition: Condition): Effect.Effect<Json, WaitFailed> =>
   opEffect("wait", id, condition as unknown as Json) as any
 
+// ---- versions ---------------------------------------------------------------------------------
+
+// patched("add-security-scan") is true for a run that reaches this point under a version that
+// has it, and false when replaying a run that already passed this point under an older version.
+// It lets a new version change code behind a running mission's position and still replay.
+// Markers live under patched/ so they never take the name of the step they guard.
+export const patched = (id: string): Effect.Effect<boolean> =>
+  opEffect("marker", `patched/${id}`, null).pipe(Effect.map(Boolean), Effect.orDie)
+
 // ---- structure --------------------------------------------------------------------------------
 
 // Name the ops inside: scope("round-2", step("fix")) opens round-2/fix.

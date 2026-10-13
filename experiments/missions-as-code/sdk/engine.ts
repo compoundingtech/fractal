@@ -43,10 +43,22 @@ interface OpState {
   state: "open" | "settled" | "abandoned"
   scheduled: boolean
   finished: boolean // the history holds its result or its cancellation
+  record?: boolean // a marker taken now, which the driver must record
+}
+
+export interface DecideOptions {
+  // "diverge" (the default) stops replay at an op whose definition changed since it was
+  // scheduled. "report" accepts the history and lists the change: an upgrade check uses it.
+  readonly onChangedSpec?: "diverge" | "report"
 }
 
 export class Engine {
   now: number
+  history: ReadonlyArray<HistoryEvent> = []
+  options: DecideOptions = {}
+  readonly changes: Array<{ op: string; kind: OpKind; settled: boolean }> = []
+  // Ops whose changed definition an upgrade accepted (from upgraded events).
+  accepted = new Set<string>()
   readonly ops = new Map<string, OpState>()
   readonly order: Array<string> = []
   private readonly counters = new Map<string, number>()
@@ -129,9 +141,26 @@ export class Engine {
     return n === 1 ? base : `${base}.${n}`
   }
 
+  // Still applying recorded history, as opposed to deciding something new.
+  replaying(): boolean {
+    return this.cursor < this.history.length - 1
+  }
+
   register(op: string, kind: OpKind, spec: Json, hash: string, resume: OpState["resume"]): void {
-    this.ops.set(op, { op, kind, spec, hash, resume, state: "open", scheduled: false, finished: false })
+    const state: OpState = { op, kind, spec, hash, resume, state: "open", scheduled: false, finished: false }
+    this.ops.set(op, state)
     this.order.push(op)
+    if (kind === "marker") {
+      // A marker answers at once. True when the history recorded it, or when this is new
+      // execution (the driver then records it); false while replaying a run that passed this
+      // point under a version that did not have it.
+      const recorded = this.history.some((e) => e.type === "scheduled" && e.op === op && e.kind === "marker")
+      const taken = recorded || !this.replaying()
+      state.state = "settled"
+      state.finished = true
+      state.record = taken && !recorded
+      resume(Effect.succeed(taken))
+    }
   }
 
   abandon(op: string): void {
@@ -152,7 +181,10 @@ export class Engine {
         const state = this.ops.get(event.op)
         if (!state) return this.diverge(event.op, "the history scheduled an op this program never asked for here")
         if (state.kind !== event.kind) return this.diverge(event.op, `the op was a ${event.kind} and is now a ${state.kind}`)
-        if (state.hash !== event.hash) return this.diverge(event.op, "the op's definition changed since it was scheduled")
+        if (state.hash !== event.hash && !this.accepted.has(event.op)) {
+          if (this.options.onChangedSpec !== "report") return this.diverge(event.op, "the op's definition changed since it was scheduled")
+          this.changes.push({ op: event.op, kind: event.kind, settled: this.history.some((e) => (e.type === "completed" || e.type === "failed") && e.op === event.op) })
+        }
         state.scheduled = true
         return
       }
@@ -228,10 +260,17 @@ const toJson = (value: unknown): Json => {
   return JSON.parse(JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v)))
 }
 
-export const decide = (program: Program, history: ReadonlyArray<HistoryEvent>): Decision => {
+export const decide = (
+  program: Program,
+  history: ReadonlyArray<HistoryEvent>,
+  options: DecideOptions = {}
+): Decision => {
   const start = history[0]
   if (!start || start.type !== "started") throw new Error("a history starts with a started event")
   const engine = new Engine(start.at, `${start.program}:${start.at}`)
+  engine.history = history
+  engine.options = options
+  engine.accepted = new Set(history.flatMap((e) => (e.type === "upgraded" ? (e.accepted ?? []) : [])))
   const runnable = program.run(start.input).pipe(
     Effect.provideService(EngineRef, engine),
     Effect.provideService(Clock.Clock, engine.clock),
@@ -252,6 +291,8 @@ export const decide = (program: Program, history: ReadonlyArray<HistoryEvent>): 
     if (state.state === "open") {
       open.push({ op, kind: state.kind, spec: state.spec, scheduled: state.scheduled })
       if (!state.scheduled) commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
+    } else if (state.record && !state.scheduled) {
+      commands.push({ type: "schedule", op, kind: state.kind, spec: state.spec, hash: state.hash })
     } else if (state.state === "abandoned" && state.scheduled && !state.finished) {
       commands.push({ type: "cancel", op })
     }
@@ -262,6 +303,7 @@ export const decide = (program: Program, history: ReadonlyArray<HistoryEvent>): 
     open: engine.divergence ? [] : open,
     commands: engine.divergence ? [] : commands,
     ...(engine.divergence ? { divergence: engine.divergence } : {}),
+    ...(engine.changes.length > 0 ? { changes: engine.changes } : {}),
     stats: { events: history.length, ops: engine.order.length, drains: engine.drains }
   }
 }
