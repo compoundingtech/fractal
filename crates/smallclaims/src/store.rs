@@ -730,7 +730,7 @@ pub const SCHEMA: &str = core_schema!("", "");
 pub const FRESH_SCHEMA: &str = core_schema!("BEGIN IMMEDIATE;", "COMMIT;");
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
-pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 18;";
+pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -931,11 +931,16 @@ impl Store {
         reject_old_schema(connection)?;
         runtime.migrate_schema(connection)?;
         connection.execute_batch(if fresh { FRESH_SCHEMA } else { SCHEMA })?;
-        connection.execute_batch(&fleet_generation_schema())?;
-        idempotency::initialize(connection)?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(&fleet_generation_schema())?;
+            idempotency::initialize(connection)
+        })?;
         events::initialize(connection)?;
-        inventory_generation::initialize(connection)?;
-        connection.execute_batch(principals::PRINCIPAL_SCHEMA)?;
+        install_schema_batch(connection, fresh, |connection| {
+            inventory_generation::initialize(connection)?;
+            connection.execute_batch(principals::PRINCIPAL_SCHEMA)?;
+            Ok(())
+        })?;
         if fresh {
             runtime.create_schema_for_fresh_store(connection)?;
         } else {
@@ -944,12 +949,14 @@ impl Store {
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 18 {
-            connection.execute_batch(SCHEMA_VERSION)?;
+        if version != CURRENT_SCHEMA_VERSION {
+            connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         }
         document_index::initialize(connection)?;
         connection.execute_batch(WRITE_CLOCK)?;
-        create_graph_generation_triggers(connection, runtime.legacy_digest_tables())?;
+        install_schema_batch(connection, fresh, |connection| {
+            create_graph_generation_triggers(connection, runtime.legacy_digest_tables())
+        })?;
         projection_digest::initialize(connection, runtime.digest_tables())?;
         checkpoint_capture_epoch::initialize(connection)?;
         Ok(())
@@ -1033,6 +1040,24 @@ impl Store {
             runtime,
         })
     }
+}
+
+/// Batch auxiliary DDL only when opening began with an empty catalog. Existing stores
+/// retain their statement-by-statement upgrade progress and ordinary reopen behavior.
+/// Callers pass only installers that do not open their own transactions.
+fn install_schema_batch(
+    connection: &Connection,
+    fresh: bool,
+    install: impl FnOnce(&Connection) -> Result<()>,
+) -> Result<()> {
+    if fresh {
+        let transaction = connection.unchecked_transaction()?;
+        install(&transaction)?;
+        transaction.commit()?;
+    } else {
+        install(connection)?;
+    }
+    Ok(())
 }
 
 /// The writer connection's clock offset. Only a simulation sets it; see `write_time`.
@@ -1547,11 +1572,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     anyhow::ensure!(
-        table_count == 0 || matches!(version, 10..=18),
+        table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
         "this database uses an unsupported st schema; start with a new state directory"
     );
     anyhow::ensure!(
-        matches!(version, 0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18),
+        version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
         "this database uses unsupported st schema version {version}"
     );
     Ok(())
@@ -6659,20 +6684,38 @@ impl Store {
     pub fn replay_replication_graph(&self) -> Result<()> {
         crate::profile::note("projection: full replay for a heal");
         let _replay = crate::profile::span("projection/heal-replay");
+        let started = std::time::Instant::now();
+        let started_unix_ms = now_ms();
         let mut connection = self.connection.write();
+        let acquired = std::time::Instant::now();
+        let writer_wait_ms = started.elapsed().as_millis();
         let _timing = time_stage(&self.replication_timers.projection);
-        let transaction = connection.transaction()?;
-        self.runtime.replay_from_nothing(&transaction)?;
-        self.runtime.after_projection(&transaction)?;
-        transaction.execute(
-            "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+        let result = (|| {
+            let transaction = connection.transaction()?;
+            self.runtime.replay_from_nothing(&transaction)?;
+            self.runtime.after_projection(&transaction)?;
+            transaction.execute(
+                "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
              VALUES ('graph', 'healthy', ?1, ?2)
              ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
                 error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
-            params![current_index_tx(&transaction)?, now_ms().to_string()],
-        )?;
-        transaction.commit()?;
+                params![current_index_tx(&transaction)?, now_ms().to_string()],
+            )?;
+            transaction.commit()?;
+            Ok::<_, anyhow::Error>(())
+        })();
         drop(connection);
+        let writer_hold_ms = acquired.elapsed().as_millis();
+        eprintln!(
+            "st: projection heal-replay started_at_unix_ms={started_unix_ms} ended_at_unix_ms={} writer_wait_ms={writer_wait_ms} writer_hold_ms={writer_hold_ms} outcome={}",
+            now_ms(),
+            if result.is_ok() {
+                "committed"
+            } else {
+                "failed"
+            }
+        );
+        result?;
         self.runtime.forget_views();
         Ok(())
     }

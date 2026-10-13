@@ -123,6 +123,8 @@ pub use smallclaims::store::{
 
 
 mod accounts;
+mod runtime_starts;
+pub use runtime_starts::{RuntimeStartAdmission, RuntimeStartOperation, RuntimeStartLock};
 mod roster_admission;
 pub(crate) use roster_admission::AdmissionGuard;
 mod adhoc_work;
@@ -2064,6 +2066,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         || version == 16
         || version == 17
         || version == 18
+        || version == smallclaims::store::CURRENT_SCHEMA_VERSION
     {
         return Ok(());
     }
@@ -11529,6 +11532,7 @@ impl Store {
                 "DELETE FROM local_observations WHERE id IN (
                     SELECT id FROM local_observations AS old
                     WHERE observed_at_unix_ms < ?1
+                      AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
                       AND EXISTS (SELECT 1 FROM local_observations AS newer
                                   WHERE newer.subject=old.subject AND newer.kind=old.kind
                                     AND newer.id>old.id)
@@ -11578,7 +11582,9 @@ impl Store {
                 let removed = connection.execute(
                     "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
-                        WHERE subject=?1 AND kind=?2 AND id<=?3 ORDER BY id LIMIT ?4
+                        WHERE subject=?1 AND kind=?2 AND id<=?3
+                          AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
+                        ORDER BY id LIMIT ?4
                      )",
                     params![subject, kind, boundary, chunk],
                 )?;
@@ -47069,7 +47075,7 @@ version 2
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 18);
+        assert_eq!(version, smallclaims::store::CURRENT_SCHEMA_VERSION);
         assert_eq!(planner_column, 1);
     }
 

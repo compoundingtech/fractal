@@ -189,3 +189,6 @@ sdk = root / "apps/fractal-web/packages/st3-sdk"
 assert "'src/**/*.perf.test.ts'" in (sdk / "vitest.config.ts").read_text()
 assert "include: ['src/**/*.perf.test.ts']" in (sdk / "vitest.perf.config.ts").read_text()
 print("passed: deterministic SDK tests and isolated frame CPU budgets have separate lanes")
+assert lanes.index('lane "CSS asset guard" node --test apps/fractal-web/scripts/vite-css-assets.node-test.mjs') < lanes.index('lane "App production build" production_build')
+assert "fractalCssAssets()" in (root / "apps/fractal-web/vite.config.ts").read_text()
+print("passed: the CSS asset guard proves its negatives before guarding the app production build")

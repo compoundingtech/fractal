@@ -3,8 +3,9 @@
 An omp seat is an ordinary st agent. Declare its workspace, harness, model, and effort in KDL:
 
 ```kdl
+version 2
 agent "worker" {
-  workspace "${ST_WORKSPACE}"
+  workspace "/srv/example/worker"
   harness "omp" {
     model "openai-codex/MODEL"
     effort "medium"
@@ -12,8 +13,9 @@ agent "worker" {
 }
 ```
 
-st validates the installed omp version before launch and supplies the channel extension, session
-directory, and boot prompt. The launcher runs under `bun`, which must be available in the daemon's
+Before the first launch of an installed omp build, st measures its delivery contract in a disposable
+session and refuses to launch a build that fails ([harness admission](seat-deploys.md#harness-admission-at-the-next-launch)).
+st supplies the channel extension, session directory, and boot prompt. The launcher runs under `bun`, which must be available in the daemon's
 login-shell environment. The seat uses the provider login of the user running the daemon. Confirm
 the selected model in the session transcript; omp may resolve an unavailable model name to another
 one.
@@ -115,27 +117,3 @@ starts with `Previous OMP process exited before this tool returned`, or when it 
 `custom/session_exit` whose `pendingToolCalls` lists that id, with no intervening user or
 non-aborted assistant message. Other results, including a person's cancellation without that exit
 context, answer the ask. The bridge does not change shutdown timing.
-
-OMP 18.4.10 can persist `Ask input was cancelled` after a signal ends a picker which F5 already
-reopened. Direct `--resume` plus F5, both with and without a preceding heal pass, has been observed
-to reopen that cancelled ask under the same toolCall id with no model turn.
-
-The isolated managed smoke on 2026-10-03 still reported `Nothing to retry` on the second relaunch,
-with policy, PTY-events, and status explicitly loaded and the heal's PTY/channel environment
-cleared. Its transcript ended on the cancelled toolResult **without a following aborted assistant
-boundary**. Bare `--resume` plus F5 on an unchanged copy failed the same way: OMP 18.4.10's retry
-predicate requires a failed/aborted assistant tail, looking past synthetic results. In contrast,
-standalone SIGTERM runs, both bare and with those fleet extensions, persisted an aborted assistant
-boundary after the cancellation. The same missing-boundary shape occurred with the st3 channel
-loaded when only the native OMP PID received SIGTERM, so it is not solely the heal environment or
-managed process-group stop. A standalone extension registering only an async, no-op `context`
-handler reproduced the missing boundary; a no-op `tool_result` observer did not. In OMP 18.4.10,
-[`emitContext`](https://github.com/can1357/oh-my-pi/blob/v18.4.10/packages/coding-agent/src/extensibility/extensions/runner.ts#L1935-L2008)
-throws on the aborted signal when context handlers exist. That abort occurs before the next
-provider stream; the aborted-error catch in
-[`Agent`](https://github.com/can1357/oh-my-pi/blob/v18.4.10/packages/agent/src/agent.ts#L2060-L2064)
-emits only `agent_end`, not the `message_end` needed to persist the aborted assistant boundary.
-The st3 channel registers such a context handler for read receipts. These captures establish a
-context-handler-dependent native persistence failure, not a general limit on reopening cancelled
-asks. No transcript rewrite, new toolCall id, model turn, context-handler removal, or
-shutdown-timing workaround is applied.
