@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Fractal UI agent rows, status, duration and time helpers, and resource cards no longer set native title tooltips that duplicated the custom hover cards. Each former title string stays available as an accessible description (hidden span plus aria-describedby). Row buttons are named exactly by their visible title, with the full reported facts as the description, and row text uses the fgSoft token instead of a separate sidebar grey.",
+  "summary": "Visible in the Fractal UI: native browser tooltips are removed from agent rows, status, duration and time labels, and resource cards, so only the custom hover card appears. Sidebar row text uses the softer fgSoft tone instead of a separate grey. In the thread header, the subtitle moves one column to the right. For assistive technology, each row button is named exactly by its visible title, and each former tooltip string stays available as an accessible description (hidden span plus aria-describedby).",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Presentation and accessibility only. sidebarRowAccessibleName is a new additive export; existing exports are unchanged."
+    "detail": "User-visible presentation and accessibility changes only (listed in the summary). sidebarRowAccessibleName is a new additive export; existing exports are unchanged."
   },
   "downtime": {
     "status": "none",
