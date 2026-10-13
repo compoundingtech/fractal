@@ -59,7 +59,10 @@ Evidence freshness is unknown until separately indexed and verified.
 
 List/show use the existing `read.projections` scope and client envelope. Explicit
 sync requires `control.work` because it exercises configured Git credentials and
-writes the local derived index. An unavailable or non-owner sync is a typed
+writes the local derived index. The CLI carries the configured person or the
+current `ST_AGENT` over the trusted local Unix socket for sync; list/show keep
+their read-only client. Sync accepts no actor selector and refuses an HTTP
+endpoint instead of forwarding local identity. An unavailable or non-owner sync is a typed
 `unavailable` result naming its reader node and the PR fallback. Imports bind each
 current ref's canonical ID to the ID of every loaded or already indexed record;
 a mismatch is skipped and reported in a bounded issue list, and cannot set another
