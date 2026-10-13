@@ -529,8 +529,11 @@ fn process_exists(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
-    unsafe { libc::kill(pid, 0) == 0 }
-    || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied
+    // Signal 0 only checks that the process exists; a process of another user answers EPERM.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied
 }
 
 /// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
