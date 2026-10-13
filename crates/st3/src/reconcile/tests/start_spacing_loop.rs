@@ -177,7 +177,7 @@ async fn quiescence_pass_counts(unrelated_writes: bool) -> Vec<usize> {
         "node".into(),
         Arc::new(Notify::new()),
     );
-    reconciler.set_max_passes_per_minute(0).unwrap();
+    reconciler.set_max_passes_per_minute(600).unwrap();
     // Settle the fixture's own effects before measuring the startup wake.
     for _ in 0..4 {
         reconciler.reconcile_once().unwrap();
