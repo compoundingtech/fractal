@@ -6880,7 +6880,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let previous = request.body["fields"]["incarnation_id"]
             .as_str()
             .unwrap_or("");
+        // An unidentified prior target supplies no replacement proof. In
+        // particular, an older exited runtime after a closed failed attempt
+        // cannot complete a new request that has not admitted any start yet.
         if let Some(observation) = observation
+            && (attempted.is_some() || !previous.is_empty())
             && observation.status != "unknown"
             && observation
                 .incarnation_id
@@ -28387,9 +28391,25 @@ mission "waiting" state="ready" {
             .find(|step| step.step == "build")
             .unwrap()
             .clone();
+        let runtime = Arc::new(FakeRuntime::default());
+        let physical = Arc::downgrade(&runtime);
+        *runtime.before_snapshot.lock().unwrap() = Some(Box::new(move || {
+            let runtime = physical.upgrade().unwrap();
+            let members = runtime.started_members.lock().unwrap().clone();
+            let mut observations = runtime.ptys.lock().unwrap();
+            for member in members.iter().filter(|member| member.terminal) {
+                if observations.iter().all(|observation| observation.runtime_id != member.runtime_id) {
+                    observations.push(RuntimeObservation {
+                        runtime_id: member.runtime_id.clone(), terminal:true,
+                        status:"running".into(), exit_code:None,
+                        incarnation_id:Some(format!("fake-start:{}", member.tags[start_jobs::OPERATION_TAG])),
+                    });
+                }
+            }
+        }));
         let reconciler = Reconciler::new(
             store.clone(),
-            Arc::new(FakeRuntime::default()),
+            runtime,
             "node".into(),
             Arc::new(Notify::new()),
         );
@@ -35232,15 +35252,37 @@ version 2
 
 "#;
         apply_source(&store, source, "publish-fake-observer");
+        let (event_notify, mut event_changed) = watch::channel(0_u64);
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
             "node".into(),
             Arc::new(Notify::new()),
         )
-        .with_resource_provider(Arc::new(FakeResourceProvider));
+        .with_resource_provider(Arc::new(FakeResourceProvider))
+        .with_event_notify(event_notify);
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if store
+                    .latest_actual_value("resource/github/acme/demo/pull/1")
+                    .unwrap()
+                    .is_some()
+                    && store
+                        .latest_actual_value("observer/github/acme/demo/pull/1")
+                        .unwrap()
+                        .is_some_and(|actual| actual["status"] == "healthy")
+                {
+                    break;
+                }
+                event_changed
+                    .changed()
+                    .await
+                    .expect("observer event sender closed");
+            }
+        })
+        .await
+        .expect("one-shot observer did not publish its completed result");
         let facts = store
             .latest_actual_value("resource/github/acme/demo/pull/1")
             .unwrap()
