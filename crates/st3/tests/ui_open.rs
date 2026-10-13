@@ -165,6 +165,35 @@ fn state(root: &Path, node: &str) -> AppState {
     }
 }
 
+/// An in-memory store holding `sources`, served on a unix socket for `PERSON`.
+async fn serve(
+    root: &Path,
+    sources: &[&str],
+) -> (
+    std::path::PathBuf,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let state = state(root, "seat-one");
+    for source in sources {
+        let intent = st3::graph::parse_intent(source, state.store.origin()).unwrap();
+        state.store.apply_internal(&intent, "ui-open-test").unwrap();
+    }
+    let socket = root.join("trusted.sock");
+    let server = tokio::spawn({
+        let path = socket.clone();
+        let app = st3::api::router(state.clone());
+        async move { st3::api::serve_unix(&path, app).await }
+    });
+    let client = Client::unix_as(&socket, PERSON);
+    for _ in 0..200 {
+        if client.capabilities().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (socket, server)
+}
+
 /// `st ui open …` from a seat, as its own process.
 async fn seat_opens(root: &Path, socket: &Path, args: &[&str]) -> Output {
     let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3"));
@@ -198,37 +227,34 @@ fn said(output: &Output) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_interface() {
     let root = tempfile::tempdir().unwrap();
-    let state = state(root.path(), "seat-one");
-    for source in [
-        "version 2\nagent \"assistant\" { workspace \"/tmp\"; command \"true\" }\n\
-         agent \"gardener\" { workspace \"/tmp\"; command \"true\" }",
-        "version 2\nmission \"garden/notes\" state=\"ready\" {\n  goal \"Write a garden note.\"\n  \
-         step \"draft\" { goal \"Draft it.\" }\n}",
-    ] {
-        let intent = st3::graph::parse_intent(source, state.store.origin()).unwrap();
-        state.store.apply_internal(&intent, "ui-open-test").unwrap();
-    }
-    let socket = root.path().join("trusted.sock");
-    let server = tokio::spawn({
-        let path = socket.clone();
-        let app = st3::api::router(state.clone());
-        async move { st3::api::serve_unix(&path, app).await }
-    });
-    let client = Client::unix_as(&socket, PERSON);
-    for _ in 0..200 {
-        if client.capabilities().await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let (socket, server) = serve(
+        root.path(),
+        &[
+            "version 2\nagent \"assistant\" { workspace \"/tmp\"; command \"true\" }\n\
+             agent \"gardener\" { workspace \"/tmp\"; command \"true\" }",
+            "version 2\nmission \"garden/notes\" state=\"ready\" {\n  goal \"Write a garden note.\"\n  \
+             step \"draft\" { goal \"Draft it.\" }\n}",
+        ],
+    )
+    .await;
 
     // Nobody has a terminal interface open: the seat is told so and nothing waits for later.
-    let alone = seat_opens(root.path(), &socket, &["agent/seat-one.gardener", "--wait", "1"]).await;
+    let alone = seat_opens(
+        root.path(),
+        &socket,
+        &["agent/seat-one.gardener", "--wait", "1"],
+    )
+    .await;
     assert!(!alone.status.success(), "{}", said(&alone));
-    assert!(said(&alone).contains("No terminal interface"), "{}", said(&alone));
+    assert!(
+        said(&alone).contains("No terminal interface"),
+        "{}",
+        said(&alone)
+    );
 
     let mut tui = Tui::start(root.path(), &socket);
-    tui.wait("the live interface", |screen| screen.contains("live")).await;
+    tui.wait("the live interface", |screen| screen.contains("live"))
+        .await;
     let before = tui.screen();
     assert!(!lower(&before).contains("gardener"), "{before}");
 
@@ -242,23 +268,32 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     assert!(output.status.success(), "{}", said(&output));
     assert!(said(&output).contains("focus stayed"), "{}", said(&output));
     let screen = tui
-        .wait("the agent's split", |screen| lower(screen).contains("agent/seat-one.gardener"))
+        .wait("the agent's split", |screen| {
+            lower(screen).contains("agent/seat-one.gardener")
+        })
         .await;
     // The person is told why the screen changed, by the seat's own name.
-    assert!(lower(&screen).contains("assistant opened gardener"), "{screen}");
-    assert!(screen.contains("Empty. Ctrl+K opens something here"), "the person's split was left alone:\n{screen}");
+    assert!(
+        lower(&screen).contains("assistant opened gardener"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Empty. Ctrl+K opens something here"),
+        "the person's split was left alone:\n{screen}"
+    );
 
     // The mission view, in a split below, taking the focus.
-    let output = seat_opens(
-        root.path(),
-        &socket,
-        &["mission-run/garden/notes/2026-10-08", "--split", "--below"],
-    )
-    .await;
+    let run = format!(
+        "mission-run/garden/notes/{}",
+        chrono::Utc::now().format("%F")
+    );
+    let output = seat_opens(root.path(), &socket, &[&run, "--split", "--below"]).await;
     assert!(output.status.success(), "{}", said(&output));
     assert!(said(&output).contains("focus moved"), "{}", said(&output));
     let screen = tui
-        .wait("the mission view", |screen| lower(screen).contains("garden/notes"))
+        .wait("the mission view", |screen| {
+            lower(screen).contains("garden/notes")
+        })
         .await;
     assert!(
         lower(&screen).contains("agent/seat-one.gardener"),
@@ -266,11 +301,18 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     );
 
     // Asking again for what is open shows it; it is not opened twice.
-    let again = seat_opens(root.path(), &socket, &["agent/seat-one.gardener", "--split"]).await;
+    let again = seat_opens(
+        root.path(),
+        &socket,
+        &["agent/seat-one.gardener", "--split"],
+    )
+    .await;
     assert!(again.status.success(), "{}", said(&again));
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(
-        lower(&tui.screen()).matches("agent/seat-one.gardener").count(),
+        lower(&tui.screen())
+            .matches("agent/seat-one.gardener")
+            .count(),
         lower(&screen).matches("agent/seat-one.gardener").count(),
         "the same pane, not another"
     );
@@ -278,7 +320,11 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     // Something st has never heard of is answered as not found, after a short grace.
     let missing = seat_opens(root.path(), &socket, &["agent/seat-one.ghost"]).await;
     assert!(!missing.status.success(), "{}", said(&missing));
-    assert!(said(&missing).contains("st has no agent/seat-one.ghost"), "{}", said(&missing));
+    assert!(
+        said(&missing).contains("st has no agent/seat-one.ghost"),
+        "{}",
+        said(&missing)
+    );
 
     // A name that is not an agent, mission or machine never reaches the interface.
     let refused = seat_opens(root.path(), &socket, &["attention/one"]).await;
@@ -286,5 +332,109 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     assert!(said(&refused).contains("agent/…"), "{}", said(&refused));
 
     tui.send("\x11");
+    server.abort();
+}
+
+/// `st work ask …` from a seat, as its own process.
+async fn seat_asks(root: &Path, socket: &Path, args: &[&str]) -> Output {
+    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3"));
+    command
+        .arg("work")
+        .arg("ask")
+        .args(args)
+        .env_clear()
+        .stdin(Stdio::null());
+    for (name, value) in environment(root, socket) {
+        command.env(name, value);
+    }
+    command.env("ST_AGENT", "agent/seat-one.assistant");
+    tokio::task::spawn_blocking(move || command.output().unwrap())
+        .await
+        .unwrap()
+}
+
+impl Tui {
+    /// A left click at the first cell of `needle`, in the lowest row that has it.
+    fn click(&mut self, needle: &str) {
+        let screen = self.screen();
+        let (row, line) = screen
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(needle))
+            .last()
+            .unwrap_or_else(|| panic!("{needle} is not on the screen:\n{screen}"));
+        let column = line.chars().collect::<Vec<_>>();
+        let column = column
+            .windows(needle.chars().count())
+            .position(|window| window.iter().collect::<String>() == needle)
+            .unwrap();
+        self.send(&format!(
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            column + 2,
+            row + 1,
+            column + 2,
+            row + 1
+        ));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_alert_a_seat_raises_for_itself_shows_above_the_input_and_is_dismissed_there() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, server) = serve(
+        root.path(),
+        &["version 2\nagent \"assistant\" { workspace \"/tmp\"; command \"true\" }"],
+    )
+    .await;
+    let mut tui = Tui::start(root.path(), &socket);
+    tui.wait("the live interface", |screen| screen.contains("live"))
+        .await;
+    let shown = seat_opens(root.path(), &socket, &["agent/seat-one.assistant"]).await;
+    assert!(shown.status.success(), "{}", said(&shown));
+    tui.wait("the agent's conversation", |screen| {
+        lower(screen).contains("agent/seat-one.assistant")
+    })
+    .await;
+
+    let request = root.path().join("alert.json");
+    std::fs::write(
+        &request,
+        r#"{"version": 1, "type": "decision",
+            "question": "Your demo folder is ready.",
+            "why_person": "Nothing waits on you; this is a notice you can dismiss.",
+            "answers": [
+              {"id": "ok", "label": "Got it", "outcome": "accept",
+               "consequence": "The notice goes away; nothing else happens."},
+              {"id": "later", "label": "Dismiss", "outcome": "decline",
+               "consequence": "The notice goes away; nothing else happens."}]}"#,
+    )
+    .unwrap();
+    let asked = seat_asks(
+        root.path(),
+        &socket,
+        &[
+            "--for",
+            PERSON,
+            "--title",
+            "Your demo folder is ready",
+            "--request",
+            request.to_str().unwrap(),
+            "--new-run",
+            "demo-folder-ready",
+            "--idempotency-key",
+            "demo-folder-ready-1",
+        ],
+    )
+    .await;
+    assert!(asked.status.success(), "{}", said(&asked));
+
+    tui.wait("the alert band", |screen| screen.contains("1 alert"))
+        .await;
+    tui.click("1 alert");
+    tui.wait("the alert card", |screen| screen.contains("Got it"))
+        .await;
+    tui.click("Got it");
+    tui.wait("the alert gone", |screen| !screen.contains("1 alert"))
+        .await;
     server.abort();
 }

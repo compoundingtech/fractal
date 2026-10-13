@@ -344,6 +344,17 @@ async fn apply(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_guides_alert_request_is_one_the_daemon_accepts() {
+        let start = super::GUIDE.find("<<'JSON'\n").expect("the alert request") + "<<'JSON'\n".len();
+        let json = &super::GUIDE[start..];
+        let json = &json[..json.find("\nJSON\n").expect("the end of the request")];
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let (request, _) = crate::person_request::StructuredRequest::parse(&value).unwrap();
+        request.validate().unwrap();
+        assert_eq!(request.answers.len(), 2, "one tap to dismiss, either way");
+    }
+
+    #[test]
     fn expert_uses_shared_harness_defaults_and_pins_the_guide() {
         assert!(
             super::GUIDE.len() <= 16_384,

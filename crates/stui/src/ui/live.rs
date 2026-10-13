@@ -1680,7 +1680,7 @@ pub fn run(context: Context) -> Result<()> {
         }
         // The missions window is large, so it is followed only while a mission list or card is on
         // screen, and kept for a while after so flipping between tabs does not fetch it each time.
-        let wanted_now = ui.missions_wanted();
+        let wanted_now = ui.missions_wanted() || open_requests.wants_missions();
         if wanted_now {
             missions_until = Some(Instant::now() + MISSIONS_GRACE);
         }

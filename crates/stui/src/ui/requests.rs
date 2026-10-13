@@ -143,7 +143,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Queue a request; returns its id.
-pub fn enqueue(dir: &Path, subject: &str, place: Place, keep_focus: bool, from: Option<String>) -> std::io::Result<String> {
+pub fn enqueue(
+    dir: &Path,
+    subject: &str,
+    place: Place,
+    keep_focus: bool,
+    from: Option<String>,
+) -> std::io::Result<String> {
     private_dir(dir, true).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -160,7 +166,10 @@ pub fn enqueue(dir: &Path, subject: &str, place: Place, keep_focus: bool, from: 
         from,
         at_unix_ms: now_ms(),
     };
-    write_private(&dir.join(format!("{id}.json")), &serde_json::to_vec(&request)?)?;
+    write_private(
+        &dir.join(format!("{id}.json")),
+        &serde_json::to_vec(&request)?,
+    )?;
     Ok(id)
 }
 
@@ -250,7 +259,9 @@ impl Inbox {
             }
             let Some(mut request) = fs::symlink_metadata(&path)
                 .ok()
-                .filter(|metadata| metadata.is_file() && mine(metadata) && metadata.len() <= MAX_BYTES)
+                .filter(|metadata| {
+                    metadata.is_file() && mine(metadata) && metadata.len() <= MAX_BYTES
+                })
                 .and_then(|_| fs::read(&path).ok())
                 .and_then(|bytes| serde_json::from_slice::<Request>(&bytes).ok())
                 .filter(|request| request.version == VERSION && pane_for(&request.subject).is_ok())
@@ -267,8 +278,10 @@ impl Inbox {
             self.waiting.push((request, Instant::now()));
         }
         // A withdrawn request is forgotten, and so is its id.
-        self.waiting.retain(|(request, _)| dir.join(format!("{}.json", request.id)).exists());
-        self.seen.retain(|id| dir.join(format!("{id}.json")).exists());
+        self.waiting
+            .retain(|(request, _)| dir.join(format!("{}.json", request.id)).exists());
+        self.seen
+            .retain(|id| dir.join(format!("{id}.json")).exists());
     }
 
     /// The requests waiting, oldest first, for the caller to open or leave.
@@ -276,12 +289,22 @@ impl Inbox {
         self.waiting.iter()
     }
 
+    /// Whether a waiting request names a mission: the missions window is followed lazily, so the
+    /// interface must follow it to know whether the mission exists.
+    pub fn wants_missions(&self) -> bool {
+        self.waiting
+            .iter()
+            .any(|(request, _)| matches!(pane_for(&request.subject), Ok(Pane::Mission(_))))
+    }
+
     /// Make a waiting request look as if it had waited `by` already.
     #[cfg(test)]
     pub fn waiting_since_for_test(&mut self, id: &str, by: Duration) {
         for (request, since) in &mut self.waiting {
             if request.id == id {
-                *since = Instant::now().checked_sub(by + Duration::from_millis(1)).unwrap();
+                *since = Instant::now()
+                    .checked_sub(by + Duration::from_millis(1))
+                    .unwrap();
             }
         }
     }
@@ -289,7 +312,9 @@ impl Inbox {
     /// Answer a request and take it off the queue.
     pub fn answer(&mut self, id: &str, answer: &Answer) {
         self.waiting.retain(|(request, _)| request.id != id);
-        let Some(dir) = self.dir.as_deref() else { return };
+        let Some(dir) = self.dir.as_deref() else {
+            return;
+        };
         if let Ok(bytes) = serde_json::to_vec(answer) {
             let _ = write_private(&dir.join(format!("{id}.answer")), &bytes);
         }
@@ -311,8 +336,14 @@ mod tests {
     #[test]
     fn subjects_name_the_panes_a_seat_may_ask_for() {
         let pane = |subject: &str| pane_for(subject).map(|pane| pane.key());
-        assert_eq!(pane("agent/garden/worker"), Ok("agent:agent/garden/worker".into()));
-        assert_eq!(pane("mission/garden/notes"), Ok("mission:mission/garden/notes".into()));
+        assert_eq!(
+            pane("agent/garden/worker"),
+            Ok("agent:agent/garden/worker".into())
+        );
+        assert_eq!(
+            pane("mission/garden/notes"),
+            Ok("mission:mission/garden/notes".into())
+        );
         assert_eq!(pane("machine/harbor"), Ok("machine:machine/harbor".into()));
         // A run opens the mission view that follows all of that mission's runs.
         assert_eq!(
@@ -338,12 +369,29 @@ mod tests {
     fn a_request_is_read_once_answered_and_collected() {
         let root = tempfile::tempdir().unwrap();
         let dir = private(root.path());
-        let id = enqueue(&dir, "agent/garden/worker", Place::Right, true, Some("agent/st/assistant".into())).unwrap();
-        assert!(fs::metadata(dir.join(format!("{id}.json"))).unwrap().permissions().mode() & 0o077 == 0);
+        let id = enqueue(
+            &dir,
+            "agent/garden/worker",
+            Place::Right,
+            true,
+            Some("agent/st/assistant".into()),
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(dir.join(format!("{id}.json")))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077
+                == 0
+        );
 
         let mut inbox = Inbox::new(Some(dir.clone()));
         inbox.read();
-        let waiting = inbox.waiting().map(|(request, _)| request.clone()).collect::<Vec<_>>();
+        let waiting = inbox
+            .waiting()
+            .map(|(request, _)| request.clone())
+            .collect::<Vec<_>>();
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].id, id);
         assert_eq!(waiting[0].place, Place::Right);
@@ -358,8 +406,36 @@ mod tests {
         inbox.answer(&id, &Answer::Opened { focused: false });
         assert_eq!(inbox.waiting().count(), 0);
         assert!(!dir.join(format!("{id}.json")).exists());
-        assert_eq!(wait(&dir, &id, Duration::from_secs(1)), Some(Answer::Opened { focused: false }));
+        assert_eq!(
+            wait(&dir, &id, Duration::from_secs(1)),
+            Some(Answer::Opened { focused: false })
+        );
         assert!(!dir.join(format!("{id}.answer")).exists());
+    }
+
+    #[test]
+    fn only_a_waiting_mission_makes_the_interface_follow_the_missions_window() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = private(root.path());
+        let agent = enqueue(&dir, "agent/garden/worker", Place::Tab, false, None).unwrap();
+        let mut inbox = Inbox::new(Some(dir.clone()));
+        inbox.read();
+        assert!(!inbox.wants_missions());
+
+        enqueue(
+            &dir,
+            "mission-run/garden/notes/2026-10-13",
+            Place::Below,
+            false,
+            None,
+        )
+        .unwrap();
+        inbox.read_at = None;
+        inbox.read();
+        assert!(inbox.wants_missions());
+
+        inbox.answer(&agent, &Answer::NotFound);
+        assert!(inbox.wants_missions(), "the mission is still waiting");
     }
 
     #[test]
@@ -370,7 +446,11 @@ mod tests {
         assert_eq!(wait(&dir, &id, Duration::from_millis(120)), None);
         let mut inbox = Inbox::new(Some(dir.clone()));
         inbox.read();
-        assert_eq!(inbox.waiting().count(), 0, "withdrawn, so it opens nothing later");
+        assert_eq!(
+            inbox.waiting().count(),
+            0,
+            "withdrawn, so it opens nothing later"
+        );
     }
 
     #[test]
@@ -384,9 +464,12 @@ mod tests {
             path
         };
         let stale = serde_json::json!({"version": 1, "subject": "agent/a/b", "at_unix_ms": 1});
-        let fresh = serde_json::json!({"version": 1, "subject": "agent/a/b", "at_unix_ms": now_ms()});
-        let bad_subject = serde_json::json!({"version": 1, "subject": "attention/x", "at_unix_ms": now_ms()});
-        let future = serde_json::json!({"version": 2, "subject": "agent/a/b", "at_unix_ms": now_ms()});
+        let fresh =
+            serde_json::json!({"version": 1, "subject": "agent/a/b", "at_unix_ms": now_ms()});
+        let bad_subject =
+            serde_json::json!({"version": 1, "subject": "attention/x", "at_unix_ms": now_ms()});
+        let future =
+            serde_json::json!({"version": 2, "subject": "agent/a/b", "at_unix_ms": now_ms()});
         let stale = write("0001.json", &stale.to_string(), 0o600);
         let junk = write("0002.json", "not json", 0o600);
         let bad = write("0003.json", &bad_subject.to_string(), 0o600);
@@ -397,7 +480,10 @@ mod tests {
 
         let mut inbox = Inbox::new(Some(dir.clone()));
         inbox.read();
-        let ids = inbox.waiting().map(|(request, _)| request.id.clone()).collect::<Vec<_>>();
+        let ids = inbox
+            .waiting()
+            .map(|(request, _)| request.id.clone())
+            .collect::<Vec<_>>();
         assert_eq!(ids, ["0006"]);
         for gone in [stale, junk, bad, open, newer, huge] {
             assert!(!gone.exists(), "{}", gone.display());
@@ -414,7 +500,10 @@ mod tests {
         let mut inbox = Inbox::new(Some(dir.clone()));
         inbox.read();
         assert_eq!(inbox.waiting().count(), 0);
-        assert!(enqueue(&dir, "agent/a/b", Place::Tab, false, None).is_ok(), "enqueue repairs its own directory's mode");
+        assert!(
+            enqueue(&dir, "agent/a/b", Place::Tab, false, None).is_ok(),
+            "enqueue repairs its own directory's mode"
+        );
     }
 
     #[test]
