@@ -16657,10 +16657,11 @@ fn omit_failed_agent_trace(subject: &str, path: &Path, error: &anyhow::Error, _l
 }
 
 fn report_agent_trace_failure(subject: &str, error: &anyhow::Error, cleanup_error: Option<String>) {
-    eprintln!("{}", json!({
+    // The issuer owns advisory failures; never write them to the agent's terminal.
+    let _ = write_driver_log(subject, &json!({
         "event": "agent_trace_omitted", "subject": subject,
         "error": format!("{error:#}"), "cleanup_error": cleanup_error,
-    }));
+    }).to_string());
 }
 
 async fn trace_current_incarnation(client: &Client, subject: &str) -> Result<Option<String>> {

@@ -301,11 +301,19 @@ mission "trace-check" state="ready" {
                 "--summary", "Trace lifecycle checked", "--evidence", "file:trace"]);
         let output = command.output().await.unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
         let committed: st3::model::StepRunView = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(committed.subject, step);
         assert_eq!(committed.status, if action == "claim" { "claimed" } else { "verifying" });
         if broken_trace {
-            assert!(String::from_utf8_lossy(&output.stderr).contains("agent_trace_omitted"));
+            let log = std::fs::read_to_string(
+                root.path().join("state/st3/driver-api-warnings.log")).unwrap();
+            let diagnostic: Value = serde_json::from_str(
+                log.lines().next_back().unwrap().splitn(3, ' ').nth(2).unwrap()).unwrap();
+            assert_eq!(diagnostic["event"], "agent_trace_omitted");
+            assert_eq!(diagnostic["subject"], ALDER);
+            assert!(diagnostic["error"].as_str().is_some_and(|error| !error.is_empty()));
+            assert!(diagnostic["cleanup_error"].as_str().is_some_and(|error| !error.is_empty()));
             assert!(path.is_dir(), "a failed trace must not replace unrelated directory contents");
             continue;
         }
