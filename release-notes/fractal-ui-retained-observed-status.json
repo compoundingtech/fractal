@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "fractal-ui keeps the last observed sidebar status visible but dimmed while a host reconnects, and lets a host own the transcript sync notice",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, columns, indexes or triggers."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Only packages/fractal-ui changes. `SidebarStatus` exposes `data-observed-status` and `data-freshness` and dims stale observations; `Transcript` gains optional `syncPresentation` (default `inline`, unchanged). No protocol, harness or CLI change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}

@@ -43,10 +43,10 @@ const cases: Readonly<Record<State, TranscriptStoryData>> = {
   settled: fixture('settled', 'settled'), expanded: fixture('expanded', 'expanded'), streaming: fixture('streaming', 'streaming'), failed: fixture('failed', 'failed'), interrupted: fixture('interrupted', 'interrupted'), unknown: fixture('unknown', 'unknown'), loading: fixture('loading', 'loading'), 'catching-up': fixture('catching-up', 'catching-up'), reconnecting: fixture('reconnecting', 'reconnecting'), 'sync-failed': fixture('sync-failed', 'sync-failed'), 'pending-send': fixture('pending-send', 'pending-send'), 'failed-send': fixture('failed-send', 'failed-send'), empty: fixture('empty', 'empty'),
 }
 /** `drop` withholds ids from the runtime adapter, standing in for an adapter that never adopts them. */
-function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
+function RuntimeTranscript({ data, drop, onOpenTool, onRetry, onRetrySend, availability, history, emptyState, syncPresentation }: { data: TranscriptStoryData; drop?: readonly string[]; onOpenTool?: (call: WorkLogCall) => void; onRetry: () => void; onRetrySend?: (itemId: string) => void; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState; syncPresentation?: 'inline' | 'shell' }) {
   const messages = React.useMemo(() => data.turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).filter(item => !drop?.includes(item.id)), [data, drop])
   const options = React.useMemo(() => ({ messages, isRunning: data.turns.some(turn => turn.work.running), onNew: async () => {} }), [messages, data])
-  return <EmbraceRuntimeProvider options={options}><Transcript title="Row projection" turns={data.turns} sync={data.sync} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history} emptyState={emptyState} /></EmbraceRuntimeProvider>
+  return <EmbraceRuntimeProvider options={options}><Transcript title="Row projection" turns={data.turns} sync={data.sync} syncPresentation={syncPresentation} now={now} observedAt={now - 8000} onOpenTool={onOpenTool} onRetryRun={onRetry} onRetrySync={onRetry} onRetrySend={onRetrySend} availability={availability} history={history} emptyState={emptyState} /></EmbraceRuntimeProvider>
 }
 function TranscriptStory({ scheme = 'dark', state = 'settled', availability, history, emptyState }: { scheme?: Scheme; state?: State; availability?: TranscriptAvailability; history?: TranscriptHistory; emptyState?: React.ReactNode | TranscriptEmptyState }) {
   const [opened, setOpened] = React.useState<WorkLogCall | undefined>(undefined)
@@ -316,6 +316,20 @@ export const CatchingUp: Story = { args: { state: 'catching-up' }, play: async (
 } }
 export const CatchingUpLight: Story = { ...CatchingUp, args: { state: 'catching-up', scheme: 'light' } }
 export const Reconnecting: Story = { args: { state: 'reconnecting' } }
+/** A host that owns the reconnect notice in its shell hides the inline sync line; the inline default keeps it. */
+export const ReconnectingShellNotice: Story = { args: { state: 'reconnecting' }, render: args => <main {...stylex.props(styles.all, ...baselineTheme, args.scheme === 'light' && lightTheme)}>{(['inline', 'shell'] as const).map(presentation => <section key={presentation} data-sync-presentation={presentation} {...stylex.props(styles.frame)}><RuntimeTranscript data={cases.reconnecting} onRetry={() => {}} syncPresentation={presentation} /></section>)}</main>, play: async ({ canvasElement }) => {
+  const inline = canvasElement.querySelector<HTMLElement>('[data-sync-presentation="inline"]')!
+  const shell = canvasElement.querySelector<HTMLElement>('[data-sync-presentation="shell"]')!
+  await within(shell).findAllByTestId('transcript-turn')
+  await expect(await within(inline).findByTestId('sync-line')).toHaveAttribute('data-sync-state')
+  const assertShellOwnsNotice = async (section: HTMLElement) => {
+    await expect(within(section).queryByTestId('sync-line')).toBeNull()
+    await expect(within(section).getByTestId('transcript-header')).toBeInTheDocument()
+  }
+  await assertShellOwnsNotice(shell)
+  // Negative control: the inline default must fail the shell-owned assertion.
+  await expect(assertShellOwnsNotice(inline)).rejects.toThrow()
+} }
 export const SyncFailed: Story = { args: { state: 'sync-failed' } }
 export const SyncFailedLight: Story = { args: { state: 'sync-failed', scheme: 'light' } }
 export const AllStates: Story = { render: args => <main {...stylex.props(styles.all, ...baselineTheme, args.scheme === 'light' && lightTheme)}>{(['settled', 'streaming', 'failed', 'interrupted', 'unknown', 'loading', 'catching-up', 'reconnecting', 'sync-failed'] as const).map(state => <section key={state}><h2>{state}</h2><TranscriptStory scheme={args.scheme} state={state} /></section>)}</main>, play: async ({ canvasElement }) => {
