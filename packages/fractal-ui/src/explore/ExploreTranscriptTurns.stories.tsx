@@ -404,8 +404,9 @@ async function assertGutter(lane: HTMLElement) {
         tip.style.cssText = original
         await expect(intersects(tip.getBoundingClientRect(), rect)).toBe(false)
       }
+      copy.scrollIntoView({ block: 'center' })
+      await new Promise<void>(resolve => lane.ownerDocument.defaultView!.requestAnimationFrame(() => lane.ownerDocument.defaultView!.requestAnimationFrame(() => resolve())))
       await userEvent.keyboard('{Escape}')
-      await userEvent.tab()
       copy.focus()
       await assertClearTime('keyboard focus')
       copy.blur()
