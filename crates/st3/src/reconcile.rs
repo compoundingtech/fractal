@@ -1008,6 +1008,7 @@ pub struct Reconciler<R = NativeRuntime> {
     faults: Mutex<Option<BTreeMap<(String, String), String>>>,
     /// Faults that could not be recorded in the graph during the current pass.
     unrecorded_faults: Mutex<Vec<String>>,
+    runtime_observation_drops: Mutex<HashMap<String, u32>>,
     /// Bound ownership-error logging across all candidates without caching guard results.
     ownership_error_log: Mutex<OwnershipErrorLog>,
     /// Step-timeout faults this reconciler has already raised, so a pass records each once.
@@ -1155,6 +1156,7 @@ impl Reconciler<NativeRuntime> {
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
+            runtime_observation_drops: Mutex::default(),
             ownership_error_log: Mutex::new(OwnershipErrorLog::default()),
             step_timeout_faults: Mutex::new(BTreeSet::new()),
             raised_broken_gates: Mutex::new(BTreeSet::new()),
@@ -1242,6 +1244,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             resource_provider: Arc::new(RegisteredResourceProvider),
             faults: Mutex::new(None),
             unrecorded_faults: Mutex::new(Vec::new()),
+            runtime_observation_drops: Mutex::default(),
             ownership_error_log: Mutex::new(OwnershipErrorLog::default()),
             step_timeout_faults: Mutex::new(BTreeSet::new()),
             raised_broken_gates: Mutex::new(BTreeSet::new()),
@@ -2266,19 +2269,34 @@ impl<R: RuntimeControl> Reconciler<R> {
         gates: &[crate::store::MissionGateRunner],
         eligible: &BTreeSet<String>,
     ) {
-        let mut retries = self.stop_observation_retries.lock()
+        let mut retries = self
+            .stop_observation_retries
+            .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let mut survivors = self.reported_kill_survivors.lock()
+        let mut survivors = self
+            .reported_kill_survivors
+            .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if retries.is_empty() && survivors.is_empty() {
+        let mut drops = self
+            .runtime_observation_drops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if retries.is_empty() && survivors.is_empty() && drops.is_empty() {
             return;
         }
-        let active = eligible.iter().map(String::as_str)
-            .chain(gates.iter().filter(|gate| gate.retired && gate.host == self.host)
-                .map(|gate| gate.subject.as_str()))
+        let active = eligible
+            .iter()
+            .map(String::as_str)
+            .chain(
+                gates
+                    .iter()
+                    .filter(|gate| gate.retired && gate.host == self.host)
+                    .map(|gate| gate.subject.as_str()),
+            )
             .collect::<BTreeSet<_>>();
         retries.retain(|subject, _| active.contains(subject.as_str()));
         survivors.retain(|subject, _| active.contains(subject.as_str()));
+        drops.retain(|subject, _| active.contains(subject.as_str()));
     }
 
     fn reconcile_pass(&self) -> Result<()> {
@@ -7772,6 +7790,40 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.record_once_with_evidence(subject, kind, fields, Vec::new())
     }
 
+    fn record_runtime_observation_admission(&self, subject: &str, dropped: bool) -> Result<()> {
+        const FAULT_AFTER_DROPS: u32 = 3;
+        let consecutive = {
+            let mut drops = self
+                .runtime_observation_drops
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if dropped {
+                let count = drops.entry(subject.into()).or_default();
+                *count = count.saturating_add(1);
+                *count
+            } else {
+                drops.remove(subject);
+                0
+            }
+        };
+        let (target, scope) = if subject.starts_with("agent/") || subject.starts_with("exec/") {
+            (subject.to_owned(), "runtime-observation".to_owned())
+        } else {
+            (
+                format!("daemon/{}", self.host),
+                format!("runtime-observation:{subject}"),
+            )
+        };
+        if !dropped {
+            self.close_fault(&target, &scope, "a fresh runtime observation was admitted")?;
+        } else if consecutive >= FAULT_AFTER_DROPS {
+            self.record_fault(&target, &scope, Err(anyhow::anyhow!(
+                "three consecutive physical captures for {subject} were refused; fresh runtime proof is still required"
+            )))?;
+        }
+        Ok(())
+    }
+
     fn record_once_with_evidence(
         &self,
         subject: &str,
@@ -7788,6 +7840,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     && claim.body.get("evidence") == Some(&serde_json::json!(evidence))
             })
         {
+            if kind == "runtime.observed" {
+                self.record_runtime_observation_admission(subject, false)?;
+            }
             return Ok(());
         }
         let input = ClaimInput {
@@ -7803,9 +7858,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(record) = self.store.append_reconciled_runtime_observation(&input)? else {
                 // The worker's durable result superseded this physical capture.
                 // Wake a fresh pass instead of publishing the prior incarnation.
+                self.record_runtime_observation_admission(subject, true)?;
                 self.start_changed(subject);
                 return Ok(());
             };
+            self.record_runtime_observation_admission(subject, false)?;
             record
         } else {
             self.store.append_claim(&input)?

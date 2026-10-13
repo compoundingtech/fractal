@@ -7,12 +7,29 @@ use std::os::unix::fs::OpenOptionsExt;
 
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
+    let has_subject_epochs: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_runtime_start_observation_subjects')",
+        [], |row| row.get(0),
+    )?;
+    if !has_subject_epochs {
+        // The installation transaction replaces earlier draft triggers once. No
+        // ledger backfill is needed: existing results predate every new capture.
+        transaction.execute_batch(
+            "DROP TRIGGER IF EXISTS local_runtime_starts_observation_insert;
+             DROP TRIGGER IF EXISTS local_runtime_starts_observation_update;
+             DROP TRIGGER IF EXISTS local_runtime_starts_observation_delete;",
+        )?;
+    }
     transaction.execute_batch(r#"
 CREATE TABLE IF NOT EXISTS local_runtime_start_observation_generation (
     id INTEGER PRIMARY KEY CHECK(id=1),
     value INTEGER NOT NULL CHECK(typeof(value)='integer' AND value>=0)
 );
 INSERT OR IGNORE INTO local_runtime_start_observation_generation VALUES(1,0);
+CREATE TABLE IF NOT EXISTS local_runtime_start_observation_subjects (
+    subject TEXT PRIMARY KEY,
+    value INTEGER NOT NULL CHECK(typeof(value)='integer' AND value>=0)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS local_runtime_starts (
     id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -27,11 +44,30 @@ CREATE TABLE IF NOT EXISTS local_runtime_starts (
     receipted INTEGER NOT NULL DEFAULT 0
 );
 CREATE TRIGGER IF NOT EXISTS local_runtime_starts_observation_insert AFTER INSERT ON local_runtime_starts
-BEGIN UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1; END;
+BEGIN
+    UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1;
+    INSERT INTO local_runtime_start_observation_subjects(subject,value)
+    VALUES(NEW.subject,(SELECT value FROM local_runtime_start_observation_generation WHERE id=1))
+    ON CONFLICT(subject) DO UPDATE SET value=excluded.value;
+END;
 CREATE TRIGGER IF NOT EXISTS local_runtime_starts_observation_update AFTER UPDATE ON local_runtime_starts
-BEGIN UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1; END;
+BEGIN
+    UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1;
+    INSERT INTO local_runtime_start_observation_subjects(subject,value)
+    VALUES(NEW.subject,(SELECT value FROM local_runtime_start_observation_generation WHERE id=1))
+    ON CONFLICT(subject) DO UPDATE SET value=excluded.value;
+    INSERT INTO local_runtime_start_observation_subjects(subject,value)
+    SELECT OLD.subject,value FROM local_runtime_start_observation_generation
+    WHERE id=1 AND OLD.subject IS NOT NEW.subject
+    ON CONFLICT(subject) DO UPDATE SET value=excluded.value;
+END;
 CREATE TRIGGER IF NOT EXISTS local_runtime_starts_observation_delete AFTER DELETE ON local_runtime_starts
-BEGIN UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1; END;
+BEGIN
+    UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1;
+    INSERT INTO local_runtime_start_observation_subjects(subject,value)
+    VALUES(OLD.subject,(SELECT value FROM local_runtime_start_observation_generation WHERE id=1))
+    ON CONFLICT(subject) DO UPDATE SET value=excluded.value;
+END;
 CREATE INDEX IF NOT EXISTS local_runtime_starts_subject ON local_runtime_starts(subject,id DESC);
 CREATE INDEX IF NOT EXISTS local_runtime_starts_subject_request
 ON local_runtime_starts(subject,CAST(json_extract(body,'$.start_request_position') AS INTEGER) DESC);
@@ -361,12 +397,14 @@ impl Store {
                 let prior = operation.body["expected_incarnation"].as_str();
                 let current = connection
                     .query_row(
-                        "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
-                        [],
+                        "SELECT COALESCE((SELECT value FROM local_runtime_start_observation_subjects WHERE subject=?1),0)",
+                        [&input.subject],
                         |row| row.get::<_, u64>(0),
                     )
                     .map_err(internal)?;
-                let stale_capture = capture_epoch != Some(current);
+                // The capture serial predates physical reads. Only this subject's
+                // later mutation invalidates it; other subjects cannot starve exits.
+                let stale_capture = capture_epoch.is_none_or(|captured| current > captured);
                 if observed != Some(actual)
                     && (stale_capture || (observed.is_some() && observed == prior))
                 {
@@ -391,7 +429,10 @@ impl Store {
             },
         ) {
             Ok((record, _)) => Ok(Some(record)),
-            Err(error) if error.code == "stale-runtime-observation" => Ok(None),
+            Err(error) if error.code == "stale-runtime-observation" => {
+                crate::reconcile_telemetry::record_runtime_observation_drop();
+                Ok(None)
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -733,7 +774,9 @@ impl Store {
             .pointer("/request/actor")
             .and_then(Value::as_str)
         {
-            self.graph.ensure_principal_key(actor)?;
+            self.graph.ensure_principal_key(actor).map_err(|error| anyhow::anyhow!(
+                "runtime-start admission refused: cannot prepare signing key for actor {actor}: {error}"
+            ))?;
         }
         self.connection.batched(|tx| -> Result<RuntimeStartAdmission> {
             let selected = current_desired_row_tx(tx, &operation.subject)?;
@@ -1313,6 +1356,235 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    #[ignore = "explicit isolated writer-cost probe; set ST3_START_COST_DIR"]
+    fn start_lifecycle_writer_cost_probe() {
+        if crate::test_support::supervise_test() {
+            return;
+        }
+        let output = std::path::PathBuf::from(
+            std::env::var_os("ST3_START_COST_DIR").expect("owned cost output directory"),
+        );
+        std::fs::create_dir_all(&output).unwrap();
+        unsafe {
+            std::env::set_var("ST3_PROFILE_DIR", &output);
+            std::env::set_var("ST3_PROFILE_SLOW_MS", "0");
+        }
+        smallclaims::profile::init_from_env();
+        for sample in 0..12 {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(&directory.path().join("claims.db"), "node").unwrap();
+            let subject = "agent/example/cost";
+            let mut start = operation(&format!("cost-{sample}"), subject, None);
+            start.owner = "node".into();
+            let before = smallclaims::sqlite::work::total();
+            smallclaims::profile::task("runtime-start/writer-cost", || {
+                assert_eq!(
+                    store.admit_runtime_start(&mut start, 2).unwrap(),
+                    RuntimeStartAdmission::Admitted
+                );
+                assert!(store.dispatch_runtime_start(&start.id, 2).unwrap());
+                store.finish_runtime_start(&start.id, &json!({"incarnation":"actual-incarnation","verification":"operation-incarnation"})).unwrap();
+                let observed = ClaimInput {
+                    subject: subject.into(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::from("starting")),
+                        ("runtime_id".into(), Value::from(subject)),
+                        ("terminal".into(), Value::from(true)),
+                        ("incarnation_id".into(), Value::from("actual-incarnation")),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("cost-observed:{sample}")),
+                };
+                assert!(
+                    store
+                        .apply_runtime_start_result(&start.id, &[receipt(subject), observed])
+                        .unwrap()
+                );
+                store.runtime_start_applied(&start.id).unwrap();
+            });
+            let work = smallclaims::sqlite::work::total() - before;
+            assert!(store.runtime_start_for(subject).unwrap().is_none());
+            println!(
+                "writer-cost sample={sample} statements={} vm_steps={} fullscan={} sorts={}",
+                work.statements, work.vm_steps, work.fullscan_steps, work.sorts
+            );
+        }
+        let reports = std::fs::read_to_string(output.join("slow.jsonl")).unwrap();
+        let samples = reports
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["label"] == "runtime-start/writer-cost")
+            .collect::<Vec<_>>();
+        assert_eq!(samples.len(), 12);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample["writer_acquisitions"].as_u64().unwrap() > 0)
+        );
+        println!(
+            "writer-cost profile={}",
+            output.join("slow.jsonl").display()
+        );
+    }
+
+    #[test]
+    fn unrelated_start_churn_cannot_starve_a_verified_incarnations_exit() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/ended";
+        let mut ended = operation("ended", subject, None);
+        store.admit_runtime_start(&mut ended, 2).unwrap();
+        store
+            .finish_runtime_start(
+                &ended.id,
+                &json!({"incarnation":"actual-incarnation","verification":"operation-incarnation"}),
+            )
+            .unwrap();
+        let mut churn = operation("churn", "agent/example/churn", None);
+        store.admit_runtime_start(&mut churn, 2).unwrap();
+        let capture = store.capture_runtime_observations().unwrap();
+        // The physical capture sees the first incarnation exit without a PID.
+        let observed = ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), Value::from("exited")),
+                ("incarnation_id".into(), Value::Null),
+                ("runtime_id".into(), Value::from(subject)),
+                ("terminal".into(), Value::from(true)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        // Continuous other-seat work occurs after the read and before its writer CAS.
+        store
+            .connection
+            .batched(|tx| -> Result<()> {
+                for _ in 0..128 {
+                    tx.execute(
+                        "UPDATE local_runtime_starts SET body=body WHERE id='churn'",
+                        [],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .append_reconciled_runtime_observation(&observed)
+                .unwrap()
+                .is_some(),
+            "an exited verified incarnation must be recorded on the first pass despite unrelated churn"
+        );
+        assert_eq!(
+            store
+                .latest_claim(subject, Some("runtime.observed"))
+                .unwrap()
+                .unwrap()
+                .body["fields"]["status"],
+            "exited"
+        );
+        drop(capture);
+        let capture = store.capture_runtime_observations().unwrap();
+        store
+            .connection
+            .batched(|tx| -> Result<()> {
+                tx.execute(
+                    "UPDATE local_runtime_starts SET body=body WHERE id='ended'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        assert!(
+            store
+                .append_reconciled_runtime_observation(&observed)
+                .unwrap()
+                .is_none(),
+            "same-subject mutation still rejects the pre-read witness"
+        );
+        drop(capture);
+    }
+
+    #[test]
+    fn keyless_agent_restart_mints_its_key_or_refuses_before_any_admission() {
+        for blocked in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(&directory.path().join("claims.db"), "node").unwrap();
+            let actor = "agent/example/keyless";
+            let request = store
+                .append_claim(&ClaimInput {
+                    subject: actor.into(),
+                    kind: "runtime.action.requested".into(),
+                    actor: Some(actor.into()),
+                    fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            let keys = directory.path().join("keys");
+            if blocked {
+                std::fs::write(&keys, "not a directory").unwrap();
+            }
+            store.use_key_directory(&keys).unwrap();
+            store
+                .set_node_key(Arc::new(
+                    smallclaims::fleet::MemberKey::generate().unwrap().0,
+                ))
+                .unwrap();
+            let held = |connection: &Connection| {
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM held_keys WHERE principal=?1",
+                        [actor],
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(held(&store.readers.get()), 0);
+            let mut start = operation("keyless-agent", actor, None);
+            start.body["request"] = serde_json::to_value(&request).unwrap();
+            let admitted = store.admit_runtime_start(&mut start, 2);
+            if blocked {
+                assert!(
+                    format!("{:#}", admitted.unwrap_err())
+                        .contains("cannot prepare signing key for actor agent/example/keyless")
+                );
+                assert!(store.pending_runtime_starts().unwrap().is_empty());
+                assert_eq!(held(&store.readers.get()), 0);
+                assert!(
+                    store
+                        .observations_for(actor, "runtime.action.requested")
+                        .unwrap()
+                        .iter()
+                        .all(|claim| claim.body["fields"]["action"] != "start")
+                );
+                assert_eq!(
+                    store
+                        .claims_for(actor, Some("runtime.action.requested"))
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            } else {
+                assert_eq!(admitted.unwrap(), RuntimeStartAdmission::Admitted);
+                assert_eq!(held(&store.readers.get()), 1);
+                let control: ClaimRecord =
+                    serde_json::from_value(start.body["control_request_receipt"].clone()).unwrap();
+                assert_eq!(control.actor.as_deref(), Some(actor));
+                assert!(store.runtime_start_for(actor).unwrap().is_some());
+            }
+        }
     }
 
     #[test]
@@ -2010,7 +2282,7 @@ mod tests {
             .unwrap();
         assert!(shared > 0 && local > 0);
         legacy.execute_batch(
-            "DROP TABLE local_runtime_start_evidence; DROP TABLE local_runtime_starts; DROP TABLE local_runtime_start_observation_generation;
+            "DROP TABLE local_runtime_start_evidence; DROP TABLE local_runtime_starts; DROP TABLE local_runtime_start_observation_subjects; DROP TABLE local_runtime_start_observation_generation;
              DELETE FROM meta WHERE key IN ('publication-operation-format-shared-cut','publication-operation-format-local-cut');
              PRAGMA user_version=18;",
         ).unwrap();

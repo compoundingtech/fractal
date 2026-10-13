@@ -448,6 +448,41 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
             .id,
         completed.id
     );
+    assert_eq!(
+        reconciler.runtime_observation_drops.lock().unwrap()[&desired.subject],
+        2
+    );
+    assert!(
+        !store
+            .observations_for(&desired.subject, "reconcile.fault")
+            .unwrap()
+            .iter()
+            .any(|claim| claim.body["fields"]["scope"] == "runtime-observation")
+    );
+    reconciler
+        .record_member(&desired, &captured, false)
+        .unwrap();
+    let faults = store
+        .observations_for(&desired.subject, "reconcile.fault")
+        .unwrap();
+    assert_eq!(
+        faults
+            .iter()
+            .filter(
+                |claim| claim.body["fields"]["scope"] == "runtime-observation"
+                    && claim.body["fields"]["status"] == "faulted"
+            )
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .latest_claim(&desired.subject, Some("runtime.observed"))
+            .unwrap()
+            .unwrap()
+            .id,
+        completed.id
+    );
     drop(capture_fence);
     let _fresh_capture = store.capture_runtime_observations().unwrap();
     let fresh = runtime.snapshot_ptys().unwrap().remove(0);
@@ -460,6 +495,23 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
     assert_eq!(
         current.body["fields"]["incarnation_id"],
         "blocked-start-incarnation"
+    );
+    assert!(
+        !reconciler
+            .runtime_observation_drops
+            .lock()
+            .unwrap()
+            .contains_key(&desired.subject)
+    );
+    assert!(
+        store
+            .observations_for(&desired.subject, "reconcile.fault")
+            .unwrap()
+            .iter()
+            .any(
+                |claim| claim.body["fields"]["scope"] == "runtime-observation"
+                    && claim.body["fields"]["status"] == "recovered"
+            )
     );
     // A fresh native PTY exit can lack a PID/incarnation in its registry row.
     // It may describe absence after this unchanged capture; absence itself is

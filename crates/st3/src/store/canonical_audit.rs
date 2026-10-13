@@ -70,6 +70,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_runtime_starts",
         "local_runtime_start_evidence",
         "local_runtime_start_observation_generation",
+        "local_runtime_start_observation_subjects",
         "local_blobs",
         "local_blob_uploads",
         "local_subscription_mission_deferrals",
