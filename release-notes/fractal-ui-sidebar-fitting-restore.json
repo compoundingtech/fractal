@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "fractal-ui batches sidebar row fitting across the roster, restores fields after the cohort track shrinks, and registers code grammars after module evaluation",
+  "summary": "fractal-ui batches sidebar row fitting across the roster, and restores fields after the cohort track shrinks",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
