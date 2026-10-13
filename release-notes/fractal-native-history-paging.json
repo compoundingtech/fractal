@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Load older conversation pages through the native timeline cursor and preserve loaded history when paging fails or the live window refreshes.",
+  "replay": { "status": "none", "detail": "No persisted projections or replay changes." },
+  "schema": { "status": "none", "detail": "No database schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Uses existing timeline paging and the virtual transcript history contract; adds no wire operation." },
+  "downtime": { "status": "none", "detail": "No service restart or coordinated rollout required." },
+  "manual": { "status": "none", "detail": "No manual migration required." },
+  "recovery": { "status": "none", "detail": "A failed page retains loaded rows and offers an explicit retry; no persisted state changes." }
+}

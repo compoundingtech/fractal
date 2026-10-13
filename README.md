@@ -32,6 +32,10 @@ Platforms/status: Linux x86_64 and macOS Apple Silicon; fresh-Mac setup is not y
 - [KDL lifecycle](docs/st3/kdl-lifecycle.md)
 - [Running st with omp](docs/st3/omp.md)
 
+The Fractal web conversation loads older messages through the native timeline cursor.
+Loaded rows remain available when a history read fails or a bounded live window refreshes;
+retry is explicit, and only a complete native page displays the conversation-start marker.
+
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.
 
 This repository also carries st2, the previous generation; see [its guide](README.st2.md).

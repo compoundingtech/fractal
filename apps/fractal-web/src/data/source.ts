@@ -131,10 +131,12 @@ export interface Fleet {
   readonly agents: readonly Agent[]
 }
 
-/** The retained conversation window; native truncation is provenance, not an available older-page fetch. */
+/** The loaded conversation window; native older pages extend it without replacing the live tail. */
 export interface ConversationPage {
   readonly items: readonly ConversationItem[]
   readonly hasOlder: boolean
+  /** Explicit older-page operation, independent of the live follow's freshness. */
+  readonly historyLoad?: { readonly _tag: 'Loading' } | { readonly _tag: 'Failed'; readonly detail: string }
   /** Native page provenance; filtered items cannot establish emptiness. */
   readonly observation?: { readonly empty: boolean }
   /** Incremental boundary relative to this exact preceding projection. */
@@ -264,6 +266,8 @@ export interface DataSource {
   readonly prefetchConversation?: (agentRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
   readonly retryConversation?: (agentRef: string) => void
+  /** Read the next native history page without replacing the live tail. */
+  readonly loadEarlierConversation?: (agentRef: string) => Promise<void>
   /** Keyed by terminal ref; live attaches a read-only viewer. */
   readonly terminal: (terminalRef: string) => Atom.Atom<Feed<TerminalScreen>>
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>

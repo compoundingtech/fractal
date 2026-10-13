@@ -12,6 +12,7 @@ import {
   type St3Options,
   type SyncStatus,
   syncStatusFromFailure,
+  decodeConversationChunk,
 } from '@st3/sdk/effect'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -92,6 +93,7 @@ interface RetainedFeed<A> {
 
 interface RetainedConversation extends RetainedFeed<ConversationPage> {
   readonly send: AttachmentPort['send']
+  readonly loadEarlier: () => Promise<void>
 }
 
 interface PendingSend {
@@ -727,6 +729,10 @@ export const liveSource = ({
     let painted = false
     let publishedItems: ConversationPage['items'] = []
     let changedFrom = Infinity
+    let sessionId: string | undefined
+    let historyCursor: string | undefined
+    let historyGeneration = 0
+    let historyLoad: ConversationPage['historyLoad']
     const projectPage = (): ConversationPage => {
       const projection = timeline.project()
       const hadPending = pending.size > 0
@@ -744,6 +750,7 @@ export const liveSource = ({
         items,
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
+        ...(historyLoad === undefined ? {} : { historyLoad }),
         change: { from: publishedItems, index: changedFrom },
         ...(timeline.observation === undefined ? {} : { observation: timeline.observation }),
       }
@@ -769,7 +776,16 @@ export const liveSource = ({
             if (event._tag !== 'Observed') return event
             ux?.().switchDataReady(ref)
             const previousSize = timeline.size
-            timeline.apply(event.value)
+            let preservedHistory = false
+            if (event.value.replace && sessionId !== undefined && event.value.sessionId === sessionId)
+              preservedHistory = timeline.applyWindow(event.value)
+            else timeline.apply(event.value)
+            if (event.value.replace && !preservedHistory) {
+              historyGeneration += 1
+              historyCursor = undefined
+              historyLoad = undefined
+            }
+            sessionId = event.value.sessionId ?? sessionId
             // Entries are identity-deduplicated by the retained timeline, not counted per chunk.
             incrDebug('Wf.conversationEntries', timeline.size - previousSize)
             return { _tag: 'Observed' as const, value: projectPage() }
@@ -781,6 +797,60 @@ export const liveSource = ({
       if (!retained.publish(page)) return
       publishedItems = page.items
       changedFrom = Infinity
+    }
+    const loadEarlier = async (): Promise<void> => {
+      if (disposed || historyLoad?._tag === 'Loading' || !timeline.hasOlder) return
+      if (sessionId === undefined || timeline.oldestEntryId === undefined) {
+        historyLoad = { _tag: 'Failed', detail: 'The conversation has not reported a history boundary yet.' }
+        publishPending()
+        return
+      }
+      const generation = historyGeneration
+      const owningSession = sessionId
+      const oldest = timeline.oldestEntryId
+      let cursor = historyCursor
+      let reachedBoundary = cursor !== undefined
+      historyLoad = { _tag: 'Loading' }
+      publishPending()
+      try {
+        // The follow has no paging cursor. On the first request walk native head pages
+        // to its oldest identity; never synthesize an opaque cursor or reorder timestamps.
+        while (!disposed && generation === historyGeneration) {
+          const response = await client.timelineList(owningSession, cursor === undefined ? {} : { cursor })
+          const page = decodeUnknownSync(Schema.Struct({
+            kind: Schema.Literal('timeline-page'), session_id: Schema.String,
+            items: Schema.Array(Schema.Unknown),
+            page: Schema.Struct({ has_more: Schema.Boolean, next_cursor: Schema.optional(Schema.NullOr(Schema.String)) }),
+          }))(response.value)
+          if (disposed || generation !== historyGeneration) return
+          if (page.session_id !== owningSession) throw new Error('History returned a different session.')
+          const chunk = decodeConversationChunk({
+            kind: 'conversation', collection: 'conversation', id: 'history', session_id: owningSession,
+            replace: false, has_more: page.page.has_more, items: page.items,
+          })
+          const boundary = chunk.entries.findIndex(entry => entry.id === oldest)
+          const earlier = reachedBoundary ? chunk.entries : boundary < 0 ? [] : chunk.entries.slice(0, boundary)
+          reachedBoundary ||= boundary >= 0
+          const next = page.page.next_cursor ?? undefined
+          if (page.page.has_more && (next === undefined || next === cursor)) throw new Error('History did not report a usable next page.')
+          if (earlier.length > 0 || !page.page.has_more) {
+            if (!reachedBoundary) throw new Error('The loaded history boundary is no longer in this session. Reconnect the conversation and try again.')
+            const before = timeline.size
+            timeline.prepend(earlier, page.page.has_more)
+            incrDebug('Wf.conversationEntries', timeline.size - before)
+            historyCursor = next
+            historyLoad = undefined
+            publishPending()
+            return
+          }
+          cursor = next
+        }
+      } catch (cause) {
+        if (disposed || generation !== historyGeneration) return
+        if (cause instanceof ClientError && cause.response.code === 'page-cursor-expired') historyCursor = undefined
+        historyLoad = { _tag: 'Failed', detail: cause instanceof Error ? cause.message : String(cause) }
+        publishPending()
+      }
     }
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
@@ -851,7 +921,7 @@ export const liveSource = ({
         return { _tag: 'Refused', reason: 'failed', detail }
       }
     }
-    return { ...retained, send }
+    return { ...retained, send, loadEarlier }
   })
   const recentConversations = new Map<string, RetainedConversation>()
   const retainConversation = (ref: string) => {
@@ -1083,6 +1153,7 @@ export const liveSource = ({
         retainConversation(ref).prefetch()
       },
       retryConversation: (ref) => retainConversation(ref).retry(),
+      loadEarlierConversation: (ref) => retainConversation(ref).loadEarlier(),
       resources,
       terminal,
       terminalInterest: (ref) => retainTerminal(ref).interest,

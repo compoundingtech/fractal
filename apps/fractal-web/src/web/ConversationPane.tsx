@@ -7,6 +7,7 @@ import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/com
 import type { WorkLogCall } from '@smalltalk/fractal-ui/assistant-ui'
 import { useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNow } from '../data/react.tsx'
 import { createConversationTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
+import { conversationHistory } from './conversationHistory.ts'
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
@@ -107,6 +108,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     refusal, onRefused: setRefusal,
   })
   const retryConversation = source.retryConversation
+  const loadEarlierConversation = source.loadEarlierConversation
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
@@ -131,7 +133,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
         // Preserve the follow-retry policy; the unavailable body owns its single recovery action.
         ...(retryConversation === undefined ? {} : { action: { label: 'Try again', onPress: () => retryConversation(agentRef) } }),
       } } : {})}
-      history={state._tag === 'Observed' ? state.history : { _tag: 'Pending' }}
+      history={conversationHistory(feed, loadEarlierConversation === undefined ? undefined : () => loadEarlierConversation(agentRef))}
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />
     </div>
