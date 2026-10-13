@@ -259,7 +259,7 @@ impl Windows {
     /// windows were first attached and steps by `interval`. Sockets on one store that come due
     /// for a paced reread therefore read together: the first computes a changed window and the
     /// others reuse it at the same revision, where sockets drifting apart would each compute it.
-    /// The step is at most one interval after `after`, and it is found from `after` alone, so a
+    /// The step is less than one interval after `after`, and it is found from `after` alone, so a
     /// timer that fires late reads once and never catches up on missed steps.
     pub(super) fn reread_boundary(&self, after: tokio::time::Instant, interval: Duration) -> tokio::time::Instant {
         if after <= self.reread_anchor || interval.is_zero() {

@@ -5,8 +5,9 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 type Reads = Arc<Mutex<BTreeMap<String, usize>>>;
 
-/// The longest a paced reread can wait after the last: its interval, then at most one more to
-/// reach the store's shared reread grid ([`collection_windows::Windows::reread_boundary`]).
+/// An upper bound on how long a paced reread can wait after the last: half an interval, then at
+/// most one interval to reach the store's shared reread grid
+/// ([`collection_windows::Windows::reread_boundary`]); two intervals leave a margin.
 const PACED_REREAD_MAX: Duration = COLLECTION_REREAD_INTERVAL.saturating_mul(2);
 
 /// [`Fixture::open_with`]'s gate: reads refuse as not ready, read rows, or refuse as revoked.
@@ -257,7 +258,9 @@ async fn a_retry_reads_only_the_failed_subscription() {
 }
 
 /// Sockets on one store that joined at different times reread a changing window on the same
-/// steps, so the first computes it and the rest reuse it; each still rereads an interval apart.
+/// steps, so the first computes it and the rest reuse it. Each rereads on every step, an interval
+/// apart: the clock moves in 130 ms steps, so a timer runs up to 130 ms after its step, as on a real
+/// clock, and that delay must not make a socket skip the next step.
 #[tokio::test(start_paused = true)]
 async fn sockets_that_join_apart_reread_a_changing_window_on_the_same_steps() {
     let root = tempfile::tempdir().unwrap();
@@ -267,9 +270,10 @@ async fn sockets_that_join_apart_reread_a_changing_window_on_the_same_steps() {
     tokio::time::advance(Duration::from_millis(700)).await;
     let mut second = Fixture::open(state.clone(), false, None, &["missions"]).await;
     assert_eq!(second.paused_frame().await["kind"], "snapshot");
-    // A commit every 100 ms keeps both windows due; note when each socket rereads.
+    // A commit every step keeps both windows due; note when each socket rereads.
     let start = tokio::time::Instant::now();
     let (mut first_at, mut second_at) = (Vec::new(), Vec::new());
+    const STEP: Duration = Duration::from_millis(130);
     for step in 0..60 {
         let status = if step % 2 == 0 { "running" } else { "stopped" };
         first.claim("agent/fixture-roster", "runtime.observed", json!({"status": status}));
@@ -279,15 +283,23 @@ async fn sockets_that_join_apart_reread_a_changing_window_on_the_same_steps() {
                 at.push(tokio::time::Instant::now() - start);
             }
         }
-        tokio::time::advance(Duration::from_millis(100)).await;
+        tokio::time::advance(STEP).await;
     }
     let shared = first_at.iter().filter(|at| second_at.contains(at)).count();
     assert!(shared >= 2, "the sockets reread together: {first_at:?} and {second_at:?}");
     for at in [&first_at, &second_at] {
-        for pair in at.windows(2) {
+        for (i, pair) in at.windows(2).enumerate() {
             let gap = pair[1] - pair[0];
-            assert!(gap >= COLLECTION_REREAD_INTERVAL - Duration::from_millis(100), "paced: {at:?}");
-            assert!(gap < 2 * COLLECTION_REREAD_INTERVAL, "never more than an interval late: {at:?}");
+            if i == 0 {
+                // Joining the grid from a read at any time: at least half an interval, at most
+                // one and a half.
+                assert!(gap + 2 * STEP >= COLLECTION_REREAD_INTERVAL / 2, "paced: {at:?}");
+                assert!(gap <= COLLECTION_REREAD_INTERVAL * 3 / 2 + 2 * STEP, "joins the grid: {at:?}");
+            } else {
+                // On the grid, a timer running up to a step late still rereads on every step.
+                assert!(gap + 2 * STEP >= COLLECTION_REREAD_INTERVAL, "paced: {at:?}");
+                assert!(gap <= COLLECTION_REREAD_INTERVAL + 2 * STEP, "a reread on every step: {at:?}");
+            }
         }
     }
 }

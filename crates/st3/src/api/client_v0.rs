@@ -1689,11 +1689,16 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     // to publish. Asking is paced like a reread: before, a stale reread asked for it.
     let mut roster_wanted = false;
     let mut last_reread = tokio::time::Instant::now() - COLLECTION_REREAD_INTERVAL;
-    // When the next paced reread may run: an interval after the last, on the store's shared grid
-    // so that sockets due together share each changed window's computation.
+    // When the next paced reread may run: the first step of the store's shared reread grid at
+    // least half an interval after the last read, so that sockets due together share each changed
+    // window's computation. A read released by a step runs a moment after it; measuring half an
+    // interval from that read still lands on the very next step, so an aligned socket rereads on
+    // every step (one interval apart), and any read waits at most one and a half intervals.
     let next_reread = |last: tokio::time::Instant| {
-        let after = last + COLLECTION_REREAD_INTERVAL;
-        windows.as_ref().map_or(after, |windows| windows.reread_boundary(after, COLLECTION_REREAD_INTERVAL))
+        let after = last + COLLECTION_REREAD_INTERVAL / 2;
+        windows.as_ref().map_or(last + COLLECTION_REREAD_INTERVAL, |windows| {
+            windows.reread_boundary(after, COLLECTION_REREAD_INTERVAL)
+        })
     };
     let mut reads = futures_util::stream::FuturesUnordered::new();
     let read_slots = Arc::new(tokio::sync::Semaphore::new(COLLECTION_MAX_SUBSCRIPTIONS));
