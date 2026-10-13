@@ -474,6 +474,45 @@ fn corrupt_document_metadata_stays_an_error_without_a_partial_page() {
     assert!(read(&store, None, None, true, None, 10).is_err());
     // Cursor values retain rusqlite's checked u64 binding, not a wrapping cast.
     parity(&store, None, None, true, Some(("doc/a", u64::MAX)), 10);
+
+    // The former inner joins excluded missing metadata before applying LIMIT. Keep
+    // that eligibility even when indexed scalar lookups supply the returned fields.
+    let missing = node();
+    let missing_claim = bind(&missing, "doc/a", "claim-missing", 2000, "missing", None);
+    let missing_blob = bind(&missing, "doc/b", "blob-missing", 2001, "missing", None);
+    let good = bind(&missing, "doc/c", "present", 2002, "present", None);
+    bind(&missing, "doc/d", "also-present", 2003, "present", None);
+    {
+        let conn = missing.connection.write();
+        conn.execute(
+            "UPDATE documents SET binding_claim_id='absent' WHERE name='doc/a'",
+            [],
+        )
+        .unwrap();
+        // A deliberately damaged private fixture, beyond normal foreign-key admission.
+        // Restore enforcement immediately; the old query is the eligibility oracle.
+        conn.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        conn.execute(
+            "DELETE FROM blobs WHERE hash=(SELECT hash FROM documents WHERE name='doc/b')",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    }
+    for history in [false, true] {
+        for limit in [0, 1, 10] {
+            for cursor in [
+                None,
+                Some(("doc/a", missing_claim.store_index)),
+                Some(("doc/b", missing_blob.store_index)),
+            ] {
+                parity(&missing, None, Some("doc/"), history, cursor, limit);
+            }
+        }
+        let page = read(&missing, None, Some("doc/"), history, None, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].binding_claim_id, good.id);
+    }
 }
 
 fn plans(
