@@ -57,6 +57,8 @@ export type ConversationHandlers = {
 type Client = Pick<St3Client, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'>;
 // Three missed eight-second protocol heartbeats bound a blackholed connection.
 export const HEARTBEAT_WAIT_MS = 24_000;
+/** How long opening the collections socket may take before it counts as a failed try (a half-dead route can hang for minutes). */
+export const OPEN_WAIT_MS = 15_000;
 type Follow = { close(): void };
 
 function errorCode(error: unknown): string | undefined {
@@ -279,7 +281,9 @@ export class Feed {
     const stale = () => this.closed || current !== this.attempt;
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
-      const opened = await this.client.collectionStream({
+      let waiting: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => { waiting = setTimeout(() => reject(new Error('st did not answer')), OPEN_WAIT_MS); });
+      const attempt = this.client.collectionStream({
         ...(this.socket ? { socket: (url, protocols, headers) => {
           const socket = this.socket!(url, protocols, headers);
           socket.onping = () => { if (!stale()) this.heard(); };
@@ -288,6 +292,11 @@ export class Feed {
         onFrame: frame => { if (!stale()) { this.heard(); this.frame(frame); } },
         onEnd: error => { if (!stale()) this.dropped(error ?? new Error('The collections socket closed.')); },
       });
+      let opened: Awaited<typeof attempt>;
+      try { opened = await Promise.race([attempt, timeout]); }
+      // A socket that opens after its try was given up on is closed, never used.
+      catch (error) { void attempt.then(late => late.close(), () => {}); throw error; }
+      finally { clearTimeout(waiting); }
       if (stale()) { opened.close(); return; }
       this.stream = opened;
       this.heard();
