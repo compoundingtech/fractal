@@ -41,8 +41,10 @@ connections in each of four classes. Four work-item reads held every interactive
 admission waited 35 seconds.
 
 Now a read takes an idle connection, or opens another when every one is busy. A read never
-waits for another read, and in WAL mode never for the writer. The pool keeps up to 32 connections
-between reads, each caching up to 8 MiB of pages, and closes the others. A read waits for a
+waits for another read, and in WAL mode never for the writer. The pool keeps up to 128 idle connections
+between reads, each requesting a 2 MiB page-cache target by default, and closes the others.
+`SMALLCLAIMS_READ_CACHE_KIB=8192` restores the previous 8 MiB target after a daemon restart;
+smaller caches may cause more disk I/O on very large stores. A read waits for a
 connection only when the operating system refuses to open one, so the daemon raises its soft
 open file limit toward the hard one, up to 8,192, when it starts. A large status projection still
 splits its subjects across four threads, each on its own connection at the same store index.
