@@ -755,6 +755,120 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "private matching census fixture; native background/foreground contention; aggregates only"]
+    fn publication_facts_native_foreground_wait_during_census_bootstrap() {
+        let source =
+            std::env::var_os("APPLY_RESTART_CENSUS_SCRATCH").expect("private matching fixture");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("foreground.db");
+        let mut connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .unwrap();
+        let uri = format!("file:{}?mode=ro", std::path::Path::new(&source).display());
+        connection
+            .execute("ATTACH DATABASE ?1 AS census", [uri])
+            .unwrap();
+        let schemas = connection.prepare("SELECT sql FROM census.sqlite_schema WHERE type IN ('table','index')
+            AND sql IS NOT NULL AND tbl_name IN ('claims','batches','replica_records','local_observations','projection_digest_repaired_claims')
+            ORDER BY type='index'").unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        for sql in schemas {
+            connection.execute_batch(&sql).unwrap();
+        }
+        let tx = connection.transaction().unwrap();
+        for table in [
+            "claims",
+            "batches",
+            "replica_records",
+            "local_observations",
+            "projection_digest_repaired_claims",
+        ] {
+            tx.execute_batch(&format!(
+                "INSERT INTO main.{table} SELECT * FROM census.{table}"
+            ))
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        connection.execute_batch("DETACH DATABASE census").unwrap();
+        drop(connection);
+        let store = Arc::new(Store::open(&path, "node").unwrap());
+        assert!(!store.publication_evidence_ready().unwrap());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_done = done.clone();
+        let worker_store = store.clone();
+        struct BootstrapDone(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for BootstrapDone {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let worker = std::thread::spawn(move || {
+            let _finished = BootstrapDone(worker_done.clone());
+            let start = std::time::Instant::now();
+            let mut pages = 0;
+            loop {
+                let complete = worker_store.advance_publication_evidence().unwrap();
+                pages += 1;
+                if complete {
+                    break;
+                }
+                // Production releases the same background guard and yields between pages.
+                std::thread::yield_now();
+            }
+            worker_done.store(true, std::sync::atomic::Ordering::Release);
+            (pages, start.elapsed().as_secs_f64())
+        });
+        let mut waits = Vec::new();
+        let mut holds = Vec::new();
+        let mut totals = Vec::new();
+        while !done.load(std::sync::atomic::Ordering::Acquire) {
+            let started = std::time::Instant::now();
+            let mut writer = store.connection.write();
+            let wait = started.elapsed().as_micros();
+            let acquired = std::time::Instant::now();
+            let tx = writer.transaction().unwrap();
+            let input = ClaimInput {
+                subject: "agent/example/latency".into(),
+                kind: "harness.diagnostic".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("severity".into(), json!("info")),
+                    ("code".into(), json!("bootstrap-contention-probe")),
+                    (
+                        "reason".into(),
+                        json!(format!("foreground-{}", waits.len())),
+                    ),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            };
+            insert_local_observation_tx(&tx, "node", &input, now_ms()).unwrap();
+            tx.commit().unwrap();
+            drop(writer);
+            waits.push(wait);
+            holds.push(acquired.elapsed().as_micros());
+            totals.push(started.elapsed().as_micros());
+        }
+        let (pages, seconds) = worker.join().unwrap();
+        assert!(!waits.is_empty());
+        let samples = waits.len();
+        waits.sort();
+        holds.sort();
+        totals.sort();
+        println!(
+            "publication foreground contention samples={samples} bootstrap_pages={pages} bootstrap_seconds={seconds} wait_p95_us={} wait_max_us={} hold_p95_us={} hold_max_us={} total_p95_us={} total_max_us={}",
+            waits[samples * 95 / 100],
+            waits.last().unwrap(),
+            holds[samples * 95 / 100],
+            holds.last().unwrap(),
+            totals[samples * 95 / 100],
+            totals.last().unwrap()
+        );
+        assert!(store.publication_evidence_ready().unwrap());
+    }
+
+    #[test]
     #[ignore = "private native measurements: run alone with --exact --ignored --test-threads=1 --nocapture"]
     fn publication_facts_native_write_cost() {
         use smallclaims::sqlite::work;
@@ -1286,6 +1400,39 @@ mod tests {
                 .unwrap()
         );
         assert!(reopened.publication_evidence_ready().unwrap());
+        // A genuinely older record trigger upgrades once; unchanged reopens do not
+        // repeat that migration or leave the stale body installed.
+        reopened.connection.write().execute_batch(
+            "DROP TRIGGER directive_note_record_insert; CREATE TRIGGER directive_note_record_insert
+             AFTER INSERT ON replica_records BEGIN SELECT 1; END;"
+        ).unwrap();
+        drop(reopened);
+        let migrated = Store::open(&path, "node").unwrap();
+        let definition: String = migrated
+            .readers
+            .get()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='directive_note_record_insert'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(definition.contains("local_directive_note_dirty"));
+        let migrated_cookie: i64 = migrated
+            .readers
+            .get()
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+        drop(migrated);
+        let stable = Store::open(&path, "node").unwrap();
+        assert_eq!(
+            migrated_cookie,
+            stable
+                .readers
+                .get()
+                .query_row::<i64, _, _>("PRAGMA schema_version", [], |row| row.get(0))
+                .unwrap()
+        );
     }
 
     #[test]
