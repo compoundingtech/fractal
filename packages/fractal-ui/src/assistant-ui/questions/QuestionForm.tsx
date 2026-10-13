@@ -297,7 +297,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
       <div {...stylex.props(styles.footer)}>
         {questions.length > 1 && <span aria-live="polite" {...stylex.props(styles.meta)}>{answeredCount} of {questions.length} answered</span>}
         {canAct ? <span {...stylex.props(styles.hints)}>
-          <span><kbd {...stylex.props(styles.kbd)}>1</kbd>–<kbd {...stylex.props(styles.kbd)}>9</kbd> pick</span>
+          {questions.some(question => question.kind !== 'text') && <span><kbd {...stylex.props(styles.kbd)}>1</kbd>–<kbd {...stylex.props(styles.kbd)}>9</kbd> pick</span>}
           {questions.length > 1 && <span><kbd {...stylex.props(styles.kbd)}>Tab</kbd> next question</span>}
           <span><kbd {...stylex.props(styles.kbd)}>Enter</kbd> submit</span>
         </span> : !request.answerable && request.readOnlyReason !== undefined && <span {...stylex.props(styles.meta)}>{request.readOnlyReason}</span>}

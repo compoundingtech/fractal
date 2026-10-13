@@ -25,7 +25,7 @@ type WidthId = 'W440' | 'W1440'
 interface Variant<T extends string> { readonly id: T; readonly description: string }
 const SCENARIOS: readonly Variant<ScenarioId>[] = [
   { id: 'S1', description: 'One question: radios, Recommended badge, markdown preview, automatic Other row' },
-  { id: 'S2', description: 'Four tabbed questions: header chips with answered markers, notes, single and multi choice' },
+  { id: 'S2', description: 'Four tabbed questions: header chips with answered markers, notes, single, multi and free-text answers' },
   { id: 'S3', description: 'Multi-select with Other text and a note' },
 ]
 const STATES: readonly Variant<StateId>[] = [
