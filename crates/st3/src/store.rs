@@ -9216,6 +9216,7 @@ impl Store {
                         format!("step run `{subject}` has an active lease"),
                     ));
                 }
+                // `Store::check_work_holder` restates these holder checks for a wait's setup.
                 if action != "claim"
                     && (!lease_valid || current.claimant.as_deref() != Some(actor.as_str()))
                 {
