@@ -168,3 +168,455 @@ fn failed_signed_send_rolls_back_its_message_and_temporary_signature() {
         "sent"
     );
 }
+
+#[test]
+fn digest_mismatched_message_operation_repair_persists_across_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("invented-message.db");
+    let store = Store::open(&path, "fixture").unwrap();
+    store.project_replication_backlog().unwrap();
+    let input = request();
+    let signature = signed(&input);
+    let (claim, _) = store.append_signed_message(&input, &signature).unwrap();
+    let (operation, digest) = operation_parts(&claim.body).unwrap();
+    let operation = operation.to_owned();
+    let digest = digest.to_owned();
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE operations SET request_digest='invented-stale-digest' WHERE id=?1",
+            [&operation],
+        )
+        .unwrap();
+    let mut lines = Vec::new();
+    store
+        .project_replication_backlog_with_log("fixture/startup", |line| lines.push(line.to_owned()))
+        .unwrap();
+    assert!(
+        lines.is_empty(),
+        "receipt-only repair must be incremental: {lines:?}"
+    );
+    assert_eq!(
+        operation_tx(&store.readers.get(), &operation)
+            .unwrap()
+            .unwrap(),
+        (digest.clone(), claim.id.clone(), "active".into())
+    );
+    assert_eq!(
+        store.claim_by_id(&claim.id).unwrap().unwrap().body,
+        claim.body
+    );
+    assert_eq!(
+        store.claim_signature(&claim.id).unwrap().unwrap().nonce,
+        signature.nonce
+    );
+    drop(store);
+    let reopened = Store::open(&path, "fixture").unwrap();
+    let mut lines = Vec::new();
+    reopened
+        .project_replication_backlog_with_log("fixture/reopen", |line| lines.push(line.to_owned()))
+        .unwrap();
+    assert!(
+        lines.is_empty(),
+        "committed stale receipt repair must survive restart: {lines:?}"
+    );
+    assert_eq!(
+        operation_tx(&reopened.readers.get(), &operation)
+            .unwrap()
+            .unwrap(),
+        (digest, claim.id.clone(), "active".into())
+    );
+    assert_eq!(
+        reopened.claim_signature(&claim.id).unwrap().unwrap().nonce,
+        signature.nonce
+    );
+}
+
+#[test]
+fn resolved_message_operation_conflict_does_not_replay_for_another_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("invented-conflict.db");
+    let store = Store::open(&path, "fixture").unwrap();
+    store.project_replication_backlog().unwrap();
+    let input = request();
+    let signature = signed(&input);
+    let (original, _) = store.append_signed_message(&input, &signature).unwrap();
+    store.project_replication_backlog().unwrap();
+    let (operation, _) = operation_parts(&original.body).unwrap();
+    let operation = operation.to_owned();
+    let mut body = original.body.clone();
+    body["_operation"]["request_digest"] = json!("invented-conflicting-digest");
+    let incoming = {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_record_tx(
+            &transaction,
+            "invented-peer",
+            &original.subject,
+            "message.sent",
+            original.actor.as_deref(),
+            &body,
+            &[],
+            None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        claim
+    };
+    let mut lines = Vec::new();
+    store
+        .project_replication_backlog_with_log("fixture/conflict", |line| {
+            lines.push(line.to_owned())
+        })
+        .unwrap();
+    assert!(
+        lines.is_empty(),
+        "message conflict repair must be incremental: {lines:?}"
+    );
+    let resolved = operation_tx(&store.readers.get(), &operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resolved.2, "conflict");
+    assert_eq!(
+        store.claim_by_id(&original.id).unwrap().unwrap().body,
+        original.body
+    );
+    assert_eq!(store.claim_by_id(&incoming.id).unwrap().unwrap().body, body);
+    assert_eq!(
+        store.claim_signature(&original.id).unwrap().unwrap().nonce,
+        signature.nonce
+    );
+    drop(store);
+    let reopened = Store::open(&path, "fixture").unwrap();
+    reopened.project_replication_backlog().unwrap();
+    assert_eq!(
+        operation_tx(&reopened.readers.get(), &operation)
+            .unwrap()
+            .unwrap(),
+        resolved
+    );
+    {
+        let mut connection = reopened.connection.write();
+        let transaction = connection.transaction().unwrap();
+        append_claim_record_tx(
+            &transaction,
+            "invented-other-peer",
+            &original.subject,
+            "message.sent",
+            original.actor.as_deref(),
+            &body,
+            &[],
+            None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+    }
+    let mut lines = Vec::new();
+    reopened
+        .project_replication_backlog_with_log("fixture/new-receipt", |line| {
+            lines.push(line.to_owned())
+        })
+        .unwrap();
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("projection full replay")),
+        "durably recorded conflict must not force another full-store replay: {lines:?}"
+    );
+    assert_eq!(
+        reopened
+            .claim_signature(&original.id)
+            .unwrap()
+            .unwrap()
+            .nonce,
+        signature.nonce
+    );
+}
+
+fn operation_rows(connection: &Connection) -> Vec<(String, String, String, String)> {
+    connection
+        .prepare("SELECT id,request_digest,canonical_claim_id,state FROM operations ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn assert_operation_replay_parity(store: &Store) {
+    let before = {
+        let connection = store.readers.get();
+        (
+            operation_rows(&connection),
+            graph_digest(&connection).unwrap(),
+            projection_digest::tables(&connection).unwrap(),
+            projection_digest::oracle(&connection).unwrap(),
+        )
+    };
+    store.replay_replication_graph().unwrap();
+    let connection = store.readers.get();
+    assert_eq!(operation_rows(&connection), before.0);
+    assert_eq!(graph_digest(&connection).unwrap(), before.1);
+    assert_eq!(projection_digest::tables(&connection).unwrap(), before.2);
+    assert_eq!(projection_digest::oracle(&connection).unwrap(), before.3);
+}
+
+#[test]
+fn message_operation_reconciliation_matches_replay_for_orders_tombstones_and_repairs() {
+    for reverse in [false, true] {
+        for mode in ["stored", "checkpoint", "repaired"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("invented-parity.db");
+            let store = Store::open(&path, "fixture").unwrap();
+            store.project_replication_backlog().unwrap();
+            let digests = if reverse {
+                ["digest-b", "digest-a"]
+            } else {
+                ["digest-a", "digest-b"]
+            };
+            let mut first = None;
+            for (number, digest) in digests.into_iter().enumerate() {
+                let mut connection = store.connection.write();
+                let tx = connection.transaction().unwrap();
+                if number == 1 {
+                    let claim: &ClaimRecord = first.as_ref().unwrap();
+                    if mode == "checkpoint" {
+                        tx.execute("INSERT INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
+                            actor,predecessors,operation_id,request_digest,accepted_at_unix_ms,checkpoint)
+                            VALUES (?1,'invented-peer',1,'invented-envelope',?2,'message.sent',NULL,'[]',
+                            'op/invented-parity',?3,0,'checkpoint/2026-10-01')",
+                            params![claim.id, claim.subject, digests[0]]).unwrap();
+                        tx.execute("DELETE FROM operations WHERE id='op/invented-parity'", [])
+                            .unwrap();
+                        tx.execute("DELETE FROM claims WHERE id=?1", [&claim.id])
+                            .unwrap();
+                    } else if mode == "repaired" {
+                        tx.execute("INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,
+                            raw,state,claim_id,updated_at_unix_ms) VALUES ('record/invented-repair','invented-peer',
+                            1,'invented-envelope',0,X'','repaired',?1,'1')", [&claim.id]).unwrap();
+                    }
+                }
+                let claim = append_claim_record_tx(&tx, "invented-peer", "message/invented-parity",
+                    "message.sent", Some("person/example"), &json!({"fields":{
+                        "from":"person/example", "to":"agent/invented", "content":"Invented receipt", "status":"sent"
+                    }, "_operation":{"id":"op/invented-parity", "request_digest":digest}}), &[], None).unwrap();
+                tx.commit().unwrap();
+                drop(connection);
+                if number == 0 {
+                    first = Some(claim);
+                }
+                FULL_REPLAYS.with(|count| count.set(0));
+                store.project_replication_backlog().unwrap();
+                assert_eq!(
+                    FULL_REPLAYS.with(std::cell::Cell::get),
+                    0,
+                    "{reverse}/{mode}/{number}"
+                );
+                assert_operation_replay_parity(&store);
+            }
+            let expected_state = if mode == "repaired" {
+                "active"
+            } else {
+                "conflict"
+            };
+            assert_eq!(
+                operation_tx(&store.readers.get(), "op/invented-parity")
+                    .unwrap()
+                    .unwrap()
+                    .2,
+                expected_state
+            );
+            let before = operation_rows(&store.readers.get());
+            drop(store);
+            let reopened = Store::open(&path, "fixture").unwrap();
+            FULL_REPLAYS.with(|count| count.set(0));
+            reopened.project_replication_backlog().unwrap();
+            assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+            assert_eq!(operation_rows(&reopened.readers.get()), before);
+            assert_operation_replay_parity(&reopened);
+        }
+    }
+}
+
+#[test]
+fn message_operation_conflict_receipt_cost_depends_on_its_own_history() {
+    use smallclaims::sqlite::work::SqliteWorkScope;
+    let mut costs = Vec::new();
+    for count in [2, 10, 100] {
+        let store = Store::open_memory("fixture").unwrap();
+        store.project_replication_backlog().unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            for number in 0..count {
+                append_claim_record_tx(&tx, "invented-peer", "message/invented-cost", "message.sent",
+                    Some("person/example"), &json!({"fields":{"from":"person/example",
+                        "to":"agent/invented", "content":format!("Invented content {number}"), "status":"sent"},
+                        "_operation":{"id":"op/invented-cost", "request_digest":format!("digest-{number:03}")}}),
+                    &[], None).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        store.project_replication_backlog().unwrap();
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            append_claim_record_tx(
+                &tx,
+                "invented-peer",
+                "message/invented-cost",
+                "message.sent",
+                Some("person/example"),
+                &json!({"fields":{"from":"person/example",
+                    "to":"agent/invented", "content":"Another receipt", "status":"sent"},
+                    "_operation":{"id":"op/invented-cost", "request_digest":"digest-001"}}),
+                &[],
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        FULL_REPLAYS.with(|replays| replays.set(0));
+        let work = SqliteWorkScope::start();
+        store.project_replication_backlog().unwrap();
+        let cost = work.finish();
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        eprintln!(
+            "message conflict receipt prior_claims={count} statements={} vm_steps={} fullscan_steps={}",
+            cost.statements, cost.vm_steps, cost.fullscan_steps
+        );
+        assert!(cost.vm_steps > 0);
+        costs.push(cost);
+    }
+    assert_eq!(costs[0].statements, costs[1].statements);
+    assert_eq!(costs[1].statements, costs[2].statements);
+    assert!(
+        costs[2].vm_steps < costs[0].vm_steps * 50,
+        "one indexed fold should grow linearly, not repeat a whole-store replay per receipt"
+    );
+}
+
+#[test]
+fn message_operation_reconciliation_rolls_back_with_its_frontier() {
+    let store = Store::open_memory("fixture").unwrap();
+    store.project_replication_backlog().unwrap();
+    let (original, _) = store
+        .append_signed_message(&request(), &signed(&request()))
+        .unwrap();
+    store.project_replication_backlog().unwrap();
+    let (operation, _) = operation_parts(&original.body).unwrap();
+    let before = operation_rows(&store.readers.get());
+    let index = store.index().unwrap();
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    let frontier: u64 = tx
+        .query_row(
+            "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut body = original.body.clone();
+    body["_operation"]["request_digest"] = json!("invented-rollback-digest");
+    let incoming = append_claim_record_tx(
+        &tx,
+        "invented-peer",
+        &original.subject,
+        "message.sent",
+        original.actor.as_deref(),
+        &body,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        try_project_simple_replication_tx(&tx, "fixture", incoming.store_index).unwrap(),
+        IncrementalProjection::Projected
+    );
+    assert_eq!(operation_tx(&tx, operation).unwrap().unwrap().2, "conflict");
+    assert_eq!(
+        tx.query_row(
+            "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+            [],
+            |row| row.get::<_, u64>(0)
+        )
+        .unwrap(),
+        frontier
+    );
+    tx.rollback().unwrap();
+    drop(connection);
+    assert_eq!(store.index().unwrap(), index);
+    assert_eq!(operation_rows(&store.readers.get()), before);
+    assert!(store.claim_by_id(&incoming.id).unwrap().is_none());
+}
+
+#[test]
+fn message_operation_late_conflict_after_duplicate_receipt_matches_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("invented-late-conflict.db");
+    let mut store = Store::open(&path, "fixture").unwrap();
+    store.project_replication_backlog().unwrap();
+    let input = request();
+    let signature = signed(&input);
+    let (original, _) = store.append_signed_message(&input, &signature).unwrap();
+    store.project_replication_backlog().unwrap();
+    let (operation, _) = operation_parts(&original.body).unwrap();
+    let mut body = original.body.clone();
+    for conflicting in [false, true] {
+        if conflicting {
+            body["_operation"]["request_digest"] = json!("invented-late-conflict");
+        }
+        {
+            let mut connection = store.connection.write();
+            let tx = connection.transaction().unwrap();
+            append_claim_record_tx(
+                &tx,
+                "invented-peer",
+                &original.subject,
+                "message.sent",
+                original.actor.as_deref(),
+                &body,
+                &[],
+                None,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        FULL_REPLAYS.with(|count| count.set(0));
+        store.project_replication_backlog().unwrap();
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+        assert_eq!(
+            operation_tx(&store.readers.get(), operation)
+                .unwrap()
+                .unwrap()
+                .2,
+            if conflicting { "conflict" } else { "active" }
+        );
+        assert_operation_replay_parity(&store);
+        assert_eq!(
+            serde_json::to_value(store.claim_signature(&original.id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&signature).unwrap()
+        );
+        drop(store);
+        store = Store::open(&path, "fixture").unwrap();
+        store.project_replication_backlog().unwrap();
+    }
+    assert_eq!(
+        store
+            .append_signed_message(&input, &signed(&input))
+            .unwrap_err()
+            .code,
+        "idempotency-conflict"
+    );
+    assert_eq!(
+        store.claim_by_id(&original.id).unwrap().unwrap().body,
+        original.body
+    );
+    assert_eq!(
+        serde_json::to_value(store.claim_signature(&original.id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&signature).unwrap()
+    );
+}
