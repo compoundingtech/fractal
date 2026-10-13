@@ -1227,6 +1227,7 @@
       "properties": {
         "id": { "$ref": "#/$defs/Id" },
         "revision": { "type": "string" },
+        "accountable": { "type": "string", "pattern": "^person/[A-Za-z0-9_.-]+$" },
         "tree": { "type": "object" },
         "kdl": { "type": "string" },
         "revisions": { "type": "array", "items": { "type": "string" } }

@@ -16,6 +16,7 @@ version 2
 
 agent "reporter" { workspace "/tmp"; command "true" }
 agent "builder" { workspace "/tmp"; command "true" }
+resource "loop-result" { kind "custom.test.loop-result" }
 
 mission "watched" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
   concurrent-runs
@@ -55,6 +56,18 @@ mission "absent-reporter" state="ready" report-to="agent/node.nobody" {
   concurrent-runs
   goal "Name an agent that is not declared."
   step "build" { assigned-to "agent/node.builder" }
+}
+mission "loop-parent" state="ready" report-to="agent/node.reporter" stalled-after="10m" {
+  concurrent-runs
+  goal "Watch progress in child rounds."
+  loop "refine" {
+    max-rounds 3
+    until { gate "done" { field "state" "resource/loop-result" is "done" } }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "work" { assigned-to "agent/node.builder" }
+    }
+  }
 }
 "#;
 
@@ -151,6 +164,142 @@ impl Fixture {
             .filter(|claim| claim.body["fields"]["scope"] == "report-to")
             .map(|claim| claim.body["fields"]["status"].as_str().unwrap().to_owned())
             .collect()
+    }
+}
+
+#[test]
+fn a_quiet_parent_counts_child_round_progress_and_then_reports_real_silence() {
+    for inline in [false, true] {
+        let (_clock, fixture) = fixture();
+        if inline {
+            let source = SOURCE.replace(
+                r#"  loop "refine" {"#,
+                "  step \"outer\" {\n    agentless\n    mission \"nested\" {\n      goal \"Work in an inline loop.\"\n      loop \"refine\" {",
+            ) + "\n}\n}\n";
+            apply_source(&fixture.store, &source, "inline-loop-report");
+        }
+        let parent = fixture.start("loop-parent", "loop-parent-activity");
+        fixture.passes(10);
+        let loop_step = parent
+            .steps
+            .iter()
+            .find(|step| step.step.ends_with("refine"))
+            .unwrap();
+        let child = fixture
+            .store
+            .mission_run_for_parent_step(&loop_step.subject)
+            .unwrap()
+            .unwrap();
+        let builder = fixture
+            .reconciler
+            .runtime
+            .started_members
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|member| member.runtime_id.ends_with("builder"))
+            .unwrap()
+            .clone();
+        fixture
+            .reconciler
+            .runtime
+            .ptys
+            .lock()
+            .unwrap()
+            .push(RuntimeObservation {
+                runtime_id: builder.runtime_id,
+                terminal: builder.terminal,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some("round-worker".into()),
+            });
+        fixture.passes(1);
+        let request = |key: &str, summary: Option<&str>| crate::model::WorkRequest {
+            actor: Some("agent/node.builder".into()),
+            incarnation: Some("round-worker".into()),
+            summary: summary.map(str::to_owned),
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: key.into(),
+        };
+        fixture
+            .store
+            .work_action(
+                &child.steps[0].subject,
+                "claim",
+                &request("claim-round", None),
+            )
+            .unwrap();
+        let parent_view = fixture.store.mission_run(&parent.id).unwrap().unwrap();
+        let quiet_since = crate::reconcile::run_report::run_activity(&parent_view);
+        let progress_at = quiet_since + 9 * MINUTE;
+        let _progress = Clock::at(&fixture.store, progress_at);
+        fixture
+            .store
+            .work_action(
+                &child.steps[0].subject,
+                "progress",
+                &request("child-round-progress", Some("Round is making progress.")),
+            )
+            .unwrap();
+        fixture.passes(2);
+        // Only the child changed; its progress invalidates the parent's evaluation and deadline.
+        let held = fixture
+            .store
+            .step_run(&child.steps[0].subject)
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.status, "working");
+        assert_eq!(held.progress_at_unix_ms, Some(progress_at));
+        assert_eq!(
+            held.claim_expires_at_unix_ms,
+            Some(progress_at + 10 * MINUTE)
+        );
+        let _past_parent_limit = Clock::at(&fixture.store, quiet_since + 11 * MINUTE);
+        fixture.passes(2);
+        assert_eq!(
+            crate::reconcile::run_report::run_activity(
+                &fixture.store.mission_run(&parent.id).unwrap().unwrap()
+            ),
+            quiet_since,
+            "Only the child round made progress"
+        );
+        let parent_reports = || {
+            fixture
+                .reports(REPORTER)
+                .into_iter()
+                .filter(|message| {
+                    message
+                        .tags
+                        .contains(&format!("mission-run:{}", parent.subject))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            parent_reports().is_empty(),
+            "Child round is active: {:?}",
+            parent_reports()
+        );
+        assert_eq!(
+            fixture.reconciler.incremental.next_due(&parent.subject),
+            Some(progress_at + 20 * MINUTE)
+        );
+        // The live worker's progress renews its lease for ten minutes. Release it before
+        // checking true silence, so a later lease-expiry transition cannot count as activity.
+        fixture
+            .store
+            .work_action(
+                &child.steps[0].subject,
+                "release",
+                &request("release-round", None),
+            )
+            .unwrap();
+        fixture.passes(2);
+        let _real_silence = Clock::at(&fixture.store, quiet_since + 22 * MINUTE);
+        fixture.passes(2);
+        assert_eq!(parent_reports().len(), 1);
+        fixture.passes(3);
+        assert_eq!(parent_reports().len(), 1);
     }
 }
 

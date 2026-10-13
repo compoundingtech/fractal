@@ -140,3 +140,20 @@ subjects stay marked, and spaces keep their resource tabs.
 
 Opening a resource tab also reads that exact subject with the existing prefix filter so
 a catalog limit does not make an available detail vanish. Session and PTY IDs only navigate.
+
+On a member granting `inventory-collections` version 1, stui follows clients,
+the selected usage period, machines, devices, native sessions and terminal lists
+through the existing collections socket. Fleet, visible panes, sidebar and
+palette demand select the windows. Leaving keeps them for the same thirty-second
+grace as missions; switching usage periods immediately replaces the old usage
+slot. All sixteen slots remain bounded, including the three live conversations
+and selected terminal. Client/usage timers, summary-driven machine rereads and
+inventory focus reads are removed. Existing protocol heartbeats and offline
+wording remain, and the sixty-second cache save is still a local write.
+
+Older members read inventories when their relevant view opens or its period
+changes; Fleet says these inventories are read, not followed. Read errors and
+partial windows stay visible. Connection generations fence legacy results, so a
+late read cannot replace a newer member's streamed rows. The actual-binary idle
+transport test runs `scripts/stui-test-client --classic` with `STUI_TIMING_LOG`
+on a private daemon, holding Fleet and Usage idle beyond every old read interval.
