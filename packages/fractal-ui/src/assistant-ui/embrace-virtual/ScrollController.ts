@@ -38,6 +38,8 @@ export class ScrollController {
   private restoring: boolean
   private userInputAt = 0
   private userScrolling = false
+  /** The latest reader input has already moved the viewport. */
+  private inputScrolled = false
   private olderNavigation = false
   private homeNavigation = false
   /** scrollTop when an older-navigation command began, until RAC moves the viewport. */
@@ -91,6 +93,7 @@ export class ScrollController {
     this.restoring = false
     this.userInputAt = performance.now()
     this.userScrolling = true
+    this.inputScrolled = false
     this.navigationTop = this.element?.scrollTop
     this.prependBottom = undefined
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
@@ -167,6 +170,7 @@ export class ScrollController {
       this.prependBottom = undefined
       this.userInputAt = performance.now()
       this.userScrolling = true
+      this.inputScrolled = false
       this.pendingAnchor = undefined
       this.restoring = false
       if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
@@ -181,10 +185,12 @@ export class ScrollController {
       if (this.pendingAnchor?.key === this.leadingKey && this.pendingAnchor !== undefined) return
       if (this.pendingAnchor !== undefined && !this.userScrolling) return
       if (resized && this.following) return
-      // Once the reader's scroll has ended, a scroll that moves with the geometry is the
-      // layout's: RAC clamps scrollTop to an estimated content size as rows change.
-      if (!this.userScrolling && (resized || performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS))
+      // Once the reader's scroll has moved and ended, a scroll that moves with the geometry
+      // is the layout's: RAC clamps scrollTop to an estimated content size as rows change.
+      // A key command whose scroll has not arrived yet still owns the next move.
+      if (!this.userScrolling && (resized && this.inputScrolled || performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS))
         return
+      this.inputScrolled = true
       this.captureAnchor()
       if (this.homeNavigation && this.leadingKey !== undefined && this.anchor?.key === this.firstKey) {
         // RAC has reached the loaded head. Include its measured inline state
