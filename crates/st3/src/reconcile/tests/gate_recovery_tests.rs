@@ -315,3 +315,38 @@ fn a_starting_round_gate_without_launch_lineage_or_ready_work_reports_instead_of
     assert_eq!(status(&store, &gate), "starting");
     assert!(store.member_reconcile_fault(&gate.subject, None).unwrap().is_none());
 }
+
+#[test]
+fn a_completed_round_terminalizes_its_missing_starting_gate_without_restarting_it() {
+    // Restore the retained crash state reported by the Manager: an ended owner,
+    // a starting gate observation, and no runtime or launch producer to retire.
+    let (store, _, gate) = fixture_with_launch("never", false);
+    store.append_claim(&ClaimInput {
+        subject: gate.subject.clone(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: member_fields(
+            gate.member.as_ref().unwrap(), "starting", Some("ended-round-gate"), false,
+        ),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("ended-round-starting-gate".into()),
+    }).unwrap();
+    let owner = store.mission_run(gate.owner_run.as_deref().unwrap()).unwrap().unwrap();
+    store.set_mission_run_state(&owner.id, "completed", None).unwrap();
+    let runtime = Arc::new(FakeRuntime::default());
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    for _ in 0..3 { restarted.reconcile_once().unwrap(); }
+    assert!(
+        matches!(status(&store, &gate).as_str(), "stopped" | "absent" | "retired"),
+        "a completed owner must not leave an unstarted gate in the active roster",
+    );
+    assert!(
+        store.desired_subjects_named(std::slice::from_ref(&gate.subject)).unwrap()
+            .iter().all(|desired| desired.kind != "agent"),
+        "the completed round cannot retain a live gate declaration",
+    );
+    assert!(runtime.starts.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+}
