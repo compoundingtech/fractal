@@ -105,6 +105,7 @@ impl Store {
             if let Some(item) = self.screen_prompt_item(&connection, &seat, person)? {
                 items.push(item);
             }
+            items.extend(self.denial_items(&connection, &seat, person)?);
             let Some((claim, at, harness)) = newest(&seat, "harness.observed")? else {
                 continue;
             };
@@ -1644,6 +1645,222 @@ impl Store {
     }
 }
 
+/// A native prompt's answer as a waiting hook reads it: the person's answer, once recorded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PromptAnswer {
+    pub answer: Option<String>,
+}
+
+/// The answers to a call Claude's auto mode classifier denied: allow that call once, allow calls
+/// of its kind for the seat, or leave it denied.
+const DENIAL_ANSWERS: [&str; 3] = ["approve-once", "approve-kind", "dismiss"];
+
+impl Store {
+    /// The person's answer to the native prompt or denial `episode` recorded, if any.
+    pub fn prompt_answer(&self, episode: &str) -> Result<PromptAnswer> {
+        let connection = self.readers.get();
+        Ok(PromptAnswer {
+            answer: native_prompt_answer(&connection, episode)?,
+        })
+    }
+
+    /// The calls Claude's auto mode classifier denied on `seat` since its running incarnation
+    /// started, that its person has not answered: each an alert, in the seat's conversation.
+    fn denial_items(
+        &self,
+        connection: &Connection,
+        seat: &str,
+        person: Option<&str>,
+    ) -> Result<Vec<AttentionItemView>> {
+        let Some((started, _)) = running_since(connection, seat)? else {
+            return Ok(Vec::new());
+        };
+        let denials = recent_denials(connection, seat)?;
+        if denials.is_empty() || !person_work::declaration_live(connection, seat)? {
+            return Ok(Vec::new());
+        }
+        let Some(owner) = self.agent_person(seat)? else {
+            return Ok(Vec::new());
+        };
+        if person.is_some_and(|person| person != owner) {
+            return Ok(Vec::new());
+        }
+        let mut items = Vec::new();
+        for (claim, index, at, fields) in denials {
+            if index < started || native_prompt_answer(connection, &claim)?.is_some() {
+                continue;
+            }
+            let tool = fields["status"].as_str().unwrap_or("tool");
+            let reason = fields["reason"].as_str().filter(|reason| !reason.is_empty()).unwrap_or("no reason given");
+            items.push(AttentionItemView {
+                episode: claim,
+                priority: "high".into(),
+                kind: "harness-prompt".into(),
+                review_mode: None,
+                subject: seat.to_owned(),
+                person: owner.clone(),
+                requester_id: None,
+                launch_id: None,
+                variant_id: None,
+                message_id: None,
+                answers: DENIAL_ANSWERS.iter().map(|answer| (*answer).to_owned()).collect(),
+                conversation: Some(seat.to_owned()),
+                title: format!("{seat} needs you to allow a {tool} call"),
+                detail: format!(
+                    "Claude's auto mode denied a {tool} call ({reason}), and only you can allow it: it is the denied call in the seat's conversation. Allow it once, allow calls of its kind for this seat, or dismiss it to leave it denied. When you allow it, st tells the seat to run it again and lets it through."
+                ),
+                request: None,
+                mission: None,
+                mission_run: None,
+                step: None,
+                targets: vec![seat.to_owned()],
+                requested_at_unix_ms: at,
+                actions: vec![attention_action(
+                    "Attach to answer",
+                    &["st", "terminals", "attach", seat],
+                )],
+            });
+        }
+        Ok(items)
+    }
+
+    /// Record `actor`'s answer to the call Claude's classifier denied that `episode` raised, and
+    /// tell the seat. `None` when `episode` is no denial of `seat`.
+    fn answer_denial(
+        &self,
+        seat: &str,
+        episode: &str,
+        answer: &str,
+        actor: &str,
+    ) -> std::result::Result<Option<ClaimRecord>, St3Error> {
+        let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
+        let Some(denial) = self.claim_by_id(episode).map_err(internal)? else {
+            return Ok(None);
+        };
+        let fields = &denial.body["fields"];
+        if denial.subject != seat
+            || denial.kind != "harness.diagnostic"
+            || fields["code"] != crate::driver_hook::PERMISSION_DENIED_CODE
+        {
+            return Ok(None);
+        }
+        if !DENIAL_ANSWERS.contains(&answer) {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "answer approve-once, approve-kind or dismiss",
+            ));
+        }
+        let connection = self.readers.get();
+        let started = running_since(&connection, seat).map_err(internal)?;
+        let answered = native_prompt_answer(&connection, episode).map_err(internal)?;
+        drop(connection);
+        if started.is_none_or(|(started, _)| (denial.store_index as i64) < started) || answered.is_some() {
+            return Err(St3Error::new(
+                "stale-fence",
+                "that prompt is no longer waiting: it was answered, or the seat restarted",
+            ));
+        }
+        let tool = fields["status"].as_str().unwrap_or("tool").to_owned();
+        let recorded = self.append_claim(&ClaimInput {
+            subject: seat.to_owned(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(actor.to_owned()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::String("native-prompt-answered".into())),
+                ("status".into(), Value::String(answer.into())),
+                ("driver".into(), Value::String("claude".into())),
+            ]),
+            evidence: vec![episode.to_owned()],
+            expected_subject: None,
+            idempotency_key: Some(native_prompt_answer_key(episode)),
+        })?;
+        // The seat stopped on the denial: say what the person decided, so it acts on it.
+        let content = match answer {
+            "approve-once" => format!(
+                "{actor} allowed the {tool} call auto mode denied, once. Run that same call again: st lets it through this time."
+            ),
+            "approve-kind" => format!(
+                "{actor} allowed the {tool} call auto mode denied, and calls of its kind on this seat. Run it again: st lets it and calls like it through."
+            ),
+            _ => format!("{actor} left the {tool} call auto mode denied as denied. Do not run it, or work around it."),
+        };
+        let message_key = format!("st3-denial-answer:{episode}");
+        let message_id = &hex::encode(sha2::Sha256::digest(message_key.as_bytes()))[..16];
+        self.append_claim(&ClaimInput {
+            subject: format!("message/{message_id}"),
+            kind: "message.sent".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("from".into(), Value::String("daemon/runtime".into())),
+                ("to".into(), Value::String(seat.into())),
+                ("content".into(), Value::String(content)),
+                ("status".into(), Value::String("sent".into())),
+                ("title".into(), Value::String(format!("Your person answered the denied {tool} call"))),
+                ("in_reply_to".into(), Value::Null),
+                ("tags".into(), Value::Array(vec![Value::String(format!("st3-denial:{episode}"))])),
+            ]),
+            evidence: vec![recorded.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(message_key),
+        })?;
+        Ok(Some(recorded))
+    }
+}
+
+/// Where in the store `seat`'s running incarnation was observed running, and its id; `None` when
+/// it is not running. Store order, not a clock: a denial after it belongs to that incarnation.
+fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, String)>> {
+    let row = connection
+        .prepare_cached(&format!(
+            "{} LIMIT 1",
+            newest_claims_of_kind_query("claims.store_index, claims.body", "runtime.observed")
+        ))?
+        .query_row(params![seat, i64::MAX], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let Some((index, body)) = row else {
+        return Ok(None);
+    };
+    let body: Value = serde_json::from_str(&body)?;
+    let fields = body.get("fields").unwrap_or(&body);
+    if fields["status"] != "running" {
+        return Ok(None);
+    }
+    Ok(Some((index, fields["incarnation_id"].as_str().unwrap_or_default().to_owned())))
+}
+
+/// The newest few denials `seat`'s hooks raised: their claims, store positions, acceptance times
+/// and fields.
+fn recent_denials(connection: &Connection, seat: &str) -> Result<Vec<(String, i64, u128, Value)>> {
+    connection
+        .prepare_cached(&format!(
+            "{} LIMIT 8",
+            newest_claims_of_kind_query(
+                "claims.id, claims.store_index, claims.accepted_at_unix_ms, claims.body",
+                "harness.diagnostic"
+            )
+            .replace(
+                " ORDER BY",
+                " AND json_extract(claims.body, '$.fields.code')='permission-denied' ORDER BY"
+            )
+        ))?
+        .query_map(params![seat, i64::MAX], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .map(|row| -> Result<(String, i64, u128, Value)> {
+            let (claim, index, at, body) = row?;
+            let body: Value = serde_json::from_str(&body)?;
+            Ok((claim, index, at.parse()?, body.get("fields").cloned().unwrap_or(body)))
+        })
+        .collect()
+}
+
 fn open_screen_prompt(
     connection: &Connection,
     seat: &str,
@@ -2041,6 +2258,9 @@ impl Store {
             ));
         }
         if let Some(answered) = self.answer_screen_prompt(seat, episode, answer, actor)? {
+            return Ok(answered);
+        }
+        if let Some(answered) = self.answer_denial(seat, episode, answer, actor)? {
             return Ok(answered);
         }
         if !matches!(answer, "allow" | "deny" | "approve") && question_answers(answer).is_none() {
