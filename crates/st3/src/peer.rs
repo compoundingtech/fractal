@@ -2339,6 +2339,22 @@ agent "example/launch" { host "owner-node"; workspace "/tmp"; command "true"; }
                 .stage,
             "replicating"
         );
+        // A durable action from the gateway can replicate, unlike an actor-less local
+        // receipt. It must not become launch proof on the destination runtime host.
+        for (kind, fields) in [
+            ("runtime.action.succeeded", serde_json::json!({
+                "action":"start", "desired_token":token, "incarnation_id":"foreign-first",
+            })),
+            ("runtime.action.failed", serde_json::json!({
+                "action":"start", "desired_token":token, "reason":"invented foreign failure",
+            })),
+        ] {
+            gateway_store.append_claim(&crate::model::ClaimInput {
+                subject:subject.into(), kind:kind.into(), actor:Some("person/avery".into()),
+                fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
+                expected_subject:None, idempotency_key:None,
+            }).unwrap();
+        }
         gateway_store.bind_fleet("fleet-test").unwrap();
         owner_store.bind_fleet("fleet-test").unwrap();
         for _ in 0..100 {

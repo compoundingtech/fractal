@@ -41,7 +41,12 @@ fn covered_window(
             }),
         "requested {kind} evidence exceeds the retained window; retry explicitly"
     );
-    Ok(records)
+    // Replicated person-authored actions and observations from another host do not
+    // prove that this requested runtime host launched or observed the incarnation.
+    Ok(records
+        .into_iter()
+        .filter(|claim| claim.origin == store.origin())
+        .collect())
 }
 
 fn read_at_snapshot(store: &Store, subject: &str, token: &str) -> anyhow::Result<LaunchStatus> {
