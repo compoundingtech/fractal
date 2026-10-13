@@ -16,6 +16,7 @@ const kitPrompt: TextItem & { role: 'user' } = { ...hostPrompt, id: 'render/kit-
 const kitAnswer: TextItem = { ...hostAnswer, id: 'render/kit-answer', text: 'An answer the host leaves to the kit.' }
 const messages: readonly TextItem[] = [hostPrompt, hostAnswer, kitPrompt, kitAnswer]
 const work = { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false }
+const turns: readonly TranscriptTurn[] = [{ id: 'render/host', prompt: hostPrompt, items: [hostAnswer], work }, { id: 'render/kit', prompt: kitPrompt, items: [kitAnswer], work }]
 const hosted: Readonly<Record<string, true>> = { [hostPrompt.id]: true, [hostAnswer.id]: true }
 const styles = stylex.create({
   root: { width: g.polishWide, maxWidth: '100%', height: g.transcriptFrameHeight, backgroundColor: surface.canvas, padding: s.md },
