@@ -5637,8 +5637,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    /// A person can spend one explicit retry despite an automatic failed-start hold. The
-    /// ordinary launch path, native-session selection and provider admission remain shared.
+    /// An authorized person or agent can spend one explicit restart retry despite an
+    /// automatic failed-start hold. Admission, native-session selection and guards stay shared.
     fn perform_start_for_request(
         &self,
         subject: &DesiredSubject,
@@ -5651,11 +5651,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             "a bound terminal seat cannot be spawned"
         );
         self.store.owned_desired_guard(subject)?;
-        let explicit_person = request.is_some_and(|request| {
-            request
-                .actor
-                .as_deref()
-                .is_some_and(|actor| actor.starts_with("person/"))
+        let explicit_retry = request.is_some_and(|request| {
+            request.body["fields"]["action"] == "restart"
+                && request.actor.as_deref().is_some_and(|actor| {
+                    actor.starts_with("person/") || actor.starts_with("agent/")
+                })
         });
         let placement_evidence = if subject.kind == "agent" {
             let Some(evidence) = self.placement_start_evidence(&subject.subject)? else {
@@ -5667,14 +5667,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         // A member whose start keeps failing waits between attempts and then parks with one
         // attention request, instead of spawning again on every pass. A gate runner fails its gate.
-        if !explicit_person
+        if !explicit_retry
             && matches!(subject.kind.as_str(), "agent" | "exec" | "pty")
             && member.driver.as_deref() != Some("codex")
             && self.defer_or_park_failed_start(subject)?
         {
             return Ok(false);
         }
-        if !explicit_person && member.driver.as_deref() == Some("codex") {
+        if !explicit_retry && member.driver.as_deref() == Some("codex") {
             let token = self.launch_token(&subject.subject)?;
             if self.codex_crash_loop_raised(&subject.subject, &token)? {
                 self.raise_codex_crash_loop(
