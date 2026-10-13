@@ -462,6 +462,10 @@ Version 1 scripts contain `format_version: 1`, `world`, the selected cast `agent
 recording multi-agent scripts. Native timestamps can describe historical past; they do not
 slow or scale the receive clock. Recording privacy scanning decodes JSON/JSONL before checking
 capability field names and values, including Unicode-escaped keys.
+Both the scanner and recording decoder reject duplicate JSON object member names before
+parsing discards earlier values, including names equivalent after Unicode-escape decoding.
+Schema identities include `x-st-ref` annotations and `$ref` names ending in `Id`; neither
+reference vocabulary may bypass the explicit identity map.
 
 Version 1 raw JSONL rows contain `ordinal` (zero-based, strictly increasing), `socket_id`
 (stable per connection, null outside sockets), `receive_ms` (monotonic elapsed milliseconds

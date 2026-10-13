@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { assertUniqueJsonMembers } from './unique-json.ts'
 
 const REPO_ROOT = fileURLToPath(new URL('../../../../', import.meta.url))
 const PACKAGE_ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -128,6 +129,7 @@ const scanRecordingCapabilities = (path: string, text: string): Finding[] => {
   const scanDocument = (document: string, line: number): Finding[] => {
     let liveCapability = false
     try {
+      assertUniqueJsonMembers(document)
       JSON.parse(document, (key: string, value: unknown) => {
         if ((key === 'capability' || key === 'stream_capability') && (typeof value !== 'string' || !/^capability#[1-9]\d*$/u.test(value))) {
           liveCapability = true

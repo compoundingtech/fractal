@@ -5,6 +5,7 @@ import type { RecordedFrame, RecordedHttp, RecordedTransport } from '../src/kit/
 import type { ConversationEvent, ConversationThread, TerminalEvent, TerminalRecord } from '../src/kit/slice.ts'
 import type { Slices } from '../src/kit/world.ts'
 import { SCHEMA_PATH } from './times.ts'
+import { assertUniqueJsonMembers } from './unique-json.ts'
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject
 export interface JsonObject { [key: string]: JsonValue }
@@ -74,10 +75,14 @@ export const decodeRecording = (source: string): RecordingRow[] => {
   try {
     const trimmed = source.trim()
     if (trimmed.startsWith('[')) {
+      assertUniqueJsonMembers(trimmed)
       const parsed: unknown = JSON.parse(trimmed)
       if (!Array.isArray(parsed)) return fail('', 'expected rows')
       values = parsed
-    } else values = trimmed.split('\n').map((line, i) => { try { return JSON.parse(line) } catch { return fail(`/${i}`, 'invalid JSON') } })
+    } else values = trimmed.split('\n').map((line, i) => {
+      try { assertUniqueJsonMembers(line); return JSON.parse(line) }
+      catch (error) { return fail(`/${i}`, error instanceof Error ? error.message : 'invalid JSON') }
+    })
   } catch (error) { return fail('', error instanceof Error ? error.message : 'invalid JSON') }
   let previous = -1
   let previousReceive = -Infinity
@@ -207,7 +212,7 @@ export const normalizeRecording = (script: RecordingScript, rows: readonly Recor
         if (incarnation !== null) url.searchParams.set('incarnation', token('incarnation', incarnation))
         return leaf(`${url.pathname}${url.search}`)
       }
-      if (s['x-st-ref'] !== undefined || key === 'message_id' || key === 'reply_to') {
+      if (s['x-st-ref'] !== undefined || ref?.endsWith('Id') || key === 'message_id' || key === 'reply_to') {
         if (/^(?:attachment|operation)#[1-9]\d*$/u.test(value)) return leaf(value)
         return leaf(identity(value, pointer))
       }

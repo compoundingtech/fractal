@@ -191,6 +191,31 @@ describe('privacy gate', () => {
       expect(scanRecordingContent('recordings/x.json', `{"${escapedKey}": "\\u0063apability#1"}`)).toEqual([])
     }
   })
+  it('rejects duplicate capability members in JSON and JSONL including escaped-equivalent keys', () => {
+    for (const key of ['capability', 'stream_capability']) {
+      for (const secondKey of [key, key.replace('capability', '\\u0063apability')]) {
+        const duplicate = `{"nested":[{"${key}":"${'live-'}scratch-secret","${secondKey}":"capability#1"}]}`
+        expect(scanRecordingContent('recordings/x.json', duplicate)).toEqual([
+          { path: 'recordings/x.json', line: 1, rule: 'invalid recording JSON' },
+        ])
+        expect(scanRecordingContent('recordings/x.jsonl', `{}\n${duplicate}\n`)).toEqual([
+          { path: 'recordings/x.jsonl', line: 2, rule: 'invalid recording JSON' },
+        ])
+      }
+    }
+  })
+
+  it('rejects live first duplicate members hidden by placeholders in scanTree recording inputs', () => {
+    const root = mkdtempSync(join(tmpdir(), 'st3-scenarios-duplicate-scan-'))
+    scratch.push(root)
+    expect(spawnSync('git', ['init', '-q'], { cwd: root }).status).toBe(0)
+    for (const dir of ['fixtures', 'pkg/recordings', 'pkg/src/vocabulary']) mkdirSync(join(root, dir), { recursive: true })
+    for (const suffix of ['script.json', 'recording.jsonl', 'normalized.json']) {
+      writeFileSync(join(root, 'pkg/recordings/proof.' + suffix), `{"stream_capability":"${'live-'}scratch-secret","stream_\\u0063apability":"capability#1"}`)
+    }
+    const findings = scanTree({ fixturesDir: join(root, 'fixtures'), packageRoot: join(root, 'pkg'), vocabularyDir: join(root, 'pkg/src/vocabulary') })
+    expect(findings.filter(({ rule }) => rule === 'invalid recording JSON')).toHaveLength(3)
+  })
 
   it('rejects capability values other than decoded numbered tokens', () => {
     for (const key of ['capability', 'stream_capability']) {

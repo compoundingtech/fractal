@@ -38,6 +38,34 @@ describe('recording schema-directed N (batch 2)', () => {
     page.cursor_expires_at = null
     expect(obj(obj(obj(normalizeRecording(script, capture, anchor)[1]!.value.body).value).page).cursor_expires_at).toBeNull()
   })
+  it('maps Id-suffixed arrangement subjects and folder references and rejects unmapped values', () => {
+    const subject = 'arrangement/person/ada/00000000-0000-7000-8000-000000000001'
+    const mappedSubject = 'arrangement/person/ada/00000000-0000-7000-8000-000000000002'
+    const folder = '00000000-0000-7000-8000-000000000003'
+    const mappedFolder = '00000000-0000-7000-8000-000000000004'
+    const capture = rows()
+    capture.push({ ordinal: 9, socket_id: 'socket#1', receive_ms: 30550, kind: 'command', value: {
+      kind: 'subscribe', id: 'arrangements', collection: 'arrangements', person: 'person/ada', subject,
+    } })
+    capture.push({ ordinal: 10, socket_id: null, receive_ms: 30551, kind: 'attach', value: {
+      type: 'arrangement.edit', parameters: { subject, owner: 'person/ada', operations: [{ op: 'folder.create', id: folder, name: 'Proof', parent: folder, key: 'a0' }] },
+      api_version: 'st3.client.v0', id: 'agent/example/a', idempotency_key: 'scenario-arrangement-proof',
+      fence: { snapshot_id: 'snapshot/meadow/9/opaque', subject_revisions: {} },
+    } })
+    const mappedScript: RecordingScript = { ...script, id_map: { ...script.id_map, [subject]: mappedSubject, [folder]: mappedFolder } }
+    const normalized = normalizeRecording(mappedScript, capture, anchor)
+    expect(normalized[4]!.value.subject).toBe(mappedSubject)
+    const parameters = obj(normalized[5]!.value.parameters)
+    expect(parameters.subject).toBe(mappedSubject)
+    const operations = parameters.operations
+    if (!Array.isArray(operations)) throw new Error('expected test operations')
+    expect(obj(operations[0]).id).toBe(mappedFolder)
+    expect(obj(operations[0]).parent).toBe(mappedFolder)
+    expect(normalizeRecording(mappedScript, normalized, anchor)).toEqual(normalized)
+    expect(() => normalizeRecording(script, capture, anchor)).toThrow(`/4/value/subject: unknown identity ${subject}`)
+    const subjectOnly: RecordingScript = { ...script, id_map: { ...script.id_map, [subject]: mappedSubject } }
+    expect(() => normalizeRecording(subjectOnly, capture, anchor)).toThrow(`/5/value/parameters/operations/0/id: unknown identity ${folder}`)
+  })
   it('maps annotated participant references and rejects unmapped references at their pointers', () => {
     const capture = rows()
     const items = capture[2]!.value.items
@@ -145,6 +173,17 @@ describe('recording schema-directed N (batch 2)', () => {
     const capture = rows()
     expect(decodeRecording(JSON.stringify(capture))).toEqual(capture)
     expect(decodeRecording(capture.map((row) => JSON.stringify(row)).join('\n'))).toEqual(capture)
+  })
+  it('rejects duplicate recording members before parsing JSON arrays and JSONL including escaped-equivalent names', () => {
+    for (const key of ['capability', 'stream_capability', 'ordinary']) {
+      for (const secondKey of [key, key.replace(/.$/u, (last) => `\\u${last.charCodeAt(0).toString(16).padStart(4, '0')}`)]) {
+        const row = `{"ordinal":0,"socket_id":null,"receive_ms":0,"kind":"harness","value":{"nested":{"${key}":"${'live-'}scratch-secret","${secondKey}":"capability#1"}}}`
+        expect(() => decodeRecording(`[${row}]`)).toThrow('duplicate JSON member')
+        expect(() => decodeRecording(`${row}\n`)).toThrow('duplicate JSON member')
+      }
+    }
+    const valid = '{"ordinal":0,"socket_id":null,"receive_ms":0,"kind":"harness","value":{"items":[{"name":1},{"name":2}],"text":"{ \\"name\\":1, \\"name\\":2 }"}}'
+    expect(decodeRecording(valid)).toHaveLength(1)
   })
   it('decodes the committed recording script through the shared strict contract', () => {
     const committed: unknown = JSON.parse(readFileSync(new URL('../recordings/fleet-mid-refactor-proof.script.json', import.meta.url), 'utf8'))
