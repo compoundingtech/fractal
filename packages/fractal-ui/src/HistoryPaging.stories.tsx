@@ -7,6 +7,7 @@ import { DataSourceProvider } from '../../../apps/fractal-web/src/data/react.tsx
 import { createHistoryFixture, historyFixtureRef, type HistoryFixture } from '../../../apps/fractal-web/src/data/historyFixture.ts'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
+import { surfaceVars as surface, textVars as ink, spaceVars as s } from './assistant-ui/composition-tokens.stylex'
 
 const fixtures = new WeakMap<HTMLElement, HistoryFixture>()
 const HistoryPaging = ({ scheme = 'dark', failure = 'none' }: { readonly scheme?: 'light' | 'dark'; readonly failure?: 'none' | 'retry' }) => {
@@ -17,8 +18,8 @@ const HistoryPaging = ({ scheme = 'dark', failure = 'none' }: { readonly scheme?
     if (feed._tag === 'Observed' && feed.value.historyLoad?._tag === 'Failed') return
     await fixture.source.loadEarlierConversation?.(ref)
   } } : fixture.source, [failure, fixture])
-  return <main ref={node => { if (node !== null) fixtures.set(node, fixture) }} data-history-paging-story="" data-scheme={scheme} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme)} style={{ display: 'flex', flexDirection: 'column', height: 800, width: '100%', background: 'var(--canvas)', color: 'var(--fg)' }}>
-    <div><button onClick={() => fixture.settle(false)}>Fail pending page</button><button onClick={() => fixture.settle(true)}>Deliver pending page</button></div>
+  return <main ref={node => { if (node !== null) fixtures.set(node, fixture) }} data-history-paging-story="" data-scheme={scheme} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme)} style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100%', background: surface.canvas, color: ink.fg }}>
+    <div style={{ display: 'flex', gap: s.md, padding: s.sm }}><button onClick={() => fixture.settle(false)}>Fail pending page</button><button onClick={() => fixture.settle(true)}>Deliver pending page</button></div>
     <DataSourceProvider source={source} registry={fixture.registry}><ConversationPane agentRef={historyFixtureRef} agentName="Row review" onOpenTool={() => {}} /></DataSourceProvider>
   </main>
 }
