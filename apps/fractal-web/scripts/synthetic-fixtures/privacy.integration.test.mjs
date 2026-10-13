@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -76,5 +76,35 @@ test('binary assets require a listed path and an exact reviewed hash', async () 
     assert.deepEqual(await scanFiles([file], undefined, policyPath), [{ file, line: 1 }])
     await writeFile(policyPath, '[]')
     assert.deepEqual(await scanFiles([file], undefined, policyPath), [{ file, line: 1 }])
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('Git-ignored build output is skipped, but tracked and non-ignored controls still fail', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'synthetic-gitignore-'))
+  const git = (...args) => {
+    const result = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+  }
+  try {
+    git('init', '--quiet')
+    await writeFile(join(dir, '.gitignore'), 'storybook-static/\nother-build/\n')
+    await mkdir(join(dir, 'storybook-static'))
+    await mkdir(join(dir, 'other-build'))
+    const denied = 'dev' + '3'
+    const ignored = join(dir, 'storybook-static', 'generated.js')
+    await writeFile(ignored, denied)
+    await writeFile(join(dir, 'other-build', 'generated.js'), denied)
+    assert.deepEqual(await scanFiles([dir]), [])
+    assert.deepEqual(await scanFiles([ignored]), [])
+    const untracked = join(dir, 'untracked.txt')
+    await writeFile(untracked, denied)
+    assert.deepEqual(await scanFiles([dir]), [{ file: untracked, line: 1 }])
+    // Even a tracked file in an ignored directory must never be exempted.
+    git('add', '--force', 'storybook-static/generated.js')
+    git('-c', 'user.name=schickling-assistant', '-c', 'user.email=261620128+schickling-assistant@users.noreply.github.com', '-c', 'rerere.enabled=false', 'commit', '--quiet', '-m', 'Track privacy control')
+    assert.deepEqual(await scanFiles([dir]), [
+      { file: ignored, line: 1 }, { file: untracked, line: 1 },
+    ])
+    assert.deepEqual(await scanFiles([ignored]), [{ file: ignored, line: 1 }])
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
