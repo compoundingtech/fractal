@@ -8311,7 +8311,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .unwrap_or_else(PoisonError::into_inner)
                 .contains(&run.generation);
             if !already_materialized {
-                changed |= self.materialize_mission_declarations(run, mission)?;
+                changed |= self.materialize_mission_declarations(run, mission, None)?;
                 self.materialized_mission_generations
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -8627,10 +8627,21 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .is_some_and(|actor| actor.starts_with("person/"))
                             || eligible_agent()?;
                         if !eligible {
+                            // A round-local, gate-only seat waits for these dependency and baseline
+                            // checks. Admit it before checking the desired assignment graph.
+                            if let Some(agent) = Self::round_gate_agent(run)
+                                && view.assigned_to.as_deref() == Some(agent)
+                            {
+                                changed |= self.materialize_mission_declarations(
+                                    run,
+                                    mission,
+                                    Some(view),
+                                )?;
+                            }
                             // A step can declare its own assigned agent. Create only that agent before
                             // checking eligibility; other declarations still wait for active execution.
                             changed |=
-                                self.materialize_step_declarations(run, &step, view, true)?;
+                                self.materialize_step_declarations(run, mission, &step, view, true)?;
                             eligible = eligible_agent()?;
                         }
                         if !eligible {
@@ -8683,7 +8694,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             return Ok(changed);
                         }
                     }
-                    changed |= self.materialize_step_declarations(run, &step, view, false)?;
+                    changed |= self.materialize_step_declarations(run, mission, &step, view, false)?;
                     if let Some(reason) = self.step_declaration_failure(&view.subject)? {
                         changed |=
                             self.store
@@ -8701,7 +8712,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             return Ok(changed);
                         }
                     }
-                    if !self.step_declarations_hold(&view.subject)? {
+                    if !self.step_declarations_hold(run, &view.subject)? {
                         return Ok(changed);
                     }
                     if !view.agentless && !view.worker_reported {
@@ -11555,6 +11566,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn materialize_step_declarations(
         &self,
         run: &MissionRunView,
+        mission: &MissionSpec,
         step: &RuntimeStep<'_>,
         view: &crate::model::StepRunView,
         assigned_agents_only: bool,
@@ -11605,9 +11617,31 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         self.reject_runtime_collisions(&intent, run, Some(&view.subject))?;
-        let response = self.store.apply_internal(
+        let mut declared_agents = BTreeSet::new();
+        if let Some(agent) = Self::round_gate_agent(run)
+            && self.store.selected_desired_kind(agent)?.is_none()
+            && intent.subjects.values().any(|desired| {
+                desired.kind == "message"
+                    && crate::store::canonical_child_string(&desired.desired, "to").as_deref()
+                        == Some(agent)
+            })
+            && let Some(source) = mission.declarations_kdl.as_deref()
+        {
+            let variables = crate::store::mission_run_variables(run, &mission.revision);
+            let source = crate::mission::interpolate_kdl(source, &variables)?;
+            let declarations = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
+            if declarations
+                .subjects
+                .get(agent)
+                .is_some_and(|desired| desired.kind == "agent")
+            {
+                declared_agents.insert(agent.to_owned());
+            }
+        }
+        let response = self.store.apply_internal_with_declared_agents(
             &intent,
             &format!("materialize:{}:{}", view.subject, view.attempt),
+            &declared_agents,
         )?;
         Ok(response.changed)
     }
@@ -11750,10 +11784,38 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// `gate` is a refine-round naming convention, not a LoopSpec marker. Defer only
+    /// its exclusively assigned, round-local seat; pooled, shared and root seats stay eager.
+    fn round_gate_agent(run: &MissionRunView) -> Option<&str> {
+        if run.parent_step_run.is_none()
+            || !run.mission.starts_with("mission/__st3/")
+            || !run.mission.ends_with("/round")
+            || !run.inputs.contains_key(LOOP_ROUND_INPUT)
+        {
+            return None;
+        }
+        let gate = run.steps.iter().find(|step| step.step == "gate")?;
+        if gate.agentless || !gate.available_to.is_empty() {
+            return None;
+        }
+        let agent = gate.assigned_to.as_deref()?;
+        if !agent.starts_with(&format!("agent/{}/", run.id))
+            || run.steps.iter().any(|step| {
+                step.step != "gate"
+                    && (step.assigned_to.as_deref() == Some(agent)
+                        || step.available_to.iter().any(|candidate| candidate == agent))
+            })
+        {
+            return None;
+        }
+        Some(agent)
+    }
+
     fn materialize_mission_declarations(
         &self,
         run: &MissionRunView,
         mission: &MissionSpec,
+        admitting_gate: Option<&crate::model::StepRunView>,
     ) -> Result<bool> {
         let Some(source) = &mission.declarations_kdl else {
             return Ok(false);
@@ -11770,6 +11832,41 @@ impl<R: RuntimeControl> Reconciler<R> {
             .into_iter()
             .map(|subject| (subject.subject.clone(), subject))
             .collect::<BTreeMap<_, _>>();
+        let deferred_gate = Self::round_gate_agent(run);
+        let declared_agents = deferred_gate
+            .into_iter()
+            .filter(|agent| {
+                intent
+                    .subjects
+                    .get(*agent)
+                    .is_some_and(|desired| desired.kind == "agent")
+            })
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        intent.subjects.retain(|subject, desired| {
+            if let Some(gate) = admitting_gate {
+                return desired.kind == "agent"
+                    && deferred_gate == Some(subject.as_str())
+                    && gate.assigned_to.as_deref() == Some(subject.as_str());
+            }
+            if desired.kind != "agent" || deferred_gate != Some(subject.as_str()) {
+                return true;
+            }
+            // Re-derive admission after restart or revision from persisted step state.
+            // Once admitted, the desired seat survives release and retry until run cleanup.
+            run.steps.iter().any(|step| {
+                step.step == "gate"
+                    && (matches!(
+                        step.status.as_str(),
+                        "ready"
+                            | "claimed"
+                            | "working"
+                            | "verifying"
+                            | "waiting-person"
+                            | "orphaned"
+                    ) || (step.status == "blocked" && step.claimant.is_some()))
+            })
+        });
         // A stop declared by a step is authoritative for the remainder of its generation.
         // Re-materializing the mission-level agent on the next final-phase pass would otherwise
         // replace that stop for one reconciliation cycle, launch a fresh incarnation, and then
@@ -11811,9 +11908,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
         }
         self.reject_runtime_collisions(&intent, run, None)?;
-        let response = self
-            .store
-            .apply_internal(&intent, &format!("materialize:{}", run.generation))?;
+        // Persist readiness before publishing the gate's desired declaration. A crash
+        // between these writes leaves ready work that restart can admit, never an early seat.
+        let readiness_changed = if let Some(gate) = admitting_gate
+            && !intent.subjects.is_empty()
+        {
+            self.store.set_step_state(&gate.subject, "ready", None)?
+        } else {
+            false
+        };
+        let response = self.store.apply_internal_with_declared_agents(
+            &intent,
+            &format!("materialize:{}", run.generation),
+            &declared_agents,
+        )?;
         // A subscription to a repository's standing observer declares it here, before a
         // superseded generation's own observer of the repository stops, so the standing observer
         // takes that observer's resource and nothing between their polls goes unobserved.
@@ -11825,7 +11933,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|spec| !spec.stopped)
             .filter_map(|spec| crate::github_watch::standing_locator(&spec.observer))
             .collect::<BTreeSet<_>>();
-        let mut changed = response.changed;
+        let mut changed = readiness_changed | response.changed;
         if !standing.is_empty() {
             let observers = self.store.repository_observers()?;
             for locator in standing {
@@ -11937,7 +12045,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }))
     }
 
-    fn step_declarations_hold(&self, step_subject: &str) -> Result<bool> {
+    fn step_declarations_hold(&self, run: &MissionRunView, step_subject: &str) -> Result<bool> {
         for subject in self
             .store
             .desired_subjects_for_owner_step(step_subject)?
@@ -11957,7 +12065,24 @@ impl<R: RuntimeControl> Reconciler<R> {
                     matches!(status.as_deref(), Some("stopped" | "absent" | "exited"))
                         || self.stop_is_settled(&subject)?
                 }
-                "message" => matches!(status.as_deref(), Some("delivered" | "read" | "closed")),
+                "message" => {
+                    if matches!(status.as_deref(), Some("delivered" | "read" | "closed")) {
+                        true
+                    } else if let Some(agent) = Self::round_gate_agent(run)
+                        && crate::store::canonical_child_string(&subject.desired, "to").as_deref()
+                            == Some(agent)
+                        && self.store.selected_desired_kind(agent)?.is_none()
+                    {
+                        // A builder's handoff to its deferred gate must be durably queued,
+                        // not delivered: requiring delivery here would cycle gate readiness
+                        // through the builder's completion back to the unstarted gate.
+                        self.store
+                            .message(&subject.subject)?
+                            .is_some_and(|message| message.to == agent && message.status == "sent")
+                    } else {
+                        false
+                    }
+                }
                 _ => match subject.member.as_ref() {
                     Some(member) if member.driver.is_some() => {
                         harness.as_ref().is_some_and(|harness| harness.is_ready())
@@ -17108,6 +17233,7 @@ mod tests {
     mod differential;
     mod doctor_eligibility_tests;
     mod first_readiness_tests;
+    mod gate_on_demand;
     mod github_watch_selection;
     mod incremental_deadlines;
     mod ownership_guard_tests;
