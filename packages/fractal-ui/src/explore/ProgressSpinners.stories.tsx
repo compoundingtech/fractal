@@ -36,7 +36,7 @@ function Shell({ variant, size, width, motion }: { readonly variant: SpinnerVari
     <h2 {...stylex.props(styles.caption)}>{name}</h2>
     <div {...stylex.props(styles.shell, narrow ? styles.stacked : styles.split)}>
       <nav aria-label={`Agents · ${name}`} data-row-pair {...stylex.props(styles.sidebar, narrow ? styles.sidebarStacked : styles.sidebarSplit)}>
-        <div data-context="sidebar" data-row {...stylex.props(styles.sideRow, styles.sideRowActive)}>
+        <div data-context="sidebar" data-row {...stylex.props(styles.sideRow)}>
           <span {...stylex.props(styles.slot, styles.softInk)}>{spinner}</span>
           <span data-baseline data-row-title {...stylex.props(styles.sideTitle)}>{fixture.agent}</span>
           <span data-baseline {...stylex.props(styles.meta)}>Working · {fixture.elapsed}</span>
@@ -260,15 +260,16 @@ export const ExplorationProbe: Story = { args: { probe: true }, play: async ({ c
 } }
 
 const styles = stylex.create({
-  root: { padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, boxSizing: 'border-box' },
+  // The canvas grows with the widest lane, so a 1440 host past a narrower viewport scrolls the page on the themed surface.
+  root: { width: 'max-content', minWidth: '100%', padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, boxSizing: 'border-box' },
   inkProbe: { display: 'none' },
   fgInk: { color: ink.fg }, softInk: { color: ink.fgSoft }, mutedInk: { color: ink.fgMuted },
   title: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading, fontWeight: t.weightMedium },
-  explanation: { marginBlock: s.md, color: ink.fgMuted },
+  explanation: { maxWidth: g.lane, marginBlock: s.md, color: ink.fgMuted },
   pickers: { display: 'flex', flexDirection: 'column', alignItems: 'start', gap: s.md },
   control: { minHeight: g.controlSm, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: { default: surface.controlFill, ':hover': surface.rowHover }, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: accent.primary, outlineOffset: s.xs2 },
   controlOn: { backgroundColor: surface.rowActive, borderColor: accent.primary, color: ink.fg },
-  lanes: { display: 'flex', flexDirection: 'column', gap: s.section, marginTop: s.section, maxWidth: '100%', overflowX: 'auto' },
+  lanes: { display: 'flex', flexDirection: 'column', gap: s.section, marginTop: s.section },
   lane: { flexShrink: 0 }, host440: { width: sg.host440 }, host1440: { width: sg.host1440 },
   caption: { margin: 0, marginBottom: s.md, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightRegular },
   shell: { display: 'grid', overflow: 'hidden', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, backgroundColor: surface.canvas },
@@ -276,7 +277,6 @@ const styles = stylex.create({
   sidebar: { display: 'flex', flexDirection: 'column', gap: s.xs2, padding: s.md, backgroundColor: surface.sidebar, borderColor: border.border, borderStyle: 'solid', borderWidth: 0 },
   sidebarSplit: { borderInlineEndWidth: g.hairline }, sidebarStacked: { borderBlockEndWidth: g.hairline },
   sideRow: { display: 'flex', alignItems: 'center', gap: s.md, minHeight: g.sidebarNested, paddingInline: s.md, borderRadius: r.sm, color: ink.fg },
-  sideRowActive: { backgroundColor: surface.rowActive },
   // The status column is a fixed 16px wide; its height follows the glyph so a taller glyph would show up as a shift.
   slot: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, flexShrink: 0 },
   sideTitle: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: t.weightMedium },
