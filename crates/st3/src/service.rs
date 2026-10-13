@@ -42,6 +42,7 @@ pub struct ServiceStatus {
 pub struct ServiceSpec {
     exe: PathBuf,
     config: Config,
+    config_path: Option<PathBuf>,
     memory_max_mb: u64,
 }
 
@@ -68,6 +69,7 @@ impl ServiceSpec {
         Ok(Self {
             exe: exe.into(),
             config,
+            config_path: None,
             memory_max_mb,
         })
     }
@@ -85,8 +87,18 @@ impl ServiceSpec {
             "--client-gateway-socket".into(),
             self.config.client_gateway_socket.display().to_string(),
         ];
+        if let Some(path) = &self.config_path {
+            arguments.extend(["--config".into(), path.display().to_string()]);
+        }
         if let Some(pty_root) = &self.config.pty_root {
             arguments.extend(["--pty-root".into(), pty_root.display().to_string()]);
+        }
+        // Downloaded archives and setup put pty next to st3. A service must remain
+        // usable before ~/.local/bin has been added to the login shell's PATH.
+        if let Some(pty) = self.exe.parent().map(|parent| parent.join("pty"))
+            .filter(|pty| pty.is_file())
+        {
+            arguments.extend(["--pty-binary".into(), pty.display().to_string()]);
         }
         self.push_fleet_arguments(&mut arguments);
         arguments
@@ -127,12 +139,19 @@ impl ServiceSpec {
             "--socket".into(),
             self.config.socket.display().to_string(),
         ];
+        if let Some(path) = &self.config_path {
+            arguments.extend(["--config".into(), path.display().to_string()]);
+        }
         self.push_fleet_arguments(&mut arguments);
         arguments
     }
 }
 
-pub fn install(mut config: Config) -> Result<()> {
+pub fn install(config: Config) -> Result<()> {
+    install_from_config_path(config, None)
+}
+
+pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) -> Result<()> {
     crate::node_identity::resolve(&mut config)?;
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
@@ -162,9 +181,11 @@ pub fn install(mut config: Config) -> Result<()> {
     ) {
         crate::peer::FleetAuth::load(fleet_id, secret)?;
     }
-    let spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    let mut spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    spec.config_path = config_path.map(|path| absolute_from(&current, path));
     if spec.config.access_mode.is_some() {
-        spec.config.initialize_install_config(&Config::default_path())?;
+        let path = spec.config_path.clone().unwrap_or_else(Config::default_path);
+        spec.config.initialize_install_config(&path)?;
     }
     install_native_service(&spec)?;
     println!("installed");
@@ -430,9 +451,10 @@ fn status_native_service() -> Result<ServiceStatusReport> {
 
 #[cfg(target_os = "linux")]
 fn restart_native_service(config: &Config) -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", REPLICATION_SERVICE_NAME])
-        .status();
+    optional_systemd_command(
+        REPLICATION_SERVICE_NAME,
+        &["--user", "stop", REPLICATION_SERVICE_NAME],
+    )?;
     run_command("systemctl", &["--user", "restart", SERVICE_NAME])?;
     if config.fleet_id.is_some() {
         run_command("systemctl", &["--user", "start", REPLICATION_SERVICE_NAME])?;
@@ -447,10 +469,45 @@ fn uninstall_native_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn stop_native_service() -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "stop", REPLICATION_SERVICE_NAME])
-        .status();
+    optional_systemd_command(
+        REPLICATION_SERVICE_NAME,
+        &["--user", "stop", REPLICATION_SERVICE_NAME],
+    )?;
     run_command("systemctl", &["--user", "stop", SERVICE_NAME])
+}
+
+#[cfg(target_os = "linux")]
+fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
+    let output = Command::new("systemctl")
+        .args(arguments)
+        .output()
+        .with_context(|| format!("run systemctl {}", arguments.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // A unit file may be gone while its service remains loaded. Only the manager can
+    // establish that a failed stop/disable addressed an absent, inactive unit.
+    let status = Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            name,
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--no-pager",
+        ])
+        .output()
+        .with_context(|| format!("check whether {name} is absent"))?;
+    let states = String::from_utf8_lossy(&status.stdout);
+    anyhow::ensure!(
+        states.lines().any(|line| line == "LoadState=not-found")
+            && states.lines().any(|line| line == "ActiveState=inactive"),
+        "systemctl {} failed with {}: {}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -685,12 +742,11 @@ fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
 
 #[cfg(target_os = "linux")]
 fn uninstall_systemd_user() -> Result<()> {
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", SERVICE_NAME])
-        .status();
-    let _ = Command::new("systemctl")
-        .args(["--user", "disable", "--now", REPLICATION_SERVICE_NAME])
-        .status();
+    optional_systemd_command(SERVICE_NAME, &["--user", "disable", "--now", SERVICE_NAME])?;
+    optional_systemd_command(
+        REPLICATION_SERVICE_NAME,
+        &["--user", "disable", "--now", REPLICATION_SERVICE_NAME],
+    )?;
     let unit_path = systemd_user_unit_path()?;
     if unit_path.exists() {
         fs::remove_file(unit_path)?;
@@ -985,6 +1041,20 @@ fn systemd_quote_arg(argument: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::PeerConfig;
+
+    #[test]
+    fn setup_service_pins_the_config_and_sibling_pty() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("st3");
+        fs::write(root.path().join("pty"), b"fixture")?;
+        let mut spec = ServiceSpec::new(executable, Config::default(), 1024)?;
+        spec.config_path = Some(root.path().join("custom/config.toml"));
+        let arguments = spec.program_arguments();
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--config" && pair[1].ends_with("custom/config.toml")));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--pty-binary" && pair[1].ends_with("/pty")));
+        assert!(spec.replication_program_arguments().contains(&"--config".into()));
+        Ok(())
+    }
 
     #[test]
     fn membership_units_carry_no_peer_fleet_or_secret_arguments() -> Result<()> {

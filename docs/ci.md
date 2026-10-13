@@ -92,6 +92,36 @@ cancel a running load test. The existing load test and its budgets are unchanged
 Its Namespace priority is always 3. A busy queue can delay optional
 loads and main baseline reports until required work drains; priority does not reserve a slot.
 
+The standing-rule before window is 2026-10-12 12:15–18:15 UTC. A finite 445-request
+census independently retained 198 Workspace creation records (167 PR, 30 merge-group,
+one manual), 200 Performance records (187 PR, 13 main) and 180 public-check records
+(167 PR, 13 main). These differ from the earlier attributed coordination count; use
+the exact filtered populations for the comparison. Some runs were still nonterminal.
+Actual runner-start waits use dependencies from each run's retrieved workflow revision:
+
+| Event / assigned pool | Qualified jobs | Median wait | p90 wait |
+| --- | ---: | ---: | ---: |
+| PR / Namespace | 802 | 319.5s | 1507s |
+| Merge group / Namespace | 181 | 301s | 1033s |
+| PR / owned | 104 | 2s | 32s |
+
+Twenty-six graph/name-unqualified samples were excluded. Unassigned jobs remain censored,
+not zero wait. Pools contain different stages/source/cache populations; this table does
+not establish a causal effect of routing or an added worker. Required-green completion
+was median/p90 2958.5s/4910s for 48 PR runs and 2517s/3706s for 14 merge runs.
+
+The 22 PRs merged during this window had 73 distinct observed Workspace head generations
+across their respective PR lifetimes. Excluding each opening head leaves 51 observed
+head updates: a **lower bound** of 2.32 pushes per merged PR (median one). This is not a
+commit count or complete push-event census: same-head/repeated-head, pre-workflow and
+unrecorded pushes are absent. New draft skip records, observed head generations and
+executed ready-head CI must be separate in the post-rule cohort. The standing policy
+landed as `f30de78266db020d7dfea468707b4d9196786ba5` at 2026-10-12 23:44:21 UTC
+(GitHub's merge-event timestamp). Before/after results remain pending the finite
+post-land measurement window; no speedup is claimed. Jobs created before landing retain
+their workflow revision and belong to the earlier-policy cohort.
+Raw report: `doc/fleet/smalltalk/ci-speed/2026-10-12/standing-demand-before@714509aea896388b2d74a203a0300434bad70acf40ad7b9aa45d52750b6c3891`.
+
 The complete 2026-10-11 UTC day contained 201 PR and 50 merge-group Workspace runs.
 Among runs with all five required checks green (80 PR, 44 merge), required-check completion
 from workflow creation had median/p90 28m57s/35m53s for PRs and 26m25s/33m44s for merge groups.
@@ -790,13 +820,15 @@ accepted-source verification remain in place.
 
 ## Required mail redelivery canaries
 
-Alongside the two Linux test shards, `scripts/ci-mail-redelivery-canaries` requires twenty named,
+Alongside the two Linux test shards, `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
 unignored regressions: boot/reconnect mailbox suppression and recent unoffered recovery for
 Claude, Codex, OpenCode, Pi, and OMP; each harness's native suspend/resume canary with hour-old
 mail held and recent unoffered mail consumed exactly once; legacy polling recovery through the
 current offer's receipt sequence; and delivered-but-unread retention across native channel
 restart. Claude's missing-channel cases also require automatic recovery, attachment during
 recheck without replacing the seat, and durable parking after three failed replacements.
+Its MCP bootstrap cases answer initialization with the daemon offline or binding pending,
+attach and reconnect in the same child, preserve native receipts, and cancel attachment on EOF.
 The mailbox cases seed hour-old sent mail and recent staged and delivered-but-unread
 mail, prove zero historical offers, preserve explicit mailbox access, and recover an in-flight
 send after a daemon restart with exactly one receipt pair. Every selected test runs with zero retries.
