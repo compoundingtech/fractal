@@ -1374,7 +1374,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         if !admitted { return None; }
                         let started = now_ms();
-                        let before = this.store.index().ok();
+                        // Continue for this pass's own effects: a completed step can release
+                        // its successor or cleanup work. Other writers notify independently;
+                        // unrelated replication traffic must not keep this wake alive.
+                        let before = smallclaims::touched::writes();
                         let failed = match crate::profile::task("task reconcile-pass", || {
                             let _trigger_span = crate::profile::span(pass_trigger);
                             this.reconcile_once_with_cause(cause)
@@ -1402,7 +1405,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
-                        Some((before != this.store.index().ok(), failed, started))
+                        Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
                 };
