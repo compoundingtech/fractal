@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Visible in the Fractal UI: native browser tooltips are removed from agent rows, status, duration and time labels, and resource cards, so only the custom hover card appears. Sidebar row text uses the softer fgSoft tone instead of a separate grey. In the thread header, the subtitle moves one column to the right. For assistive technology, each row button is named exactly by its visible title, and each former tooltip string stays available as an accessible description (hidden span plus aria-describedby).",
+  "summary": "Visible in the Fractal UI: native browser tooltips are removed from agent rows, status, duration and time labels, and resource cards, so only the custom hover card appears. Sidebar row text uses the softer fgSoft tone instead of a separate grey. In sidebar agent rows, the subtitle moves one column to the right (it is now a sibling of the row button, not inside it). For assistive technology, each row button is named exactly by its visible title, and each former tooltip string stays available as an accessible description (hidden span plus aria-describedby).",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
