@@ -78,7 +78,8 @@ DROP TRIGGER IF EXISTS publication_claim_delete;
 CREATE TRIGGER publication_claim_delete AFTER DELETE ON claims BEGIN
     DELETE FROM local_publication_claims WHERE claim_id=OLD.id;
     DELETE FROM local_publication_pending WHERE claim_id=OLD.id;
-    INSERT INTO local_publication_batches VALUES(OLD.batch_id,0)
+    INSERT INTO local_publication_batches
+      SELECT OLD.batch_id,0 WHERE EXISTS(SELECT 1 FROM claims INDEXED BY claims_batch_index WHERE batch_id=OLD.batch_id LIMIT 1)
       ON CONFLICT(batch_id) DO UPDATE SET cursor=0;
 END;
 CREATE TRIGGER IF NOT EXISTS publication_claim_update
@@ -875,7 +876,7 @@ mod tests {
                             let fields = if runtime {
                                 json!({"status":"running","incarnation_id":format!("delete-{i}")})
                             } else {
-                                json!({"action":"screen"})
+                                json!({"action":"screen","reason":format!("delete-{i}")})
                             };
                             let row = append_claim_tx(
                                 &tx,
@@ -900,6 +901,8 @@ mod tests {
                     }
                     let mut costs = work::SqliteWork::default();
                     let mut holds = Vec::new();
+                    let mut repair_cost = work::SqliteWork::default();
+                    let mut repair_holds = Vec::new();
                     // One native delete statement per chunk, including maintenance and commit observer.
                     for chunk in ids.chunks(100) {
                         let mut writer = graph.connection.write();
@@ -921,7 +924,17 @@ mod tests {
                         costs.vm_steps += cost.vm_steps;
                         costs.statements += cost.statements;
                         if let Some(store) = &revised {
-                            finish(store);
+                            while !store.publication_evidence_ready().unwrap() {
+                                let mut writer = graph.connection.write_background();
+                                let before = work::total();
+                                let started = std::time::Instant::now();
+                                writer.transaction().unwrap().commit().unwrap();
+                                drop(writer);
+                                repair_holds.push(started.elapsed().as_micros());
+                                let cost = work::total() - before;
+                                repair_cost.vm_steps += cost.vm_steps;
+                                repair_cost.statements += cost.statements;
+                            }
                         }
                     }
                     holds.sort();
@@ -931,6 +944,18 @@ mod tests {
                         costs.statements,
                         holds[holds.len() / 2],
                         holds.last().unwrap()
+                    );
+                    repair_holds.sort();
+                    println!(
+                        "publication delete repair after={after} runtime={runtime} batch_size={batch_size}: vm_per_deleted_row={} statements={} loans={} loan_hold_p95_us={} loan_hold_max_us={}",
+                        repair_cost.vm_steps / total_rows as u64,
+                        repair_cost.statements,
+                        repair_holds.len(),
+                        repair_holds
+                            .get(repair_holds.len() * 95 / 100)
+                            .copied()
+                            .unwrap_or(0),
+                        repair_holds.last().copied().unwrap_or(0)
                     );
                     if let Some(store) = &revised {
                         oracle(store);
