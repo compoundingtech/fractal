@@ -57,6 +57,11 @@ omits the profile's `-c` entries (and an authored `-c` entry for the same keys):
 Before this, a plain-declaration Codex seat that restarted on an auto install had its TUI exit and the
 driver started a new thread instead of resuming (the old rollout stayed on disk, unreferenced).
 
+A saved thread that has not yet taken a turn has no rollout on disk, and Codex cannot resume it. Under
+declared permissions the launch fails closed (the driver does not guess that the thread is empty and
+replace it) and says so: `saved Codex resume binding has no persisted rollout for thread ...`. Give the
+seat one turn on its previous declaration, which saves the thread, then restart it on the new one.
+
 The live eval `evals/st3/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
 restart between two turns, checking the thread id, the daemon socket, the network and the refused
 write) are paid and run by hand; no CI gate proves the real launch path. The argv tests and the
