@@ -22,7 +22,8 @@
     "test:palettes": "node --test src/legacy-palettes.test.mjs",
     "test:transcript": "node --test --test-force-exit src/assistant-ui/composition/Transcript.unit.test.mjs",
     "check:shell-imports": "node scripts/check-shell-imports.mjs",
-    "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs"
+    "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs",
+    "test:scroll": "node --test --test-force-exit src/assistant-ui/EmbraceScrollViewport.integration.test.mjs"
   },
   "dependencies": {
     "react": "19.2.3",
@@ -47,6 +48,7 @@
     "tailwindcss": "4.2.2",
     "typescript": "6.0.3",
     "@types/node": "26.6.4",
+    "jsdom": "26.1.0",
     "@types/hast": "3.0.5",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

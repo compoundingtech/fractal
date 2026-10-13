@@ -1,6 +1,12 @@
 import type { ListLayout } from 'react-aria-components'
 import { layoutKeyAtOffset, scrollToLayoutKey } from '../composition/virtual-layout'
 
+/**
+ * A source leaf inside an entry: a message, a tool row, or a work summary that owns folded
+ * members. When an entry is split or renamed, the captured member names the reader's current entry.
+ */
+export type ScrollMember = { readonly id: string; readonly offset: number; readonly summary: boolean }
+
 /** The source transcript persists a mode or a stable entry, never a numeric bottom. */
 export type ScrollAnchor =
   | { readonly _tag: 'Following' }
@@ -9,6 +15,7 @@ export type ScrollAnchor =
       readonly entry: string | null
       readonly offset: number
       readonly scrollTop: number
+      readonly member?: ScrollMember
     }
 
 export type JumpResult =
@@ -17,7 +24,18 @@ export type JumpResult =
   | { readonly _tag: 'Superseded' }
 
 type Row = { readonly id: string; readonly version?: string; readonly targetIds?: readonly string[] }
-type ReadingPosition = { readonly key: string; readonly offset: number }
+type ReadingPosition = { readonly key: string; readonly offset: number; readonly member?: ScrollMember }
+
+/** Anchorable leaves: work summaries list their source members; other leaves are one source item. */
+const leafSelector = '[data-scroll-anchor-id], [data-item-id]'
+const summaryMembers = (leaf: HTMLElement): readonly string[] => {
+  try {
+    const members: unknown = JSON.parse(leaf.dataset['scrollAnchorMembers'] ?? '[]')
+    return Array.isArray(members) ? members.filter((member): member is string => typeof member === 'string') : []
+  } catch {
+    return []
+  }
+}
 
 const FOLLOW_SLACK = 48
 const USER_SCROLL_WINDOW_MS = 250
@@ -55,6 +73,8 @@ export class ScrollController {
   private rowKeys = new Set<string>()
   private readonly rowIndex = new Map<string, number>()
   private readonly rowByTarget = new Map<string, string>()
+  /** Full loaded source membership, including items whose owning entry is not committed yet. */
+  private sourceIds: ReadonlySet<string> | undefined
   private geometry = { contentHeight: 0, viewportHeight: 0 }
   private pressed: ReadingPosition | undefined
   private pendingJump: { readonly key: string; readonly resolve: (result: JumpResult) => void } | undefined
@@ -104,7 +124,7 @@ export class ScrollController {
 
   readonly position = (): ScrollAnchor => this.following
     ? { _tag: 'Following' }
-    : { _tag: 'Reading', entry: this.anchor?.key ?? null, offset: this.anchor?.offset ?? 0, scrollTop: this.element?.scrollTop ?? 0 }
+    : { _tag: 'Reading', entry: this.anchor?.key ?? null, offset: this.anchor?.offset ?? 0, scrollTop: this.element?.scrollTop ?? 0, member: this.anchor?.member }
 
   constructor(
     private readonly options: {
@@ -117,7 +137,7 @@ export class ScrollController {
     this.following = options.initial._tag === 'Following'
     this.restoring = options.initial._tag === 'Reading'
     if (options.initial._tag === 'Reading' && options.initial.entry !== null) {
-      this.pendingAnchor = { key: options.initial.entry, offset: options.initial.offset }
+      this.pendingAnchor = { key: options.initial.entry, offset: options.initial.offset, member: options.initial.member }
     }
   }
 
@@ -293,16 +313,40 @@ export class ScrollController {
   }
 
   private savePosition() {
-    this.options.save(
-      this.following
-        ? { _tag: 'Following' }
-        : {
-            _tag: 'Reading',
-            entry: this.anchor?.key ?? null,
-            offset: this.anchor?.offset ?? 0,
-            scrollTop: this.element?.scrollTop ?? 0,
-          },
-    )
+    this.options.save(this.position())
+  }
+
+  /** The first owned source leaf crossing the viewport top; a summary keeps a member it still owns. */
+  private memberAt(row: HTMLElement, key: string, top: number): ScrollMember | undefined {
+    for (const leaf of row.querySelectorAll<HTMLElement>(leafSelector)) {
+      if (leaf.querySelector(leafSelector) !== null) continue
+      const rect = leaf.getBoundingClientRect()
+      if (rect.height === 0 || rect.bottom <= top) continue
+      if (leaf.dataset['scrollAnchorId'] !== undefined) {
+        const members = summaryMembers(leaf)
+        const previous = this.anchor?.member
+        const id = previous?.summary === true && members.includes(previous.id) ? previous.id : members[0]
+        if (id !== undefined) return { id, offset: rect.top - top, summary: true }
+      } else {
+        const id = leaf.dataset['itemId']!
+        if (this.rowByTarget.get(id) === key) return { id, offset: rect.top - top, summary: false }
+      }
+    }
+    return undefined
+  }
+
+  /** The member's current leaf; a tool row folded after its entry remounted is represented by its summary. */
+  private memberLeaf(row: HTMLElement, member: ScrollMember): HTMLElement | undefined {
+    let summary: HTMLElement | undefined
+    for (const leaf of row.querySelectorAll<HTMLElement>(leafSelector)) {
+      if (leaf.dataset['scrollAnchorId'] !== undefined) {
+        if (summary === undefined && summaryMembers(leaf).includes(member.id)) {
+          if (member.summary) return leaf
+          summary = leaf
+        }
+      } else if (!member.summary && leaf.dataset['itemId'] === member.id && leaf.querySelector(leafSelector) === null) return leaf
+    }
+    return summary
   }
 
   private captureAnchor() {
@@ -319,8 +363,8 @@ export class ScrollController {
       }
     }
     const key = nearest?.dataset['embraceEntryId']
-    if (key !== undefined && this.rowKeys.has(key)) {
-      this.anchor = { key, offset: nearestTop - top }
+    if (nearest !== undefined && key !== undefined && this.rowKeys.has(key)) {
+      this.anchor = { key, offset: nearestTop - top, member: this.memberAt(nearest, key, top) }
     } else {
       const leading = this.leadingKey === undefined ? null : this.options.layout.getLayoutInfo(this.leadingKey)
       const match = leading !== null && element.scrollTop < leading.rect.y + leading.rect.height
@@ -343,7 +387,12 @@ export class ScrollController {
     const anchor = this.pendingAnchor
     const element = this.element
     if (element === null) return
-    const key = anchor !== undefined && this.rowKeys.has(anchor.key) ? anchor.key : undefined
+    // A split or backfilled entry can be renamed, or its captured member can move to another
+    // entry while the old id survives: the member's current owner names the reader's row.
+    const owner = anchor?.member === undefined ? undefined : this.rowByTarget.get(anchor.member.id)
+    // A loaded member whose entry is not committed yet (runtime adoption) is not absent.
+    if (anchor?.member !== undefined && owner === undefined && this.sourceIds?.has(anchor.member.id) === true) return
+    const key = anchor === undefined ? undefined : owner ?? (this.rowKeys.has(anchor.key) ? anchor.key : undefined)
     const info = key === undefined ? null : this.options.layout.getLayoutInfo(key)
     if (
       this.restoring &&
@@ -413,7 +462,10 @@ export class ScrollController {
       if (target !== undefined) {
         element.scrollTop +=
           target.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.offset
-        this.anchor = { key, offset: anchor.offset }
+        // The old entry offset does not locate a member that moved: its leaf is the reader's line.
+        const leaf = key === anchor.key || anchor.member === undefined ? undefined : this.memberLeaf(target, anchor.member)
+        if (leaf !== undefined) element.scrollTop += leaf.getBoundingClientRect().top - element.getBoundingClientRect().top - anchor.member!.offset
+        this.anchor = { key, offset: leaf === undefined ? anchor.offset : target.getBoundingClientRect().top - element.getBoundingClientRect().top, member: anchor.member }
         this.pendingAnchor = this.anchor
         this.restoring = false
         this.savePosition()
@@ -431,6 +483,7 @@ export class ScrollController {
     this.leadingKey = leadingKey
     this.rows = rows
     this.firstKey = rows[0]?.id
+    this.sourceIds = sourceIds
     if (previous !== rows || previousLeading !== leadingKey) {
       this.rowKeys.clear()
       this.rowIndex.clear()
@@ -493,14 +546,17 @@ export class ScrollController {
       if (this.element !== null) scrollToEnd(this.element)
       return
     }
+    const owner = this.anchor?.member === undefined ? undefined : this.rowByTarget.get(this.anchor.member.id)
     if (
-      this.anchor !== undefined &&
-      previousFirst !== undefined &&
-      this.firstKey !== previousFirst &&
-      this.rowKeys.has(previousFirst)
+      this.anchor !== undefined && (
+        previous !== rows && owner !== undefined && owner !== this.anchor.key ||
+        previousFirst !== undefined && this.firstKey !== previousFirst && this.rowKeys.has(previousFirst)
+      )
     ) {
-      // The collection rebuild follows this commit. ResizeObserver restores before
-      // paint when the sizer grows; the tracked animation frame is the fallback.
+      // Rows were inserted above the reader, or a split/backfill moved the reader's member to
+      // another entry (content above it changed, content below did not). The collection rebuild
+      // follows this commit. ResizeObserver restores before paint when the sizer grows; the
+      // tracked animation frame is the fallback.
       this.pendingAnchor = this.anchor
       // The sizer may already include the inserted rows; the settled geometry does not.
       if (this.element !== null) this.prependBottom = (this.geometry.contentHeight || this.element.scrollHeight) - this.element.scrollTop
@@ -531,7 +587,15 @@ export function readScrollAnchor(key: string): ScrollAnchor {
     'entry' in value && (value.entry === null || typeof value.entry === 'string') &&
     'offset' in value && typeof value.offset === 'number' && Number.isFinite(value.offset) &&
     'scrollTop' in value && typeof value.scrollTop === 'number' && Number.isFinite(value.scrollTop)
-  ) return { _tag: 'Reading', entry: value.entry, offset: value.offset, scrollTop: value.scrollTop }
+  ) {
+    const member = 'member' in value && typeof value.member === 'object' && value.member !== null &&
+      'id' in value.member && typeof value.member.id === 'string' &&
+      'offset' in value.member && typeof value.member.offset === 'number' && Number.isFinite(value.member.offset) &&
+      'summary' in value.member && typeof value.member.summary === 'boolean'
+      ? { id: value.member.id, offset: value.member.offset, summary: value.member.summary }
+      : undefined
+    return { _tag: 'Reading', entry: value.entry, offset: value.offset, scrollTop: value.scrollTop, member }
+  }
   return { _tag: 'Following' }
 }
 

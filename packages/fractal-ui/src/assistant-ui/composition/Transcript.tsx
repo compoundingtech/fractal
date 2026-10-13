@@ -216,7 +216,16 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
+const workMemberIds = new WeakMap<TranscriptTurn, readonly string[]>()
+/** Summary ownership comes from the full source turn, never its adopted rendered prefix; computed once per turn object. */
+const summaryMembers = (turn: TranscriptTurn): readonly string[] => {
+  const cached = workMemberIds.get(turn)
+  if (cached !== undefined) return cached
+  const members = turn.items.filter(item => item._tag === 'ToolCall' || item._tag === 'Reasoning').map(item => item.id)
+  workMemberIds.set(turn, members)
+  return members
+}
+const PreparedTurn = React.memo(function PreparedTurn({ turn, now, summaryMemberIds, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now: number; summaryMemberIds: readonly string[]; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
   const reasoning = turn.items.filter(item => item._tag === 'Reasoning')
   const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning')
@@ -230,7 +239,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
   })
   return <section data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} text={item.text} streaming={item.streaming} />)} />}
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={JSON.stringify(['work-summary', turn.id])} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.map(item => <ThinkingEntry key={item.id} text={item.text} streaming={item.streaming} />)} />}
     {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
   </section>
@@ -305,10 +314,13 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   }, [strandedIds])
   const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage }), [resolveImage, onLoadImage])
   // New rows or changed content are news; send state, tool status and timing are metadata.
-  const rows = React.useMemo(() => committed.map(turn => {
-    const items = turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]
-    return { id: turn.id, turn, targetIds: items.map(item => item.id), version: items.map(contentVersion).join(' ') }
-  }), [committed])
+  const rows = React.useMemo(() => {
+    const sources = new Map(turns.map(turn => [turn.id, turn]))
+    return committed.map(turn => {
+      const items = turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]
+      return { id: turn.id, turn, summaryMemberIds: summaryMembers(sources.get(turn.id) ?? turn), targetIds: items.map(item => item.id), version: items.map(contentVersion).join(' ') }
+    })
+  }, [turns, committed])
   const running = [...committed].reverse().find(turn => turn.work.running)
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   const failure = syncLine({ status: sync, label: 'conversation', now, observedAt })
@@ -334,7 +346,7 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
           : history._tag === 'Loading' ? <span role="status" data-testid="history-loading" {...stylex.props(styles.historyNote)}>Loading earlier messages…</span>
           : <><span role="status" data-testid="history-error" {...stylex.props(styles.historyNote)}>Earlier messages could not be loaded.</span>{history.detail !== undefined && <span data-testid="history-error-detail" {...stylex.props(styles.historyNote)}>{history.detail}</span>}<Link data-testid="history-retry" onPress={retry} {...stylex.props(styles.historyLoad)}>Try again</Link></>}
       </div>}
-      renderItem={({ turn }) => <PreparedTurn turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />}
+      renderItem={({ turn, summaryMemberIds }) => <PreparedTurn turn={turn} now={turn.work.running ? now : 0} summaryMemberIds={summaryMemberIds} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />}
     />{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider>
 }
