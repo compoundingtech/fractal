@@ -2,12 +2,14 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { ComposerPrimitive, QueueItemPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import {
-  Autocomplete, Button, Focusable, Header, ListBox, ListBoxItem, ListBoxSection, Menu, MenuItem, MenuTrigger, Popover, Text, Token, TokenField, TokenInput, Tooltip, TooltipTrigger,
+  Autocomplete, Button, Focusable, Header, ListBox, ListBoxItem, ListBoxSection, MenuTrigger, Popover, Text, Token, TokenField, TokenInput, TooltipTrigger,
   type Key,
 } from 'react-aria-components'
 import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, statusVars as status, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from './composition-tokens.stylex'
 import { readingColumnStyles } from './reading-column.stylex'
 import { Icon } from './composition/Icons'
+import { Menu, MenuItem, Popover as MenuPopover, TooltipSurface } from './composition/Controls'
+import { ThemePortal } from './taste/ThemePortal'
 import { EffortPicker } from './embrace-composer/EffortPicker'
 import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
@@ -63,7 +65,7 @@ export interface EmbraceComposerProps {
 const styles = stylex.create({
   root: {
     backgroundColor: surface.glassFill, color: text.fg, borderWidth: g.hairline,
-    borderStyle: 'solid', borderColor: border.glassBorder, borderRadius: r.slab,
+    borderStyle: 'solid', borderColor: { default: border.glassBorder, ':focus-within': interaction.composerFocusBorder }, borderRadius: r.slab,
     position: 'relative', padding: s.xl, display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0,
     backdropFilter: `blur(${g.blur})`,
   },
@@ -121,7 +123,7 @@ const styles = stylex.create({
   queue: { display: 'flex', flexDirection: 'column', gap: s.sm },
   queueRow: { display: 'flex', alignItems: 'center', gap: s.sm, backgroundColor: surface.codeBg, borderRadius: r.sm, padding: s.sm },
   queueText: { flexGrow: 1, fontSize: t.metaSize, minWidth: 0, overflowWrap: 'anywhere' },
-  adaptiveRoot: { padding: s.md, gap: s.md, ':focus-within': { outline: `${g.focusRing} solid ${accent.primary}`, outlineOffset: g.focusOffset } },
+  adaptiveRoot: { padding: s.md, gap: s.md },
   pill: { borderRadius: r.full, flexDirection: 'row', alignItems: 'center' },
   slab: { borderRadius: r.slab, flexDirection: 'column' },
   focusSlab: { borderRadius: r.full, flexDirection: 'row', alignItems: 'center', ':focus-within': { borderRadius: r.slab, flexDirection: 'column', alignItems: 'stretch' } },
@@ -138,9 +140,8 @@ const styles = stylex.create({
   readoutCompact: { maxWidth: '72px', fontSize: t.denseSize },
   readout: { maxWidth: g.crumbMax, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: text.fg, ':focus-visible': { outline: `${g.focusRing} solid ${interaction.focusRing}`, outlineOffset: g.focusOffset } },
   iconCompact: { paddingInline: s.xs },
-  targetPopup: { maxWidth: 'min(400px,90vw)', maxHeight: g.commandMaxHeight, overflowY: 'auto', backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.xs, fontFamily: t.fontSans, fontSize: t.metaSize },
-  targetTooltip: { width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, boxSizing: 'border-box', padding: s.sm, borderRadius: r.sm, backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
-  targetOption: { minHeight: g.controlLg, display: 'flex', alignItems: 'center', paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outlineStyle: 'none', ':focus': { backgroundColor: surface.rowActive } },
+  targetPopup: { maxWidth: `min(${g.modalMax},90vw)`, maxHeight: g.commandMaxHeight, overflowY: 'auto' },
+  targetTooltip: { width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, boxSizing: 'border-box', overflowWrap: 'anywhere' },
 })
 
 const emptyHistory: readonly string[] = []
@@ -265,36 +266,36 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
   const { compact, iconOnly } = React.useContext(CompactComposerContext)
   const running = useAuiState(state => state.thread.isRunning)
   const readoutName = target.model === undefined ? target.label : `${target.label} · ${target.model}`
-  return <>
+  return <ThemePortal>
     <div {...stylex.props(styles.targets)}>
       {selectRecipient ? <MenuTrigger>
-        <TooltipTrigger delay={150} closeDelay={0}>
+        <TooltipTrigger delay={500} closeDelay={0}>
           <Button aria-label={`Select recipient: ${target.label}`} {...stylex.props(styles.button, styles.target, compact && styles.targetCompact, iconOnly && styles.targetIcon)}>
             <span data-composer-picker-label={!iconOnly ? true : undefined} {...stylex.props(styles.targetLabel)}>{iconOnly ? <Icon name="message" /> : target.label}</span>
             {!compact && <Icon name="chevron-down" size={12} />}
           </Button>
-          <Tooltip {...stylex.props(styles.targetTooltip)}>{target.label}</Tooltip>
+          <TooltipSurface style={styles.targetTooltip}>{target.label}</TooltipSurface>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption)}>{choice.label}</MenuItem>)}</Menu></Popover>
-      </MenuTrigger> : <TooltipTrigger delay={150} closeDelay={0}>
+        <MenuPopover style={styles.targetPopup}><Menu aria-label="Recipient" selectionMode="single" selectedKeys={[target.ref]} onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label}>{choice.label}</MenuItem>)}</Menu></MenuPopover>
+      </MenuTrigger> : <TooltipTrigger delay={500} closeDelay={0}>
         <Focusable><span tabIndex={0} role="img" aria-label={target.model === undefined ? 'Recipient' : 'Recipient and model'} data-composer-target-readout={readoutName} data-composer-readout={!iconOnly ? true : undefined} {...stylex.props(styles.readout, compact && styles.readoutCompact)}>{iconOnly ? <Icon name="message" /> : target.label}</span></Focusable>
-        <Tooltip {...stylex.props(styles.targetTooltip)}>{readoutName}</Tooltip>
+        <TooltipSurface style={styles.targetTooltip}>{readoutName}</TooltipSurface>
       </TooltipTrigger>}
       {selectModel && <MenuTrigger>
-        <TooltipTrigger delay={150} closeDelay={0}>
+        <TooltipTrigger delay={500} closeDelay={0}>
           <Button aria-label={`Select model: ${target.model ?? 'Model'}`} {...stylex.props(styles.button, styles.target, compact && styles.targetCompact, iconOnly && styles.targetIcon)}>
             <span data-composer-picker-label={!iconOnly ? true : undefined} {...stylex.props(styles.targetLabel)}>{iconOnly ? <Icon name="gear" /> : target.model ?? 'Model'}</span>
             {!compact && <Icon name="chevron-down" size={12} />}
           </Button>
-          <Tooltip {...stylex.props(styles.targetTooltip)}>{target.model ?? 'Model'}</Tooltip>
+          <TooltipSurface style={styles.targetTooltip}>{target.model ?? 'Model'}</TooltipSurface>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Model" onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model} {...stylex.props(styles.targetOption)}>{model}</MenuItem>)}</Menu></Popover>
+        <MenuPopover style={styles.targetPopup}><Menu aria-label="Model" selectionMode="single" selectedKeys={target.model === undefined ? [] : [target.model]} onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model}>{model}</MenuItem>)}</Menu></MenuPopover>
       </MenuTrigger>}
       <EffortPicker {...effort} compact={compact} />
     </div>
     <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
     {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
-  </>
+  </ThemePortal>
 }
 
 function PlainComposer({ targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {

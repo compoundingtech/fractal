@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
-import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
+import { MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
+import { Button, Disclosure, DisclosurePanel, ProgressBar, VisuallyHidden } from 'react-aria-components'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
 import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
@@ -17,6 +17,8 @@ import { SendFailure, TranscriptEmptyContent, type TranscriptEmptyState } from '
 import { Icon } from './Icons'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { readingColumnStyles } from '../reading-column.stylex'
+import { Tooltip } from './Controls'
+import { useCopyFeedback, type CopyAction } from './useCopyFeedback'
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -87,6 +89,15 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
   }, [item.text, expanded])
   return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
+/** The callback must resolve only after the host has successfully copied the answer. */
+export function CopyAnswerButton({ text, onCopy }: { readonly text: string; readonly onCopy?: CopyAction }) {
+  const { state, copied, copy, tooltip, announcement } = useCopyFeedback(text, onCopy ?? (() => navigator.clipboard.writeText(text)))
+  return <><Tooltip {...tooltip('Copy answer')}><Button aria-label={copied ? 'Copy answer: Copied' : 'Copy answer'} onPress={copy} {...stylex.props(styles.copy)}><Icon name={copied ? 'check' : 'copy'} size={14} /></Button></Tooltip><VisuallyHidden><span role="status" aria-live="polite">{state.tag === 'failed' ? 'Could not copy answer. Check clipboard permissions and try again.' : announcement}</span></VisuallyHidden></>
+}
+function RuntimeCopyAnswer() {
+  const text = useAuiState(state => state.message.content.filter(part => part.type === 'text').map(part => part.text).join('\n\n'))
+  return <CopyAnswerButton text={text} />
+}
 /** Settled metadata remains below the prose; unknown time is omitted rather than invented. */
 export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string }) {
   const streaming = item._tag === 'Text' && item.streaming
@@ -94,7 +105,7 @@ export function AgentMessage({ item, senderLine }: { readonly item: (TextItem & 
   return <MessagePrimitive.Root data-testid="agent-message" data-item-id={item.id} data-item-kind={item._tag} {...stylex.props(styles.answer)}>
     {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
     {item._tag === 'Text' ? <Markdown text={item.text} streaming={item.streaming} /> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
-    {!streaming && <div data-testid="answer-meta" {...stylex.props(styles.answerMeta)}><ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy)}><Icon name="copy" size={14} /></ActionBarPrimitive.Copy>{Number.isFinite(completed) && <time dateTime={new Date(completed).toISOString()}>{new Date(completed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>}
+    {!streaming && <div data-testid="answer-meta" {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer />{Number.isFinite(completed) && <time dateTime={new Date(completed).toISOString()}>{new Date(completed).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>}
   </MessagePrimitive.Root>
 }
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. */
