@@ -1,0 +1,24 @@
+killing driver 979997 after: schedule timer review-deadline
+answered review-overdue on orchard/ship-change/lab-4: reassign
+run orchard/ship-change/lab-4: completed
+--- driver log
+2026-10-13T21:19:50.802Z resumed orchard/ship-change as orchard/ship-change/lab-4: replaying 11 journal events
+2026-10-13T21:20:15.205Z completed review-deadline
+2026-10-13T21:20:16.455Z cancel review
+2026-10-13T21:20:17.904Z schedule ask review-overdue
+2026-10-13T21:20:21.575Z completed review-overdue
+2026-10-13T21:20:21.656Z schedule step review-reassigned
+2026-10-13T21:20:36.631Z completed review-reassigned
+2026-10-13T21:20:38.966Z schedule gate round-1/ci
+2026-10-13T21:20:52.490Z failed round-1/ci
+2026-10-13T21:20:52.600Z schedule step round-1/fix
+2026-10-13T21:21:06.467Z completed round-1/fix
+2026-10-13T21:21:06.550Z schedule gate round-2/ci
+2026-10-13T21:21:20.368Z completed round-2/ci
+2026-10-13T21:21:20.394Z completed: {"shipped":true,"rounds":2,"review":"review-reassigned completed"} (194 st calls, 10029 ms in st)
+--- journal
+23 journal claims, 23 events, seqs contiguous: true
+ops scheduled: build, docs, build-backoff, build.2, review, review-deadline, review-overdue, review-reassigned, round-1/ci, round-1/fix, round-2/ci
+ops scheduled twice: none
+--- child runs
+9

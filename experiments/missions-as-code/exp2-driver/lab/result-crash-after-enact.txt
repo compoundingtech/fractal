@@ -1,0 +1,19 @@
+answered review-overdue on orchard/ship-change-crash/lab-5: reassign
+run orchard/ship-change-crash/lab-5: completed
+--- driver log
+2026-10-13T21:22:49.566Z resumed orchard/ship-change as orchard/ship-change-crash/lab-5: replaying 15 journal events
+2026-10-13T21:22:49.654Z schedule step review-reassigned
+2026-10-13T21:23:01.665Z completed review-reassigned
+2026-10-13T21:23:01.830Z schedule gate round-1/ci
+2026-10-13T21:23:15.652Z failed round-1/ci
+2026-10-13T21:23:15.721Z schedule step round-1/fix
+2026-10-13T21:23:29.597Z completed round-1/fix
+2026-10-13T21:23:29.683Z schedule gate round-2/ci
+2026-10-13T21:23:44.058Z completed round-2/ci
+2026-10-13T21:23:44.093Z completed: {"shipped":true,"rounds":2,"review":"review-reassigned completed"} (130 st calls, 1962 ms in st)
+--- journal
+23 journal claims, 23 events, seqs contiguous: true
+ops scheduled: build, docs, build-backoff, build.2, review, review-deadline, review-overdue, review-reassigned, round-1/ci, round-1/fix, round-2/ci
+ops scheduled twice: none
+--- child runs
+1

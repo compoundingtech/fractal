@@ -1,0 +1,10 @@
+{
+  "build": { "sleep": 3, "exit": 1 },
+  "build.2": { "sleep": 3, "exit": 0 },
+  "docs": { "sleep": 4, "exit": 0 },
+  "review": { "sleep": 100000, "exit": 0 },
+  "review-reassigned": { "sleep": 3, "exit": 0 },
+  "round-1/ci": { "sleep": 3, "exit": 1 },
+  "round-1/fix": { "sleep": 3, "exit": 0 },
+  "round-2/ci": { "sleep": 3, "exit": 0 }
+}

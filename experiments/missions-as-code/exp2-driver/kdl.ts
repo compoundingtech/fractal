@@ -19,6 +19,7 @@ export interface Rendered {
   readonly kdl: string
   // The subject whose claims carry the worker's summary and evidence.
   readonly step: string
+  readonly hash: string
 }
 
 const q = (text: string): string =>
@@ -130,7 +131,9 @@ export const render = (
     `}`,
     ``
   ].join("\n")
-  // One mission per distinct op shape: identical specs share a published revision.
-  const mission = `mac/${program}/${kind}/${hashJson(body)}`
-  return { mission, kdl: body.replace(`"MISSION"`, q(mission)), step: "work" }
+  // One mission per op name, readable in every list (orchard/ship-change/ops/review). Each
+  // distinct spec is its own revision; the driver starts the exact revision it published, so
+  // two runs that ask different things of the same op do not move each other.
+  const mission = `${program}/ops/${op.replace(/\.\d+$/, "")}`
+  return { mission, kdl: body.replace(`"MISSION"`, q(mission)), step: "work", hash: hashJson(body) }
 }
