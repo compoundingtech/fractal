@@ -8276,6 +8276,33 @@ impl<R: RuntimeControl> Reconciler<R> {
         if run.phase.starts_with("cleanup-") {
             return self.reconcile_mission_run_cleanup(run);
         }
+        let refreshed;
+        let run = if crate::store::mission_gate_agent(run).is_some() {
+            if !self.store.prepare_round_gate_identity(run)? {
+                smallclaims::touched::note_read(|| run.subject.clone());
+                smallclaims::touched::note_read(|| format!("agent/{}/gate", run.id));
+                for step in &run.steps {
+                    smallclaims::touched::note_read(|| step.subject.clone());
+                }
+                return Ok(false);
+            }
+            let is_legacy_gate = |subject: &str| {
+                subject.strip_prefix("agent/")
+                    .and_then(|subject| subject.strip_prefix(run.id.as_str())) == Some("/gate")
+            };
+            if run.steps.iter().any(|step| {
+                step.assigned_to.as_deref().is_some_and(is_legacy_gate)
+                    || step.available_to.iter().any(|subject| is_legacy_gate(subject))
+            }) {
+                refreshed = self.store.mission_run(&run.subject)?
+                    .context("the round disappeared during gate identity cutover")?;
+                &refreshed
+            } else {
+                run
+            }
+        } else {
+            run
+        };
         let mut changed = false;
         let flat = flatten_mission_steps(mission);
         let normal_paths = flat
@@ -11612,7 +11639,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let variables = run_variables(run, step, view);
         let source = crate::mission::interpolate_kdl(source, &variables)?;
-        let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
+        let mut intent = crate::graph::parse_execution_intent_for_run(&source, &self.host, run)?;
         if assigned_agents_only {
             intent.subjects.retain(|subject, desired| {
                 desired.kind == "agent"
@@ -11713,7 +11740,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok((changed, complete));
         }
         let source = format!("version 2\n\n{stops}\n");
-        let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
+        let mut intent = crate::graph::parse_execution_intent_for_run(&source, &self.host, run)?;
         for subject in intent.subjects.values_mut() {
             subject.owner_generation = Some(run.generation.clone());
         }
@@ -11811,7 +11838,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         #[cfg(test)]
         self.mission_declaration_parses
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
+        let mut intent = crate::graph::parse_execution_intent_for_run(&source, &self.host, run)?;
         let selected = self
             .store
             .desired_subjects_for_owner_run(&run.subject)?

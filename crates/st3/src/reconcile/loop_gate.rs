@@ -1,7 +1,7 @@
 //! Gate seats are declared with a round, but readiness alone authorizes their start.
 use super::*;
 
-impl Reconciler {
+impl<R: RuntimeControl> Reconciler<R> {
     pub(super) fn is_loop_gate(&self, subject: &DesiredSubject) -> Result<bool> {
         self.store.is_loop_gate(subject)
     }
