@@ -408,8 +408,8 @@ recordings/<name>.script.json        fake-harness script generated from the worl
         ▼
 st3 scenario recorder (Rust test binary, run on demand)
   ├─ starts a scratch daemon in a fresh temporary state directory
-  ├─ declares the cast's agents with the scripted fake harness (pattern: terminal_binding tests)
-  ├─ the fake harness writes a native transcript and terminal output step by step from the script
+  ├─ declares the cast's agents with a scripted fake harness
+  ├─ the harness writes native transcript turns and executes commands in a real PTY
   └─ a client-v0 client sends a fixed list of subscribe commands and HTTP reads, and records each
      command, frame and HTTP exchange with its receive time
         │
@@ -430,19 +430,75 @@ slices of the recording's own world, and recorded slices reused by narrative wor
   `emit`; the freshness, decode, privacy and fidelity gates cover them. A re-recording that
   changes the wire shape is a reviewed diff.
 
+Run the ignored `-p st3 --test scenario_recorder` Cargo target inside `nix develop`,
+under `gate-slot --class heavy`, with `-- --ignored --nocapture`. Set
+`ST3_SCENARIO_SCRIPT` and `ST3_SCENARIO_OUTPUT` to absolute paths; the output must not
+already exist. Re-record into a new candidate, then review it before replacing the committed
+input. The recorder accepts no caller-owned endpoint or state directory.
+
+The implementation composes three existing patterns, not a pre-existing recorder API:
+`crates/st3/tests/terminal_binding.rs` supplies scratch ownership and teardown scaffolding;
+`crates/st3/tests/no_st2_seat.rs` and `scripts/st3-no-st2-eval/{run,claude}` supply native
+Claude transcripts and real driver hooks; `terminal_actions_survive_unrelated_writes_but_reject_changed_screens`
+in `crates/st3/src/api/client_v0.rs` supplies the real PTY/projector and terminal attach pattern.
+`terminal_binding` alone produces neither native transcripts nor styled screens.
+
+### Recording formats
+
+Version 1 scripts contain `format_version: 1`, `world`, the selected cast `agent`, `host`,
+`person`, and public `workspace`, ordered `turns` (`prompt`, `answer`, native `timestamp`,
+optional shell `command`), and ordered HTTP GET `reads`. This single-agent proof format is
+extended with an explicit version change before recording multi-agent scripts. Native
+timestamps can describe historical past; they do not slow or scale the receive clock.
+
+Version 1 raw JSONL rows contain `ordinal` (zero-based, strictly increasing), `socket_id`
+(stable per connection, null outside sockets), `receive_ms` (monotonic elapsed milliseconds
+from capture start), `kind`, and `value`. Kinds and values are:
+
+- `header`: `format_version`, `script_format_version`, `world`, `daemon_build` (the
+  checkout-built daemon's version/build provenance), `daemon_sha256` (binary digest),
+  and wall-clock `started_at`;
+- `command` / `frame`: the exact sent collection command / received JSON frame;
+- `http`: `method`, `path`, `query`, `status`, `request_body`, and complete response `body`;
+- `attach`: the submitted terminal attach action, also included in its HTTP exchange;
+- `harness`: the script turn released to the harness;
+- `pty_output`: the actual command stdout bytes represented as UTF-8 `text`, with `turn`
+  and `terminal`; styled screen frames still come from the real projector;
+- `baseline`: explicit `last_pre_timeline_ordinal`, identifying the last baseline frame.
+
+Ordinal breaks ties between rows received in the same millisecond. The recorder replaces
+attach capabilities with non-functional equality-preserving `capability#n` tokens **before
+any file write**, including HTTP bodies and subscription commands. Scratch filesystem paths
+are mapped to the script's public workspace before capture; raw committed files are already
+public-safe, not an archive of credentials waiting for normalization.
+
+The combined committed script, raw, and normalized recording inputs have a separate 12 MiB
+budget; the fixtures-tree 24 MiB budget is unchanged.
+
+The recorded-world end state is seven story-specific narratives: `fleet-mid-refactor`,
+`ci-failing-fix`, `merge-conflict-standoff`, `long-debug-rabbit-hole`,
+`release-candidate-polish`, `offline-reconnect-storm`, and `first-run-onboarding`.
+Proof captures may be committed incrementally; one proof is not this narrative cutover.
+
 ### Normalization
 
 `N` turns a raw recording into its normalized form. It is deterministic and applies to commands,
 frames and HTTP exchanges alike:
 
 1. **Identities:** scratch ids map to the world's namespace through one id map, built from the
-   script. An id without a mapping fails the import.
-2. **Time:** receive times become offsets from the recording's last pre-timeline frame, rounded
-   to milliseconds. Schema instants are rebased to the anchor as in [Time](#time-d5).
+   script. An id without a mapping fails the import. One scratch daemon represents one cast
+   host: all captured host-bearing data maps to the narrative terminal's owning cast host;
+   other hosts remain synthetic.
+2. **Time:** receive times become offsets from the explicitly marked last pre-timeline frame,
+   rounded to milliseconds, never scaled. Historical past comes from native transcript
+   timestamps. Schema instants are rebased to the anchor as in [Time](#time-d5).
 3. **Fences and cursors:** each distinct raw `store_index` becomes an ordinal store version
    (`store#1`, `store#2`, …) in increasing order, and a snapshot id becomes the token of its store
    version and host; page cursors become `cursor#n`. Equal raw values get equal tokens, so two
-   subscriptions read at the same store index keep the same token.
+   subscriptions read at the same store index keep the same token. Opaque transport request,
+   operation, attachment, and capability ids become `request#n`, `operation#n`,
+   `attachment#n`, and `capability#n`, preserving equality (capabilities are already scrubbed
+   at capture).
 4. Nothing else changes: payloads, order, `has_more`, revisions and frame boundaries stay as
    recorded.
 

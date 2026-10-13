@@ -127,3 +127,7 @@ path = "tests/api_accept.rs"
 [[test]]
 name = "gate_teardown"
 path = "tests/gate_teardown.rs"
+
+[[test]]
+name = "scenario_recorder"
+path = "tests/scenario_recorder.rs"

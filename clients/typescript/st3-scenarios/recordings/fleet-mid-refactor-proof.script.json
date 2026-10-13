@@ -1,0 +1,26 @@
+{
+  "format_version": 1,
+  "world": "fleet-mid-refactor",
+  "agent": "agent/example/atlas/builder",
+  "host": "host/meadow",
+  "person": "person/ada",
+  "workspace": "~/src/atlas",
+  "turns": [
+    {
+      "prompt": "Rename fetchUser to loadUser in packages/api.",
+      "answer": "The API export is now loadUser; checking the worker call site next.",
+      "timestamp": "2026-10-12T11:20:00Z"
+    },
+    {
+      "prompt": "Show the remaining worker call site.",
+      "answer": "The worker still imports fetchUser and needs the matching rename.",
+      "timestamp": "2026-10-12T11:21:00Z",
+      "command": "printf '\\033[32mpackages/worker: fetchUser -> loadUser\\033[0m\\n'"
+    }
+  ],
+  "reads": [
+    "/v1/client/agents",
+    "/v1/client/sessions/agent/example/atlas/builder/timeline",
+    "/v1/client/terminals/agent%2Fexample%2Fatlas%2Fbuilder/screen"
+  ]
+}
