@@ -419,7 +419,8 @@ async function assertGutter(lane: HTMLElement) {
       await waitFor(() => expect(tips()).toHaveLength(0))
       // Right of the run beside its first line, taking no row: the block keeps the plain 8px gap.
       await expect(box.left).toBeGreaterThanOrEqual(run.right + 8 - 0.5)
-      await expect(box.top).toBeGreaterThanOrEqual(firstLine.top - 0.5)
+      // The text Range excludes the line box's leading; the gutter time must overlap the actual first text line.
+      await expect(box.top + time.getBoundingClientRect().height).toBeGreaterThan(firstLine.top)
       await expect(box.top).toBeLessThan(firstLine.bottom)
       // Tooltip engagement may scroll the run into view; compare fresh rectangles for the displacement control.
       const alignedFirstLine = firstLineRange.getClientRects()[0]!
