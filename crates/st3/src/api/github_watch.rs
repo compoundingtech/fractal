@@ -193,6 +193,47 @@ pub(super) async fn watch(
     Ok(Json(view))
 }
 
+/// A declared wait on a pull request wakes its seat through a watch: the wait sets one, with the
+/// default deadline, unless the seat already watches the thread.
+pub(super) async fn watch_for_wait(
+    state: &AppState,
+    actor: &str,
+    thread: ThreadRef,
+) -> Result<(), ApiError> {
+    if !actor.starts_with("agent/") {
+        return Err(bad(
+            "watch-needs-a-seat",
+            "a wait on a pull request wakes one agent seat; run `st work wait` inside the seat",
+        ));
+    }
+    let store = state.store.clone();
+    let subject = thread.watch(actor);
+    let watched = {
+        let store = store.clone();
+        blocking_action(move || store.live_watch(&subject).map_err(St3Error::from).map(|watch| watch.is_some()))
+            .await?
+    };
+    if watched {
+        return Ok(());
+    }
+    let until = deadline(None)?;
+    let github = read_thread(&thread).await?;
+    watchable(&thread, &github)?;
+    let actor = actor.to_owned();
+    blocking_action(move || {
+        if !store.seat_live(&actor)? {
+            return Err(St3Error::new(
+                "watch-needs-a-seat",
+                format!("`{actor}` is not a running seat"),
+            ));
+        }
+        store.declare_watch(&thread, &actor, until)
+    })
+    .await?;
+    signal_changed(state);
+    Ok(())
+}
+
 /// A comment or review GitHub answered with: its kind, ID, link and author.
 #[derive(Debug)]
 struct Posted {

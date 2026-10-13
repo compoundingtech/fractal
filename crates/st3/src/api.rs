@@ -2412,6 +2412,8 @@ fn client_work_values(
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,
                 "execution_started_at_unix_ms": work.execution_started_at_unix_ms,
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
+                "waiting_on": work.waiting_on.as_ref().map(crate::store::describe_wait),
+                "waiting_since_unix_ms": work.waiting_on.as_ref().map(|wait| wait.since_unix_ms),
                 "execution_elapsed_ms": work.execution_elapsed_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
@@ -15700,6 +15702,7 @@ async fn handoff_work(
     )?;
     let request = WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some(input.actor.clone()),
         incarnation: input.incarnation.clone(),
         summary: Some(input.note.clone()),
@@ -15733,6 +15736,14 @@ async fn post_work_action(
         request.actor.as_deref(),
         &mut request.incarnation,
     )?;
+    if action == "wait"
+        && let Some(target) = request.wait_on.as_deref()
+        && let crate::store::WaitTarget::PullRequest(thread) =
+            crate::store::WaitTarget::parse(target, smallclaims::store::now_ms()).map_err(ApiError::bad)?
+    {
+        let actor = request.actor.clone().unwrap_or_default();
+        github_watch::watch_for_wait(&state, &actor, thread).await?;
+    }
     work_action_response(state, action, subject, request, None, None).await
 }
 
@@ -15752,6 +15763,7 @@ async fn extend_work(
     let extend_ms = request.by_ms;
     let request = WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: request.actor,
         incarnation: request.incarnation,
         summary: None,
@@ -18063,6 +18075,7 @@ mission "refs-work" state="ready" {{
         assert_eq!(refs[0]["next_work_id"], second.steps[0].subject);
         let action = |name: &str| store.work_action(&second.steps[0].subject, name, &WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.amber".into()), incarnation: Some("refs-runtime".into()),
             summary: Some("Complete fixture work.".into()), reason: None, evidence: Vec::new(),
             idempotency_key: format!("refs-{name}"),
@@ -18111,6 +18124,7 @@ mission "expiring-work" state="ready" {
         store.set_step_state(step, "ready", None).unwrap();
         store.work_action(step, "claim", &WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.zeta".into()), incarnation: Some("fixture-runtime".into()),
             summary: None, reason: None, evidence: Vec::new(), idempotency_key: "lease-fence-claim".into(),
         }).unwrap();
@@ -19853,6 +19867,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             "/v1/work/complete/step-run/run/work",
             serde_json::to_value(WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some("agent/node.worker".into()),
                 incarnation: Some("ended-incarnation".into()),
                 summary: Some("complete".into()),
@@ -23261,6 +23276,7 @@ mission "paged" state="ready" {
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: None,
@@ -24634,6 +24650,7 @@ mission "wake" state="ready" {
         fixture.store.work_action(&fixture.runs[agent / 10].steps[agent % 10].subject,
             action, &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some(fixture.subjects[agent].clone()),
                 incarnation: Some(format!("roster-session-{agent}")),
                 summary: Some(format!("Fixture {action}.")), reason: None,
@@ -27617,6 +27634,7 @@ version 2
                 "claim",
                 &WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(actor.clone()),
                     incarnation: Some("test".into()),
                     summary: None,
@@ -28012,6 +28030,7 @@ version 2
                 "claim",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(claimant.clone()),
                     incarnation: Some("test-incarnation".into()),
                     summary: None,
@@ -28028,6 +28047,7 @@ version 2
                 "complete",
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(claimant.clone()),
                     incarnation: Some("test-incarnation".into()),
                     summary: Some("Candidate submitted for review".into()),
@@ -28298,6 +28318,7 @@ version 2
                     action,
                     &crate::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some(feedback_claimant.clone()),
                         incarnation: Some("test-incarnation".into()),
                         summary: Some("Candidate submitted".into()),

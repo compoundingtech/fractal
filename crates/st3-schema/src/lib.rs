@@ -1573,6 +1573,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.wait-ended",
+            &["step-run"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
             "gate.requested",
             &["gate-operation"],
             WritePolicy::SystemOnly,
@@ -2801,6 +2810,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("extend_ms", integer()),
             ("clock", enumeration(&["paused", "running"])),
             ("wait_until_unix_ms", integer()),
+            ("wait_on", object()),
             ("handoff_key", string()),
             ("handoff_request", object()),
             ("handoff_to", reference()),
@@ -2814,6 +2824,12 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("idle_since_unix_ms", string()),
             ("reason", string()),
             ("waits", array()),
+        ],
+        "work.wait-ended" => &[
+            ("attempt", integer()),
+            ("wait", string()),
+            ("reason", string()),
+            ("message", reference()),
         ],
         "gate.requested" => &[
             ("status", string()),
@@ -4317,6 +4333,7 @@ mod tests {
                 "work.released",
                 "work.renewed",
                 "work.submitted",
+                "work.wait-ended",
                 "workspace.observed",
             ]
         );
