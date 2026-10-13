@@ -5105,9 +5105,7 @@ impl Store {
                 Some(connection) => Rc::new(connection),
                 None => guard.pinned.take().expect("a request loan holds its connection"),
             }),
-            transaction: Some(crate::windows::Timer::start(
-                crate::windows::StoreWork::ReadTransaction,
-            )),
+            transaction: Some(crate::windows::holds::ReadHold::start()),
         };
         drop(guard);
         let connection = pinned
