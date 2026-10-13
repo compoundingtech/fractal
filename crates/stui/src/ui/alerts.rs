@@ -1,6 +1,8 @@
 //! Alerts beside the conversation or the terminal of the agent they belong to: one line above the
-//! message box and a badge over a terminal, either of which opens the alerts box, which is Home
-//! floated over the glass with the agent's first alert selected.
+//! message box that opens into a read-only list (title and the first lines of what each says, three
+//! at a time, scrolling), and a badge over a terminal. Nothing in the list answers anything: a click
+//! on an alert, the badge or Ctrl+N opens the alerts box, which is Home floated over the glass with
+//! that alert selected, where the whole of it is read and answered.
 //!
 //! An alert is anything that blocks or waits on an answer: an ask, a human gate, a launch or
 //! revision approval, a native harness prompt or a harness login. It clears itself when it is
@@ -14,6 +16,10 @@ pub(super) struct BandRow {
     pub(super) line: Line<'static>,
     pub(super) hits: Vec<(u16, u16, Hit)>,
 }
+
+/// How many alerts the opened list shows at once, and how many lines of what an alert says.
+const ALERTS_SHOWN: usize = 3;
+const SUMMARY_LINES: usize = 2;
 
 impl Ui {
     /// The open alerts that show in `agent`'s conversation, in the order Now lists them.
@@ -43,38 +49,152 @@ impl Ui {
             .count()
     }
 
-    /// The line for `agent` at `width` columns: empty when nothing waits on the person there,
-    /// otherwise what waits and that a click opens it. It holds no answer: answering happens in
-    /// the box it opens, where a form has the room it needs.
+    /// What an alert says, in a few words: the question, the reason, the call it waits on.
+    fn alert_summary(item: &Attention) -> String {
+        let text = match &item.kind {
+            AttentionKind::Review { question, because, .. } => format!("{question} {because}"),
+            AttentionKind::Feedback { question, .. } => question.clone(),
+            AttentionKind::Launch { planner, name, .. } => format!("{planner} proposes {name}"),
+            AttentionKind::Revision { reason, .. } => reason.clone(),
+            AttentionKind::Fault { what, because, .. } => format!("{what} {because}"),
+            AttentionKind::Message { body, .. } => body.clone(),
+            AttentionKind::Prompt { text, .. } => text.clone(),
+            AttentionKind::Login { text, .. } => text.clone(),
+            AttentionKind::Request { question, structured, .. } => structured
+                .as_ref()
+                .map_or_else(|| question.clone(), |request| request.question.clone()),
+            _ => String::new(),
+        };
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The lines above the box for `agent` at `width` columns: none when nothing waits there; one
+    /// that says what waits until it is opened; opened, a read-only list with each alert's title
+    /// and the first lines of what it says, three at a time, with rows to scroll the rest. Every
+    /// row is a way in to the alerts box: no answer is offered here, because an answer is made
+    /// after reading all of it.
     pub(super) fn alert_band(&self, agent: &str, width: usize) -> Vec<BandRow> {
         let alerts = self.alerts_in(agent);
         let Some(first) = alerts.first() else {
             return Vec::new();
         };
         let count = alerts.len();
-        let (glyph, color) = screens::attention_style(&first.kind);
-        let lead = format!(" ◆ {count} alert{} · ", if count == 1 { "" } else { "s" });
-        let tail = " ▸ open ";
-        let room = width
-            .saturating_sub(text::width(&lead) + text::width(tail) + 4)
-            .max(8);
-        let spans = vec![
-            Span::styled(lead, theme::strong(theme::PERSON)),
-            Span::styled(format!("{glyph} "), theme::fg(color)),
-            Span::styled(
-                text::truncate(first_line(&first.title), room),
-                theme::text(),
-            ),
-            Span::styled(tail, theme::dim()),
-        ];
-        vec![BandRow {
-            line: Line::from(spans),
+        let open = self.alerts_open.contains(agent);
+        let toggle = Hit::Alert(agent.to_owned(), AlertTap::Toggle);
+        if !open {
+            let (glyph, color) = screens::attention_style(&first.kind);
+            let lead = format!(" ◆ {count} alert{} · ", if count == 1 { "" } else { "s" });
+            let tail = " ▸ show ";
+            let room = width
+                .saturating_sub(text::width(&lead) + text::width(tail) + 4)
+                .max(8);
+            return vec![BandRow {
+                line: Line::from(vec![
+                    Span::styled(lead, theme::strong(theme::PERSON)),
+                    Span::styled(format!("{glyph} "), theme::fg(color)),
+                    Span::styled(
+                        text::truncate(first_line(&first.title), room),
+                        theme::text(),
+                    ),
+                    Span::styled(tail, theme::dim()),
+                ]),
+                hits: vec![(0, width as u16, toggle)],
+            }];
+        }
+        // Opened: a title bar the width of the pane, which hides it again.
+        let left = format!(" ◆ {count} alert{} ", if count == 1 { "" } else { "s" });
+        let right = " ▾ hide ";
+        let gap = width.saturating_sub(text::width(&left) + text::width(right));
+        let bar = |style: Style| style.bg(theme::SURFACE0);
+        let mut rows = vec![BandRow {
+            line: Line::from(vec![
+                Span::styled(left, bar(theme::strong(theme::PERSON))),
+                Span::styled(" ".repeat(gap), bar(Style::default())),
+                Span::styled(right, bar(theme::dim())),
+            ]),
+            hits: vec![(0, width as u16, toggle)],
+        }];
+        let inner = width.saturating_sub(4).max(10);
+        let first_shown = self
+            .alerts_scroll
+            .get(agent)
+            .copied()
+            .unwrap_or(0)
+            .min(count.saturating_sub(ALERTS_SHOWN));
+        let scroll_row = |label: String, delta: isize| BandRow {
+            line: Line::from(Span::styled(label, theme::fg(theme::OVERLAY1))),
             hits: vec![(
                 0,
                 width as u16,
-                Hit::Alert(agent.to_owned(), AlertTap::Box),
+                Hit::Alert(agent.to_owned(), AlertTap::Scroll(delta)),
             )],
-        }]
+        };
+        if first_shown > 0 {
+            rows.push(scroll_row(format!("   ▲ {first_shown} earlier"), -1));
+        }
+        for item in alerts.iter().skip(first_shown).take(ALERTS_SHOWN) {
+            let (glyph, color) = screens::attention_style(&item.kind);
+            let opens = Hit::Alert(item.id.clone(), AlertTap::Open);
+            let mut item_rows = vec![BandRow {
+                line: Line::from(vec![
+                    Span::styled(format!(" {glyph} "), theme::fg(color)),
+                    Span::styled(
+                        text::truncate(first_line(&item.title), inner.saturating_sub(8)),
+                        theme::bold(),
+                    ),
+                    Span::styled(format!("  {} ago", item.age), theme::dim()),
+                ]),
+                hits: Vec::new(),
+            }];
+            let summary = Self::alert_summary(item);
+            if !summary.is_empty() {
+                let mut lines = text::wrap(
+                    &[text::run(summary, theme::soft())],
+                    inner,
+                    &[text::run("   ", theme::dim())],
+                    &[text::run("   ", theme::dim())],
+                    None,
+                );
+                let cut = lines.len() > SUMMARY_LINES;
+                lines.truncate(SUMMARY_LINES);
+                if cut && let Some(last) = lines.last_mut() {
+                    last.spans.push(Span::styled(" …", theme::dim()));
+                }
+                item_rows.extend(lines.into_iter().map(|line| BandRow {
+                    line,
+                    hits: Vec::new(),
+                }));
+            }
+            // A bar down the left in the alert's colour; every row of it opens the alert.
+            for row in &mut item_rows {
+                row.line
+                    .spans
+                    .insert(0, Span::styled("▌", theme::fg(color)));
+                row.hits = vec![(0, width as u16, opens.clone())];
+            }
+            rows.extend(item_rows);
+        }
+        let below = count.saturating_sub(first_shown + ALERTS_SHOWN);
+        if below > 0 {
+            rows.push(scroll_row(format!("   ▼ {below} more"), 1));
+        }
+        rows
+    }
+
+    /// Scroll the opened list by `delta` alerts, within what exists.
+    pub(super) fn scroll_alerts(&mut self, agent: &str, delta: isize) {
+        let count = self.alerts_in(agent).len();
+        let last = count.saturating_sub(ALERTS_SHOWN);
+        let at = self.alerts_scroll.get(agent).copied().unwrap_or(0);
+        let next = at.saturating_add_signed(delta).min(last);
+        self.alerts_scroll.insert(agent.to_owned(), next);
+    }
+
+    /// Open or close the list of `agent`'s alerts above its box.
+    pub(super) fn toggle_alerts(&mut self, agent: &str) {
+        if !self.alerts_open.remove(agent) {
+            self.alerts_open.insert(agent.to_owned());
+        }
     }
 
     /// A small badge, bottom right of `body`, saying how many alerts wait; a click opens the box.
@@ -224,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn the_line_says_what_waits_and_has_one_target_that_opens_the_box() {
+    fn the_line_says_what_waits_and_has_one_target_that_opens_the_list() {
         let ui = with_alerts(vec![
             prompt("attention/a", &["allow", "deny"]),
             prompt("attention/b", &[]),
@@ -233,10 +353,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let shown = texts(&rows);
         assert!(shown.contains("2 alerts") && shown.contains("is waiting for a permission"), "{shown}");
-        assert!(shown.contains("▸ open"), "{shown}");
+        assert!(shown.contains("▸ show"), "{shown}");
         assert_eq!(
             rows[0].hits.iter().map(|(_, _, hit)| hit.clone()).collect::<Vec<_>>(),
-            vec![Hit::Alert("agent/example/atlas".into(), AlertTap::Box)]
+            vec![Hit::Alert("agent/example/atlas".into(), AlertTap::Toggle)]
         );
         for width in [12usize, 24, 40] {
             assert_eq!(ui.alert_band("agent/example/atlas", width).len(), 1);
@@ -268,7 +388,7 @@ mod tests {
         other.agent = Some("agent/example/docs".into());
         other.conversations = vec!["agent/example/docs".into()];
         let mut ui = with_alerts(vec![other, prompt("attention/mine", &[])]);
-        ui.click(Hit::Alert("agent/example/atlas".into(), AlertTap::Box));
+        ui.open_alerts("agent/example/atlas");
         assert_eq!(ui.tab, 0);
         assert_eq!(ui.attention_focus().as_deref(), Some("attention/mine"));
         // With none about the agent, the first alert of all.
@@ -287,5 +407,70 @@ mod tests {
         ui.open_alert("attention/b");
         assert_eq!(ui.tab, 0);
         assert_eq!(ui.attention_focus().as_deref(), Some("attention/b"));
+    }
+
+    fn six(ui_agent: &str) -> Vec<Attention> {
+        (0..6)
+            .map(|index| {
+                let mut item = prompt(&format!("attention/{index}"), &["allow", "deny"]);
+                item.title = format!("Approve change number {index}");
+                item.agent = Some(ui_agent.into());
+                item.conversations = vec![ui_agent.into()];
+                if let AttentionKind::Prompt { text, .. } = &mut item.kind {
+                    *text = format!(
+                        "Claude asks to run a long command for item {index} that goes on and on so that it needs more than two lines to say what it does and where, and the rest should be cut with an ellipsis"
+                    );
+                }
+                item
+            })
+            .collect()
+    }
+
+    #[test]
+    fn opened_the_list_is_read_only_shows_three_titles_with_two_lines_each() {
+        let agent = "agent/example/atlas";
+        let mut ui = with_alerts(six(agent));
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        let rows = ui.alert_band(agent, 80);
+        let shown = texts(&rows);
+        assert!(shown.contains("6 alerts") && shown.contains("▾ hide"), "{shown}");
+        for index in 0..3 {
+            assert!(shown.contains(&format!("Approve change number {index}")), "{shown}");
+        }
+        assert!(!shown.contains("number 3"), "only three at a time: {shown}");
+        assert!(shown.contains("▼ 3 more") && !shown.contains('▲'), "{shown}");
+        // Read only: nothing here answers anything, and every alert row opens it.
+        for word in ["allow", "deny", "Approve ", "accept", "answer"] {
+            assert!(!shown.contains(&format!("[{word}")) && !shown.contains(&format!(" {word} ")), "{word}: {shown}");
+        }
+        assert!(shown.contains('…'), "a long text is cut with an ellipsis: {shown}");
+        // Two lines of text and a title per alert, plus the bar and the more-row: at most 12.
+        assert!(rows.len() <= 3 * 3 + 2, "{}", rows.len());
+        let opens: Vec<Hit> = rows
+            .iter()
+            .flat_map(|row| row.hits.iter().map(|(_, _, hit)| hit.clone()))
+            .filter(|hit| matches!(hit, Hit::Alert(_, AlertTap::Open)))
+            .collect();
+        assert!(opens.contains(&Hit::Alert("attention/0".into(), AlertTap::Open)));
+    }
+
+    #[test]
+    fn the_list_scrolls_through_all_six_and_a_click_on_an_alert_opens_it_in_the_box() {
+        let agent = "agent/example/atlas";
+        let mut ui = with_alerts(six(agent));
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        ui.click(Hit::Alert(agent.into(), AlertTap::Scroll(1)));
+        ui.click(Hit::Alert(agent.into(), AlertTap::Scroll(1)));
+        ui.click(Hit::Alert(agent.into(), AlertTap::Scroll(1)));
+        ui.click(Hit::Alert(agent.into(), AlertTap::Scroll(1)));
+        let shown = texts(&ui.alert_band(agent, 80));
+        assert!(shown.contains("number 5") && shown.contains("number 3"), "{shown}");
+        assert!(shown.contains("▲ 3 earlier") && !shown.contains('▼'), "stops at the end: {shown}");
+        ui.click(Hit::Alert(agent.into(), AlertTap::Scroll(-9)));
+        assert!(texts(&ui.alert_band(agent, 80)).contains("number 0"));
+        // A click on one opens the box on it.
+        ui.click(Hit::Alert("attention/4".into(), AlertTap::Open));
+        assert!(ui.home_open() || ui.tab == 0);
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/4"));
     }
 }

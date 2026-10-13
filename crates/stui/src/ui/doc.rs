@@ -15,6 +15,12 @@ pub enum AlertTap {
     /// Open the alerts box: Home over the glass, on the agent's first alert. The `Hit` names the
     /// agent, not an alert.
     Box,
+    /// Open or close the list of the agent's alerts above its box (the `Hit` names the agent).
+    Toggle,
+    /// Scroll that list by this many alerts (the `Hit` names the agent).
+    Scroll(isize),
+    /// Open the alerts box on this alert (the `Hit` names the alert).
+    Open,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

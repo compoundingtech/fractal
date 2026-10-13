@@ -4422,7 +4422,7 @@ mod tests {
         ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
         // Collapsed: one line above the box, the box whole at the bottom, and nothing to answer.
         let shown = screen(&ui);
-        assert!(shown.contains("1 alert") && shown.contains("▸ open"), "{shown}");
+        assert!(shown.contains("1 alert") && shown.contains("▸ show"), "{shown}");
         assert!(!shown.contains("deny"), "{shown}");
         let lines: Vec<&str> = shown.lines().collect();
         let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
@@ -4431,8 +4431,13 @@ mod tests {
         let input = line("Message Atlas Builder");
         assert!(band < rule && rule < input, "{shown}");
         assert!(input + 3 >= lines.len(), "the box sits at the bottom: {shown}");
-        // A click opens the alerts box: Home over the glass, on this agent's alert.
-        ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Box));
+        // A click opens the list; a click on an alert in it opens the alerts box: Home over the
+        // glass, on that alert.
+        ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Toggle));
+        let list = screen(&ui);
+        assert!(list.contains("▾ hide") && list.contains("waiting for a permission"), "{list}");
+        assert!(!ui.home_open());
+        ui.click(Hit::Alert("attention/one".into(), AlertTap::Open));
         assert!(ui.home_open());
         assert_eq!(ui.attention_focus().as_deref(), Some("attention/one"));
         let shown = screen(&ui);

@@ -469,6 +469,11 @@ pub struct Ui {
     terminal_body: Cell<Option<Rect>>,
     /// Where the alerts badge was drawn over a terminal this frame: a click there is the box's.
     alert_badge: Cell<Option<Rect>>,
+    /// The conversations whose alert list the person opened, how far each is scrolled, and where
+    /// the list was drawn this frame (the wheel scrolls it there).
+    alerts_open: HashSet<String>,
+    alerts_scroll: HashMap<String, usize>,
+    alert_band_area: RefCell<Option<(Rect, String)>>,
     /// Where the attached terminal's cursor is on screen and its shape, when the terminal has
     /// the keys: the person's own cursor shows it.
     terminal_cursor: Cell<Option<pty::Cursor>>,
@@ -717,6 +722,9 @@ impl Ui {
             terminal_size: Cell::new((24, 80)),
             terminal_body: Cell::new(None),
             alert_badge: Cell::new(None),
+            alerts_open: HashSet::new(),
+            alerts_scroll: HashMap::new(),
+            alert_band_area: RefCell::new(None),
             terminal_cursor: Cell::new(None),
             terminal_selecting: false,
             terminal_selection_mode: false,
@@ -1521,6 +1529,7 @@ impl Ui {
         };
         self.terminal_cursor.set(None);
         self.alert_badge.set(None);
+        *self.alert_band_area.borrow_mut() = None;
         buf.set_style(area, Style::default().bg(theme::BASE).fg(theme::TEXT));
         if area.width < 20 || area.height < 6 {
             buf.set_stringn(
@@ -2666,7 +2675,7 @@ impl Ui {
         let room = area
             .height
             .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize / 2).max(1)));
+        band.truncate(room.min((area.height as usize * 3 / 5).max(1)));
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -2690,6 +2699,17 @@ impl Ui {
             }
         }
         self.pane(buf, &key, body, doc, true);
+        if band_height > 0 {
+            *self.alert_band_area.borrow_mut() = Some((
+                Rect {
+                    x: area.x,
+                    y: body.y + body.height,
+                    width: area.width,
+                    height: band_height,
+                },
+                agent.id.clone(),
+            ));
+        }
         for (offset, row) in band.iter().enumerate() {
             let y = body.y + body.height + offset as u16;
             buf.set_line(area.x, y, &row.line, area.width);
@@ -5491,6 +5511,21 @@ impl Ui {
             return;
         }
 
+        // The wheel over the opened alert list scrolls it, not the conversation under it.
+        let band_here = if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+        {
+            let area = self.alert_band_area.borrow().clone();
+            area.filter(|(rect, agent)| {
+                contains(*rect, mouse.column, mouse.row) && self.alerts_open.contains(agent)
+            })
+        } else {
+            None
+        };
+        if let Some((_, agent)) = band_here {
+            let delta = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+            self.scroll_alerts(&agent, delta);
+            return;
+        }
         if mouse.kind == MouseEventKind::Moved {
             self.mouse_moved(mouse);
             return;
@@ -6079,6 +6114,9 @@ impl Ui {
             Hit::Help => self.help = !self.help,
             Hit::Answer(index) => self.answering = Some(index),
             Hit::Alert(agent, AlertTap::Box) => self.open_alerts(&agent),
+            Hit::Alert(agent, AlertTap::Toggle) => self.toggle_alerts(&agent),
+            Hit::Alert(agent, AlertTap::Scroll(delta)) => self.scroll_alerts(&agent, delta),
+            Hit::Alert(id, AlertTap::Open) => self.open_alert(&id),
             Hit::Voice => {
                 self.editing = true;
                 self.start_voice();
