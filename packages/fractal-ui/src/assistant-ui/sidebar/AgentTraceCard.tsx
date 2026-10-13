@@ -112,7 +112,10 @@ function SpendSection({ row, trace }: { readonly row: Row; readonly trace: Agent
   const totals: SpendTotals | undefined = trace.spendTotals._tag === 'Known' ? trace.spendTotals.value : undefined
   const scalar = row.usage._tag === 'Known' ? row.usage : undefined
   const unattributed = trace.spendTotals._tag === 'Unknown' && trace.spendTotals.reason === 'not-attributed'
-  const label = totals === undefined ? undefined : `Cumulative spend over the last 24 hours: session ${usd.format(totals.sessionUsd)}, subagents ${usd.format(totals.subagentsUsd)}`
+  // The cumulative series ends at its own totals, so a Known series stays labelled even before the totals read arrives.
+  const last = trace.spend._tag === 'Known' ? trace.spend.value[trace.spend.value.length - 1] : undefined
+  const charted = totals ?? last
+  const label = charted === undefined ? undefined : `Cumulative spend over the last 24 hours: session ${usd.format(charted.sessionUsd)}, subagents ${usd.format(charted.subagentsUsd)}`
   const scope = scalar?.scope === 'lifetime-incl-subagents' ? 'lifetime, includes subagents' : '24h, includes subagents'
   return <section data-trace-section="spend" aria-label="Spend" {...stylex.props(styles.section)}>
     <SectionHead title={trace.spend._tag === 'Known' ? 'Spend · 24h' : 'Spend'}>
