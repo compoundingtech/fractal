@@ -45,11 +45,11 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
 
 const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent'
 
-/** The host owns work-log classification: how a tool reads, runs or edits. */
+/** The host owns work-log classification: how a tool reads, runs or changes files. */
 const toolKindFor = (name: string): WorkKind => {
   const tool = name.toLowerCase()
   if (/(?:^|[/_.-])(?:bash|sh|shell|exec|execute|run|command|eval|task|infra)(?:$|[/_.-])/.test(tool)) return 'run'
-  return /(?:edit|write|patch|apply)/.test(tool) ? 'edit' : 'read'
+  return /(?:edit|write|patch|apply)/.test(tool) ? 'change' : 'read'
 }
 
 /** Human intent belongs in the header; raw paths and commands remain on the source tool item. */
@@ -61,7 +61,7 @@ const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): 
       return value.trim().replace(/\s+/g, ' ').slice(0, 100)
   }
   return toolKindFor(item.name) === 'run' ? 'Running a command'
-    : toolKindFor(item.name) === 'edit' ? 'Updating a file' : 'Reading information'
+    : toolKindFor(item.name) === 'change' ? 'Updating a file' : 'Reading information'
 }
 
 const activeRunStatuses: Record<RunStatus, boolean> = { queued: true, running: true, waiting: true, completed: false, failed: false, cancelled: false }
