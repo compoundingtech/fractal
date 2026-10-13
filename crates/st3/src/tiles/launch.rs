@@ -143,29 +143,51 @@ fn require_root(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// The tile's Unix user must exist with the registry's group, and never be a person's login.
+/// The tile's Unix user must exist with the registry's group and look like no one's login: no
+/// home under /home and a shell that refuses logins. This is a check against an obvious
+/// mistake, not the authority: root's registry says which user is a tile, and root must never
+/// list a person's account there.
 fn check_account(name: &str, tile: &Tile) -> Result<()> {
-    let Some((account, gid, home)) = account(tile.uid) else {
+    let Some(entry) = account(tile.uid) else {
         bail!(
             "tile {name}: Unix user {} does not exist; create it as a system user with no login",
             tile.uid
         );
     };
-    if gid != tile.gid {
+    if entry.gid != tile.gid {
         bail!(
-            "tile {name}: Unix user {account} has group {gid}, but the registry says {}",
+            "tile {name}: Unix user {} has group {}, but the registry says {}",
+            entry.name,
+            entry.gid,
             tile.gid
         );
     }
-    if home.starts_with("/home/") {
+    if entry.home.starts_with("/home/") {
         bail!(
-            "tile {name}: Unix user {account} has a login home {home}; a tile is not a login user"
+            "tile {name}: Unix user {} has a login home {}; a tile is not a login user",
+            entry.name,
+            entry.home
+        );
+    }
+    let shell = Path::new(&entry.shell).file_name().and_then(OsStr::to_str);
+    if !matches!(shell, Some("nologin" | "false")) {
+        bail!(
+            "tile {name}: Unix user {} has the login shell `{}`; give it nologin",
+            entry.name,
+            entry.shell
         );
     }
     Ok(())
 }
 
-fn account(uid: u32) -> Option<(String, u32, String)> {
+struct Account {
+    name: String,
+    gid: u32,
+    home: String,
+    shell: String,
+}
+
+fn account(uid: u32) -> Option<Account> {
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
     let mut buffer = vec![0 as libc::c_char; 16 * 1024];
     let mut result = std::ptr::null_mut();
@@ -188,7 +210,12 @@ fn account(uid: u32) -> Option<(String, u32, String)> {
             .to_string_lossy()
             .into_owned()
     };
-    Some((text(entry.pw_name), entry.pw_gid, text(entry.pw_dir)))
+    Some(Account {
+        name: text(entry.pw_name),
+        gid: entry.pw_gid,
+        home: text(entry.pw_dir),
+        shell: text(entry.pw_shell),
+    })
 }
 
 /// `st tiles enter`: build the tile and run `command` in it. Runs as the main process of the
@@ -295,33 +322,36 @@ fn tile_dir(path: &Path, tile: &Tile) -> Result<PathBuf> {
 }
 
 /// Make `path` a real directory owned by `uid:gid` with `mode`, or refuse one that is not a
-/// directory or belongs to someone else, such as a user that once had this tile's number.
+/// directory or belongs to someone else, such as a user that once had this tile's number. The
+/// directory is opened without following a symbolic link and changed through that descriptor,
+/// so what is changed is what was checked, wherever the directory lies.
 fn owned_dir(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<()> {
-    match fs::symlink_metadata(path) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::DirBuilder::new()
-                .mode(0o700)
-                .create(path)
-                .with_context(|| format!("create {}", path.display()))?;
-            std::os::unix::fs::lchown(path, Some(uid), Some(gid))
-                .with_context(|| format!("own {}", path.display()))?;
-        }
-        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
-        Ok(metadata) => {
-            if !metadata.is_dir() {
-                bail!("{} is not a directory; remove it", path.display());
-            }
-            if metadata.uid() != uid {
-                bail!(
-                    "{} belongs to Unix user {}, not {uid}; a tile's directories are never \
-                     inherited from another user",
-                    path.display(),
-                    metadata.uid()
-                );
-            }
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let created = match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+        Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
+    };
+    let directory = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("{} is not a directory; remove it", path.display()))?;
+    if created {
+        std::os::unix::fs::fchown(&directory, Some(uid), Some(gid))
+            .with_context(|| format!("own {}", path.display()))?;
+    } else {
+        let owner = directory.metadata()?.uid();
+        if owner != uid {
+            bail!(
+                "{} belongs to Unix user {owner}, not {uid}; a tile's directories are never \
+                 inherited from another user",
+                path.display()
+            );
         }
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+    directory
+        .set_permissions(fs::Permissions::from_mode(mode))
         .with_context(|| format!("set the mode of {}", path.display()))?;
     Ok(())
 }
@@ -409,10 +439,13 @@ impl Setup {
 
     /// PID 1 of the tile: build its file system, drop to its user, run the command, reap.
     fn init(self) -> Result<i32> {
-        // When `enter` dies, so does the tile: PID 1 ending ends every process in it.
+        // The guarantee that nothing outlives the launch is the unit's cgroup: when `enter` ends,
+        // systemd kills every process in it. The parent-death signal only ends the tile sooner.
+        // It cannot tell whether `enter` already died before this call, since getppid is 0 for a
+        // parent outside the PID namespace.
         // SAFETY: prctl with these arguments has no memory effects.
         check(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) })?;
-        // SAFETY: getppid has no preconditions. The parent is outside this PID namespace.
+        // SAFETY: getppid has no preconditions.
         if unsafe { libc::getppid() } != 0 {
             bail!("the tile's first process is not in a new PID namespace");
         }

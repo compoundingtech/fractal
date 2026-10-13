@@ -1,10 +1,14 @@
-//! The system call filter every tile process runs under: once its namespaces are set up, a tile
-//! can neither make nor join another namespace, nor change what is mounted. The filter refuses
-//! those calls with EPERM (clone3 with ENOSYS, so libc falls back to clone, whose flags the
-//! filter can read). A call from another architecture's system call table ends the process.
+//! The system call filter every tile process runs under. Once its namespaces are set up, a tile
+//! can neither make nor join another namespace, nor change what is mounted, and it cannot reach
+//! the kernel interfaces an unprivileged process most often turns into root: io_uring, BPF,
+//! userfaultfd, perf events, the kernel keyrings, kcmp and reading or writing another process's
+//! memory. Refused calls fail with EPERM; io_uring and clone3 fail with ENOSYS, so a runtime falls
+//! back to ordinary system calls (libc falls back from clone3 to clone, whose flags the filter
+//! can read). A call from another architecture's system call table ends the process.
 //!
 //! This narrows the kernel a tile reaches; it is not the boundary itself. The boundary is the
-//! tile's own Unix user, its namespaces and its root-owned cgroup.
+//! tile's own Unix user, its namespaces and its root-owned cgroup. The filter refuses a list of
+//! calls rather than allowing one, so a new kernel interface is reachable until it is added here.
 
 use std::io;
 
@@ -27,8 +31,9 @@ const CLONE_NAMESPACES: u32 = (libc::CLONE_NEWNS
     | libc::CLONE_NEWPID
     | libc::CLONE_NEWNET) as u32;
 
-/// Calls refused outright.
+/// Calls refused with EPERM.
 const REFUSED: &[libc::c_long] = &[
+    // Namespaces and mounts.
     libc::SYS_unshare,
     libc::SYS_setns,
     libc::SYS_mount,
@@ -42,6 +47,24 @@ const REFUSED: &[libc::c_long] = &[
     libc::SYS_fsmount,
     libc::SYS_fspick,
     libc::SYS_mount_setattr,
+    // Kernel surfaces an unprivileged process reaches and that tools do not need.
+    libc::SYS_bpf,
+    libc::SYS_userfaultfd,
+    libc::SYS_perf_event_open,
+    libc::SYS_add_key,
+    libc::SYS_request_key,
+    libc::SYS_keyctl,
+    libc::SYS_kcmp,
+    libc::SYS_process_vm_readv,
+    libc::SYS_process_vm_writev,
+];
+
+/// Calls that fail with ENOSYS, as on a kernel without them, so callers use their fallback.
+const UNAVAILABLE: &[libc::c_long] = &[
+    libc::SYS_clone3,
+    libc::SYS_io_uring_setup,
+    libc::SYS_io_uring_enter,
+    libc::SYS_io_uring_register,
 ];
 
 // Offsets into `struct seccomp_data`.
@@ -95,8 +118,10 @@ pub fn program() -> Vec<libc::sock_filter> {
         program.push(jump(EQUAL, call as u32, 0, 1));
         program.push(statement(RETURN, EPERM));
     }
-    program.push(jump(EQUAL, libc::SYS_clone3 as u32, 0, 1));
-    program.push(statement(RETURN, ENOSYS));
+    for &call in UNAVAILABLE {
+        program.push(jump(EQUAL, call as u32, 0, 1));
+        program.push(statement(RETURN, ENOSYS));
+    }
     // clone: refuse namespace flags in its first argument. The accumulator holds the number.
     program.push(jump(EQUAL, libc::SYS_clone as u32, 0, 3));
     program.push(statement(LOAD, ARG0_LOW));
@@ -170,7 +195,9 @@ mod tests {
         for &refused in REFUSED {
             assert_eq!(call(refused, 0), EPERM, "{refused}");
         }
-        assert_eq!(call(libc::SYS_clone3, 0), ENOSYS);
+        for &unavailable in UNAVAILABLE {
+            assert_eq!(call(unavailable, 0), ENOSYS, "{unavailable}");
+        }
         assert_eq!(call(libc::SYS_clone, libc::CLONE_NEWUSER as u32), EPERM);
         assert_eq!(call(libc::SYS_clone, libc::CLONE_NEWNET as u32), EPERM);
         // A thread or a fork is fine.

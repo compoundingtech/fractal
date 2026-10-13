@@ -656,7 +656,10 @@ fn a_tile_reaches_its_endpoint_and_the_kernel_says_which_tile_called() {
     assert_eq!(cgroup, registry::tools_cgroup(&a.name));
     assert_eq!(
         identified,
-        Some((a.name.clone(), format!("agent/fleet/fixture-example/{}", a.name)))
+        Some((
+            a.name.clone(),
+            format!("agent/fleet/fixture-example/{}", a.name)
+        ))
     );
     let lines = text(&output);
     let mut lines = lines.lines();
@@ -726,6 +729,20 @@ except OSError as error:
     results["fork_limit"] = (error.errno, len(children))
 for pid in children:
     os.kill(pid, 9)
+import platform
+numbers = {
+    "x86_64": {"io_uring_setup": 425, "bpf": 321, "userfaultfd": 323, "perf_event_open": 298,
+               "add_key": 248, "request_key": 249, "keyctl": 250, "kcmp": 312,
+               "process_vm_readv": 310, "process_vm_writev": 311},
+    "aarch64": {"io_uring_setup": 425, "bpf": 280, "userfaultfd": 282, "perf_event_open": 241,
+                "add_key": 217, "request_key": 218, "keyctl": 219, "kcmp": 272,
+                "process_vm_readv": 270, "process_vm_writev": 271},
+}[platform.machine()]
+# keyctl(KEYCTL_GET_KEYRING_ID, KEY_SPEC_SESSION_KEYRING, 1) works for any user without the filter.
+arguments = {"keyctl": (0, -3 & 0xffffffff, 1), "io_uring_setup": (1, ctypes.create_string_buffer(120))}
+for name, number in numbers.items():
+    result = libc.syscall(number, *arguments.get(name, (0, 0, 0, 0, 0)))
+    results["kernel_" + name] = ctypes.get_errno() if result == -1 else "succeeded"
 print(json.dumps(results), flush=True)
 "#;
 
@@ -746,6 +763,20 @@ fn a_tile_cannot_make_or_join_namespaces_mount_or_leave_its_cgroup() {
     assert_eq!(seen["clone_newuser"], libc::EPERM);
     assert_eq!(seen["fork"], "succeeded");
     assert_eq!(seen["setuid_root"], libc::EPERM);
+    assert_eq!(seen["kernel_io_uring_setup"], libc::ENOSYS);
+    for call in [
+        "bpf",
+        "userfaultfd",
+        "perf_event_open",
+        "add_key",
+        "request_key",
+        "keyctl",
+        "kcmp",
+        "process_vm_readv",
+        "process_vm_writev",
+    ] {
+        assert_eq!(seen[format!("kernel_{call}")], libc::EPERM, "{call}");
+    }
     // tasks_max = 16 counts the unit's launcher, the tile's init, the probe and thirteen
     // children; the next fork is refused.
     assert_eq!(seen["fork_limit"], serde_json::json!([libc::EAGAIN, 13]));
@@ -949,6 +980,31 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
         String::from_utf8_lossy(&writable.stderr)
             .contains("can be changed by someone other than root")
     );
+    // A tile's user with a login shell looks like a person's login and is refused.
+    ok(sudo([
+        "usermod",
+        "--shell",
+        "/run/current-system/sw/bin/sh",
+        &a.user,
+    ]));
+    let login = sudo([
+        host.st.as_os_str(),
+        "tiles".as_ref(),
+        "run".as_ref(),
+        "--registry".as_ref(),
+        host.registry.as_os_str(),
+        a.name.as_ref(),
+        "--".as_ref(),
+        "true".as_ref(),
+    ]);
+    assert!(!login.status.success());
+    assert!(String::from_utf8_lossy(&login.stderr).contains("login shell"));
+    ok(sudo([
+        "usermod",
+        "--shell",
+        "/run/current-system/sw/bin/nologin",
+        &a.user,
+    ]));
     // A st that someone other than root can change never runs as root in a tile's unit.
     let user_st = Command::new("sudo")
         .arg("-n")

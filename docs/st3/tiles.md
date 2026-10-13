@@ -34,7 +34,10 @@ cpu_weight = 100
 
 A tile's name is up to 32 of `a-z`, `0-9` and `_`. Two tiles never share a Unix user, a tile is
 never root, never a person and never another tile's supervisor, and a read-only path never
-overlaps a tile's private state. Never reuse a tile's Unix user for anything else while its
+overlaps a tile's private state. The launcher also refuses a tile's Unix user that looks like a
+login: a home under `/home` or a shell other than `nologin` or `false`. That check catches an
+obvious mistake; it is not what makes a user a tile. Root's registry is, so root must never list
+a person's account there. Never reuse a tile's Unix user for anything else while its
 files, processes or grants remain: st refuses state directories owned by another user.
 
 A process is a tile's when the kernel says it runs as the tile's Unix user inside the tile's
@@ -76,10 +79,15 @@ own servers listen there and nothing else is reachable; abstract Unix sockets be
 
 PID 1 then closes every descriptor but standard input, output and error, drops the capability
 bounding and ambient sets and its supplementary groups, becomes the tile's user and group, sets
-no-new-privileges and installs a seccomp filter. The filter refuses `unshare`, `setns`, clone
-with a namespace flag, `mount`, `umount2`, `pivot_root`, `chroot` and the new mount API with
-EPERM, refuses `clone3` with ENOSYS (libc falls back to clone, whose flags the filter reads), and
-ends a process that calls through another architecture's table. PID 1 forks the command with a
+no-new-privileges and installs a seccomp filter. The filter refuses with EPERM `unshare`,
+`setns`, clone with a namespace flag, `mount`, `umount2`, `pivot_root`, `chroot` and the new
+mount API, and the kernel surfaces an unprivileged process most often turns into root and tools
+do not need: `bpf`, `userfaultfd`, `perf_event_open`, the keyring calls (`add_key`,
+`request_key`, `keyctl`), `kcmp` and `process_vm_readv`/`writev`. `clone3` and io_uring fail
+with ENOSYS, as on a kernel without them, so libc and runtimes fall back (libc to clone, whose
+flags the filter reads). A call through another architecture's table ends the process. The
+filter is a list of refusals, so a kernel interface added after it is reachable until it is
+added here; it narrows the kernel a tile reaches and is not the boundary itself. PID 1 forks the command with a
 clean environment (`HOME`, `USER`, `PATH`, `TMPDIR`, `ST_TILE`, `ST_AGENT`, `ST_TILE_ENDPOINT`,
 `TERM`), every signal at its default, then reaps until the command exits, and exits with its
 status.
@@ -88,9 +96,10 @@ status.
 
 Every way a tile's launch ends leaves nothing behind. When the command exits, PID 1 exits and the
 kernel ends every process left in the PID namespace, including ones that ignore SIGTERM or
-double-forked into their own sessions. When PID 1 is killed, the same. When `st tiles enter` is
-killed, PID 1 gets SIGKILL from its parent-death signal, and systemd stops the unit and kills
-its cgroup. `st tiles stop` does the latter directly. In each case the unit and its cgroup are
+double-forked into their own sessions. When PID 1 is killed, the same. When `st tiles enter`
+ends for any reason, systemd stops the unit and kills every process in its cgroup: the cgroup is
+the guarantee. PID 1 also gets SIGKILL from its parent-death signal, which only ends it sooner.
+`st tiles stop` stops the unit directly. In each case the unit and its cgroup are
 gone when `st tiles run` returns, no process of the tile's user remains on the host, and the
 tile's mounts, which only ever existed in its own mount namespace, are gone with it. The tile
 starts again cleanly.
@@ -112,6 +121,12 @@ creating disposable system users and removing them, every unit and every directo
 ST_TILES_ROOT_TEST=1 cargo test -p st3 --test integration tiles_root:: -- --nocapture
 ```
 
+CI does not run these: its runners have no root, and the tests return at once there. The builder
+of every change to `crates/st3/src/tiles` or `tests/tiles_root.rs` runs them on a Linux host with
+root before review, and the pull request says where and at which commit. Before a release that
+ships a harness in a tile (design step 2), a release gate must run them on a host like the ones
+that will run tiles; that gate is part of step 2.
+
 - Identity: the command runs as the tile's user with no groups, no capability in any set,
   no-new-privileges and the filter, sees only its own processes, its own root and `lo`, and
   only standard streams are open.
@@ -121,7 +136,9 @@ ST_TILES_ROOT_TEST=1 cargo test -p st3 --test integration tiles_root:: -- --noca
   tile's user cannot read another's state.
 - Keys: a node key written as st writes it, and every path of the supervisor's state, are
   unreadable by the tile's user and absent inside the tile.
-- Escape: every namespace flag, `setns`, mounts and `chroot` are refused; `fork` works until
+- Escape: every namespace flag, `setns`, mounts and `chroot` are refused, and so are io_uring,
+  `bpf`, `userfaultfd`, `perf_event_open`, the keyring calls, `kcmp` and
+  `process_vm_readv`/`writev`; `fork` works until
   `TasksMax`; the tile's user cannot move a process into its own or a sibling's cgroup.
 - Descriptors: a descriptor root's shell left open across `st tiles run` is not in the tile.
 - Cleanup: killing the launcher, killing PID 1, stopping the unit and the command exiting each
@@ -135,5 +152,12 @@ ST_TILES_ROOT_TEST=1 cargo test -p st3 --test integration tiles_root:: -- --noca
 - The credential compartment and one harness running in a tile (design step 2).
 - Network egress: a tile has no route off its loopback until a root-owned veth, route and
   firewall policy is added.
+- A disk bound. A tile's home and work live on the host's file system with no quota: a tile can
+  fill that disk. Its /tmp and /dev/shm are tmpfs, charged to its memory ceiling. A project
+  quota or a size-limited file system for `STATE/NAME` must come before a harness runs in a
+  tile.
+- An allowlist filter. The seccomp filter refuses a list of calls; an allowlist of the calls a
+  harness and its tools need, measured from real runs, would close new kernel interfaces by
+  default. Decide it with step 2, when the workload is known.
 - Landlock and an AppArmor or SELinux profile on top of the namespaces.
 - macOS.
