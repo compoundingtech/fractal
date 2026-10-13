@@ -16429,10 +16429,14 @@ async fn trace_mission_name(client: &Client, lease: Option<&StepRunView>) -> Res
     Ok(Some(mission.strip_prefix("mission/").unwrap_or(&mission).to_owned()))
 }
 
-fn omit_failed_agent_trace(subject: &str, path: &Path, error: &anyhow::Error) {
+fn omit_failed_agent_trace(subject: &str, path: &Path, error: &anyhow::Error, _lock: &std::fs::File) {
     let cleanup_error = fs::remove_file(path).err()
         .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
         .map(|error| error.to_string());
+    report_agent_trace_failure(subject, error, cleanup_error);
+}
+
+fn report_agent_trace_failure(subject: &str, error: &anyhow::Error, cleanup_error: Option<String>) {
     eprintln!("{}", json!({
         "event": "agent_trace_omitted", "subject": subject,
         "error": format!("{error:#}"), "cleanup_error": cleanup_error,
@@ -16451,8 +16455,15 @@ async fn initialize_agent_trace(
     client: &Client, subject: &str, driver: &str, incarnation: &str, path: &Path,
     argv: &[String],
 ) {
+    let lock = match lock_agent_trace(path).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            report_agent_trace_failure(subject, &error, None);
+            return;
+        }
+    };
     if let Err(error) = try_initialize_agent_trace(client, subject, driver, incarnation, path, argv).await {
-        omit_failed_agent_trace(subject, path, &error);
+        omit_failed_agent_trace(subject, path, &error, &lock);
     }
 }
 
@@ -16465,7 +16476,6 @@ async fn try_initialize_agent_trace(
     argv: &[String],
 ) -> Result<()> {
     use st3::agent_trace::issuer;
-    let _lock = lock_agent_trace(path).await?;
     anyhow::ensure!(
         trace_current_incarnation(client, subject).await?.as_deref() == Some(incarnation),
         "the runtime changed before agent trace issuance",
@@ -16543,8 +16553,15 @@ async fn refresh_agent_trace(
     client: &Client, subject: &str, path: &Path, source_incarnation: Option<&str>,
     observed: Option<&st_drivers::harness_context::Observed>,
 ) {
+    let lock = match lock_agent_trace(path).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            report_agent_trace_failure(subject, &error, None);
+            return;
+        }
+    };
     if let Err(error) = try_refresh_agent_trace(client, subject, path, source_incarnation, observed).await {
-        omit_failed_agent_trace(subject, path, &error);
+        omit_failed_agent_trace(subject, path, &error, &lock);
     }
 }
 
@@ -16556,7 +16573,6 @@ async fn try_refresh_agent_trace(
     observed: Option<&st_drivers::harness_context::Observed>,
 ) -> Result<()> {
     use st3::agent_trace::issuer;
-    let _lock = lock_agent_trace(path).await?;
     let work: Vec<StepRunView> = client
         .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
     let current_incarnation = trace_current_incarnation(client, subject).await?;
@@ -25647,6 +25663,32 @@ mod tests {
         assert_eq!(trace_model_route("omp", "anthropic/claude-sonnet-4", Some("openrouter")),
             Some("openrouter/anthropic/claude-sonnet-4".into()));
         assert_eq!(trace_model_route("codex", "openai/gpt-5", None), Some("openai/gpt-5".into()));
+    }
+
+    #[tokio::test]
+    async fn agent_trace_contending_writers_leave_the_owners_valid_file_intact() {
+        use st3::agent_trace::{Runtime, issuer};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent-trace.json");
+        let subject = "agent/example/seat";
+        let runtime: Runtime = serde_json::from_value(json!({
+            "type":"agent-trace-runtime/v1",
+            "who":{"agent":subject,"principal":"person/avery"},
+            "how":{"harness":{"tool":"omp"}},
+            "where":{},
+        })).unwrap();
+        let owner = issuer::lock(&path).unwrap();
+        issuer::write_atomic(&path, &runtime).unwrap();
+        let original = fs::read(&path).unwrap();
+        // An unreachable API would fail either writer if it reached the locked transaction.
+        let client = Client::new(Endpoint::Http("http://127.0.0.1:0".into()));
+        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        assert_eq!(fs::read(&path).unwrap(), original);
+        refresh_agent_trace(&client, subject, &path, Some("current"), None).await;
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let decoded: Runtime = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(decoded, runtime);
+        drop(owner);
     }
 
     #[tokio::test]
