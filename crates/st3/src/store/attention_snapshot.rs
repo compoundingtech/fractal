@@ -1502,12 +1502,10 @@ pub(super) fn resolve_native_harness_at(
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
     let Some((ownership, transition)) = fields["ownership_sequence"].as_u64()
         .zip(fields["transition_sequence"].as_u64()) else { return Ok(()); };
-    if let Some((state, at)) = native_prompt_sequence_resolution(connection, subject, ownership, transition, index)? {
-        view.state = if matches!(state, NativePromptState::Answered { ref answer } if answer == "allow") {
-            "working"
-        } else {
-            "idle"
-        }.into();
+    // A Smalltalk answer is a request for the permission hook, not proof that
+    // Claude received it. The hook may already have exhausted its polling wait.
+    if let Some((NativePromptState::Gone, at)) = native_prompt_sequence_resolution(connection, subject, ownership, transition, index)? {
+        view.state = "idle".into();
         view.blocked_on = None;
         view.ask = None;
         view.reason = None;
@@ -1543,6 +1541,7 @@ fn native_prompt_sequence_resolution(
            AND json_extract(body, '$._operation.id') IN (?1,?2)
            AND store_index<=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
     ))?;
+    let mut requested_answer = None;
     for claim in observations.query_map(params![subject, index, ownership, transition], |row| row.get::<_, String>(0))? {
         smallclaims::read_budget::check()?;
         let claim = claim?;
@@ -1556,10 +1555,14 @@ fn native_prompt_sequence_resolution(
                 Some(answer) if matches!(answer.as_str(), "allow" | "deny") => NativePromptState::Answered { answer },
                 _ => NativePromptState::Gone,
             };
-            return Ok(Some((state, at.parse()?)));
+            let resolution = (state, at.parse()?);
+            if matches!(resolution.0, NativePromptState::Gone) {
+                return Ok(Some(resolution));
+            }
+            requested_answer.get_or_insert(resolution);
         }
     }
-    Ok(None)
+    Ok(requested_answer)
 }
 
 /// What a waiting prompt hook needs to know: whether the seat's prompt is still open, answered
@@ -1569,6 +1572,8 @@ fn native_prompt_sequence_resolution(
 pub enum NativePromptState {
     /// Not yet published, or still waiting on a person.
     Open,
+    /// The person recorded an answer for a live permission hook to apply.
+    /// This is not proof the hook received it or the native dialog closed.
     Answered { answer: String },
     /// Answered in the terminal, replaced or ended: nothing will arrive.
     Gone,
@@ -1626,6 +1631,9 @@ impl Store {
             serde_json::from_str::<Value>(body).is_ok_and(|body| {
                 let fields = body.get("fields").unwrap_or(&body);
                 fields["ownership_sequence"] == ownership && fields["transition_sequence"] == transition
+                    && fields["blocked_on"] == "human"
+                    && matches!(fields["ask"].as_str(), Some("permission" | "question" | "review"))
+                    && !matches!(fields["state"].as_str(), Some("indeterminate" | "unknown"))
             })
         });
         let Some(own) = own else {
@@ -1635,9 +1643,10 @@ impl Store {
             let superseded = recent.iter().any(|(_, body)| {
                 serde_json::from_str::<Value>(body).is_ok_and(|body| {
                     let fields = body.get("fields").unwrap_or(&body);
-                    fields["ownership_sequence"].as_u64()
-                        .zip(fields["transition_sequence"].as_u64())
-                        .is_some_and(|sequence| sequence > (ownership, transition))
+                    matches!(fields["state"].as_str(), Some("ready" | "working" | "idle" | "ended"))
+                        && fields["ownership_sequence"].as_u64()
+                            .zip(fields["transition_sequence"].as_u64())
+                            .is_some_and(|sequence| sequence > (ownership, transition))
                 })
             });
             return Ok(if superseded {
@@ -1655,17 +1664,26 @@ impl Store {
         for (claim, body) in &recent[..=own] {
             let body: Value = serde_json::from_str(body)?;
             let fields = body.get("fields").unwrap_or(&body);
+            // Staleness can publish an indeterminate snapshot with unchanged
+            // episode counters. Neither it nor unknown axes prove native closure.
+            if matches!(fields["state"].as_str(), Some("indeterminate" | "unknown"))
+                || fields["blocked_on"] == "unknown"
+                || fields["ask"] == "unknown"
+            {
+                continue;
+            }
             if fields["blocked_on"] != "human"
                 || !matches!(fields["ask"].as_str(), Some("permission" | "question" | "review"))
                 || fields["incarnation_id"] != own_fields["incarnation_id"]
                 || fields["ask"] != own_fields["ask"]
                 || fields["reason"] != own_fields["reason"]
-                || matches!(fields["state"].as_str(), Some("ended" | "indeterminate"))
+                || fields["state"] == "ended"
             {
                 return Ok(NativePromptState::Gone);
             }
             chain.push(claim.clone());
         }
+        let mut requested_answer = None;
         for claim in &chain {
             // Refused in the terminal, which only the screen showed.
             let refused: bool = connection
@@ -1679,11 +1697,15 @@ impl Store {
                 return Ok(NativePromptState::Gone);
             }
             if let Some(answer) = native_prompt_answer(&connection, claim)? {
-                return Ok(NativePromptState::Answered { answer });
+                requested_answer.get_or_insert(NativePromptState::Answered { answer });
             }
         }
-        Ok(native_prompt_sequence_resolution(&connection, seat, ownership, transition, i64::MAX as u64)?
-            .map_or(NativePromptState::Open, |(state, _)| state))
+        let durable = native_prompt_sequence_resolution(&connection, seat, ownership, transition, i64::MAX as u64)?
+            .map(|(state, _)| state);
+        if matches!(durable, Some(NativePromptState::Gone)) {
+            return Ok(NativePromptState::Gone);
+        }
+        Ok(requested_answer.or(durable).unwrap_or(NativePromptState::Open))
     }
 
     /// Record `actor`'s answer to the native prompt `episode` (the observation that opened it) of

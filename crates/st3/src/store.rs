@@ -57021,6 +57021,17 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             append("harness.observed", blocked(4), None);
             assert_eq!(store.native_prompt_state(seat, 1, 4).unwrap(), NativePromptState::Open, "{ask}");
             assert_eq!(store.observed_harness_at(seat, store.index().unwrap()).unwrap().unwrap().blocked_on.as_deref(), Some("human"));
+            // Staleness is uncertainty, not prompt dismissal. Its derived
+            // snapshot retains the driver's ownership/transition counters.
+            append("harness.observed", json!({
+                "state":"indeterminate", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":"unknown", "ask":"unknown", "reason":"stale",
+                "ownership_sequence":1, "transition_sequence":4
+            }), None);
+            assert_eq!(store.native_prompt_state(seat, 1, 4).unwrap(), NativePromptState::Open, "{ask}");
+            append("harness.observed", blocked(4), None);
+            assert_eq!(store.native_prompt_state(seat, 1, 4).unwrap(), NativePromptState::Open, "{ask}");
+            assert_eq!(store.observed_harness_at(seat, store.index().unwrap()).unwrap().unwrap().blocked_on.as_deref(), Some("human"));
             // A native timeout that ends the turn, unlike the hook's polling
             // timeout while a dialog stays open, retires the hold.
             append("harness.observed", json!({
@@ -57127,9 +57138,9 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
             }
         );
         let answered = store.observed_harness_at(seat, store.index().unwrap()).unwrap().unwrap();
-        assert!(answered.blocked_on.is_none());
-        assert!(answered.ask.is_none());
-        assert_eq!(answered.state, "idle");
+        assert_eq!(answered.blocked_on.as_deref(), Some("human"));
+        assert_eq!(answered.ask.as_deref(), Some("permission"));
+        // Recording the answer does not prove the native polling hook applied it.
         assert!(prompt().is_none(), "an answered prompt is no longer an alert");
         assert!(
             store

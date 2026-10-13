@@ -68,7 +68,7 @@ st conversations ls person/ada
 
 Claude's native permission, question and review dialogs hold new Smalltalk channel
 notifications outside the harness. Mail remains durable and releases in mailbox
-order once that prompt is answered or dismissed; a later session cannot inherit
+order once Claude applies the native answer or the dialog is dismissed; a later session cannot inherit
 the previous session's hold or answer. Native transcript receipt recovery still
 runs for mail already offered, so this hold does not erase delivery/read proof or
 replay uncertain handoffs. An unavailable or stale observation keeps new offers
@@ -76,9 +76,12 @@ held until current evidence returns.
 
 A permission hook's answer-poll timeout does **not** mean the dialog timed out:
 Claude can still be waiting for a terminal answer after that hook stops polling.
-The hold remains while that dialog is open. A native timeout that closes the prompt
-releases it when Claude reports the resolution or the terminal shows its input
-box again; an ended session leaves its mail for its successor.
+The hold remains while that dialog is open. Merely recording an answer in Smalltalk
+cannot release mail: an expired hook no longer receives that answer. Claude must
+apply the decision or its terminal must show the dialog has closed. A native timeout
+that closes the prompt releases it on that same positive evidence; an ended session
+leaves its mail for its successor. Stale or indeterminate observations never count
+as native closure, including after a fresh heartbeat restores the same episode.
 
 Attach an existing PNG, JPEG, GIF, or WebP image (up to four, at most 10 MiB each):
 

@@ -383,7 +383,9 @@ async fn notifications_held(client: &Client, subject: &str, agent_dir: &Path, wr
         Duration::from_secs(2),
         client.get::<crate::store::NativePromptState>(&path),
     ).await;
-    if !matches!(prompt, Ok(Ok(crate::store::NativePromptState::Gone | crate::store::NativePromptState::Answered { .. }))) {
+    // An answer recorded after the permission hook's polling deadline cannot
+    // reach Claude. Only native closure, not an answer request, releases mail.
+    if !matches!(prompt, Ok(Ok(crate::store::NativePromptState::Gone))) {
         return true;
     }
     // An answer to the previous prompt cannot release a new prompt that opened
@@ -780,14 +782,14 @@ mod tests {
             std::fs::write(&path, serde_json::to_vec(&record(ask, "human", "current", now)).unwrap()).unwrap();
             prompt.send_replace(NativePromptState::Open);
             assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
-            for resolved in [
-                NativePromptState::Answered { answer: "allow".into() },
-                NativePromptState::Answered { answer: "deny".into() },
-                NativePromptState::Gone,
-            ] {
-                prompt.send_replace(resolved);
-                assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
+            for answer in ["allow", "deny"] {
+                // The permission hook may have expired before this answer was
+                // recorded. The still-open native dialog remains authoritative.
+                prompt.send_replace(NativePromptState::Answered { answer: answer.into() });
+                assert!(notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
             }
+            prompt.send_replace(NativePromptState::Gone);
+            assert!(!notifications_held(&client, "agent/worker", dir.path(), "current").await, "{ask}");
         }
         for ask in ["none", "future-ask"] {
             std::fs::write(&path, serde_json::to_vec(&record(ask, "human", "current", now)).unwrap()).unwrap();
