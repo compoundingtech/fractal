@@ -404,6 +404,7 @@ export type AssistantAgentPage = {
   items: Array<AssistantAgentItem>;
   kind: "page";
   page: PageInfo;
+  sync?: SyncNotice;
 };
 
 export type AssistantAttentionItem = {
@@ -426,6 +427,7 @@ export type AssistantAttentionPage = {
   items: Array<AssistantAttentionItem>;
   kind: "page";
   page: PageInfo;
+  sync?: SyncNotice;
 };
 
 export type AssistantContentPage = (AssistantConversationContent | AssistantTerminalContent);
@@ -514,6 +516,7 @@ export type AssistantMissionPage = {
   items: Array<AssistantMissionItem>;
   kind: "page";
   page: PageInfo;
+  sync?: SyncNotice;
 };
 
 export type AssistantPageRequest = {

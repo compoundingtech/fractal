@@ -3949,6 +3949,8 @@ pub struct AssistantAttentionPage {
     pub filters: BTreeMap<String, String>,
     pub items: Vec<AssistantAttentionItem>,
     pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -3958,6 +3960,8 @@ pub struct AssistantMissionPage {
     pub filters: BTreeMap<String, String>,
     pub items: Vec<AssistantMissionItem>,
     pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -3967,6 +3971,8 @@ pub struct AssistantAgentPage {
     pub filters: BTreeMap<String, String>,
     pub items: Vec<AssistantAgentItem>,
     pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
