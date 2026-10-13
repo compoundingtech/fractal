@@ -1,8 +1,4 @@
 //! The actual stui binary on a daemon-less device, talking only to isolated members.
-#[macro_use]
-#[path = "../../../scripts/ci-test-paths.rs"]
-mod ci_test_paths;
-
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -11,11 +7,7 @@ use alacritty_terminal::{
     vte::ansi::Processor,
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use st3::{
-    api::AppState,
-    model::PersonAskRequest,
-    store::Store,
-};
+use st3::{api::AppState, model::PersonAskRequest, store::Store};
 use st3_client::{Client, PairingBegin};
 use std::{
     io::{Read, Write},
@@ -69,9 +61,9 @@ impl Tui {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_stui"));
+        let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_st3"));
         // This proves pairing and control, read off the classic layout's screens.
-        command.arg("--classic");
+        command.args(["ui", "--classic"]);
         command.env_clear();
         command.env("HOME", root);
         command.env("XDG_CONFIG_HOME", root.join("config"));
@@ -136,9 +128,14 @@ impl Tui {
 }
 
 fn state(root: &Path, node: &str) -> AppState {
-    let store = Store::open_memory(node).unwrap();
+    // These servers read while client actions write; shared-memory stores are sequential fixtures.
+    let store = Store::open(&root.join("graph.db"), node).unwrap();
     // Real pairing now enrolls a key; the member must hold its node authority to grant it.
-    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    store
+        .set_node_key(Arc::new(
+            smallclaims::fleet::MemberKey::generate().unwrap().0,
+        ))
+        .unwrap();
     AppState {
         store: Arc::new(store),
         notify: Arc::new(Notify::new()),
@@ -155,15 +152,33 @@ fn state(root: &Path, node: &str) -> AppState {
     }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
-    let intent = st3::graph::parse_intent("version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }", state.store.origin()).unwrap();
-    state.store.apply_internal(&intent, "tui-person-asker").unwrap();
-    let step = state.store.ask_person(&PersonAskRequest {
-        legacy_request: None, person: "person/avery".into(), title: title.into(),
-        reason: "Confirm on the remote member".into(), actor: format!("agent/{}.asker", state.store.origin()),
-        step: None, new_run: Some(name.into()), incarnation: None, idempotency_key: name.into(),
-        request: None,
-    }).unwrap();
-    state.event_notify.send_modify(|index| *index = state.store.index().unwrap());
+    let intent = st3::graph::parse_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    )
+    .unwrap();
+    state
+        .store
+        .apply_internal(&intent, "tui-person-asker")
+        .unwrap();
+    let step = state
+        .store
+        .ask_person(&PersonAskRequest {
+            legacy_request: None,
+            person: "person/avery".into(),
+            title: title.into(),
+            reason: "Confirm on the remote member".into(),
+            actor: format!("agent/{}.asker", state.store.origin()),
+            step: None,
+            new_run: Some(name.into()),
+            incarnation: None,
+            idempotency_key: name.into(),
+            request: None,
+        })
+        .unwrap();
+    state
+        .event_notify
+        .send_modify(|index| *index = state.store.index().unwrap());
     step.subject
 }
 
@@ -228,9 +243,10 @@ async fn pair(root: &Path, local: &Client, url: &str) {
 }
 
 async fn complete_challenge(root: &Path, url: &str, challenge: &st3_client::PairingChallenge) {
-    let mut child = Command::new(test_env!("CARGO_BIN_EXE_stui"))
+    let mut child = Command::new(test_env!("CARGO_BIN_EXE_st3"))
         .args([
-            "pair",
+            "devices",
+            "complete",
             url,
             &challenge.pairing_id,
             "--fingerprint",
@@ -420,12 +436,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     })
     .await;
     assert_eq!(
-        state
-            .store
-            .step_run(&online_step)
-            .unwrap()
-            .unwrap()
-            .status,
+        state.store.step_run(&online_step).unwrap().unwrap().status,
         "completed"
     );
 
@@ -474,12 +485,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     })
     .await;
     assert_eq!(
-        state
-            .store
-            .step_run(&offline_step)
-            .unwrap()
-            .unwrap()
-            .status,
+        state.store.step_run(&offline_step).unwrap().unwrap().status,
         "ready",
         "recovery must not replay offline input"
     );
@@ -583,12 +589,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
     })
     .await;
     assert_eq!(
-        state
-            .store
-            .step_run(&return_step)
-            .unwrap()
-            .unwrap()
-            .status,
+        state.store.step_run(&return_step).unwrap().unwrap().status,
         "completed"
     );
     drop(tui);
@@ -601,4 +602,264 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
         server.abort();
     }
     route.abort();
+}
+
+/// The designated timing client drives the actual binary against an isolated daemon. Both
+/// old timer intervals are exceeded; protocol pings keep the stream live without a read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inventory_screens_send_no_request_after_their_first_frames_for_more_than_a_minute() {
+    use serde_json::Value;
+    let member = tempfile::tempdir().unwrap();
+    let mut state = state(member.path(), "inventory-idle");
+    state.native_session_home = Some(member.path().join("native"));
+    std::fs::create_dir_all(state.native_session_home.as_ref().unwrap()).unwrap();
+    let socket = member.path().join("inventory.sock");
+    let app = st3::api::router(state);
+    let served = socket.clone();
+    let server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let client = Client::unix_as(&socket, "person/avery");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.capabilities().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (key, label, windows) in [
+        (
+            "4",
+            "inventory-fleet",
+            vec!["clients", "machines", "devices", "sessions"],
+        ),
+        ("5", "inventory-usage", vec!["usage-24"]),
+    ] {
+        let device = tempfile::tempdir().unwrap();
+        let log = device.path().join("timing.jsonl");
+        let events = device.path().join("events.jsonl");
+        let mut command = Command::new("python3");
+        command
+            .arg(repo.join("scripts/stui-test-client"))
+            .args([
+                "--binary",
+                test_env!("CARGO_BIN_EXE_st3"),
+                "--classic",
+                "--seconds",
+                "72",
+                "--label",
+                label,
+                "--keys",
+                key,
+            ])
+            .arg("--timing")
+            .arg(&log)
+            .arg("--events")
+            .arg(&events)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("HOME", device.path())
+            .env("XDG_CONFIG_HOME", device.path().join("config"))
+            .env("XDG_CACHE_HOME", device.path().join("cache"))
+            .env("XDG_STATE_HOME", device.path().join("state"))
+            .env("ST3_ENDPOINT", &socket)
+            .env("ST3_PERSON", "person/avery");
+        let output = tokio::task::spawn_blocking(move || command.output().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let rows = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let recorded = std::fs::read_to_string(&events)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let origin = rows.iter().find(|row| row["type"] == "start").unwrap()["epoch_ms"]
+            .as_u64()
+            .unwrap();
+        let idle = recorded
+            .iter()
+            .find(|row| row["type"] == "idle_start")
+            .unwrap()["epoch_ms"]
+            .as_u64()
+            .unwrap();
+        let end = recorded
+            .iter()
+            .find(|row| row["type"] == "idle_end")
+            .unwrap();
+        assert_eq!(
+            end["running"], true,
+            "the real client stayed alive throughout idle"
+        );
+        let mut ready = idle;
+        for window in windows {
+            let frames = rows
+                .iter()
+                .filter(|row| {
+                    row["type"] == "frame" && row["id"] == window && row["kind"] == "snapshot"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                frames.len(),
+                1,
+                "{label} must subscribe {window} once, without polling or resubscription: {rows:?}"
+            );
+            ready = ready.max(origin + frames[0]["at_ms"].as_u64().unwrap());
+        }
+        assert!(
+            end["epoch_ms"].as_u64().unwrap() - ready > 60_000,
+            "the idle oracle exceeds the longest old interval after all first frames"
+        );
+        let requests = rows
+            .iter()
+            .filter(|row| {
+                row["type"] == "request"
+                    && origin + row["at_ms"].as_u64().unwrap() > ready
+                    && origin + row["at_ms"].as_u64().unwrap() <= end["epoch_ms"].as_u64().unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            requests.is_empty(),
+            "idle {label} issued requests: {requests:?}"
+        );
+        let inventory_http = rows
+            .iter()
+            .filter(|row| row["type"] == "request")
+            .filter(|row| {
+                [
+                    "/v1/client/clients",
+                    "/v1/client/machines",
+                    "/v1/client/devices",
+                    "/v1/client/sessions",
+                    "/v1/client/terminals",
+                    "/v1/client/usage",
+                ]
+                .iter()
+                .any(|route| {
+                    row["route"]
+                        .as_str()
+                        .is_some_and(|actual| actual.starts_with(route))
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            inventory_http.is_empty(),
+            "a granted member uses the stream even on initial focus: {inventory_http:?}"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subscriptions() {
+    use axum::{
+        body::to_bytes,
+        middleware::{Next, from_fn},
+        response::IntoResponse,
+    };
+    use serde_json::Value;
+    let member = tempfile::tempdir().unwrap();
+    let mut state = state(member.path(), "older-inventory");
+    state.native_session_home = Some(member.path().join("native"));
+    std::fs::create_dir_all(state.native_session_home.as_ref().unwrap()).unwrap();
+    let app = st3::api::router(state).layer(from_fn(
+        |request: axum::extract::Request, next: Next| async move {
+            let capabilities = request.uri().path() == "/v1/client/capabilities";
+            let response = next.run(request).await;
+            if !capabilities {
+                return response;
+            }
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let mut value: Value = serde_json::from_slice(&bytes).unwrap();
+            value["value"]["capabilities"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|capability| capability["id"] != "inventory-collections");
+            (status, axum::Json(value)).into_response()
+        },
+    ));
+    let socket = member.path().join("older.sock");
+    let served = socket.clone();
+    let server = tokio::spawn(async move { st3::api::serve_unix(&served, app).await });
+    let client = Client::unix_as(&socket, "person/avery");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.capabilities().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let device = tempfile::tempdir().unwrap();
+    let log = device.path().join("legacy.jsonl");
+    let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut command = Command::new("python3");
+    command
+        .arg(repo.join("scripts/stui-test-client"))
+        .args([
+            "--binary",
+            test_env!("CARGO_BIN_EXE_st3"),
+            "--classic",
+            "--seconds",
+            "4",
+            "--label",
+            "older-inventory",
+            "--keys",
+            "4",
+        ])
+        .arg("--timing")
+        .arg(&log)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", device.path())
+        .env("XDG_CONFIG_HOME", device.path().join("config"))
+        .env("XDG_CACHE_HOME", device.path().join("cache"))
+        .env("XDG_STATE_HOME", device.path().join("state"))
+        .env("ST3_ENDPOINT", &socket)
+        .env("ST3_PERSON", "person/avery");
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    for route in [
+        "/v1/client/clients",
+        "/v1/client/machines",
+        "/v1/client/devices",
+        "/v1/client/sessions",
+    ] {
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["type"] == "request"
+                    && row["route"]
+                        .as_str()
+                        .is_some_and(|actual| actual.starts_with(route)))
+                .count(),
+            1,
+            "older member reads {route} once on focus: {rows:?}"
+        );
+    }
+    assert!(
+        !rows.iter().any(|row| row["type"] == "frame"
+            && ["clients", "machines", "devices", "sessions"]
+                .contains(&row["id"].as_str().unwrap_or_default())),
+        "unadvertised inventory windows are not attempted"
+    );
+    server.abort();
 }

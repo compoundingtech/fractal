@@ -1,13 +1,9 @@
-//! --slo reads local summaries before client configuration or terminal setup.
-#[macro_use]
-#[path = "../../../scripts/ci-test-paths.rs"]
-mod ci_test_paths;
-
+//! `st ui --slo` reads local summaries before client configuration or terminal setup.
 use std::{path::Path, process::Command};
 
 fn history(root: &Path) -> String {
-    let output = Command::new(test_env!("CARGO_BIN_EXE_stui"))
-        .arg("--slo")
+    let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+        .args(["ui", "--slo"])
         .env_remove("ST_AGENT")
         .env("HOME", root)
         .env("XDG_CACHE_HOME", root.join("cache"))
@@ -45,7 +41,7 @@ fn history_prints_every_fixed_measurement_and_its_historical_targets() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("cache/st3/stui/slo");
     std::fs::create_dir_all(&directory).unwrap();
-    let fixture = include_str!("fixtures/quality-hour.json");
+    let fixture = include_str!("../../stui/tests/fixtures/quality-hour.json");
     let file = directory.join("0.jsonl");
     std::fs::write(&file, fixture.replace('\n', "") + "\n").unwrap();
     let output = history(root.path());
