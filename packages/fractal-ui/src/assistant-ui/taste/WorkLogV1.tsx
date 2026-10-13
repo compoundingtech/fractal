@@ -32,7 +32,8 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   const [showSystemEvents, setShowSystemEvents] = React.useState(false)
   // Unclassified results (orphans) stay out of the default rows; one disclosure reveals them.
   const systemCalls = turn.calls.filter(call => call.kind === 'unknown')
-  const failedCall = turn.calls.find(call => call.status === 'error')
+  // A skipped call is not a failure, so it never becomes the failed command.
+  const failedCall = turn.calls.find(call => call.status === 'error' && !call.skipped)
   const failed = turn.failed && !turn.interrupted
   const workLabel = turn.running ? 'Working' : settled ? `Worked${durationLabel ? ` for ${durationLabel}` : ''}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
   const summary = [workLabel, settled && turn.commands ? `${turn.commands} ${turn.commands === 1 ? 'command' : 'commands'}` : undefined, settled && turn.messagesSent ? `${turn.messagesSent} ${turn.messagesSent === 1 ? 'message sent' : 'messages sent'}` : undefined, settled && turn.changedFiles ? `${turn.changedFiles} ${turn.changedFiles === 1 ? 'file changed' : 'files changed'}` : undefined].filter(value => value !== undefined).join(' · ')
