@@ -428,7 +428,7 @@ mod tests {
                 .header(LOCAL_PERSON_HEADER, "agent/test").body(Body::empty()).unwrap();
             read.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into()));
             let response = app.clone().oneshot(read).await.unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.status(), if path == "/v1/client/devices" { StatusCode::FORBIDDEN } else { StatusCode::OK });
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert!(!String::from_utf8(body.to_vec()).unwrap().contains(grant["grant"]["id"].as_str().unwrap()));
         }
