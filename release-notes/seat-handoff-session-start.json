@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A restarted seat is sent its handoff document and the live state of its work as its first message",
+  "replay": {
+    "status": "none",
+    "detail": "No existing claim kind or field changes. The daemon appends ordinary message.sent and runtime.reconcile-decision claims; an older daemon replaying them reads them as it reads any message or decision."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes or triggers change. Handoffs are ordinary documents named doc/agents/IDENTITY/handoff."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "A seat bound to an agent identity can no longer bind a document under doc/agents/ for another identity (document-not-yours). Writes outside doc/agents/ and writes by people are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "New command st agents handoff write|show, a new reserved message tag prefix st3-session-start:, and a new first message to a seat whose new incarnation becomes ready and that has a handoff or unfinished steps. A seat the daemon meets for the first time is baselined and sent nothing, so running seats are not messaged on upgrade."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No migration and no restart of any seat."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back stops the message; handoff documents remain readable as documents."
+  }
+}
