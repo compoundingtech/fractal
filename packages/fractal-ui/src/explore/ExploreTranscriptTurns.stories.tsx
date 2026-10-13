@@ -15,7 +15,7 @@ import { WorkLogV1 } from '../assistant-ui/taste/WorkLogV1'
 import { baselineTheme } from '../assistant-ui/neutral-theme'
 import { lightTheme } from '../assistant-ui/composition-theme'
 import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
-import { replyItems, turnBlocks, workTurn, type TurnBlock } from './turns-fixture'
+import { replyItems, turnBlocks, turnNames, workTurn, type TurnBlock } from './turns-fixture'
 import { turnsGeometry as geometry } from './turns-tokens.stylex'
 
 // The owner's pick: T1 sender Cards with unnamed seat Prose, K1 kind words (system notices as a muted Marker), M1 input
@@ -70,7 +70,7 @@ function Block({ block, previous }: { block: TurnBlock; previous?: TurnBlock }) 
     const adoptContent = () => {
       for (const region of element.querySelectorAll<HTMLElement>('[role="region"]')) {
         region.tabIndex = -1
-        region.setAttribute('aria-label', `${block.sender} · ${block.id}`)
+        region.setAttribute('aria-label', turnNames[block.id]!)
       }
     }
     adoptContent()
@@ -79,7 +79,7 @@ function Block({ block, previous }: { block: TurnBlock; previous?: TurnBlock }) 
     return () => observer.disconnect()
   }, [expanded, block.id, block.sender])
   const time = <time data-turn-time dateTime={block.at} {...stylex.props(styles.time)}>{clock(block.at)}</time>
-  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${block.id}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, styles.inlineCopy, styles.rowCopy, styles.layeredCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip {...stylex.props(styles.tooltip)}>{copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
+  const copy = <TooltipTrigger delay={0}><Button data-copy data-affordance="reveal" aria-label={`${copied ? 'Copied' : 'Copy'} ${turnNames[block.id]}`} onPress={async () => { await navigator.clipboard.writeText(block.text); setCopied(true) }} {...stylex.props(styles.copy, styles.inlineCopy, styles.rowCopy, styles.layeredCopy)}><Icon name={copied ? 'check' : 'copy'} scale="status" /></Button><Tooltip placement="start" {...stylex.props(styles.tooltip)}>{copied ? 'Copied' : 'Copy message'}</Tooltip></TooltipTrigger>
   // Copy leads the meta side, so at rest its hidden slot reads as free space beside the identity, not a hole
   // between the kind word and the time.
   const inputMeta = <span data-input-meta {...stylex.props(styles.inputMeta)}>{copy}<span data-input-kind>{block.kind}{!block.verified ? ' · Unverified' : ''}</span><span data-meta-time>{time}</span></span>
@@ -381,10 +381,40 @@ async function assertGutter(lane: HTMLElement) {
     await expect(gutter.querySelectorAll('[data-copy]')).toHaveLength(1)
     await expect(gutterFaults(seat, gutter, bounds)).toEqual([])
     const box = gutter.getBoundingClientRect(), run = seat.getBoundingClientRect()
-    const firstLine = seat.querySelector('[data-turn-content] p')!.getClientRects()[0]!
+    const firstLineRange = lane.ownerDocument.createRange()
+    firstLineRange.selectNodeContents(seat.querySelector('[data-turn-content] p')!)
+    const firstLine = firstLineRange.getClientRects()[0]!
     const previous = (seat.previousElementSibling as HTMLElement).getBoundingClientRect()
     await expect(getComputedStyle(gutter).position === 'absolute', `gutter beside the text at ${bounds.width}px`).toBe(beside)
     if (beside) {
+      const copy = gutter.querySelector<HTMLElement>('[data-copy]')!
+      const time = gutter.querySelector<HTMLElement>('[data-turn-time]')!
+      const tips = () => Array.from(lane.ownerDocument.querySelectorAll<HTMLElement>('[role="tooltip"]')).filter(tip => tip.textContent === 'Copy message')
+      const assertClearTime = async (modality: string) => {
+        await waitFor(() => {
+          expect(tips(), `Copy tooltip opens on ${modality}`).toHaveLength(1)
+          expect(intersects(tips()[0]!.getBoundingClientRect(), time.getBoundingClientRect()), `Copy tooltip clears time on ${modality}`).toBe(false)
+        })
+        // Move the real tooltip over the time: the same geometry predicate must reject it.
+        const tip = tips()[0]!
+        const original = tip.style.cssText
+        const rect = time.getBoundingClientRect()
+        Object.assign(tip.style, { position: 'fixed', inset: 'auto', left: `${rect.left}px`, top: `${rect.top}px`, transform: 'none' })
+        await expect(intersects(tip.getBoundingClientRect(), rect), 'covered-time negative control').toBe(true)
+        tip.style.cssText = original
+        await expect(intersects(tip.getBoundingClientRect(), rect)).toBe(false)
+      }
+      await userEvent.keyboard('{Escape}')
+      await userEvent.tab()
+      copy.focus()
+      await assertClearTime('keyboard focus')
+      copy.blur()
+      await waitFor(() => expect(tips()).toHaveLength(0))
+      copy.scrollIntoView({ block: 'center' })
+      await userEvent.hover(copy)
+      await assertClearTime('hover')
+      await userEvent.unhover(copy)
+      await waitFor(() => expect(tips()).toHaveLength(0))
       // Right of the run beside its first line, taking no row: the block keeps the plain 8px gap.
       await expect(box.left).toBeGreaterThanOrEqual(run.right + 8 - 0.5)
       await expect(box.top).toBeGreaterThanOrEqual(firstLine.top - 0.5)
@@ -547,6 +577,9 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
       const inFlow = seatToolbar !== undefined
       await expect(reservedMetaHeight(block)).toBe(inFlow ? 16 : 0)
       // Every block carries exactly its own time.
+      const name = turnNames[block.getAttribute('data-turn-block')!]!
+      await expect(block.querySelector('[data-copy]')).toHaveAccessibleName(`Copy ${name}`)
+      for (const region of block.querySelectorAll('[role="region"]')) await expect(region).toHaveAccessibleName(name)
       await expect(block.querySelectorAll('time[data-turn-time]')).toHaveLength(1)
       const next = blocks[index + 1]
       if (next === undefined) continue

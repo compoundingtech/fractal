@@ -3,6 +3,19 @@ import type { WorkLogTurn } from '../assistant-ui/taste/work-log'
 
 export type TurnKind = 'Person' | 'Agent' | 'Relay' | 'System' | 'Seat'
 export interface TurnBlock { readonly id: string; readonly kind: TurnKind; readonly sender: string; readonly text: string; readonly at: string; readonly verified: boolean; readonly subject?: string }
+export const turnNames: Readonly<Record<string, string>> = {
+  'relay-hold': 'Merge hold announcement',
+  'reply-hold': 'Merge hold reply',
+  'relay-release': 'Merge release announcement',
+  'reply-release': 'Merge release reply',
+  'relay-routing': 'Model routing announcement',
+  'reply-routing': 'Model routing reply',
+  'relay-resume': 'Resume request',
+  'reply-resume': 'Resume reply',
+  human: 'Alex’s coverage request',
+  mail: 'Retained review update',
+  notice: 'Session restored notice',
+}
 // Exact screenshot prose; only scanner-flagged tokens receive equal-length substitutions.
 // The fourth reply is transcribed from the approved clearer screenshot (9:49 reply).
 export const turnBlocks: readonly TurnBlock[] = [
