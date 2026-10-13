@@ -753,7 +753,8 @@ async function assertProjection(canvasElement: HTMLElement, expandedBlock?: HTML
     }, { timeout: 2000 })
     // Hidden dots join the flex parts; name computation may pad them with spaces.
     await expect(identity).toHaveAccessibleName(/^Workspace\s*\.\s*Review$/)
-    await expect(identity.textContent).toBe('Workspace.Review')
+    // At 440 the parent folds rather than show one letter; the visible '…' is decorative and the hidden text keeps the identity.
+    await expect(identity.textContent?.replace(/…/g, '')).toBe('Workspace.Review')
     // Keyboard focus on an off-screen trigger scrolls it into view; that scroll must not close the tooltip it opened.
     view.scrollTo(0, identity.getBoundingClientRect().top + view.scrollY + view.innerHeight)
     await settle()
