@@ -140,7 +140,9 @@ jobs:
                   online = sum(status == "online" and bool(labels & {pool, pool + "-priority", pool + "-merge"})
                                for status, busy, labels in by_id.values())
                   free = sum(bool(labels & {pool, pool + "-priority", pool + "-merge"}) for labels in idle.values())
-                  print(f'{pool}: {online} online, {free} idle visible to runner read token', file=summary)
+                  census = f'{pool}: {online} online, {free} idle visible to runner read token'
+                  print(census)
+                  print(census, file=summary)
               def candidates(label):
                   return [key for key, labels in idle.items() if label in labels]
               def choose(suffix=""):

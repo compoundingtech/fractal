@@ -64,6 +64,8 @@ def check(name, pages, expected=None, api=True, **overrides):
                     (line.split('=', 1) for line in output.read_text().splitlines())}
         expected = expected if isinstance(expected, dict) else ({'ci1': [expected]} if expected else {})
         assert selected == expected, (name, selected, expected)
+        if 'idle visible to runner read token' in summary.read_text():
+            assert 'idle visible to runner read token' in result.stdout, (name, 'census must be retained in ordinary job logs')
         assert calls.exists() == api, (name, "unexpected API call")
         assert (any("**" + label[0].split("-")[0] + "**" in summary.read_text() for label in expected.values()) if expected else "**Namespace**" in summary.read_text()), name
         print(f"passed: {name}")
@@ -205,7 +207,9 @@ assert 'ubuntu-latest' in release, 'installer checks and assembly stay off compi
 release_blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", release.split("\njobs:\n", 1)[1]))
 for job in ('assemble', 'publish'):
     assert 'runs-on: ubuntu-latest' in release_blocks[job], (job, 'artifact verification must not wait for a compiler runner')
-assert "fromJSON(needs['pick-runner'].outputs.ci1" in (ROOT / '.github/workflows/release-portable.yml').read_text()
+portable = (ROOT / '.github/workflows/release-portable.yml').read_text()
+assert "fromJSON(needs['pick-runner'].outputs.ci1" in portable
+assert "if: ${{ !cancelled() }}" in portable, 'picker failure cannot silently skip a portable release'
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/release-daily.yml').read_text()
 assert "linux-tests-shard-2" in blocks["linux-gate"], "both shards must be required"
 assert 'CI_TEST_PARTITION: "hash:1/2"' in blocks["linux-tests"]

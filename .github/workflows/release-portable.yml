@@ -115,7 +115,9 @@ jobs:
                   online = sum(status == "online" and bool(labels & {pool, pool + "-priority", pool + "-merge"})
                                for status, busy, labels in by_id.values())
                   free = sum(bool(labels & {pool, pool + "-priority", pool + "-merge"}) for labels in idle.values())
-                  print(f'{pool}: {online} online, {free} idle visible to runner read token', file=summary)
+                  census = f'{pool}: {online} online, {free} idle visible to runner read token'
+                  print(census)
+                  print(census, file=summary)
               def candidates(label):
                   return [key for key, labels in idle.items() if label in labels]
               def choose(suffix=""):
@@ -156,6 +158,7 @@ jobs:
           CACHE_REASON: Only reads organization runner metadata; checks out and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   linux-x86_64:
+    if: ${{ !cancelled() }}
     needs: [pick-runner]
     runs-on: ${{ fromJSON(needs['pick-runner'].outputs.ci1 || '["ci1-priority"]') }}
     timeout-minutes: 30

@@ -30,6 +30,7 @@ export default githubWorkflow(auditCaches({
   "jobs": {
     "pick-runner": priorityRunnerJob,
     "linux-x86_64": {
+      "if": "${{ !cancelled() }}",
       "needs": ["pick-runner"],
       "runs-on": releaseLinuxRunner,
       "timeout-minutes": 30,
