@@ -2259,3 +2259,5 @@ A current generation with pending or blocked work at readiness 0 shares first-re
 priority even after another step completes. The existing predicate evaluator decides which
 steps can become ready. Runs are newest-first within each priority group, and all active
 run IDs remain in the finite snapshot; new arrivals enter the following snapshot.
+
+A lease expiry returns work to ready without consuming a retry attempt; its reason and the prior worker’s wake give the expiry and recorded renewal acceptance times (older quiet rows show request time with acceptance time unknown), while a new claim is required to resume.

@@ -9286,8 +9286,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         )?;
                         return Ok(changed);
                     }
-                    if view.status == "ready"
-                        && view.blocked_reason.as_deref() == Some("the worker lease expired")
+                    if matches!(view.status.as_str(), "ready" | "blocked")
+                        && view.blocked_reason.as_deref().is_some_and(|reason| reason.starts_with("the worker lease expired"))
                     {
                         if self.step_timed_out(view, &step)? {
                             changed |= self.expire_step_timeout(view, &step)?;
@@ -18051,6 +18051,7 @@ pub(crate) mod tests {
     mod first_readiness_tests;
     mod gate_on_demand;
     mod readiness_priority_tests;
+    mod lease_expiry_tests;
     mod github_watch_selection;
     mod incremental_deadlines;
     pub(crate) mod mission_eval_reuse;

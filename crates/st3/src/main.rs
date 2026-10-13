@@ -67,6 +67,8 @@ mod completion;
 mod doctor_cli;
 #[cfg(test)]
 mod follow_tests;
+#[cfg(test)]
+mod lease_expiry_show_tests;
 mod presentation;
 
 use presentation::{
