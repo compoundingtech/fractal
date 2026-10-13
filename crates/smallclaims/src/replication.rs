@@ -462,6 +462,9 @@ pub struct ReplicationPeerStatus {
     /// inventory make the projection comparison premature.
     #[serde(default)]
     pub projection_comparison_waiting: bool,
+    /// Why the comparison is premature, in words; absent when it is not waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection_comparison_waiting_reason: Option<String>,
     /// How far apart the two envelope sets were at the last exchange that measured them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<ReplicationPeerSync>,

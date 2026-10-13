@@ -86,3 +86,46 @@ fn local_claims_wait_until_their_envelopes_and_peer_comparison_are_current() {
         "unsealed local claims were reported comparable"
     );
 }
+#[test]
+fn a_comparison_made_at_an_aligned_exchange_survives_envelopes_that_arrive_afterwards() {
+    let source = node("alder");
+    let target = node("birch");
+    let other = node("cedar");
+    let mut summary = source.export_replication_summary(FLEET).unwrap();
+    summary
+        .projection_digests
+        .insert("documents".into(), "different".into());
+    target
+        .receive_replication_exchange("alder", FLEET, &summary)
+        .unwrap();
+    let view = status(&target);
+    assert!(!view.peers[0].projection_comparison_waiting);
+    assert_eq!(view.peers[0].differing_tables, vec!["documents"]);
+    // Another peer delivers an envelope. This node's inventory moves on, and alder's stored
+    // inventory is now older than it, though the comparison made at the aligned exchange holds.
+    other
+        .append_claim(&ClaimInput {
+            subject: "note/sample".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let from_other = other
+        .export_replication_exchange(FLEET, &ReplicationInventory::default())
+        .unwrap();
+    target
+        .receive_replication_exchange("cedar", FLEET, &from_other)
+        .unwrap();
+    let view = status(&target);
+    let peer = &view.peers[0];
+    assert!(
+        !peer.projection_comparison_waiting,
+        "a newer inventory made the earlier comparison premature: {peer:?}"
+    );
+    assert_eq!(peer.differing_tables, vec!["documents"]);
+    assert_eq!(peer.projection_comparison_waiting_reason, None);
+}
