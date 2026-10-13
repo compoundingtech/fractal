@@ -208,8 +208,8 @@ fn digest_mismatched_message_operation_repair_persists_across_reopen() {
         claim.body
     );
     assert_eq!(
-        store.claim_signature(&claim.id).unwrap().unwrap().nonce,
-        signature.nonce
+        serde_json::to_value(store.claim_signature(&claim.id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&signature).unwrap()
     );
     drop(store);
     let reopened = Store::open(&path, "fixture").unwrap();
@@ -228,8 +228,8 @@ fn digest_mismatched_message_operation_repair_persists_across_reopen() {
         (digest, claim.id.clone(), "active".into())
     );
     assert_eq!(
-        reopened.claim_signature(&claim.id).unwrap().unwrap().nonce,
-        signature.nonce
+        serde_json::to_value(reopened.claim_signature(&claim.id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&signature).unwrap()
     );
 }
 
@@ -284,8 +284,8 @@ fn resolved_message_operation_conflict_does_not_replay_for_another_receipt() {
     );
     assert_eq!(store.claim_by_id(&incoming.id).unwrap().unwrap().body, body);
     assert_eq!(
-        store.claim_signature(&original.id).unwrap().unwrap().nonce,
-        signature.nonce
+        serde_json::to_value(store.claim_signature(&original.id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(&signature).unwrap()
     );
     drop(store);
     let reopened = Store::open(&path, "fixture").unwrap();
@@ -436,6 +436,26 @@ fn message_operation_reconciliation_matches_replay_for_orders_tombstones_and_rep
             reopened.project_replication_backlog().unwrap();
             assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
             assert_eq!(operation_rows(&reopened.readers.get()), before);
+            // Another receipt exercises the keyed reducer with a retained tombstone,
+            // including a minimum digest for which no stored claim remains.
+            {
+                let mut connection = reopened.connection.write();
+                let tx = connection.transaction().unwrap();
+                append_claim_record_tx(&tx, "invented-other-peer", "message/invented-parity",
+                    "message.sent", Some("person/example"), &json!({"fields":{
+                        "from":"person/example", "to":"agent/invented", "content":"Another receipt", "status":"sent"
+                    }, "_operation":{"id":"op/invented-parity", "request_digest":digests[1]}}), &[], None).unwrap();
+                tx.commit().unwrap();
+            }
+            reopened.project_replication_backlog().unwrap();
+            assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+            assert_eq!(
+                operation_tx(&reopened.readers.get(), "op/invented-parity")
+                    .unwrap()
+                    .unwrap()
+                    .2,
+                expected_state
+            );
             assert_operation_replay_parity(&reopened);
         }
     }
