@@ -385,3 +385,11 @@ devices, native sessions and terminal lists on the collection socket. The
 `collection_refresh_tests::*_inventory_*` real-socket tests cover source changes,
 frame schema and typed decoding, reconnect snapshots, invalid subscription
 filters/limits, active-device retirement and native filesystem/process events.
+
+The phone uses the same `collections.inventory` reads, covered by the real-socket
+tests above, while the screen displaying each inventory is focused. Its Node
+`inventoryFeed.test.mjs` checks the client layer: shared slots, selected usage
+periods, ordered updates, explicit refresh snapshots, reconnect, background and
+grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
+`collectionSocket.test.mjs` checks authentication and control-event delivery at
+the native bridge boundary; it does not claim an iOS simulator was driven.

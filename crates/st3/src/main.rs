@@ -58,6 +58,7 @@ use completion::{Complete, Entity, WorkFilter};
 mod cli_help;
 mod directive_note;
 mod completion;
+mod doctor_cli;
 #[cfg(test)]
 mod follow_tests;
 mod presentation;
@@ -77,6 +78,8 @@ use presentation::{
     about = "Coordinate durable agent work across machines without losing operational truth"
 )]
 struct Cli {
+    #[arg(long, global = true, hide = true)]
+    read_contract_inventory_json: bool,
     #[arg(long, global = true)]
     endpoint: Option<String>,
     #[arg(long, global = true, hide = true)]
@@ -2610,6 +2613,9 @@ enum TraceCommand {
 
 #[derive(Args)]
 struct DoctorArgs {
+    /// Inspect local source-build tools instead of daemon health; does not compile or contact GitHub.
+    #[arg(long, conflicts_with = "performance")]
+    developer: bool,
     #[arg(long)]
     strict: bool,
     /// Show only the slowest requests and queries over the last five minutes.
@@ -3583,7 +3589,7 @@ enum GhCommand {
     /// the close or merge, or the deadline, ends the watch. Watching
     /// it again keeps the watch and takes the new deadline.
     #[command(
-        after_help = "Examples:\n  st gh watch acme/garden#12\n  st gh watch https://github.com/acme/garden/pull/12 --until 4h"
+        after_help = "Examples:\n  st gh watch acme/garden#12\n  st gh watch https://github.com/acme/garden/pull/12 --until 4h\n  st gh watch acme/garden#12 --until none"
     )]
     Watch(GhWatchArgs),
     /// End this seat's watch on an issue or pull request.
@@ -3638,7 +3644,7 @@ struct GhOwnArgs {
 struct GhWatchArgs {
     /// OWNER/REPO#NUMBER, or the issue or pull request URL.
     thread: String,
-    /// End the watch at this time: a duration such as 4h, or an RFC 3339 time.
+    /// End after 14 days by default; use a duration such as 4h, an RFC 3339 time, or none for no deadline.
     #[arg(long)]
     until: Option<String>,
     #[arg(long = "as", env = "ST_AGENT")]
@@ -4234,6 +4240,11 @@ enum MessageCommand {
     /// A message is a direct connection: it wakes the recipient agent for a full turn,
     /// which rereads its context. A reply that only acknowledges or reports is `--kind silent`.
     Reply(MessageReplyArgs),
+    /// Wait up to a deadline for a reply from one sender, and print the reply or `no reply`.
+    ///
+    /// The reply is marked read for the waiting seat, so native delivery does not hand it over
+    /// again as a separate turn. Without `--after` only messages sent after the wait began count.
+    Wait(MessageWaitArgs),
     /// Close exact messages after their related action is complete.
     Archive(MessageArchiveArgs),
     /// Archive unread mail past an age threshold as each recipient.
@@ -4408,6 +4419,26 @@ struct MessageReplyArgs {
     /// replied to, the words and attachments, as for `send`.
     #[arg(long)]
     idempotency_key: Option<String>,
+}
+
+#[derive(Args)]
+struct MessageWaitArgs {
+    /// The seat waiting for the reply; defaults to the non-empty ST_AGENT value.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as")]
+    actor: Option<String>,
+    /// Whose reply to wait for, for example `person/ada`.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "from")]
+    sender: String,
+    /// Count a reply sent after this message, for a question sent just before the wait began.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Message)))]
+    #[arg(long)]
+    after: Option<String>,
+    /// How long to wait, such as 30s or 2m, at most 10m (issue the wait again for longer). Zero
+    /// checks once and returns.
+    #[arg(long, default_value = "30s")]
+    timeout: String,
 }
 
 #[derive(Args)]
@@ -4668,10 +4699,79 @@ impl std::fmt::Display for CommandExit {
 
 impl std::error::Error for CommandExit {}
 
+fn read_contract_inventory_for_command(mut command: clap::Command) -> Value {
+    fn walk(
+        command: &clap::Command,
+        prefix: &str,
+        output: &mut BTreeSet<String>,
+        aliases: &mut BTreeMap<String, Vec<String>>,
+    ) {
+        let children = command
+            .get_subcommands()
+            .filter(|child| child.get_name() != "help")
+            .collect::<Vec<_>>();
+        if prefix != "st" && (children.is_empty() || !command.is_subcommand_required_set()) {
+            output.insert(prefix.to_owned());
+        }
+        for child in children {
+            let path = format!("{prefix} {}", child.get_name());
+            let mut names = child
+                .get_all_aliases()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            if !names.is_empty() {
+                aliases.insert(path.clone(), names);
+            }
+            walk(child, &path, output, aliases);
+        }
+    }
+
+    command.build();
+    let mut commands = BTreeSet::new();
+    let mut aliases = BTreeMap::new();
+    walk(&command, "st", &mut commands, &mut aliases);
+    json!({
+        "kind": "st3.cli-inventory.v1",
+        "modes": ["human", "json"],
+        "commands": commands,
+        "aliases": aliases,
+    })
+}
+
+fn read_contract_inventory_json() -> Value {
+    read_contract_inventory_for_command(Cli::command())
+}
+
+fn read_contract_inventory_request(arguments: &[std::ffi::OsString]) -> Option<bool> {
+    const FLAG: &str = "--read-contract-inventory-json";
+    let present = arguments
+        .iter()
+        .skip(1)
+        .take_while(|argument| argument.as_os_str() != std::ffi::OsStr::new("--"))
+        .any(|argument| {
+            argument == FLAG || argument.to_string_lossy().starts_with(&format!("{FLAG}="))
+        });
+    present.then(|| arguments.len() == 2 && arguments[1] == FLAG)
+}
+
 fn main() -> ExitCode {
     // A recorder link starts st3 as `git` or `gh`. It must not build the async runtime.
     if let Some(program) = st3::recorder::invoked_program() {
         st3::recorder::run(program);
+    }
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    match read_contract_inventory_request(&arguments) {
+        Some(true) => {
+            println!("{}", read_contract_inventory_json());
+            return ExitCode::SUCCESS;
+        }
+        Some(false) => {
+            eprintln!("st: --read-contract-inventory-json must be used alone");
+            return ExitCode::from(2);
+        }
+        None => {}
     }
     // What `st clients` lists for this process: its name and build, as reported.
     st3_client::set_client_name(format!("st {}", st_drivers::version::machine_version()));
@@ -4706,7 +4806,6 @@ fn main() -> ExitCode {
         st_drivers::provider_session::install_stop_handlers();
         st_drivers::reexec::unblock_stop_signals();
     }
-    let arguments = std::env::args_os().collect::<Vec<_>>();
     if let Some(stui) = bare_st_opens(
         arguments.len(),
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
@@ -4925,7 +5024,8 @@ fn record_daemon_commands(args: &UpArgs) {
 
 #[tokio::main]
 async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
-    if matches!(&cli.command, Command::Driver(_)) {
+    let native_driver = matches!(&cli.command, Command::Driver(_));
+    if native_driver {
         st3::telemetry::local_only();
     }
     let _telemetry = (!matches!(
@@ -4958,7 +5058,13 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
             if let Some(exit) = error.downcast_ref::<CommandExit>() {
                 return ExitCode::from(exit.0);
             }
-            eprintln!("st: {}", plain_error(&error));
+            let message = if native_driver {
+                plain_error(&error)
+            } else {
+                doctor_cli::human_outage_message(&error)
+                    .unwrap_or_else(|| plain_error(&error))
+            };
+            eprintln!("st: {message}");
             if refused_command(&error) {
                 st3::gate_report::note_refusal(&plain_error(&error));
             }
@@ -11061,11 +11167,38 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
             }
             anyhow::bail!("the daemon is starting; the API is not ready");
         }
+        Err(error) if st3::client::daemon_unreachable(&error).is_some() => {
+            if json_output {
+                let message = doctor_cli::human_outage_message(&error)
+                    .unwrap_or_else(|| plain_error(&error));
+                print_value(&json!({"status": "fail", "checks": [{
+                    "name": "daemon", "status": "fail", "message": message
+                }]}), true)?;
+            }
+            Err(error)
+        }
         outcome => outcome,
     }
 }
 
 async fn run_doctor(client: &Client, args: DoctorArgs, json_output: bool) -> Result<()> {
+    if args.developer {
+        let environment = st3::environment::snapshot()?;
+        let check = doctor_cli::developer_tools(&environment);
+        if json_output {
+            print_value(
+                &json!({"status": check.status, "scope": "local developer tools", "checks": [check]}),
+                true,
+            )?;
+        } else {
+            println!("{}\t{}\t{}", check.status, check.name, check.message);
+        }
+        anyhow::ensure!(
+            !args.strict || check.status != "warn",
+            "st doctor found a computed warning in strict mode"
+        );
+        return Ok(());
+    }
     let readiness = client.socket_path().and_then(st3::startup::read);
 
     if args.performance {
@@ -16797,6 +16930,29 @@ async fn run_message(
             };
             print_message_receipt(&receipt, json_output)
         }
+        MessageCommand::Wait(args) => {
+            let actor = message_list_identity(args.actor, std::env::var("ST_AGENT").ok())?;
+            reject_foreign_agent_actor(&actor)?;
+            let sender = normalize_message_subject(&args.sender);
+            let timeout = parse_timeout(&args.timeout)?;
+            anyhow::ensure!(
+                timeout <= MAX_REPLY_WAIT,
+                "a wait lasts at most 10m; issue it again to wait longer"
+            );
+            let after = match args.after.as_deref() {
+                Some(reference) => Some(read_message(client, reference).await?.created_index),
+                None => None,
+            };
+            let reply = wait_for_reply(client, &actor, &sender, after, timeout).await?;
+            let reply = match reply {
+                Some(message) => {
+                    Some(read_message_after_lifecycle(client, &message.subject, &actor, false).await?)
+                }
+                None => None,
+            };
+            sync_message_projection(client).await?;
+            print_reply_wait(reply.as_ref(), json_output)
+        }
         MessageCommand::Cleanup { all, actor, older_than, dry_run } => {
             if let Some(actor) = actor.as_deref() {
                 reject_foreign_agent_actor(actor)?;
@@ -17562,6 +17718,127 @@ fn normalize_message_reference(reference: &str) -> String {
     };
     let reference = urlencoding::decode(reference).unwrap_or(std::borrow::Cow::Borrowed(reference));
     reference.trim_start_matches("message/").to_owned()
+}
+
+/// The earliest message to `actor` from `sender` that arrived after `after`.
+fn earliest_reply(messages: Vec<MessageView>, sender: &str, after: u64) -> Option<MessageView> {
+    messages
+        .into_iter()
+        .filter(|message| {
+            message.from == sender
+                && message.created_index > after
+                && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+        })
+        .min_by_key(|message| message.created_index)
+}
+
+async fn unread_replies(client: &Client, actor: &str, sender: &str, after: u64) -> Result<Option<MessageView>> {
+    let mut candidates = Vec::new();
+    for_each_message(client, Some(actor), false, |message| {
+        candidates.push(message);
+        Ok(())
+    })
+    .await?;
+    Ok(earliest_reply(candidates, sender, after))
+}
+
+/// The longest one wait holds a tool call and a connection; a longer wait is issued again.
+const MAX_REPLY_WAIT: Duration = Duration::from_secs(600);
+
+/// The least time between two reads of the event feed by one wait, so a busy store cannot make a
+/// waiting seat poll.
+const REPLY_WAIT_PACE: Duration = Duration::from_millis(500);
+
+/// Whether an event may be new mail from `sender` to `actor`. An event whose body names its
+/// endpoints is judged by them; one that does not is a candidate the message itself settles.
+fn may_be_reply(event: &EventRecord, actor: &str, sender: &str) -> bool {
+    if event.kind != "message.sent" || !event.subject.starts_with("message/") {
+        return false;
+    }
+    let endpoint = |name: &str| event.body.pointer(&format!("/fields/{name}")).and_then(Value::as_str);
+    endpoint("to").is_none_or(|to| to == actor) && endpoint("from").is_none_or(|from| from == sender)
+}
+
+/// Wait until `sender` writes to `actor` or the deadline passes. The graph's event feed wakes the
+/// wait, but only a `message.sent` event addressed to the seat from the sender costs a read, and
+/// that read is the one message it names, never the mailbox. The mailbox is listed once, and only
+/// for `--after`, to find a reply that landed before the wait began. Event reads are paced.
+async fn wait_for_reply(
+    client: &Client,
+    actor: &str,
+    sender: &str,
+    after: Option<u64>,
+    timeout: Duration,
+) -> Result<Option<MessageView>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    // Capture the index before looking, so a message that lands during the look is still on the
+    // event feed from this cursor.
+    let health: Value = client.get("/v1/health").await?;
+    let started = health["store_index"]
+        .as_u64()
+        .context("the daemon health response has no store index")?;
+    let floor = after.unwrap_or(started);
+    if after.is_some()
+        && let Some(message) = unread_replies(client, actor, sender, floor).await?
+    {
+        return Ok(Some(message));
+    }
+    let mut cursor = started;
+    let mut event_feed = LocalEventFeed::default();
+    let mut last_read: Option<tokio::time::Instant> = None;
+    loop {
+        let mut remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if let Some(last) = last_read {
+            let pause = REPLY_WAIT_PACE.saturating_sub(last.elapsed()).min(remaining);
+            if !pause.is_zero() {
+                tokio::time::sleep(pause).await;
+                remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            }
+        }
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        last_read = Some(tokio::time::Instant::now());
+        let wait_ms = remaining.as_millis().clamp(1, 30_000);
+        let page = event_feed
+            .read(client, &format!("after={cursor}&wait=true&timeout_ms={wait_ms}"))
+            .await?;
+        for event in &page.items {
+            if event.store_index <= floor || !may_be_reply(event, actor, sender) {
+                continue;
+            }
+            let message = read_message(client, &event.subject).await?;
+            if message.from == sender
+                && message.to == actor
+                && message.created_index > floor
+                && matches!(message.status.as_str(), "sent" | "staged" | "delivered")
+            {
+                return Ok(Some(message));
+            }
+        }
+        if let Some(scanned) = page.next_after {
+            cursor = cursor.max(scanned);
+        }
+        // A full page means more events are waiting: read the next one without a pause.
+        if page.items.len() >= 200 {
+            last_read = None;
+        }
+    }
+}
+
+fn print_reply_wait(reply: Option<&MessageView>, json_output: bool) -> Result<()> {
+    match (reply, json_output) {
+        (Some(message), true) => print_value(&json!({"reply": true, "message": message}), true),
+        (None, true) => print_value(&json!({"reply": false}), true),
+        (Some(message), false) => {
+            println!("{}", message.content);
+            Ok(())
+        }
+        (None, false) => {
+            println!("no reply");
+            Ok(())
+        }
+    }
 }
 
 async fn sync_message_projection(client: &Client) -> Result<()> {
@@ -28568,6 +28845,73 @@ mod tests {
             offered, documented,
             "Update the inventory and its end-to-end coverage when the CLI changes"
         );
+    }
+
+    #[test]
+    fn machine_read_inventory_comes_from_the_live_clap_graph() {
+        let inventory = read_contract_inventory_json();
+        assert_eq!(inventory["modes"], json!(["human", "json"]));
+        assert!(inventory["aliases"].is_object());
+        let with_alias = read_contract_inventory_for_command(
+            clap::Command::new("st").subcommand(clap::Command::new("invented").alias("i")),
+        );
+        let changed_alias = read_contract_inventory_for_command(
+            clap::Command::new("st").subcommand(clap::Command::new("invented").alias("j")),
+        );
+        assert_eq!(with_alias["aliases"]["st invented"], json!(["i"]));
+        assert_eq!(changed_alias["aliases"]["st invented"], json!(["j"]));
+        assert_ne!(with_alias["aliases"], changed_alias["aliases"]);
+        assert!(inventory.get("source_head").is_none());
+        assert!(inventory.get("source_tree").is_none());
+        let reported = inventory["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|command| command.as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        let visible: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/action-coverage.json"
+        ))
+        .unwrap();
+        for row in visible["cli"].as_array().unwrap() {
+            assert!(reported.contains(row["command"].as_str().unwrap()));
+        }
+        assert!(reported.contains("st claude-channel install-policy"));
+        assert!(!reported.contains("st help"));
+    }
+
+    #[test]
+    fn machine_read_inventory_probe_is_exclusive_before_actions() {
+        let args = |words: &[&str]| words.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            read_contract_inventory_request(&args(&["st", "--read-contract-inventory-json"])),
+            Some(true)
+        );
+        for mixed in [
+            vec!["st", "--read-contract-inventory-json", "documents", "put"],
+            vec!["st", "documents", "put", "--read-contract-inventory-json"],
+            vec!["st", "--read-contract-inventory-json=true"],
+        ] {
+            assert_eq!(read_contract_inventory_request(&args(&mixed)), Some(false));
+        }
+        for literal in [
+            "--read-contract-inventory-json",
+            "--read-contract-inventory-json=true",
+        ] {
+            assert_eq!(
+                read_contract_inventory_request(&args(&["st", "documents", "put", "--", literal])),
+                None
+            );
+            assert_eq!(
+                read_contract_inventory_request(&args(&["st", "driver", "run", "--", "codex", literal])),
+                None
+            );
+            assert!(Cli::try_parse_from([
+                "st", "documents", "put", "--as", "doc/example", "--", literal,
+            ])
+            .is_ok());
+        }
+        assert_eq!(read_contract_inventory_request(&args(&["st", "documents", "put"])), None);
     }
 
     #[test]
