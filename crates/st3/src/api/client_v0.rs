@@ -2563,7 +2563,8 @@ pub(super) fn authenticate(
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
                 || request.extensions().get::<super::NativeDeliveryPeer>().is_some();
-            if session.local_peer && administrative_get(request) {
+            if session.local_peer && administrative_get(request)
+                && session.authority_actor.starts_with("person/") {
                 return Err(forbidden("local harnesses and peers cannot inspect owner administration"));
             }
             session.custom_forms = custom_forms;

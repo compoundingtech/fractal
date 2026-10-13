@@ -423,10 +423,15 @@ mod tests {
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert!(String::from_utf8(body.to_vec()).unwrap().contains(grant["grant"]["id"].as_str().unwrap()));
         }
-        let mut read = Request::builder().uri("/v1/client/agents")
-            .header(LOCAL_PERSON_HEADER, "agent/test").body(Body::empty()).unwrap();
-        read.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into()));
-        assert_eq!(app.oneshot(read).await.unwrap().status(), StatusCode::OK);
+        for path in ["/v1/client/agents", "/v1/client/devices"] {
+            let mut read = Request::builder().uri(path)
+                .header(LOCAL_PERSON_HEADER, "agent/test").body(Body::empty()).unwrap();
+            read.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into()));
+            let response = app.clone().oneshot(read).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(!String::from_utf8(body.to_vec()).unwrap().contains(grant["grant"]["id"].as_str().unwrap()));
+        }
     }
     #[tokio::test]
     async fn assistant_grant_administration_rejects_paired_person_over_unix() {
