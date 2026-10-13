@@ -951,7 +951,9 @@ fn native_rollout_guard_rejection_proves_no_producer_was_created() {
         crate::rollout::PREDECESSOR_ENV.into(),
         "old:incarnation".into(),
     );
-    let runtime = NativeRuntime::new(&root.path().join("state"), None, &pty);
+    let state = root.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let runtime = NativeRuntime::new(&state, None, &pty);
     let guard_called = AtomicBool::new(false);
     let error = runtime
         .start_guarded(&member, &|| {
@@ -980,6 +982,9 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
         return;
     }
     use std::os::unix::fs::PermissionsExt as _;
+    // Select the supported detached mode in this isolated subprocess. A systemd
+    // launcher is itself a created producer, even when its inner executable fails.
+    st_runtime::initialize_isolation(&BTreeMap::new());
     for (binary, rejected) in [
         ("invalid executable format", true),
         ("#!/bin/sh\nexit 1\n", false),
@@ -1008,7 +1013,9 @@ fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
         member
             .environment
             .insert(start_jobs::OPERATION_ENV.into(), "pty-operation".into());
-        let runtime = NativeRuntime::new(&root.path().join("state"), None, &pty);
+        let state = root.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        let runtime = NativeRuntime::new(&state, None, &pty);
         let error = runtime.start_guarded(&member, &|| Ok(())).unwrap_err();
         assert_eq!(
             error.downcast_ref::<st_runtime::StartRejected>().is_some(),
