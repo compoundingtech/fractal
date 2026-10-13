@@ -65,9 +65,13 @@ same digests on both sides every time the comparison was made.
 - At each exchange where the comparison is made (inventories equal, nothing received, no
   signatures held, projection not deferred, same registry), remember the result for that peer:
   when, the registry digest, and the tables that differed.
-- The status reports that result while it is at most five minutes old and the registry still
-  matches. A newer exchange whose inventories differ no longer undoes it. A pair that has had no
-  aligned exchange in five minutes reads waiting again.
+- The status reports that result while it is at most five minutes old, the registry still matches
+  and it found every comparable projection equal. A newer exchange whose inventories differ no
+  longer undoes it. A comparison that found tables differing is not carried over a later exchange
+  with different inventories, because the nodes may have converged since and a difference is only
+  named from an exchange that can identify it; that pair reads waiting and says which tables the
+  last aligned exchange found differing. A pair with no aligned exchange in five minutes reads
+  waiting too.
 - Local conditions that make a comparison premature still apply immediately: unsealed local
   batches, claims waiting for their kinds, a deferred projection, a different registry.
 - The status exports what the reported comparison found (`projection_graphs_equal`) and when it was

@@ -87,7 +87,7 @@ fn local_claims_wait_until_their_envelopes_and_peer_comparison_are_current() {
     );
 }
 #[test]
-fn a_comparison_made_at_an_aligned_exchange_survives_envelopes_that_arrive_afterwards() {
+fn a_difference_found_at_an_aligned_exchange_is_not_named_once_the_inventory_moves_on() {
     let source = node("alder");
     let target = node("birch");
     let other = node("cedar");
@@ -101,8 +101,8 @@ fn a_comparison_made_at_an_aligned_exchange_survives_envelopes_that_arrive_after
     let view = status(&target);
     assert!(!view.peers[0].projection_comparison_waiting);
     assert_eq!(view.peers[0].differing_tables, vec!["documents"]);
-    // Another peer delivers an envelope. This node's inventory moves on, and alder's stored
-    // inventory is now older than it, though the comparison made at the aligned exchange holds.
+    // Another peer delivers an envelope, so alder's stored inventory is now older than this
+    // node's. Whether the table still differs is not known, and none is named.
     other
         .append_claim(&ClaimInput {
             subject: "note/sample".into(),
@@ -122,14 +122,15 @@ fn a_comparison_made_at_an_aligned_exchange_survives_envelopes_that_arrive_after
         .unwrap();
     let view = status(&target);
     let peer = &view.peers[0];
+    assert!(peer.projection_comparison_waiting);
+    assert!(peer.differing_tables.is_empty());
+    assert_eq!(peer.projection_graphs_equal, None);
     assert!(
-        !peer.projection_comparison_waiting,
-        "a newer inventory made the earlier comparison premature: {peer:?}"
+        peer.projection_comparison_waiting_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("documents")),
+        "{peer:?}"
     );
-    assert_eq!(peer.differing_tables, vec!["documents"]);
-    assert_eq!(peer.projection_comparison_waiting_reason, None);
-    assert_eq!(peer.projection_graphs_equal, Some(false));
-    assert!(peer.projection_compared_at_unix_ms.is_some());
 }
 #[test]
 fn an_equal_comparison_stays_equal_while_the_inventory_moves_on() {

@@ -7751,19 +7751,20 @@ impl Store {
                 }
             }
             // The peer's advertised inventory is the one it held at the last exchange, and this
-            // node keeps receiving from its other peers, so the two rarely match now. The
-            // comparison made at the exchange where they did match is what to report.
-            let held = if inventory_aligned || status.projection_digests.is_empty() {
+            // node keeps receiving from its other peers, so the two rarely match now. An aligned
+            // comparison that found every projection equal still holds. One that found tables
+            // differing does not: the nodes held the same envelopes then, but whether the tables
+            // still differ is unknown while the latest inventories differ, and a difference is
+            // only named from an exchange that can identify it.
+            let aligned_before = if inventory_aligned || status.projection_digests.is_empty() {
                 None
             } else {
                 self.peer_aligned_comparison(peer, now)
                     .filter(|held| held.schema_digest == registry_digest)
             };
-            if let Some(held) = held.as_ref()
-                && live_settled
-            {
-                status.differing_tables = held.differing_tables.clone();
-            }
+            let held = aligned_before
+                .clone()
+                .filter(|held| held.differing_tables.is_empty());
             let reason = if waiting_claims != 0 {
                 Some(format!(
                     "{waiting_claims} replicated claims wait for a build that knows their kinds"
@@ -7783,6 +7784,14 @@ impl Store {
                     "the peer runs projection registry {} and this node runs {}; the builds differ",
                     short_digest(digest),
                     short_digest(&registry_digest)
+                ))
+            } else if let Some(before) = aligned_before
+                .as_ref()
+                .filter(|before| !before.differing_tables.is_empty() && !inventory_aligned)
+            {
+                Some(format!(
+                    "the last exchange with the same envelopes found {} differing; the latest exchange does not have the same envelopes, so they cannot be compared again yet",
+                    before.differing_tables.join(", ")
                 ))
             } else if !inventory_aligned && held.is_none() {
                 let lag = status
@@ -8795,9 +8804,6 @@ mod aligned_comparison_tests {
         let source = node("alder");
         let target = node("birch");
         let mut summary = source.export_replication_summary(FLEET).unwrap();
-        summary
-            .projection_digests
-            .insert("documents".into(), "different".into());
         let aligned_inventory = summary.inventory.digest.clone();
         summary.inventory.digest = "older inventory".into();
         target
