@@ -76,7 +76,7 @@ scripts/onboarding-mac-test --scenario setup \
 
 `--scenario no-harness` is another flags-based run. All three cases require a
 clean base without providers; they verify the explicit no-harness explanation and
-absence of the built-in expert/mission. Provider transport and model/content
+absence of the built-in Smalltalk Assistant/mission. Provider transport and model/content
 completion remain separate tests. Multiple `--scenario` options create fresh
 clones sequentially. No task is scheduled in CI.
 

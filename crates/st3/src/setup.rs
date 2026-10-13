@@ -43,12 +43,12 @@ pub struct SetupArgs {
     /// Install the user-owned Claude channel (default: true; never installs policy).
     #[arg(long, action = clap::ArgAction::Set)]
     pub claude_channel: Option<bool>,
-    /// Start onboarding again, including a stopped built-in expert.
+    /// Start onboarding again, including a stopped built-in Smalltalk Assistant.
     #[arg(long)]
     pub onboarding: bool,
-    /// Start the built-in expert after setup (default: ask, with --yes: yes).
+    /// Start the built-in Smalltalk Assistant after setup (default: ask, with --yes: yes).
     #[arg(long, action = clap::ArgAction::Set)]
-    pub expert: Option<bool>,
+    pub assistant: Option<bool>,
 }
 
 pub struct PreparedSetup {
@@ -208,14 +208,14 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let initial_subject = if let Some(harness) = &harness {
         if !first_run && !args.onboarding {
             println!(
-                "This setup already existed, so the built-in expert is not started on its own. Run st setup --onboarding to begin."
+                "This setup already existed, so the built-in Smalltalk Assistant is not started on its own. Run st setup --onboarding to begin."
             );
             None
         } else if daemon_ready(&config).await {
-            if confirm_expert(&config, harness, &args)? {
+            if confirm_assistant(&config, harness, &args)? {
                 let started = crate::onboarding::start(&config, harness, args.onboarding).await?;
                 if started.is_some() {
-                    print_expert_summary(&config, harness)?;
+                    print_assistant_summary(&config, harness)?;
                 }
                 started
             } else {
@@ -379,20 +379,20 @@ fn fallback_harness(found: &[String]) -> Option<String> {
     next
 }
 
-/// Ask before the built-in expert starts: it is an agent running on the person's own
+/// Ask before the built-in Smalltalk Assistant starts: it is an agent running on the person's own
 /// provider account. An explicit `--onboarding` already names the request.
-fn confirm_expert(config: &Config, harness: &str, args: &SetupArgs) -> Result<bool> {
+fn confirm_assistant(config: &Config, harness: &str, args: &SetupArgs) -> Result<bool> {
     if args.onboarding {
         return Ok(true);
     }
     println!(
-        "The built-in expert is an agent that runs on your own {harness} account, so it uses your {harness} usage and quota. It runs in {} access mode.",
+        "The built-in Smalltalk Assistant is an agent that runs on your own {harness} account, so it uses your {harness} usage and quota. It runs in {} access mode.",
         config.active_access_mode().as_str()
     );
     let start = ask_bool(
-        "Start the built-in expert now?",
-        "--expert",
-        args.expert,
+        "Start the built-in Smalltalk Assistant now?",
+        "--assistant",
+        args.assistant,
         args.yes,
         true,
     )?;
@@ -402,14 +402,14 @@ fn confirm_expert(config: &Config, harness: &str, args: &SetupArgs) -> Result<bo
     Ok(start)
 }
 
-/// Name what starting the expert created and how to stop it.
-fn print_expert_summary(config: &Config, harness: &str) -> Result<()> {
+/// Name what starting the Assistant created and how to stop it.
+fn print_assistant_summary(config: &Config, harness: &str) -> Result<()> {
     let person = config
         .person
         .as_deref()
         .context("setup needs a person")?;
     println!(
-        "Created: the agent agent/st/expert ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/expert --as {person}",
+        "Created: the agent agent/st/assistant ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: st agents stop agent/st/assistant --as {person}",
         crate::onboarding::workspace()?.display()
     );
     Ok(())
