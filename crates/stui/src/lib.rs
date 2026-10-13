@@ -887,6 +887,7 @@ pub fn run(options: Args) -> Result<()> {
         process_started,
         initial_subject: options.initial_subject.filter(|_| profile.is_none()),
     })
+    .inspect_err(|error| ui::lastrun_note_exit(format!("error: {error:#}")))
 }
 
 #[cfg(test)]

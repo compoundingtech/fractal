@@ -24,16 +24,73 @@ struct Mark {
 /// This stui's file, removed on drop.
 pub struct Run {
     file: Option<PathBuf>,
+    started: std::time::Instant,
+}
+
+/// Why this stui is ending, as the code that ends it knows. Said once; the first reason stands.
+static EXIT_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record why this stui is ending, for `exits.log` (Nathan, 2026-10-13: "it crashed twice and I
+/// cannot tell why"). A hard kill leaves no reason, and a run file that outlives its process.
+pub fn note_exit(reason: impl Into<String>) {
+    if let Ok(mut said) = EXIT_REASON.lock()
+        && said.is_none()
+    {
+        *said = Some(reason.into());
+    }
 }
 
 impl Drop for Run {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        let panicking = std::thread::panicking();
+        if let Some(file) = self
+            .file
+            .as_ref()
+            .and_then(|file| file.parent())
+            .and_then(Path::parent)
+            .map(|dir| dir.join("exits.log"))
+        {
+            let reason = EXIT_REASON
+                .lock()
+                .ok()
+                .and_then(|said| said.clone())
+                .unwrap_or_else(|| {
+                    if panicking {
+                        "panic".to_owned()
+                    } else {
+                        "ended by a path that gave no reason".to_owned()
+                    }
+                });
+            write_exit(&file, self.started.elapsed().as_secs(), &reason);
+        }
+        if panicking {
             return;
         }
         if let Some(file) = self.file.take() {
             let _ = std::fs::remove_file(file);
         }
+    }
+}
+
+/// Append one line to `exits.log`, which is cleared once it passes 100 KB: when this stui ended,
+/// how long it had run, and why.
+fn write_exit(file: &Path, ran_seconds: u64, reason: &str) {
+    use std::io::Write as _;
+    if std::fs::metadata(file).is_ok_and(|meta| meta.len() > 100_000) {
+        let _ = std::fs::remove_file(file);
+    }
+    if let Ok(mut out) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    {
+        let reason = reason.replace('\n', " ");
+        let _ = writeln!(
+            out,
+            "{} pid {} ran {ran_seconds}s: {reason}",
+            now_unix(),
+            std::process::id()
+        );
     }
 }
 
@@ -122,7 +179,13 @@ fn alive(pid: u32) -> bool {
 /// (and every one is cleared), as "started 3h ago".
 pub fn begin(build: &str) -> (Run, Option<String>) {
     let Some(directory) = directory() else {
-        return (Run { file: None }, None);
+        return (
+            Run {
+                file: None,
+                started: std::time::Instant::now(),
+            },
+            None,
+        );
     };
     let _ = std::fs::create_dir_all(&directory);
     let note = left_without_exiting(&directory, std::process::id(), now_unix());
@@ -139,6 +202,7 @@ pub fn begin(build: &str) -> (Run, Option<String>) {
     (
         Run {
             file: written.then_some(file),
+            started: std::time::Instant::now(),
         },
         note,
     )
@@ -245,6 +309,7 @@ mod tests {
         std::fs::write(&file, b"{}").unwrap();
         drop(Run {
             file: Some(file.clone()),
+            started: std::time::Instant::now(),
         });
         assert!(!file.exists());
     }
@@ -256,7 +321,10 @@ mod tests {
         std::fs::write(&file, b"{}").unwrap();
         let kept = file.clone();
         let outcome = std::panic::catch_unwind(|| {
-            let _run = Run { file: Some(kept) };
+            let _run = Run {
+                file: Some(kept),
+                started: std::time::Instant::now(),
+            };
             panic!("recovery probe");
         });
         assert!(outcome.is_err());
@@ -279,6 +347,24 @@ mod tests {
         write_panic(&file, "build-1", "after the cut");
         let cut = std::fs::read_to_string(&file).unwrap();
         assert!(cut.len() < 1_000 && cut.contains("after the cut"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_exit_is_logged_with_when_how_long_and_why_and_the_log_stays_small() {
+        let root = std::env::temp_dir().join(format!("stui-exit-{}", std::process::id()));
+        let file = root.join("stui").join("exits.log");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_exit(&file, 3725, "terminal closed (stdin hung up)");
+        write_exit(&file, 4, "error: the daemon\nwent away");
+        let log = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(log.lines().count(), 2, "{log}");
+        assert!(log.contains("ran 3725s: terminal closed (stdin hung up)"), "{log}");
+        assert!(log.contains("ran 4s: error: the daemon went away"), "{log}");
+        std::fs::write(&file, "x".repeat(100_001)).unwrap();
+        write_exit(&file, 1, "quit (Ctrl+Q)");
+        let cut = std::fs::read_to_string(&file).unwrap();
+        assert!(cut.len() < 200 && cut.contains("quit (Ctrl+Q)"), "{cut}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

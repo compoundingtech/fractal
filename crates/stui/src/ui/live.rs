@@ -1828,6 +1828,13 @@ pub fn run(context: Context) -> Result<()> {
             },
         )?;
     }
+    super::lastrun::note_exit(if ui.quit {
+        "quit (Ctrl+Q)"
+    } else if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+        "signal (INT, TERM or HUP)"
+    } else {
+        "terminal closed (stdin hung up)"
+    });
     // Leave no attachment behind.
     if let Some(current) = attached.take() {
         let _ = runtime.block_on(feed::detach(
