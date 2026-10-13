@@ -17860,6 +17860,7 @@ impl Store {
     }
 
     /// Prefer a bound account person, then follow declaration authors and mission requesters.
+    /// Mission-owned declarations follow their requester before the declaration writer.
     /// Missing or cyclic ownership remains unknown; it never selects a global operator.
     pub(crate) fn agent_person(&self, agent: &str) -> Result<Option<String>> {
         let mut actor = agent.to_owned();
@@ -17894,10 +17895,19 @@ impl Store {
             let requester = desired
                 .owner_run
                 .as_deref()
-                .map(|run| self.mission_run(run))
+                .map(|run| {
+                    smallclaims::touched::note_read(|| run.to_owned());
+                    let connection = self.readers.get();
+                    connection
+                        .query_row(
+                            "SELECT requester FROM mission_runs WHERE id=?1",
+                            [run.strip_prefix("mission-run/").unwrap_or(run)],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                })
                 .transpose()?
-                .flatten()
-                .map(|run| run.requester);
+                .flatten();
             let Some(next) = requester.or(writer) else {
                 return Ok(None);
             };

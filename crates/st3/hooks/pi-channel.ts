@@ -490,6 +490,14 @@ export default function (pi: ExtensionAPI) {
       return null;
     }
   };
+  const modelProvider = (ctx: ExtensionContext): string | null => {
+    try {
+      const provider = ctx.model?.provider;
+      return typeof provider === "string" && provider !== "" ? provider : null;
+    } catch {
+      return null;
+    }
+  };
 
   const usageReading = (ctx: ExtensionContext): Record<string, unknown> | undefined => {
     const read = (ctx as { getContextUsage?: () => unknown }).getContextUsage;
@@ -517,6 +525,7 @@ export default function (pi: ExtensionAPI) {
       // record exists to surface.
       usedPercent: finiteOrNull(percent),
       model: modelId(ctx),
+      provider: modelProvider(ctx),
       costUsd: state.lastCostUsd ?? null,
     };
   };

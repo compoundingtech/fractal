@@ -235,6 +235,8 @@ struct Record {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
     cost_usd: Option<f64>,
     /// Cumulative lifetime spend for the session, and **never** occupancy — named for exactly that
     /// distinction. It is never the numerator of any percent.
@@ -282,6 +284,7 @@ pub struct Reading {
     pub window_tokens: Option<u64>,
     pub used_percent: Option<f64>,
     pub model: Option<String>,
+    pub provider: Option<String>,
     pub cost_usd: Option<f64>,
     pub session_total_tokens: Option<u64>,
     pub rate_limits: RateLimits,
@@ -594,6 +597,11 @@ impl Writer {
             (None, Some(current)) => (current.account.clone(), current.plan.clone()),
             (None, None) => (None, None),
         };
+        let provider = match (&reading, current.as_ref()) {
+            (Some(reading), _) => reading.provider.clone(),
+            (None, Some(current)) => current.provider.clone(),
+            (None, None) => None,
+        };
         if limits.observed_at_ms.is_none()
             && (limits.five_hour.is_some() || limits.seven_day.is_some())
         {
@@ -639,6 +647,7 @@ impl Writer {
             window_tokens,
             used_percent,
             model,
+            provider,
             cost_usd,
             session_total_tokens: session_total,
             rate_limits: limits,
@@ -680,6 +689,10 @@ impl Writer {
     /// exhaustion, or the record is older than the heartbeat. A compaction edge bypasses this
     /// entirely and is handled by the caller.
     fn due(&self, current: &Record, reading: &Reading, now_ms: u64) -> bool {
+        // A model switch must refresh provenance even when occupancy stays in the same bucket.
+        if current.model != reading.model || current.provider != reading.provider {
+            return true;
+        }
         if bucket(current.used_percent) != bucket(reading.used_percent) {
             return true;
         }
@@ -731,6 +744,7 @@ pub struct Observed {
     pub window_tokens: Option<u64>,
     pub used_percent: Option<f64>,
     pub model: Option<String>,
+    pub provider: Option<String>,
     pub cost_usd: Option<f64>,
     pub session_total_tokens: Option<u64>,
     pub rate_limits: RateLimits,
@@ -831,6 +845,7 @@ pub fn read_raw_at(raw: &[u8], now_ms: u64) -> Option<Observed> {
         window_tokens: record.window_tokens,
         used_percent: record.used_percent,
         model: record.model,
+        provider: record.provider,
         cost_usd: record.cost_usd,
         session_total_tokens: record.session_total_tokens,
         rate_limits: record.rate_limits,
@@ -891,6 +906,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn model_route_changes_land_without_an_occupancy_bucket_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = catalog(temp.path());
+        let mut writer = Writer::new(&dir, "example-linux.worker", Harness::Pi).unwrap();
+        let mut value = reading(100, 10.0);
+        value.model = Some("first".into());
+        value.provider = Some("provider".into());
+        assert!(writer.observe(value.clone()).unwrap());
+        assert!(!writer.observe(value.clone()).unwrap());
+        value.model = Some("second".into());
+        assert!(writer.observe(value.clone()).unwrap());
+        value.provider = Some("other".into());
+        assert!(writer.observe(value).unwrap());
+        let observed = read(&harness_context_path(&dir)).unwrap();
+        assert_eq!(observed.model.as_deref(), Some("second"));
+        assert_eq!(observed.provider.as_deref(), Some("other"));
+    }
+
     /// A catalog-shaped tree: a control directory at the root and the agent below it.
     fn catalog(root: &Path) -> PathBuf {
         fs::create_dir_all(root.join(crate::catalog_lock::CONTROL_DIR)).unwrap();
@@ -944,6 +978,7 @@ mod tests {
                 window_tokens: Some(258_400),
                 used_percent: Some(33.0),
                 model: Some("gpt-5".to_string()),
+                provider: Some("openai".into()),
                 cost_usd: Some(1.25),
                 session_total_tokens: Some(2_235_329),
                 rate_limits: RateLimits {
@@ -964,6 +999,7 @@ mod tests {
         assert_eq!(observed.window_tokens, Some(258_400));
         assert_eq!(observed.used_percent, Some(33.0));
         assert_eq!(observed.model.as_deref(), Some("gpt-5"));
+        assert_eq!(observed.provider.as_deref(), Some("openai"));
         assert_eq!(observed.cost_usd, Some(1.25));
         assert_eq!(observed.session_total_tokens, Some(2_235_329));
         assert_eq!(observed.rate_limits.five_hour, Some(31.0));

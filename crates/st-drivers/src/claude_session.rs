@@ -1702,6 +1702,7 @@ pub fn statusline_reading(payload: &serde_json::Value) -> Reading {
             .pointer("/model/id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        provider: Some("anthropic".into()),
         cost_usd: payload
             .pointer("/cost/total_cost_usd")
             .and_then(serde_json::Value::as_f64),

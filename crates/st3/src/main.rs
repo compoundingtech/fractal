@@ -16760,6 +16760,12 @@ async fn post_work(
             }
         }
     })?;
+    if std::env::var("ST_AGENT").ok().as_deref() == Some(actor.as_str())
+        && let Some(path) = std::env::var_os("AGENT_TRACE_FILE")
+        && matches!(action, "claim" | "complete" | "fail" | "release" | "submit")
+    {
+        refresh_agent_trace(client, &actor, Path::new(&path), None, None).await;
+    }
     if json_output {
         print_value(&response, true)
     } else {
@@ -16779,6 +16785,276 @@ async fn post_work(
         }
         Ok(())
     }
+}
+
+fn agent_trace_path(subject: &str) -> Option<PathBuf> {
+    std::env::var_os("AGENT_TRACE_FILE").map(PathBuf::from).or_else(|| {
+        std::env::var_os(st_drivers::driver_paths::AGENT_DIR_ENV)
+            .map(|dir| PathBuf::from(dir).join("agent-trace.json"))
+    }).or_else(|| {
+        std::env::var_os("ST3_DRIVER_STATE_DIR").map(|root| {
+            PathBuf::from(root).join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
+                .join("observations").join("agent-trace.json")
+        })
+    })
+}
+
+fn trace_model_route(driver: &str, model: &str, provider: Option<&str>) -> Option<String> {
+    if let Some(provider) = provider {
+        return Some(format!("{provider}/{model}"));
+    }
+    if model.contains('/') {
+        return Some(model.to_owned());
+    }
+    let provider = provider.or(match driver {
+        "claude" => Some("anthropic"),
+        "codex" => Some("openai"),
+        _ => None,
+    })?;
+    Some(format!("{provider}/{model}"))
+}
+
+fn trace_lease<'a>(
+    work: &'a [StepRunView],
+    subject: &str,
+    incarnation: &str,
+) -> (Option<&'a StepRunView>, Option<String>) {
+    let now = u128::from(st_drivers::message::now_ms());
+    let mut held = work.iter().filter(|step| {
+        work_claim_is_held_by(step, subject)
+            && step.claim_incarnation.as_deref() == Some(incarnation)
+            && step.claim_expires_at_unix_ms.is_some_and(|expires| expires > now)
+    });
+    let Some(lease) = held.next() else { return (None, None) };
+    let Some(second) = held.next() else { return (Some(lease), None) };
+    // Only ambiguity allocates a diagnostic; the common idle/single-lease paths do not.
+    let subjects: Vec<&str> = std::iter::once(lease).chain(std::iter::once(second))
+        .chain(held).map(|step| step.subject.as_str()).collect();
+    let diagnostic = json!({
+        "type": "agent_trace_purpose_ambiguous",
+        "claim_count": subjects.len(),
+        "subjects": subjects,
+    }).to_string();
+    (None, Some(diagnostic))
+}
+
+async fn lock_agent_trace(path: &Path) -> Result<std::fs::File> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || st3::agent_trace::issuer::lock(&path)).await?
+}
+
+async fn trace_mission_name(client: &Client, lease: Option<&StepRunView>) -> Result<Option<String>> {
+    let Some(lease) = lease else { return Ok(None) };
+    let mission: Option<String> = client
+        .get(&format!("/v1/agent-trace/mission/{}", urlencoding::encode(&lease.run)))
+        .await?;
+    let mission = mission.context("claimed lease has no recorded mission")?;
+    Ok(Some(mission.strip_prefix("mission/").unwrap_or(&mission).to_owned()))
+}
+
+fn omit_failed_agent_trace(subject: &str, path: &Path, error: &anyhow::Error, _lock: &std::fs::File) {
+    let cleanup_error = fs::remove_file(path).err()
+        .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
+        .map(|error| error.to_string());
+    report_agent_trace_failure(subject, error, cleanup_error);
+}
+
+fn report_agent_trace_failure(subject: &str, error: &anyhow::Error, cleanup_error: Option<String>) {
+    // The issuer owns advisory failures; never write them to the agent's terminal.
+    let _ = write_driver_log(subject, &json!({
+        "event": "agent_trace_omitted", "subject": subject,
+        "error": format!("{error:#}"), "cleanup_error": cleanup_error,
+    }).to_string());
+}
+
+async fn trace_current_incarnation(client: &Client, subject: &str) -> Result<Option<String>> {
+    let status: StatusResponse = client.get(&format!(
+        "/v1/status?subject={}&harness_only=true", urlencoding::encode(subject),
+    )).await?;
+    Ok(status.subjects.first().and_then(|seat| seat.harness.as_ref())
+        .map(|harness| harness.incarnation_id.clone()))
+}
+
+async fn initialize_agent_trace(
+    client: &Client, subject: &str, driver: &str, incarnation: &str, path: &Path,
+    argv: &[String],
+) {
+    let lock = match lock_agent_trace(path).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            report_agent_trace_failure(subject, &error, None);
+            return;
+        }
+    };
+    if let Err(error) = try_initialize_agent_trace(client, subject, driver, incarnation, path, argv).await {
+        omit_failed_agent_trace(subject, path, &error, &lock);
+    }
+}
+
+async fn try_initialize_agent_trace(
+    client: &Client,
+    subject: &str,
+    driver: &str,
+    incarnation: &str,
+    path: &Path,
+    argv: &[String],
+) -> Result<()> {
+    use st3::agent_trace::issuer;
+    anyhow::ensure!(
+        trace_current_incarnation(client, subject).await?.as_deref() == Some(incarnation),
+        "the runtime changed before agent trace issuance",
+    );
+    let principal: Option<String> = client
+        .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject)))
+        .await?;
+    let Some(principal) = principal else {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        write_driver_log(subject, "agent trace omitted: the seat has no verified accountable root")?;
+        return Ok(());
+    };
+    let work: Vec<StepRunView> = client
+        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
+    let (lease, diagnostic) = trace_lease(&work, subject, incarnation);
+    if let Some(diagnostic) = diagnostic {
+        write_driver_log(subject, &diagnostic)?;
+    }
+    let mission_name = trace_mission_name(client, lease).await?;
+    let facts = trace_launch_facts(client, subject, Some(driver), incarnation, argv,
+        principal, mission_name).await?;
+    issuer::write_atomic(path, &issuer::build(&facts, lease)?)
+}
+
+async fn trace_launch_facts(
+    client: &Client,
+    subject: &str,
+    driver: Option<&str>,
+    incarnation: &str,
+    argv: &[String],
+    principal: String,
+    mission_name: Option<String>,
+) -> Result<st3::agent_trace::issuer::Facts> {
+    let status: StatusResponse = client
+        .get(&format!("/v1/status?subject={}&harness_only=true", urlencoding::encode(subject))).await?;
+    let seat = status.subjects.iter().find(|seat| seat.subject == subject)
+        .context("agent trace has no recorded seat")?;
+    let driver = driver.or_else(|| seat.harness.as_ref()
+        .filter(|harness| harness.incarnation_id == incarnation)
+        .and_then(|harness| harness.driver.as_deref()))
+        .context("agent trace has no observed harness tool")?;
+    let desired: st3::model::DesiredSubject = client
+        .get(&format!("/v1/desired/{}", urlencoding::encode(subject))).await?;
+    let declaration = Some(declaration_node(&desired.desired)?);
+    let harness = declaration.as_ref().and_then(KdlNode::children)
+        .and_then(|body| body.get("harness")).and_then(KdlNode::children);
+    let declared = |name: &str| harness.and_then(|body| body.get(name))
+        .and_then(|node| node.get(0)).and_then(kdl::KdlValue::as_string).map(str::to_owned);
+    let argv_model = argv.windows(2).find(|pair| matches!(pair[0].as_str(), "--model" | "-m"))
+        .map(|pair| pair[1].clone())
+        .or_else(|| argv.iter().find_map(|arg| arg.strip_prefix("--model=").map(str::to_owned)));
+    let model_route = declared("model").or(argv_model)
+        .and_then(|model| trace_model_route(driver, &model, None));
+    Ok(st3::agent_trace::issuer::Facts {
+        agent: subject.into(),
+        principal,
+        incarnation: incarnation.into(),
+        harness_tool: driver.into(),
+        // No harness version is reported by the launch protocol.
+        harness_version: None,
+        model_route,
+        model_effort: declared("effort"),
+        session: std::env::var("PTY_SESSION").ok(),
+        host: Some(st_drivers::run::detect_host()),
+        worktree: Some(std::env::current_dir()?.display().to_string()),
+        mission_name,
+    })
+}
+
+async fn refresh_agent_trace(
+    client: &Client, subject: &str, path: &Path, source_incarnation: Option<&str>,
+    observed: Option<&st_drivers::harness_context::Observed>,
+) {
+    let lock = match lock_agent_trace(path).await {
+        Ok(lock) => lock,
+        Err(error) => {
+            report_agent_trace_failure(subject, &error, None);
+            return;
+        }
+    };
+    if let Err(error) = try_refresh_agent_trace(client, subject, path, source_incarnation, observed).await {
+        omit_failed_agent_trace(subject, path, &error, &lock);
+    }
+}
+
+async fn try_refresh_agent_trace(
+    client: &Client,
+    subject: &str,
+    path: &Path,
+    source_incarnation: Option<&str>,
+    observed: Option<&st_drivers::harness_context::Observed>,
+) -> Result<()> {
+    use st3::agent_trace::issuer;
+    let work: Vec<StepRunView> = client
+        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
+    let current_incarnation = trace_current_incarnation(client, subject).await?;
+    // An event from a predecessor provider cannot restate its model or lease after restart.
+    if source_incarnation.is_some_and(|source| current_incarnation.as_deref() != Some(source))
+    {
+        return Ok(());
+    }
+    let incarnation = current_incarnation.as_deref().unwrap_or_default();
+    let principal: Option<String> = client
+        .get(&format!("/v1/agent-trace/principal/{}", urlencoding::encode(subject))).await?;
+    let Some(principal) = principal else {
+        match fs::remove_file(path) {
+            Ok(()) => write_driver_log(subject,
+                "agent trace removed: the seat has no verified accountable root")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(());
+    };
+    let raw = match fs::read(path) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if raw.is_none() && incarnation.is_empty() {
+        return Ok(());
+    }
+    let (lease, diagnostic) = trace_lease(&work, subject, incarnation);
+    if let Some(diagnostic) = diagnostic {
+        write_driver_log(subject, &diagnostic)?;
+    }
+    let mission_name = trace_mission_name(client, lease).await?;
+    let mut runtime = if let Some(raw) = raw.as_ref() {
+        let mut runtime: issuer::Runtime = serde_json::from_slice(raw)?;
+        issuer::update_principal(&mut runtime, principal)?;
+        issuer::update_lease(&mut runtime, subject, incarnation, lease, mission_name.as_deref(),
+            u128::from(st_drivers::message::now_ms()))?;
+        runtime
+    } else {
+        // A verified accountable root may become available after the provider launch.
+        let facts = trace_launch_facts(client, subject, None, incarnation, &[],
+            principal, mission_name).await?;
+        issuer::build(&facts, lease)?
+    };
+    if let Some(observed) = observed
+        && let Some(model) = observed.model.as_deref()
+        && let Some(route) = trace_model_route(observed.harness.as_str(), model, observed.provider.as_deref())
+    {
+        // Context reports carry no effort; never restate a previous model's effort.
+        issuer::update_model(&mut runtime, &route, None);
+    }
+    // Avoid file churn for an unchanged lease and model.
+    let encoded = serde_json::to_vec(&runtime)?;
+    if raw.as_deref().is_none_or(|raw| encoded.as_slice() != raw.strip_suffix(b"\n").unwrap_or(raw)) {
+        issuer::write_atomic(path, &runtime)?;
+    }
+    Ok(())
 }
 
 /// This machine's host documents, which a claim prints because they describe where the claimed
@@ -18713,6 +18989,8 @@ async fn run_st2_native_driver(
         predecessor_harness_record: fs::read(&harness_state_path).ok(),
         ..NativeLoopState::default()
     };
+    initialize_agent_trace(client, subject, driver, &incarnation,
+        &paths.agent_dir.join("agent-trace.json"), &argv).await;
     let task = spawn_st3_provider(
         driver,
         &paths,
@@ -20449,6 +20727,11 @@ async fn publish_harness_usage(
     observed: &st_drivers::harness_context::Observed,
     last_fingerprint: &mut Option<String>,
 ) -> Result<()> {
+    if let Some(path) = client.event.map(|(_, _, dir, _)| dir.join("agent-trace.json"))
+        .or_else(|| agent_trace_path(subject))
+    {
+        refresh_agent_trace(client.client, subject, &path, Some(incarnation), Some(observed)).await;
+    }
     // A context-window occupancy reading and cumulative session spend are
     // different measurements. Publish them as distinct durable records; never
     // manufacture response-token buckets from occupancy.
@@ -21177,6 +21460,12 @@ async fn run_pi_channel(
     let observation_paths = st_drivers::driver_paths::Paths::from_environment(identity, &|name| {
         std::env::var(name).ok()
     })?;
+    if let Some(paths) = observation_paths.as_ref()
+        && !paths.agent_dir.join("agent-trace.json").exists()
+    {
+        initialize_agent_trace(client, subject, driver, &incarnation,
+            &paths.agent_dir.join("agent-trace.json"), &[]).await;
+    }
     let mut observer = if let Some(paths) = observation_paths
         && st_drivers::harness_events::enabled(&paths.agent_dir)
     {
@@ -22443,6 +22732,10 @@ async fn drive_codex_native(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
+    if matches!(start, ProviderStart::Launch(_, _)) {
+        initialize_agent_trace(client, subject, "codex", &incarnation,
+            &paths.agent_dir.join("agent-trace.json"), &argv).await;
+    }
     let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
@@ -23067,12 +23360,21 @@ fn work_incarnation_key(incarnation: Option<&str>) -> String {
 }
 
 async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Result<()> {
-    let work: Vec<StepRunView> = client
-        .get(&format!("/v1/work?actor={}", urlencoding::encode(subject)))
-        .await?;
+    let path = agent_trace_path(subject);
+    renew_claimed_work_with_trace(client, subject, minute, path.as_deref()).await
+}
+
+async fn renew_claimed_work_with_trace(
+    client: &Client, subject: &str, minute: u64, trace_path: Option<&Path>,
+) -> Result<()> {
+    let work: Vec<StepRunView> =
+        client.get(&format!("/v1/work?actor={}", urlencoding::encode(subject))).await?;
     // Most resident seats hold no work. Only a held claim needs the status reduction
     // that proves its harness incarnation is still live before renewing the lease.
     if !work.iter().any(|step| work_claim_is_held_by(step, subject)) {
+        if let Some(path) = trace_path {
+            refresh_agent_trace(client, subject, path, None, None).await;
+        }
         return Ok(());
     }
     let status: StatusResponse = client
@@ -23119,6 +23421,9 @@ async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Resu
                 failure.get_or_insert(error);
             }
         }
+    }
+    if let Some(path) = trace_path {
+        refresh_agent_trace(client, subject, path, None, None).await;
     }
     failure.map_or(Ok(()), Err)
 }
@@ -26065,6 +26370,168 @@ mod claude_attachment_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_model_route_keeps_explicit_provider_for_namespaced_model_ids() {
+        assert_eq!(trace_model_route("omp", "anthropic/claude-sonnet-4", Some("openrouter")),
+            Some("openrouter/anthropic/claude-sonnet-4".into()));
+        assert_eq!(trace_model_route("codex", "openai/gpt-5", None), Some("openai/gpt-5".into()));
+    }
+
+    #[tokio::test]
+    async fn agent_trace_contending_writers_leave_the_owners_valid_file_intact() {
+        use st3::agent_trace::{Runtime, issuer};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent-trace.json");
+        let subject = "agent/example/seat";
+        let runtime: Runtime = serde_json::from_value(json!({
+            "type":"agent-trace-runtime/v1",
+            "who":{"agent":subject,"principal":"person/avery"},
+            "how":{"harness":{"tool":"omp"}},
+            "where":{},
+        })).unwrap();
+        let owner = issuer::lock(&path).unwrap();
+        issuer::write_atomic(&path, &runtime).unwrap();
+        let original = fs::read(&path).unwrap();
+        // An unreachable API would fail either writer if it reached the locked transaction.
+        let client = Client::new(Endpoint::Http("http://127.0.0.1:0".into()));
+        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        assert_eq!(fs::read(&path).unwrap(), original);
+        refresh_agent_trace(&client, subject, &path, Some("current"), None).await;
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let decoded: Runtime = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(decoded, runtime);
+        drop(owner);
+    }
+
+    #[tokio::test]
+    async fn agent_trace_failures_do_not_block_launch_lease_renewal_or_event_publication() {
+        use axum::{Json, Router, extract::OriginalUri};
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        let subject = "agent/invalid whitespace";
+        let step = json!({
+            "subject":"step-run/0123456789abcdef0123456789abcdef/work",
+            "run":"mission-run/example/repo/check/abcdef0123456789abcdef0123456789",
+            "generation":"run-generation/0123456789abcdef0123456789abcdef",
+            "step":"work","definition_hash":"hash","status":"working","attempt":1,
+            "assigned_to":subject,"agentless":false,"title":null,"worker_reported":false,
+            "claimant":subject,"claim_incarnation":"current","claim_expires_at_unix_ms":u64::MAX,
+            "readiness_epoch":1,"blocked_reason":null,"not_before_unix_ms":null,
+            "created_at_unix_ms":0,"updated_at_unix_ms":0,
+        });
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let count = renewals.clone();
+        let principal_present = Arc::new(AtomicBool::new(true));
+        let present = principal_present.clone();
+        let app = Router::new().fallback(move |OriginalUri(uri): OriginalUri| {
+            let count = count.clone();
+            let step = step.clone();
+            let present = present.clone();
+            async move {
+                let value = match uri.path() {
+                    "/v1/work" => json!([step]),
+                    "/v1/status" => {
+                        assert!(uri.query().unwrap().contains("harness_only=true"));
+                        json!({"store_index":0,"pending_actions":[],"subjects":[{
+                            "subject":subject,"conflicts":[],"claims":[],"reachability":"local",
+                            "harness":{"state":"ready","driver":"omp","incarnation_id":"current",
+                                "claim":"claim/current","observed_at_unix_ms":0},
+                        }]})
+                    }
+                    path if path.starts_with("/v1/work/renew/") => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        step
+                    }
+                    "/v1/harness-events" => {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        json!({"id":"claim/usage","store_index":1,"batch_id":"batch/usage",
+                            "subject":subject,"kind":"harness.usage","origin":"fixture",
+                            "body":{},"predecessors":[],"accepted_at_unix_ms":0})
+                    }
+                    path if path.starts_with("/v1/agent-trace/principal/") =>
+                        json!(present.load(Ordering::SeqCst).then_some("person/avery")),
+                    path if path.starts_with("/v1/agent-trace/mission/") => json!("mission/example/repo/check"),
+                    path if path.starts_with("/v1/desired/") => json!({
+                        "subject":subject,"kind":"agent","desired":{"name":"agent","arguments":[subject]},
+                        "revision":"revision","token":"token","sources":[],
+                    }),
+                    _ => panic!("unexpected trace request: {uri}"),
+                };
+                Json(json!({"api_version":"st3.v1","value":value}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::new(Endpoint::Http(format!("http://{address}")));
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent-trace.json");
+        fs::write(&path, b"stale predecessor").unwrap();
+        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        assert!(!path.exists(), "rejected identity must remove stale trace without aborting launch");
+        let unavailable = root.path().join("missing/agent-trace.json");
+        initialize_agent_trace(&client, subject, "omp", "current", &unavailable, &[]).await;
+        renew_claimed_work_with_trace(&client, subject, 1, Some(&unavailable)).await.unwrap();
+        assert_eq!(renewals.load(Ordering::SeqCst), 1);
+        assert!(!unavailable.exists());
+        fs::create_dir(&path).unwrap();
+        st_drivers::harness_events::enable(root.path(), "current").unwrap();
+        st_drivers::harness_state::claim(root.path(), "example/seat", "omp", "provider").unwrap();
+        let sequence = st_drivers::harness_events::pending(root.path(), 100).unwrap()[0].sequence;
+        let observed = st_drivers::harness_context::Observed {
+            harness: st_drivers::harness_context::Harness::Omp,
+            used_tokens: Some(1), window_tokens: Some(100), used_percent: Some(1.0),
+            model: Some("x".repeat(65)), provider: Some("openrouter".into()),
+            cost_usd: None, session_total_tokens: None, rate_limits: Default::default(),
+            account: None, plan: None, compactions: 0, last_compaction_ms: None,
+            last_compaction_trigger: None, observed_at_ms: 0, age_ms: 0, stale: false,
+        };
+        let publisher = ObservationClient {
+            client: &client, event: Some(("current", sequence, root.path(), None)),
+        };
+        let mut fingerprint = None;
+        publish_harness_usage(&publisher, subject, "omp", "current", &observed, &mut fingerprint)
+            .await.unwrap();
+        assert!(fingerprint.is_some(), "usage publication must still complete");
+        assert_eq!(renewals.load(Ordering::SeqCst), 2);
+        st_drivers::harness_events::acknowledge(root.path(), sequence).unwrap();
+        assert!(st_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
+        principal_present.store(false, Ordering::SeqCst);
+        if path.is_dir() { fs::remove_dir(&path).unwrap(); }
+        fs::write(&path, b"stale predecessor").unwrap();
+        initialize_agent_trace(&client, subject, "omp", "current", &path, &[]).await;
+        assert!(!path.exists(), "an absent verified accountable root must not leave a trace");
+        server.abort();
+    }
+
+    #[test]
+    fn ambiguous_trace_purpose_reports_all_current_claims_without_selecting_one() {
+        let subjects = ["step-run/one/build", "step-run/two/review", "step-run/three/check"];
+        let mut work: Vec<StepRunView> = subjects.iter().map(|subject| {
+            serde_json::from_value(json!({
+                "subject": subject, "run": "mission-run/demo", "generation": "run-generation/one",
+                "step": "work", "definition_hash": "hash", "status": "working", "attempt": 1,
+                "assigned_to": "agent/worker", "agentless": false, "title": null,
+                "worker_reported": false, "claimant": "agent/worker", "claim_incarnation": "worker:1",
+                "claim_expires_at_unix_ms": u64::MAX, "readiness_epoch": 1,
+                "blocked_reason": null, "not_before_unix_ms": null,
+                "created_at_unix_ms": 0, "updated_at_unix_ms": 0,
+            })).unwrap()
+        }).collect();
+        let mut predecessor = work[0].clone();
+        predecessor.subject = "step-run/old/build".into();
+        predecessor.claim_incarnation = Some("worker:old".into());
+        work.push(predecessor);
+        let (lease, diagnostic) = trace_lease(&work, "agent/worker", "worker:1");
+        assert!(lease.is_none(), "ambiguity must not select an arbitrary lease");
+        let diagnostic: Value = serde_json::from_str(&diagnostic.unwrap()).unwrap();
+        assert_eq!(diagnostic, json!({
+            "type": "agent_trace_purpose_ambiguous", "claim_count": 3, "subjects": subjects,
+        }));
+        let (lease, diagnostic) = trace_lease(&work[..1], "agent/worker", "worker:1");
+        assert_eq!(lease.unwrap().subject, subjects[0]);
+        assert!(diagnostic.is_none(), "a unique purpose needs no warning");
+    }
 
     #[test]
     fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {

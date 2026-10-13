@@ -4450,6 +4450,7 @@ dependencies = [
  "pty-client",
  "pty-core",
  "pty-terminal",
+ "regex",
  "reqwest",
  "ring",
  "rusqlite",

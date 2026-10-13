@@ -463,6 +463,14 @@ const PROBES: &[Probe] = &[
     })),
     get("GET /v1/client/notes", "/v1/client/notes"),
     get(
+        "GET /v1/agent-trace/principal/{*subject}",
+        "/v1/agent-trace/principal/{seat}",
+    ),
+    get(
+        "GET /v1/agent-trace/mission/{*run}",
+        "/v1/agent-trace/mission/{run}",
+    ),
+    get(
         "GET /v1/client/adapter/deliveries",
         "/v1/client/adapter/deliveries?after={adapter_frontier}&wait_ms=0",
     ),
@@ -1354,6 +1362,118 @@ impl Fixture {
         }
         path
     }
+}
+
+/// Trace declaration evidence does not hydrate the owning mission's step history.
+#[tokio::test]
+async fn trace_principal_mission_owner_cost_is_independent_of_step_count() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut measurements = Vec::new();
+    for steps in [100, 1000] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), NODE).unwrap());
+        store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        store.ensure_principal_key("person/reviewer").unwrap();
+        let root_source = r#"version 2
+agent "cost/principal-root" { accountable "person/reviewer"; command "true"; }
+"#;
+        let root_intent = st3::graph::parse_intent(root_source, NODE).unwrap();
+        let root_planned = store.mission(&root_intent, st3::model::IntentInput {
+            kdl: root_source.into(), source_name: None,
+        }).unwrap();
+        store.apply_as(&root_intent, &root_planned.subject_tokens,
+            "principal-root", Some("person/reviewer")).unwrap();
+        let mut source = String::from(
+            "version 2\nmission \"cost/principal\" state=\"ready\" {\n  goal \"Bound principal lookup.\"\n",
+        );
+        for step in 0..steps {
+            source.push_str(&format!("  step \"work-{step}\" {{ agentless }}\n"));
+        }
+        source.push_str("}\n");
+        let intent = st3::graph::parse_intent(&source, NODE).unwrap();
+        let planned = store.mission(&intent, st3::model::IntentInput {
+            kdl: source, source_name: None,
+        }).unwrap();
+        store.apply(&intent, &planned.subject_tokens, "principal-mission").unwrap();
+        let run = store.create_mission_run(&st3::model::MissionRunRequest {
+            mission: "cost/principal".into(), revision: None,
+            workspace: root.path().display().to_string(),
+            requester: Some("person/requester".into()), mode: None,
+            inputs: BTreeMap::new(), idempotency_key: "principal-run".into(),
+        }).unwrap();
+        assert_eq!(run.steps.len(), steps);
+        let source = r#"version 2
+account "principal/bound" {
+  provider "anthropic"; owner "person/owner"; plan "max"; login "/logins/principal";
+}
+agent "cost/principal-owned" { command "true" }
+agent "cost/principal-authored" { command "true" }
+agent "cost/principal-bound" { harness "claude" { account "principal/bound" } }
+"#;
+        let mut intent = st3::graph::parse_intent(source, NODE).unwrap();
+        for desired in intent.subjects.values_mut().filter(|desired| {
+            desired.kind == "agent" && desired.subject != "agent/cost/principal-authored"
+        }) {
+            desired.owner_run = Some(run.subject.clone());
+            desired.owner_generation = Some(run.generation.clone());
+        }
+        let planned = store.mission(&intent, st3::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        store.apply_as(
+            &intent, &planned.subject_tokens, "principal-seats", Some("agent/cost/principal-root"),
+        ).unwrap();
+        store.seal_local_batches().unwrap();
+        store.judge_claims(true).unwrap();
+        let app = st3::api::router(AppState {
+            store: store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: NODE.into(),
+            state_dir: root.path().join("state"),
+            pty_root: root.path().join("pty"),
+            pty_binary: stub_pty(root.path()),
+            fleet_id: None, configured_peers: Vec::new(), client_relay: None,
+            native_session_home: Some(root.path().join("home")),
+            planner_default: st3::model::PlannerSpec::default(),
+        });
+        let mut samples = Vec::new();
+        for _ in 0..4 {
+            let before = work::total();
+            let response = app.clone().oneshot(Request::builder()
+                .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-owned")
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let principal = body["value"].as_str().unwrap();
+            assert_eq!(principal, "person/reviewer");
+            samples.push(work::total() - before);
+        }
+        measurements.push(samples.into_iter().skip(1).min_by_key(|work| work.vm_steps).unwrap());
+        // A bound account is command ownership, not trace declaration evidence.
+        let response = app.clone().oneshot(Request::builder()
+            .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-bound")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/reviewer"));
+        // All seats follow the same verified declaring root, independent of mission ownership.
+        let response = app.oneshot(Request::builder()
+            .uri("/v1/agent-trace/principal/agent%2Fcost%2Fprincipal-authored")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["value"], json!("person/reviewer"));
+    }
+    let (small, large) = (measurements[0], measurements[1]);
+    println!("trace principal 100 -> 1000 mission steps: {small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps * 3 + SLACK,
+        "principal lookup hydrated mission steps: {small:?} -> {large:?}");
+    assert!(large.fullscan_steps <= small.fullscan_steps * 3 + SLACK,
+        "principal lookup scanned mission history: {small:?} -> {large:?}");
 }
 
 /// Historical runs may grow the answer, but must not repeat the assignee's message scan.

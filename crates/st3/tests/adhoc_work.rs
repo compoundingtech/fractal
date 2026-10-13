@@ -145,9 +145,17 @@ impl Daemon {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(message), "expected {message}: {stderr}");
     }
-    fn declare(&self) {
-        let intent = st3::parse_intent("version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\"; }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\"; }", "example").unwrap();
-        self.store.apply_internal(&intent, "seats").unwrap();
+    fn declare(&self, person: Option<&str>) {
+        let source = "version 2\nagent \"example/alder\" { workspace \"/tmp\"; command \"true\"; }\nagent \"example/birch\" { workspace \"/tmp\"; command \"true\"; }";
+        let intent = st3::parse_intent(source, "example").unwrap();
+        if let Some(person) = person {
+            let preview = self.store.mission(&intent, st3::model::IntentInput {
+                kdl: source.into(), source_name: None,
+            }).unwrap();
+            self.store.apply_as(&intent, &preview.subject_tokens, "seats", Some(person)).unwrap();
+        } else {
+            self.store.apply_internal(&intent, "seats").unwrap();
+        }
         for (actor, incarnation) in [(ALDER, "alder-one"), (BIRCH, "birch-one")] {
             for (kind, fields) in [
                 (
@@ -189,10 +197,149 @@ impl Drop for Daemon {
 }
 
 #[tokio::test]
+async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
+    check_trace_claim_complete(false, false).await;
+}
+
+#[tokio::test]
+async fn ad_hoc_post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
+    check_trace_claim_complete(true, false).await;
+}
+
+#[tokio::test]
+async fn post_work_reports_committed_result_when_trace_publication_fails() {
+    check_trace_claim_complete(true, true).await;
+}
+
+async fn check_trace_claim_complete(ad_hoc: bool, broken_trace: bool) {
+    use st3::agent_trace::issuer::{self, Facts};
+    let root = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(root.path());
+    daemon.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    daemon.store.ensure_principal_key("person/avery").unwrap();
+    daemon.declare(Some("person/avery"));
+    let root_source = r#"version 2
+agent "example/alder" { accountable "person/avery"; workspace "/tmp"; command "true"; }
+"#;
+    let root_intent = st3::parse_intent(root_source, "example").unwrap();
+    let root_preview = daemon.store.mission(&root_intent, st3::model::IntentInput {
+        kdl: root_source.into(), source_name: None,
+    }).unwrap();
+    daemon.store.apply_as(&root_intent, &root_preview.subject_tokens,
+        "trace-root", Some("person/avery")).unwrap();
+    daemon.store.seal_local_batches().unwrap();
+    daemon.store.judge_claims(true).unwrap();
+    assert_eq!(daemon.store.trace_principal(ALDER).unwrap().as_deref(), Some("person/avery"));
+    let source = r#"version 2
+mission "trace-check" state="ready" {
+    goal "Check runtime trace lifecycle."
+    step "work" { assigned-to "agent/example/alder"; }
+}
+"#;
+    let intent = st3::parse_intent(source, "example").unwrap();
+    let preview = daemon.store.mission(&intent, st3::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    daemon.store.apply_as(&intent, &preview.subject_tokens, "trace-mission", Some("person/avery")).unwrap();
+    daemon.start().await;
+    let opened = if ad_hoc {
+        daemon.ok(&["work", "start", "Check trace lifecycle", "--as", ALDER]).await
+    } else {
+        daemon.ok(&["missions", "start", "trace-check", "--workspace",
+            root.path().to_str().unwrap(), "--as", "person/avery"]).await
+    };
+    let run = if ad_hoc { opened["run"].as_str().unwrap() }
+        else { opened["mission_run"]["subject"].as_str().unwrap() };
+    let reconciler = st3::reconcile::Reconciler::new(
+        daemon.store.clone(), Arc::new(NoRuntime), "example".into(), Arc::new(Notify::new()),
+    );
+    reconciler.reconcile_once().unwrap();
+    // The process-free reconciler advances mission readiness but has no physical PTY.
+    // Restore the fixture's explicit live harness observation before claiming work.
+    for (kind, fields) in [
+        ("runtime.observed", json!({"runtime_id":"example/alder",
+            "incarnation_id":"alder-one","status":"running","reachability":"local"})),
+        ("harness.observed", json!({"incarnation_id":"alder-one","state":"ready"})),
+    ] {
+        daemon.store.append_claim(&ClaimInput {
+            subject: ALDER.into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    let run_view = daemon.store.mission_run_steps(run, false).unwrap().unwrap();
+    let step = run_view.steps[0].subject.as_str();
+    let path = root.path().join("agent-trace.json");
+    let runtime = issuer::build(&Facts {
+        agent: ALDER.into(),
+        principal: "person/avery".into(),
+        incarnation: "alder-one".into(),
+        harness_tool: "omp".into(),
+        harness_version: None,
+        model_route: None,
+        model_effort: None,
+        session: None,
+        host: Some("example".into()),
+        worktree: None,
+        mission_name: None,
+    }, None).unwrap();
+    if broken_trace {
+        std::fs::create_dir(&path).unwrap();
+    } else {
+        issuer::write_atomic(&path, &runtime).unwrap();
+    }
+    for action in ["claim", "complete"] {
+        let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
+        command.env("HOME", root.path())
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
+            .env("ST_AGENT", ALDER)
+            .env("AGENT_TRACE_FILE", &path)
+            .arg("--endpoint").arg(daemon.socket())
+            .args(["--daemon-wait", "0", "--json", "work", action, step,
+                "--as", ALDER, "--incarnation", "alder-one",
+                "--summary", "Trace lifecycle checked", "--evidence", "file:trace"]);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+        let committed: st3::model::StepRunView = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(committed.subject, step);
+        assert_eq!(committed.status, if action == "claim" { "claimed" } else { "verifying" });
+        if broken_trace {
+            let log = std::fs::read_to_string(
+                root.path().join("state/st3/driver-api-warnings.log")).unwrap();
+            let diagnostic: Value = serde_json::from_str(
+                log.lines().next_back().unwrap().splitn(3, ' ').nth(2).unwrap()).unwrap();
+            assert_eq!(diagnostic["event"], "agent_trace_omitted");
+            assert_eq!(diagnostic["subject"], ALDER);
+            assert!(diagnostic["error"].as_str().is_some_and(|error| !error.is_empty()));
+            assert!(diagnostic["cleanup_error"].as_str().is_some_and(|error| !error.is_empty()));
+            assert!(path.is_dir(), "a failed trace must not replace unrelated directory contents");
+            continue;
+        }
+        let runtime: st3::agent_trace::Runtime =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let value = serde_json::to_value(&runtime).unwrap();
+        if action == "claim" {
+            assert_eq!(value["how"]["issuance"]["_tag"], "st-issued");
+            assert_eq!(value["how"]["issuance"]["step_run"], step);
+            assert_eq!(value["why"]["mission"]["run"], run);
+            assert_eq!(value["why"]["step"]["run"],
+                run_view.steps[0].generation.strip_prefix("run-generation/").unwrap());
+            assert!(value["why"]["mission"]["name"].is_string());
+            assert!(value["why"]["step"]["name"].is_string());
+        } else {
+            assert!(runtime.why.is_none(), "completion must not retain mission or step");
+            assert!(runtime.how.issuance.is_none(), "completion must not retain a lease");
+        }
+    }
+}
+
+#[tokio::test]
 async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare();
+    daemon.declare(None);
     daemon.start().await;
     let title = "Inspect ${literal} fixture";
     let start = [
@@ -468,7 +615,7 @@ async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
 async fn person_handoff_is_visible_acknowledged_and_closed_with_evidence() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare();
+    daemon.declare(None);
     daemon.start().await;
     let opened = daemon
         .ok(&["work", "start", "Review fixture", "--as", ALDER])
@@ -586,7 +733,7 @@ async fn person_handoff_is_visible_acknowledged_and_closed_with_evidence() {
 async fn a_person_answers_an_ask_from_spontaneous_work_without_evidence() {
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
-    daemon.declare();
+    daemon.declare(None);
     daemon.start().await;
     let opened = daemon
         .ok(&["work", "start", "Rollout scope", "--as", ALDER])

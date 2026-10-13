@@ -1079,7 +1079,7 @@ assert.ok(context.length > 0, "the producer must emit context frames, not merely
 const reading = context.find((frame) => frame.reading);
 assert.ok(reading, "a context frame must carry a `reading` object");
 // Every leg is always present, `null` where withheld — one absence convention on the wire.
-for (const key of ["usedTokens", "windowTokens", "usedPercent", "model", "costUsd"]) {
+for (const key of ["usedTokens", "windowTokens", "usedPercent", "model", "provider", "costUsd"]) {
   assert.ok(key in reading.reading, `reading carries ${key}`);
 }
 
@@ -1091,6 +1091,8 @@ assert.ok(known, "a populated context must produce a reading with real numbers")
 assert.strictEqual(known.reading.usedTokens, 22500, "omp's numerator is the prompt figure");
 assert.notStrictEqual(known.reading.usedTokens, 22525, "publishing totalTokens would be pi's rule");
 assert.strictEqual(known.reading.usedPercent, 562.5, "carried raw, never clamped");
+assert.strictEqual(known.reading.model, "fake-1");
+assert.strictEqual(known.reading.provider, "fakelab");
 
 const edges = context.filter((frame) => frame.compaction);
 assert.ok(edges.length > 0, "a compaction edge must ride a context frame");

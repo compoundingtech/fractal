@@ -300,6 +300,7 @@ impl CodexContextProducer {
             window_tokens: window.and_then(|window| u64::try_from(window).ok()),
             used_percent: codex_used_percent(window, last_total),
             model: None,
+            provider: None,
             cost_usd: None,
             // Cumulative lifetime spend and never occupancy (HC-R16): the captured session read
             // 2,235,329 against a 258,400-token window.

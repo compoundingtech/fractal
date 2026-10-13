@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Provide managed native drivers with a lease-derived Agent Trace runtime file.",
+  "replay": {
+    "status": "none",
+    "detail": "Runtime trace issuance uses the current lease context; signed claims, replay admission and canonical projections are unchanged. Idle agents omit both why and issuance rather than inventing work context."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema migration, stored-claim rewrite or client schema change. The runtime file uses the Agent Trace runtime contract."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint, claim-admission or authorization rule changes. Trace metadata does not grant authority or replace lease fencing."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Native driver children receive AGENT_TRACE_FILE pointing to agent-trace.json in their agent directory. Issuance is derived from a unique active lease; idle agents omit issuance and why. Agent identity and mission run references retain their complete subjects, step run references retain the generation identifier, and issuance retains the exact step subject. Several live claims omit purpose and issuance and log their count and subjects instead of choosing an arbitrary lease. References rejected by the runtime authority omit purpose and issuance with a diagnostic rather than fabricate identifiers. A launch without a known model omits model until the harness reports it. Model routes preserve the explicit provider and the complete model identifier, including namespaced identifiers. Unrepresentable models are omitted. Human trace attribution follows verified declaring seats to the accountable person explicitly declared and signed by the fleet root. Account ownership, mission requesters and command authorization do not supply trace attribution. Missing or unverified roots leave no trace file. There is no environment principal fallback. All trace failures are best-effort: they do not change provider launch, lease renewal, event acknowledgment or a committed work result. Trace transaction failures are recorded in the issuer's private driver log, never on the agent's stderr. Failed transactions remove stale trace files only while holding the writer lock. Lock contention skips the update without changing the owning writer's file. Declaration evidence and incarnation reads use bounded projections. Context reports retain the existing model identifier and add provider separately; provider or model changes publish immediately. The trace setting is outbound child environment only and is not required for native path resolution. Interrupted-ask healing removes AGENT_TRACE_FILE alongside managed driver handles while retaining the existing launcher identity."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption or database migration is required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual trace-file creation or operator migration is required; the managed driver runtime supplies the file and child environment."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No durable data or authorization state is migrated, so no database recovery procedure changes. Runtime trace metadata is derived from the current managed execution context."
+  }
+}
