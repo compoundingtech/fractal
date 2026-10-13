@@ -110,6 +110,7 @@ pub mod store;
 pub mod subagents;
 /// Suspends a quiet seat and resumes its own native session.
 pub mod suspension;
+pub(crate) mod publication;
 pub mod seat_snapshot;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]

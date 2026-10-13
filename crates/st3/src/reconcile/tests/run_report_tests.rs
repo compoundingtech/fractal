@@ -220,6 +220,7 @@ fn a_quiet_parent_counts_child_round_progress_and_then_reports_real_silence() {
             summary: summary.map(str::to_owned),
             reason: None,
             evidence: Vec::new(),
+            wait_ms: None,
             idempotency_key: key.into(),
         };
         fixture

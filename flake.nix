@@ -221,9 +221,6 @@
           "st2-pty-stats-component"
           "--exclude"
           "st2-vista-component"
-          # The standalone decision model has its own hermetic gate.
-          "--exclude"
-          "st-decision-fold"
           # `checks.st3` gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
@@ -1202,6 +1199,9 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.git
+            # Git evidence fixtures sign observations and serve API responses with Python.
+            pkgs.openssh
+            pkgs.python3
             pkgs.sccache
             pkgs.cargo-nextest
             pkgs.pkg-config

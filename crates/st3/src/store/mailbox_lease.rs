@@ -11,9 +11,21 @@ thread_local! {
     static BEFORE_FAULT_READER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static DURING_FAULT_READ: std::cell::RefCell<Option<FaultReadHook>> = const { std::cell::RefCell::new(None) };
     static AFTER_FAULT_ACQUISITION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static CARD_FAULT_DEADLINES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Runs once, after a promotion's reader pre-check found something that may promote and
     /// before the writer is borrowed, so a test can change the lease in that gap.
     static AFTER_PROMOTION_PRECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+impl Store {
+    pub(crate) fn expire_next_card_fault_read_for_test() {
+        Self::expire_card_fault_reads_for_test(1);
+    }
+
+    pub(crate) fn expire_card_fault_reads_for_test(count: usize) {
+        CARD_FAULT_DEADLINES.with(|remaining| remaining.set(count));
+    }
 }
 
 fn lease(
@@ -1661,6 +1673,12 @@ impl Store {
         // Admission and result cleanup remain within the enclosing wall deadline.
         // Captures without a request retain their existing finite wall bound.
         let duration = std::time::Duration::from_millis(25);
+        #[cfg(test)]
+        let duration = CARD_FAULT_DEADLINES.with(|remaining| {
+            let count = remaining.get();
+            remaining.set(count.saturating_sub(1));
+            if count == 0 { duration } else { std::time::Duration::ZERO }
+        });
         let budget = smallclaims::read_budget::current().unwrap_or_else(
             || smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", duration),
         );
