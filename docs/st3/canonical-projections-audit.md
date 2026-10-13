@@ -72,7 +72,7 @@ Mixed storage tables below are classified by their logical shared fields; local 
 | `planning_candidates` | Shared projection | Shared immutable variant/revision/document references, mission revision and submission timestamp. |
 | `planning_previews` | Shared projection | Shared serialized preview claim fields, graph/diff/response/hash and candidate fence. store_index here is an originating claim payload field, not this replica’s admission cursor: identical claim payloads must compare identically. Future cross-node preview fencing should use stable claim/frontier identity. |
 | `graph_generation` | Local | Local cache invalidation counter; same graph can have different mutation counts. |
-| `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source or operation projections. |
+| `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source, operation or actual-state projections. Actual values, provenance, runtime origin and runtime-epoch reads use this durable repaired-ID membership even after local receipt cleanup. |
 | `replica_envelope_signatures` | Shared storage, with stated local fields | Shared signed envelope identity/member-key/signature; stored_at is local receipt time. Authority/signature inventory is distinct from outcome projection digests. |
 | `claim_signatures` | Shared storage | Each claim's signature exactly as its envelope payload carried it; written once at sealing or admission, never rewritten. Covered by the envelope hash and writer signature, so it adds nothing to any digest. |
 | `claim_verdicts`, `claim_verdict_links`, `claim_verdict_queue`, `claim_verdict_fresh` | Local cache | Signature verdicts folded from admitted claims in canonical order; never synced, outside every digest, rebuilt by `recheck_claim_verdicts`. |
@@ -305,3 +305,9 @@ The local `coordination_offer` trigger runs after lifecycle claims are inserted 
 for staged, delivered, read and closed receipts it clears `coordination_sends.held` with one
 guarded primary-key update in the existing writer transaction. It adds no reader write or
 conversation payload and is outside shared projection digests.
+
+The Git change reader uses `local_git_change_records` and
+`local_git_change_latest` as node-local verified-object receipts and latest indexed
+pointers. They start empty, rebuild from explicitly fetched Git objects, and do
+not participate in replicated projection order or digests. The table inventory
+audit classifies both as local storage.

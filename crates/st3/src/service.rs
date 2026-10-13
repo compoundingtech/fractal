@@ -89,7 +89,9 @@ pub struct ServiceStatus {
 pub struct ServiceSpec {
     exe: PathBuf,
     config: Config,
+    config_path: Option<PathBuf>,
     memory_max_mb: u64,
+    read_cache_kib: Option<usize>,
 }
 
 impl ServiceSpec {
@@ -115,7 +117,9 @@ impl ServiceSpec {
         Ok(Self {
             exe: exe.into(),
             config,
+            config_path: None,
             memory_max_mb,
+            read_cache_kib: None,
         })
     }
 
@@ -132,8 +136,18 @@ impl ServiceSpec {
             "--client-gateway-socket".into(),
             self.config.client_gateway_socket.display().to_string(),
         ];
+        if let Some(path) = &self.config_path {
+            arguments.extend(["--config".into(), path.display().to_string()]);
+        }
         if let Some(pty_root) = &self.config.pty_root {
             arguments.extend(["--pty-root".into(), pty_root.display().to_string()]);
+        }
+        // Downloaded archives and setup put pty next to st3. A service must remain
+        // usable before ~/.local/bin has been added to the login shell's PATH.
+        if let Some(pty) = self.exe.parent().map(|parent| parent.join("pty"))
+            .filter(|pty| pty.is_file())
+        {
+            arguments.extend(["--pty-binary".into(), pty.display().to_string()]);
         }
         self.push_fleet_arguments(&mut arguments);
         arguments
@@ -174,12 +188,19 @@ impl ServiceSpec {
             "--socket".into(),
             self.config.socket.display().to_string(),
         ];
+        if let Some(path) = &self.config_path {
+            arguments.extend(["--config".into(), path.display().to_string()]);
+        }
         self.push_fleet_arguments(&mut arguments);
         arguments
     }
 }
 
-pub fn install(mut config: Config) -> Result<()> {
+pub fn install(config: Config) -> Result<()> {
+    install_from_config_path(config, None)
+}
+
+pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) -> Result<()> {
     crate::node_identity::resolve(&mut config)?;
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
@@ -209,9 +230,12 @@ pub fn install(mut config: Config) -> Result<()> {
     ) {
         crate::peer::FleetAuth::load(fleet_id, secret)?;
     }
-    let spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    let mut spec = ServiceSpec::new(exe, config, DEFAULT_MEMORY_MAX_MB)?;
+    spec.read_cache_kib = crate::read_cache::override_kib();
+    spec.config_path = config_path.map(|path| absolute_from(&current, path));
     if spec.config.access_mode.is_some() {
-        spec.config.initialize_install_config(&Config::default_path())?;
+        let path = spec.config_path.clone().unwrap_or_else(Config::default_path);
+        spec.config.initialize_install_config(&path)?;
     }
     install_native_service(&spec)?;
     println!("installed");
@@ -477,9 +501,10 @@ fn status_native_service() -> Result<ServiceStatusReport> {
 
 #[cfg(target_os = "linux")]
 fn restart_native_service(config: &Config) -> Result<()> {
-    let _ = host_command("systemctl")
-        .args(["--user", "stop", replication_service_name()])
-        .status();
+    optional_systemd_command(
+        replication_service_name(),
+        &["--user", "stop", replication_service_name()],
+    )?;
     run_command("systemctl", &["--user", "restart", service_name()])?;
     if config.fleet_id.is_some() {
         run_command("systemctl", &["--user", "start", replication_service_name()])?;
@@ -494,10 +519,45 @@ fn uninstall_native_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn stop_native_service() -> Result<()> {
-    let _ = host_command("systemctl")
-        .args(["--user", "stop", replication_service_name()])
-        .status();
+    optional_systemd_command(
+        replication_service_name(),
+        &["--user", "stop", replication_service_name()],
+    )?;
     run_command("systemctl", &["--user", "stop", service_name()])
+}
+
+#[cfg(target_os = "linux")]
+fn optional_systemd_command(name: &str, arguments: &[&str]) -> Result<()> {
+    let output = host_command("systemctl")
+        .args(arguments)
+        .output()
+        .with_context(|| format!("run systemctl {}", arguments.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    // A unit file may be gone while its service remains loaded. Only the manager can
+    // establish that a failed stop/disable addressed an absent, inactive unit.
+    let status = host_command("systemctl")
+        .args([
+            "--user",
+            "show",
+            name,
+            "--property=LoadState",
+            "--property=ActiveState",
+            "--no-pager",
+        ])
+        .output()
+        .with_context(|| format!("check whether {name} is absent"))?;
+    let states = String::from_utf8_lossy(&status.stdout);
+    anyhow::ensure!(
+        states.lines().any(|line| line == "LoadState=not-found")
+            && states.lines().any(|line| line == "ActiveState=inactive"),
+        "systemctl {} failed with {}: {}",
+        arguments.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -732,12 +792,11 @@ fn systemd_service_status(name: &str) -> Result<ServiceStatus> {
 
 #[cfg(target_os = "linux")]
 fn uninstall_systemd_user() -> Result<()> {
-    let _ = host_command("systemctl")
-        .args(["--user", "disable", "--now", service_name()])
-        .status();
-    let _ = host_command("systemctl")
-        .args(["--user", "disable", "--now", replication_service_name()])
-        .status();
+    optional_systemd_command(service_name(), &["--user", "disable", "--now", service_name()])?;
+    optional_systemd_command(
+        replication_service_name(),
+        &["--user", "disable", "--now", replication_service_name()],
+    )?;
     let unit_path = systemd_user_unit_path()?;
     if unit_path.exists() {
         fs::remove_file(unit_path)?;
@@ -872,6 +931,9 @@ pub fn render_systemd_user_unit(spec: &ServiceSpec) -> String {
         .map(|argument| systemd_quote_arg(argument))
         .collect::<Vec<_>>()
         .join(" ");
+    let cache_environment = spec.read_cache_kib
+        .map(|kib| format!("Environment=SMALLCLAIMS_READ_CACHE_KIB={kib}\n"))
+        .unwrap_or_default();
     let weight = st_runtime::LIVE_WEIGHT;
     let instance_environment = systemd_instance_environment();
     format!(
@@ -883,7 +945,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
-{instance_environment}Restart=on-failure\n\
+{instance_environment}{cache_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
 CPUWeight={weight}\n\
@@ -984,7 +1046,13 @@ fn render_launchd_program_plist(
         .iter()
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
-    let instance_environment = plist_environment(&crate::instance::service_environment());
+    let mut environment = crate::instance::service_environment();
+    if label == service_label() {
+        if let Some(kib) = spec.read_cache_kib {
+            environment.push(("SMALLCLAIMS_READ_CACHE_KIB".to_owned(), kib.to_string()));
+        }
+    }
+    let instance_environment = plist_environment(&environment);
     let stdout = spec.config.state_dir.join("logs").join(stdout_name);
     let stderr = spec.config.state_dir.join("logs").join(stderr_name);
     format!(
@@ -1054,6 +1122,36 @@ fn systemd_quote_arg(argument: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::PeerConfig;
+
+    #[test]
+    fn reader_cache_override_is_persisted_for_the_daemon_on_both_platforms() -> Result<()> {
+        let mut spec = ServiceSpec::new("/usr/bin/st3", Config::default(), 1024)?;
+        assert!(!render_systemd_user_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        assert!(!render_launchd_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        spec.read_cache_kib = Some(1024);
+        assert!(render_systemd_user_unit(&spec)
+            .contains("Environment=SMALLCLAIMS_READ_CACHE_KIB=1024\n"));
+        assert!(render_launchd_plist(&spec).contains(
+            "<key>EnvironmentVariables</key><dict><key>SMALLCLAIMS_READ_CACHE_KIB</key><string>1024</string></dict>"
+        ));
+        assert!(!render_systemd_replication_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        assert!(!render_launchd_replication_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
+        Ok(())
+    }
+
+    #[test]
+    fn setup_service_pins_the_config_and_sibling_pty() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let executable = root.path().join("st3");
+        fs::write(root.path().join("pty"), b"fixture")?;
+        let mut spec = ServiceSpec::new(executable, Config::default(), 1024)?;
+        spec.config_path = Some(root.path().join("custom/config.toml"));
+        let arguments = spec.program_arguments();
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--config" && pair[1].ends_with("custom/config.toml")));
+        assert!(arguments.windows(2).any(|pair| pair[0] == "--pty-binary" && pair[1].ends_with("/pty")));
+        assert!(spec.replication_program_arguments().contains(&"--config".into()));
+        Ok(())
+    }
 
     #[test]
     fn membership_units_carry_no_peer_fleet_or_secret_arguments() -> Result<()> {

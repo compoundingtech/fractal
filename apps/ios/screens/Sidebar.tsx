@@ -33,13 +33,16 @@ function DragHandle({ title, onBegin, onEnd, onDrop }: { title: string; onBegin:
 }
 
 export function SidebarScreen({ navigation }: RootScreen<'ResourcesRoot'>) {
-  const { data, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources, loadLists, sidebarSeen, url, caps, actor, status, hasSynced, busy, actions, loadErrors, truncated, gatewayHost, error } = useStore();
+  const { data, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, watchSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources, loadLists, sidebarSeen, url, caps, actor, status, hasSynced, busy, actions, loadErrors, truncated, gatewayHost, error, feed, inventoryGranted } = useStore();
   useListsOnFocus(['machines', 'sessions']); useMissionsOnFocus();
-  useFocusEffect(useCallback(() => { if (status === 'online') void loadSidebarTerminals(); }, [status, loadSidebarTerminals]));
+  useFocusEffect(useCallback(() => {
+    if (inventoryGranted) return watchSidebarTerminals();
+    if (inventoryGranted === false && status === 'online') void loadSidebarTerminals();
+  }, [status, loadSidebarTerminals, watchSidebarTerminals, inventoryGranted]));
   useFocusEffect(useCallback(() => { if (status === 'online') void loadSidebarResources(); }, [status, loadSidebarResources]));
   const [refreshing, setRefreshing] = useState(false);
   const refresh = <RefreshControl refreshing={refreshing} tintColor={theme.overlay1} onRefresh={() => {
-    setRefreshing(true); if (status !== 'online') actions.reconnect();
+    setRefreshing(true); if (status !== 'online') actions.reconnect(); else if (inventoryGranted) feed?.refresh();
     void Promise.all([loadLists(['machines', 'sessions']), loadSidebarTerminals(), loadSidebarResources()]).finally(() => setRefreshing(false));
   }} />;
   const [filter, setFilter] = useState(''), [choices, setChoices] = useState<SidebarChoices>({}), [loadedKey, setLoadedKey] = useState('');

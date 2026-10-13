@@ -4,7 +4,8 @@
 //! window keeps its last picture and looks frozen (Nathan, 2026-10-05). Each running stui keeps
 //! a small file under `$XDG_CACHE_HOME/st3/stui/runs/` (the cache, not the state: a device
 //! with no st state must stay free of it), removed when it exits by any route that
-//! runs destructors: a quit, a signal it handles, an error or a panic. A file whose process is
+//! runs destructors: a quit, a signal it handles or an error. A panic preserves its marker
+//! for draft-recovery accounting on the next launch. A file whose process is
 //! gone is the trace of one that did not, and the next stui to start says so.
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ struct Mark {
     pid: u32,
     started_unix: u64,
     build: String,
+    #[serde(default)]
+    panicked: bool,
 }
 
 /// This stui's file, removed on drop.
@@ -25,6 +28,9 @@ pub struct Run {
 
 impl Drop for Run {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
         if let Some(file) = self.file.take() {
             let _ = std::fs::remove_file(file);
         }
@@ -46,11 +52,17 @@ pub fn log_panics(build: &str) {
     let build = build.to_owned();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        mark_panicked();
+        super::slo::panic();
         let what = format!("{info}\n{}", std::backtrace::Backtrace::force_capture());
         // Beside the run files in the cache, and beside `connection.log` in the state
         // directory, where a person looking at what stui left behind looks first.
-        let state =
-            super::prefs::path().and_then(|prefs| prefs.parent().map(|dir| dir.join("panics.log")));
+        let state = super::prefs::path().and_then(|prefs| {
+            prefs
+                .parent()
+                .filter(|dir| dir.is_dir())
+                .map(|dir| dir.join("panics.log"))
+        });
         let cache = directory().and_then(|runs| runs.parent().map(|dir| dir.join("panics.log")));
         for file in [cache, state].into_iter().flatten() {
             write_panic(&file, &build, &what);
@@ -59,6 +71,20 @@ pub fn log_panics(build: &str) {
         super::drafts_store::flush_unsaved();
         previous(info);
     }));
+}
+
+fn mark_panicked() {
+    let Some(dir) = directory() else { return };
+    let file = dir.join(format!("{}.json", std::process::id()));
+    if let Some(mut mark) = std::fs::read(&file)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Mark>(&raw).ok())
+    {
+        mark.panicked = true;
+        if let Ok(raw) = serde_json::to_vec(&mark) {
+            let _ = std::fs::write(file, raw);
+        }
+    }
 }
 
 /// Append one panic to the log, which is cleared once it passes 200 KB.
@@ -105,6 +131,7 @@ pub fn begin(build: &str) -> (Run, Option<String>) {
         pid: std::process::id(),
         started_unix: now_unix(),
         build: build.to_owned(),
+        panicked: false,
     };
     let written = serde_json::to_vec(&mark)
         .ok()
@@ -130,7 +157,10 @@ fn left_without_exiting(directory: &Path, own: u32, now: u64) -> Option<String> 
         if mark.pid == own || alive(mark.pid) {
             continue;
         }
-        let _ = std::fs::remove_file(&path);
+        // Only the process that successfully consumes a stale marker counts it.
+        if std::fs::remove_file(&path).is_ok() && !mark.panicked {
+            super::slo::METRICS.add("silent_exits", 1);
+        }
         if newest
             .as_ref()
             .is_none_or(|known| mark.started_unix > known.started_unix)
@@ -166,6 +196,7 @@ mod tests {
             pid,
             started_unix: started,
             build: "0.1.0+test".into(),
+            panicked: false,
         };
         std::fs::write(
             directory.join(format!("{pid}.json")),
@@ -216,6 +247,20 @@ mod tests {
             file: Some(file.clone()),
         });
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn unwinding_preserves_the_run_marker_for_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("run.json");
+        std::fs::write(&file, b"{}").unwrap();
+        let kept = file.clone();
+        let outcome = std::panic::catch_unwind(|| {
+            let _run = Run { file: Some(kept) };
+            panic!("recovery probe");
+        });
+        assert!(outcome.is_err());
+        assert!(file.exists());
     }
 
     #[test]
