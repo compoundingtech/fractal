@@ -712,6 +712,9 @@ mod schema_install_tests {
         SmalltalkRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap();
+        // SQLite silently ignores this connection change within a transaction. The
+        // authorizer must still see it, or the late-chunk guard could give false assurance.
+        connection.execute_batch("BEGIN; PRAGMA foreign_keys=ON; ROLLBACK;").unwrap();
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
         connection.commit_hook(None::<fn() -> bool>);
         let events = events.lock().unwrap();
@@ -762,6 +765,8 @@ mod schema_install_tests {
                 .any(|event| event.starts_with("connection-pragma:")),
             "connection PRAGMAs must remain outside the fresh late chunk: {events:?}"
         );
+        assert!(events[end + 1..].iter().any(|event| event == "connection-pragma:foreign_keys"),
+            "the ignored-PRAGMA positive control must be recorded");
         // VACUUM or a nested BEGIN in any helper makes the real fresh install above fail.
         assert!(connection.is_autocommit());
     }
