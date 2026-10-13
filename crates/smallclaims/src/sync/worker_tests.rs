@@ -1546,6 +1546,109 @@ mod retry_tests {
         }
     }
 
+    /// `fabric dial` never connects, so a member's refusal reaches the worker as a tunnel that
+    /// closes. The worker then asks `fabric probe --json`, and only a refusal class puts the
+    /// route to sleep.
+    #[tokio::test]
+    async fn a_tunnel_that_closes_is_a_refusal_only_when_the_probe_says_so() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fleet_id = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+        let auth = FleetAuth::test(fleet_id, &[37; 32]);
+        let answer = |outcome: &str, code: &str, class: &str| {
+            format!(
+                "{{\"peer\":\"amber\",\"outcome\":\"{outcome}\",\"error\":\"fabric:{code} words\",\"code\":\"{code}\",\"class\":\"{class}\"}}"
+            )
+        };
+        for (probe, refused) in [
+            (
+                answer("unreachable", "peer_not_permitted_for_service", "refusal"),
+                true,
+            ),
+            (
+                answer("unreachable", "peer_not_in_allow_list", "refusal"),
+                true,
+            ),
+            (answer("unreachable", "unreachable", "fault"), false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(plain_open(&root.path().join("indigo.db"), "indigo").unwrap());
+            store.bind_fleet(fleet_id).unwrap();
+            // A tunnel that accepts and closes at once, as a refused one does.
+            let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = dead.local_addr().unwrap();
+            let closer = tokio::spawn(async move {
+                loop {
+                    let _ = dead.accept().await;
+                }
+            });
+            let probes = root.path().join("probes");
+            let program = root.path().join("fabric");
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\n  dial) echo '{{\"address\":\"{address}\"}}';;\n  probe) echo \"$2\" >> '{}'; echo '{probe}'; exit 2;;\nesac\n",
+                    probes.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut context = FleetContext::legacy(["amber".into()].into());
+            context.fabric = Some(Fabric::new(program));
+            let (_routes, receiver) = watch::channel(vec![Route::Fabric {
+                node: "amber".into(),
+                protocol: "st3-peer-v1".into(),
+            }]);
+            let wake = watch::channel(0).0;
+            let worker = tokio::spawn(dial_peer(
+                Local(store.clone()),
+                "indigo".into(),
+                "amber".into(),
+                receiver,
+                auth.clone(),
+                context,
+                wake.subscribe(),
+            ));
+            // Wait until the worker has asked Fabric what the closed tunnel meant.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while std::fs::read_to_string(&probes)
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+                    == 0
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{probe}: the probe was never asked"));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let peer = store
+                .replication_status(true, Some(fleet_id), &["amber".into()])
+                .unwrap()
+                .peers
+                .remove(0);
+            if refused {
+                assert_eq!(peer.status, "refused", "{probe}");
+                assert!(peer.last_error.is_none());
+                assert!(
+                    peer.refusal_reason
+                        .as_ref()
+                        .unwrap()
+                        .contains("that member's Fabric grants")
+                );
+                // Asleep: more time passes and the probe is not asked again.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let asked = std::fs::read_to_string(&probes).unwrap().lines().count();
+                assert_eq!(asked, 1, "{probe}");
+            } else {
+                assert_ne!(peer.status, "refused", "{probe}");
+                assert!(peer.refusal_reason.is_none(), "{probe}");
+            }
+            worker.abort();
+            closer.abort();
+        }
+    }
+
     #[test]
     fn absent_members_cost_a_few_attempts_per_hour_after_exponential_backoff() {
         // Use the shortest jitter so this bounds the most aggressive retry schedule.

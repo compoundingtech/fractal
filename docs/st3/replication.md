@@ -676,8 +676,12 @@ st doctor
 
 The status view reports the authority digest, graph digest, record counts, projection health, and last peer results.
 
-A Fabric `peer not permitted for service` answer means the member's grants refuse that direct
-route. It shows as `refused`, with the Fabric node and service, in `st replication status`,
+A Fabric refusal (error class `refusal`: `peer_not_permitted_for_service` when the member's grants
+refuse that direct route, `peer_not_in_allow_list` when it does not trust this machine) means
+that route will not work until the member changes its trust. `fabric dial` never connects, so
+the worker learns of it when the tunnel closes, and then asks `fabric probe --json` for the code.
+Only the `refusal` class puts the route to sleep; a `fault` is retried like any absent member.
+It shows as `refused`, with the Fabric node and service, in `st replication status`,
 `st fleet status` and `st doctor`. It is neither an absent member nor a replication error;
 `last_error` is empty and the JSON status carries `refusal_reason`. Doctor's replication check
 passes when the refusal is the only issue.
