@@ -9,7 +9,8 @@ A profile is the terminal's own answer to the capability query ratatui-image sen
 graphics query, DA1, the cell size in pixels and a status report):
 
   kitty   answers the kitty graphics query OK, DA1 without sixel
-  iterm2  answers DA1 without sixel and nothing to kitty; TERM_PROGRAM=iTerm.app as iTerm2 sets it
+  iterm2  answers DA1 without sixel and nothing to kitty; sets TERM_PROGRAM=iTerm.app and
+          ITERM_SESSION_ID as iTerm2 does (tmux keeps the second)
   sixel   answers DA1 with attribute 4 (sixel), nothing to kitty
   silent  answers nothing at all
 
@@ -38,7 +39,8 @@ CELL = (20, 10)  # pixel height, width of one cell
 
 ENVIRONMENT = {
     "kitty": {"TERM": "xterm-kitty", "KITTY_WINDOW_ID": "1"},
-    "iterm2": {"TERM": "xterm-256color", "TERM_PROGRAM": "iTerm.app", "LC_TERMINAL": "iTerm2"},
+    "iterm2": {"TERM": "xterm-256color", "TERM_PROGRAM": "iTerm.app", "LC_TERMINAL": "iTerm2",
+               "ITERM_SESSION_ID": "w0t0p0:00000000-0000-0000-0000-000000000000"},
     "sixel": {"TERM": "xterm-256color"},
     "silent": {"TERM": "xterm-256color"},
 }

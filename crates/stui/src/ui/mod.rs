@@ -655,6 +655,27 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
+    /// Release the pixels of every image more than a screen away from what the last frame
+    /// showed, in every pane; an image in a tab not drawn is released too.
+    pub(crate) fn release_far_images(&mut self) {
+        let frame = self.frame.borrow();
+        let near = frame
+            .panes
+            .iter()
+            .flat_map(|pane| {
+                let height = pane.rect.height as usize;
+                let from = pane.top.saturating_sub(height + content::IMAGE_ROWS);
+                let to = pane.top.saturating_add(2 * height);
+                pane.images
+                    .iter()
+                    .filter(move |(_, line)| (from..to).contains(line))
+                    .map(|(key, _)| key.clone())
+            })
+            .collect();
+        drop(frame);
+        self.content.release_far(&near);
+    }
+
     /// Use the last presented viewport, not every row in the conversation.
     pub(crate) fn next_content_read(&mut self, reads: &mut content::Reads) -> Option<content::Key> {
         if reads.idle()
@@ -683,13 +704,14 @@ impl Ui {
             if pane.rect.width == 0 || pane.rect.height == 0 {
                 continue;
             }
-            if self.auto_images {
-                for (key, line) in &pane.images {
-                    if pane.entry_visible(*line, line.saturating_add(1), &frame.covers)
-                        && self.content.request_visible_image(key)
-                    {
-                        return Some(key.clone());
-                    }
+            for (key, line) in &pane.images {
+                // A terminal that draws images loads them as they come into view; anywhere, an
+                // image the person showed comes back after scrolling released it.
+                if (self.auto_images || self.content.shown_released(key))
+                    && pane.entry_visible(*line, line.saturating_add(1), &frame.covers)
+                    && self.content.request_visible_image(key)
+                {
+                    return Some(key.clone());
                 }
             }
             for (index, (entry, start)) in pane.entries.iter().enumerate() {
@@ -2493,7 +2515,9 @@ impl Ui {
             Pane::Terminal(agent) => return self.draw_terminal(buf, area, agent),
             Pane::Home(id) => {
                 let drafts = self.drafts_for(id.as_deref().unwrap_or_default(), width);
-                screens::home_detail(&self.world, id.as_deref(), width, &drafts)
+                let mut doc = screens::home_detail(&self.world, id.as_deref(), width, &drafts);
+                self.content.expand_requests(&mut doc, width);
+                doc
             }
             Pane::NewMission => {
                 let empty = Default::default();
@@ -3130,17 +3154,22 @@ impl Ui {
             }
             if let Hit::InlineImage(key) = &target.hit
                 && target.line < top + height
-                && target.line + 12 > top
-                && let Some(picker) = &self.picker
+                && target.line + content::IMAGE_ROWS > top
             {
                 let start = target.line.max(top);
-                let end = (target.line + 12).min(top + height);
-                self.content.draw_image(picker, key, Rect {
-                    x: area.x + 2,
-                    y: area.y + (start - top) as u16,
-                    width: area.width.saturating_sub(3),
-                    height: (end - start) as u16,
-                }, buf);
+                let end = (target.line + content::IMAGE_ROWS).min(top + height);
+                self.content.draw_image(
+                    key,
+                    area.width.saturating_sub(3),
+                    (start - target.line) as u16,
+                    Rect {
+                        x: area.x + 2,
+                        y: area.y + (start - top) as u16,
+                        width: area.width.saturating_sub(3),
+                        height: (end - start) as u16,
+                    },
+                    buf,
+                );
             }
         }
         if let Some(selection) = &self.conversation_state.selection
@@ -7208,6 +7237,7 @@ mod tests {
                 from_id: "agent/garden/seed".into(),
                 question: "selection (keep / discard)".into(),
                 structured: None,
+                images: Vec::new(),
             },
             actions: vec!["custom.reply".into()],
             related: vec![],
@@ -7425,6 +7455,7 @@ mod tests {
                 from_id: "agent/example/planner".into(),
                 question: "Answer yes and I land them.".into(),
                 structured: None,
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -7702,6 +7733,7 @@ mod tests {
                 },
             ],
             custom: true,
+            attachments: Vec::new(),
             ..Default::default()
         };
         let item = Attention {
@@ -7718,6 +7750,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -7780,6 +7813,7 @@ mod tests {
                 recommendation: None,
                 answers,
                 custom: false,
+                attachments: Vec::new(),
             };
             let item = Attention {
                 conversations: vec![],
@@ -7795,6 +7829,7 @@ mod tests {
                     from_id: "agent/example/cos".into(),
                     question: request.question.clone(),
                     structured: Some(Box::new(request)),
+                    images: Vec::new(),
                 },
                 actions: vec!["work.done".into()],
                 related: Vec::new(),
@@ -7912,6 +7947,7 @@ mod tests {
                 },
             ],
             custom: true,
+            attachments: Vec::new(),
         };
         let item = Attention {
             conversations: vec![],
@@ -7927,6 +7963,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -7994,6 +8031,7 @@ mod tests {
             subjects: Vec::new(),
             answers: vec![option("a", "Refresh"), option("b", "Shorten"), option("c", "Leave it")],
             custom: false,
+            attachments: Vec::new(),
         };
         let item = Attention {
             conversations: vec![],
@@ -8009,6 +8047,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -8084,6 +8123,7 @@ mod tests {
                 },
             ],
             custom: false,
+            attachments: Vec::new(),
         };
         let item = Attention {
             conversations: vec![],
@@ -8099,6 +8139,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: request.question.clone(),
                 structured: Some(Box::new(request)),
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -8177,6 +8218,7 @@ mod tests {
                 from_id: "agent/example/cos".into(),
                 question: "The proof needs a runner.".into(),
                 structured: None,
+                images: Vec::new(),
             },
             actions: vec!["work.done".into()],
             related: Vec::new(),
@@ -8422,6 +8464,7 @@ mod tests {
                         from_id: "agent/example/planner".into(),
                         question: "Name the runner.".into(),
                         structured: None,
+                        images: Vec::new(),
                     },
                     actions: vec!["work.done".into()],
                     related: Vec::new(),

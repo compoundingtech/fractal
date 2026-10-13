@@ -388,9 +388,33 @@ fn image(value: &Value) -> bool {
         )
 }
 
-fn image_media(_value: &Value) -> &str {
-    // Native MIME labels are untrusted. Fetch reports the detected passive image format.
-    "application/octet-stream"
+/// What a reader can say about an inline image before fetching it: the format its own first
+/// bytes show and its decoded size. Native MIME labels are untrusted, so a source whose bytes are
+/// not inline (a path, a URL) or not a known image keeps `application/octet-stream` and no size.
+fn image_facts(value: &Value) -> (&'static str, Option<usize>) {
+    let unknown = ("application/octet-stream", None);
+    let Some(source) = image_source(value) else {
+        return unknown;
+    };
+    let data = match source.strip_prefix("data:") {
+        Some(url) => match url.split_once(";base64,") {
+            Some((_, data)) => data,
+            None => return unknown,
+        },
+        None => source,
+    };
+    let data = data.trim_end();
+    if data.len() < 16 || data.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return unknown;
+    }
+    let Ok(head) = STANDARD.decode(&data[..16]) else {
+        return unknown;
+    };
+    let Some(media) = crate::blobs::sniff_media_type(&head) else {
+        return unknown;
+    };
+    let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
+    (media, Some(data.len() / 4 * 3 - padding.min(2)))
 }
 
 fn external_image(value: &Value) -> bool {
@@ -429,7 +453,8 @@ fn image_refs(
         if external_image(value) {
             return false;
         }
-        *value = json!({"type":"image","content":continuation(reference(source,basis,session,item,pointer),image_media(value),None,"on-demand")});
+        let (media, size) = image_facts(value);
+        *value = json!({"type":"image","content":continuation(reference(source,basis,session,item,pointer),media,size,"on-demand")});
         return true;
     }
     let mut changed = false;
@@ -586,10 +611,11 @@ pub(super) fn prepare_one(
             if block["kind"] == "image" && external_image(&block["payload"]) {
                 block["kind"] = json!("image_link");
             } else if block["kind"] == "image" {
+                let (media, size) = image_facts(&block["payload"]);
                 block["continuation"] = continuation(
                     reference(source, basis, session_id, &original, &pointer),
-                    image_media(&block["payload"]),
-                    None,
+                    media,
+                    size,
                     "on-demand",
                 );
                 block["payload"] = json!({});
@@ -1124,6 +1150,29 @@ fn detected_media(bytes: &[u8]) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_inline_image_names_its_sniffed_format_and_decoded_size_and_nothing_else_does() {
+        let png = b"\x89PNG\r\n\x1a\n0123456789abcdef-pixels";
+        let encoded = STANDARD.encode(png);
+        for value in [
+            json!({"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":encoded}}),
+            json!({"type":"input_image","image_url":format!("data:image/gif;base64,{encoded}")}),
+            json!({"type":"image","mimeType":"image/png","data":encoded}),
+        ] {
+            // The label says jpeg or gif; the bytes say png, and the bytes win.
+            assert_eq!(image_facts(&value), ("image/png", Some(png.len())), "{value}");
+        }
+        for value in [
+            json!({"type":"image","data":STANDARD.encode(b"<svg><script>alert(1)</script></svg>")}),
+            json!({"type":"image","data":"file:///etc/passwd"}),
+            json!({"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}),
+            json!({"type":"input_image","image_url":"data:image/png,not-base64"}),
+            json!({"type":"image","data":"AAAA"}),
+        ] {
+            assert_eq!(image_facts(&value), ("application/octet-stream", None), "{value}");
+        }
+    }
     use super::*;
     use crate::external_sessions::ExternalDriver;
 
@@ -1432,8 +1481,10 @@ mod tests {
                 .find(|block| block["kind"] == "image")
                 .unwrap();
             let reference = &image["continuation"];
-            // Inline data is not decoded until fetch; the chunk reports the detected MIME.
-            assert_eq!(reference["media_type"], "application/octet-stream");
+            // Only the first bytes are decoded before fetch: enough to name the format the bytes
+            // show and the size, so a reader sees both before loading.
+            assert_eq!(reference["media_type"], "image/png");
+            assert_eq!(reference["size"], pixels.len());
             assert_eq!(reference["reason"], "on-demand");
             let token = reference["ref"].as_str().unwrap();
             assert!(locator(token, &native.id).unwrap().image);

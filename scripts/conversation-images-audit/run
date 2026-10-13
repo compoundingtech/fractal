@@ -7,10 +7,11 @@
 #   run up ST3_BINARY PTY_BINARY  start an instance daemon in a throwaway HOME, seed every case and
 #                              stay until the daemon stops
 #   run look PROFILE [tmux]    open stui under a terminal answering as PROFILE (kitty, iterm2,
-#                              sixel, silent), optionally inside tmux; open the Claude transcript,
+#                              sixel, silent), optionally inside tmux; open SCENE (claude, the
+#                              default: the Claude transcript; gardener: the mail; now: the asks),
 #                              where a drawing terminal loads the first image by itself, then load
 #                              one by hand; keep the screens and the image bytes drawn under
-#                              $AUDIT/looks/PROFILE[-tmux]/
+#                              $AUDIT/looks/SCENE-PROFILE[-tmux]/
 #   run pond                   join a second host (its own instance and HOME) to the fleet, send
 #                              an image only it holds, and stay until it stops
 #   run pond-off               stop the second host, so its image is remote-unavailable
@@ -195,15 +196,10 @@ JSON
 JSON
   st work ask --for "$person" --title 'Pond sketch' --new-run example/pond-sketch \
     --request "$audit/feedback.json" --idempotency-key audit-ask-3 --as agent/example/gardener >"$audit/case-feedback.txt" 2>&1 || true
-  # The request schema has no attachment field: show what it says to one.
-  python3 -I - "$audit/request.json" "$audit/request-attach.json" "blob/$garden_sha" <<'PY2'
-import json, sys
-request = json.load(open(sys.argv[1]))
-request["attachments"] = [{"blob": sys.argv[3], "media_type": "image/png"}]
-json.dump(request, open(sys.argv[2], "w"))
-PY2
-  st work ask --for "$person" --title 'North bed plan, with the image' --new-run example/north-bed-2 \
-    --request "$audit/request-attach.json" --idempotency-key audit-ask-2 --as agent/example/gardener >"$audit/case-ask-attach.txt" 2>&1 || true
+  # An ask that carries the image itself (st work ask --attach); a build without it says so.
+  st work ask --for "$person" --title 'North bed plan, with the sketch' --new-run example/north-bed-2 \
+    --request "$audit/request.json" --attach "$images/garden.png" --idempotency-key audit-ask-2 \
+    --as agent/example/gardener >"$audit/case-ask-attach.txt" 2>&1 || true
 
   cat "$ids"
 }
@@ -258,7 +254,7 @@ capture() {
 
 look() {
   local profile="$1" in_tmux="${2:-}" name out
-  name="$profile${in_tmux:+-tmux}"
+  name="${SCENE:-claude}-$profile${in_tmux:+-tmux}"
   out="$audit/looks/$name"
   mkdir -p "$out"
   # The UI sees only the throwaway HOME and what the terminal itself sets (TERM and its kin, as
@@ -266,7 +262,7 @@ look() {
   cat >"$audit/tools/ui" <<UI
 #!/bin/sh
 set -- HOME="$home" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" LANG=C.UTF-8 ST3_PERSON="$person"
-for name in TERM TERM_PROGRAM LC_TERMINAL KITTY_WINDOW_ID TMUX; do
+for name in TERM TERM_PROGRAM LC_TERMINAL KITTY_WINDOW_ID ITERM_SESSION_ID TMUX; do
   eval "[ -n \"\\\${\$name+set}\" ]" && eval "set -- \"\\\$@\" \"\$name=\\\$\$name\""
 done
 exec env -i "\$@" "$audit/tools/st3" --instance "$instance" ui --local
@@ -276,11 +272,18 @@ UI
   if [ -n "$in_tmux" ]; then
     ui=(tmux -L "audit-$name" -f /dev/null new-session -x 120 -y 40 "$audit/tools/ui")
   fi
-  # Ctrl+K finds the Claude transcript; Enter opens it; a terminal that draws loads the first
+  # SCENE picks what to open: the Claude transcript (default), the gardener's mail, or Now with
+  # the asks' cards. Ctrl+K finds it and Enter opens it; a terminal that draws loads the first
   # image by itself; Ctrl+Up focuses the image row above and Ctrl+U loads it by hand.
+  local open
+  case "${SCENE:-claude}" in
+    claude) open=(--key '4:^K' --key '5:claude in workspace' --key '7:\r') ;;
+    gardener) open=(--key '4:^K' --key '5:gardener' --key '7:\r') ;;
+    now) open=(--key '4:^H') ;;
+    *) echo "SCENE is claude, gardener or now"; exit 2 ;;
+  esac
   python3 -I "$here/terminal.py" --profile "$profile" --out "$out" --seconds "${SECONDS_PER_LOOK:-20}" \
-    --key '4:^K' --key '5:claude in workspace' --key '7:\r' --snapshot 12.5 \
-    --key '13:\x1b[1;5A' --key '14:^U' \
+    "${open[@]}" --snapshot 12.5 --key '13:\x1b[1;5A' --key '14:^U' \
     "${@:3}" -- "${ui[@]}"
   [ -z "$in_tmux" ] || tmux -L "audit-$name" kill-server 2>/dev/null || true
 }
