@@ -26677,7 +26677,7 @@ mission "orchid/timeout" state="ready" timeout="1ms" {
         // This oracle checks convergence/lifecycle, at the fastest supported configured cap.
         // Default30 start spacing is independently covered by deterministic gate controls.
         reconciler.set_max_passes_per_minute(600).unwrap();
-        let task = tokio::spawn(reconciler.run());
+        let task = tokio::spawn(reconciler.clone().run());
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
