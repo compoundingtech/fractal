@@ -115,15 +115,31 @@ const planMove = (doc: SidebarDocument, move: SidebarMove): MovePlan | { refused
   return { item, parent, siblings, index: anchor === undefined ? siblings.length : siblings.indexOf(anchor), unchanged }
 }
 
+/** Keep aligned with MAX_KEY_BYTES and valid_key in crates/st3-schema/src/arrangements.rs. */
+const maxArrangementKeyBytes = 128
+const validArrangementKey = (key: string): boolean => {
+  if (!/^[A-Za-z]/.test(key) || /[^0-9A-Za-z]/.test(key) || key.length > maxArrangementKeyBytes) return false
+  // Canonical keys are ASCII, so their string length is also their UTF-8 byte length.
+  const head = key.charCodeAt(0)
+  const integerLength = head >= 97 ? head - 97 + 2 : 90 - head + 2
+  return key.length >= integerLength
+    && (key.length === integerLength || !key.endsWith('0'))
+    && !(key[0] === 'A' && /^0+$/.test(key.slice(1, integerLength)))
+}
+
 /**
  * st admits only canonical fractional-indexing keys (generated ArrangementKey), not core.mts's legacy claim alphabet.
- * Invalid or colliding neighbour keys are rekeyed in the same edit; if no local gap exists, the whole partition is rekeyed.
+ * Invalid or colliding neighbour keys are rekeyed in the same edit; noncanonical or oversized outputs rekey the whole partition.
  */
 export const nativeInsertAt = (siblings: readonly string[], index: number): Insertion => {
-  try { return insertAt(siblings, index, generateKeyBetween) } catch {
-    const keys = generateNKeysBetween(null, null, siblings.length + 1)
-    return { key: keys[index]!, rekeyed: siblings.map((_, at): [number, string] => [at, keys[at < index ? at : at + 1]!]) }
+  try {
+    const insertion = insertAt(siblings, index, generateKeyBetween)
+    if (validArrangementKey(insertion.key) && insertion.rekeyed.every(([, key]) => validArrangementKey(key))) return insertion
+  } catch {
+    // Invalid neighbours can leave no local gap; use the same full-partition fallback.
   }
+  const keys = generateNKeysBetween(null, null, siblings.length + 1)
+  return { key: keys[index]!, rekeyed: siblings.map((_, at): [number, string] => [at, keys[at < index ? at : at + 1]!]) }
 }
 export const canDrop = (doc: SidebarDocument, move: SidebarMove): SidebarDropVerdict => {
   const plan = planMove(doc, move)

@@ -1,0 +1,1 @@
+Repeated sidebar reordering now refreshes the group's position keys before they exceed the server's limit, preserving the row order. Existing position keys below the limit are unchanged.
