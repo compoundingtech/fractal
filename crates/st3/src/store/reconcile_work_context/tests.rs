@@ -1073,4 +1073,17 @@ fn batched_work_definition_index_preserves_nested_display_order_and_first_match(
     );
     assert!(index.get(&mission.steps[&third].path).is_err());
     assert!(index.get("not-present").is_err());
+    store
+        .connection
+        .write()
+        .execute(
+            "UPDATE mission_revisions SET body=?1",
+            [serde_json::to_string(&mission).unwrap()],
+        )
+        .unwrap();
+    let error = read(&store, ACTOR, now_ms()).unwrap_err();
+    assert!(
+        error.to_string().contains("missing-definition-step"),
+        "{error}"
+    );
 }
