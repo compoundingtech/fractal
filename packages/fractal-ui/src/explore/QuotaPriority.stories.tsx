@@ -33,7 +33,7 @@ function AccountRow({ row, args, onSelect }: { row: UsageMeterRow; args: Args; o
   const extraCount = row.omitted + (!full && row.comparison ? 1 : 0)
   const reset = row.reset === 'Unreported' ? '—' : row.reset.replace(/\s/g, '')
   return <div role="row" data-priority-row={row.id} data-stale={row.stale || undefined} data-visible-count={full ? 5 : 3} {...stylex.props(styles.row)}>
-    <div role="cell" data-priority="1" {...stylex.props(styles.cell, styles.accountCell)}><Tooltip label={row.identity}><Button aria-label={`Account ${row.label}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} aria-describedby={`${args.D}-${row.id}-identity`} onPress={() => onSelect(row.id)} {...stylex.props(styles.account)}><span data-line-run>{row.identity}</span></Button></Tooltip><VisuallyHidden id={`${args.D}-${row.id}-identity`}>{row.identity}</VisuallyHidden></div>
+    <div role="cell" data-priority="1" {...stylex.props(styles.cell, styles.accountCell)}><Tooltip label={row.identity}><Button aria-describedby={`${args.D}-${row.id}-account`} onPress={() => onSelect(row.id)} {...stylex.props(styles.account)}><span data-line-run>{row.identity}</span></Button></Tooltip><VisuallyHidden id={`${args.D}-${row.id}-account`}>{`${row.label}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`}</VisuallyHidden></div>
     <div role="cell" data-priority="2" data-reading aria-label={`Primary ${row.governing.label} · ${row.governing.text}${row.stale ? ' · Stale' : ''}${row.note ? ` · ${row.note}` : ''}`} {...stylex.props(styles.cell)}><UsageMeterReading meter={governing} stale={row.stale} compact /></div>
     <div role="cell" data-priority="3" data-reset aria-label={row.reset === 'Unreported' ? 'Reset unreported' : `Primary reset: ${row.reset}`} {...stylex.props(styles.cell, styles.reset)}><span data-line-run>{reset}</span></div>
     {full && <div role="cell" data-priority="4" data-reading={args.D === 'D1' ? undefined : ''} aria-label={`Secondary ${row.comparison?.label} · ${row.comparison?.text}`} {...stylex.props(styles.cell)}>{comparison && <UsageMeterReading meter={comparison} stale={row.stale} compact />}</div>}
@@ -157,8 +157,8 @@ export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({
       await waitFor(() => { expect(canvasElement.querySelector('[data-sidebar]')?.getAttribute('data-drop')).toBe(drop.id); expect(canvasElement.querySelector('[data-sidebar]')?.getAttribute('data-bar')).toBe(bar.id) })
       assertTables(canvasElement)
     }
-    const north = canvas.getByRole('button', { name: 'Account North studio' })
-    expect(north).toHaveAccessibleDescription('gh/north-studio')
+    const north = canvas.getByRole('button', { name: 'gh/north-studio' })
+    expect(north).toHaveAccessibleDescription('North studio')
     await userEvent.hover(north)
     expect(await within(document.body).findByRole('tooltip', {}, { timeout: 3000 })).toHaveTextContent('gh/north-studio')
     await userEvent.unhover(north); await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
@@ -179,7 +179,7 @@ export const QuotaPriorityProbe: Story = { args: { probe: true }, play: async ({
     table.style.columnGap = '0'; expect(() => assertTables(canvasElement)).toThrow(); table.style.removeProperty('column-gap'); assertTables(canvasElement)
     const exhausted = canvasElement.querySelector<HTMLElement>('[data-priority-row="harbor"] [data-reading] [data-usage-meter-tone="exhausted"]')!
     exhausted.style.paddingInlineStart = '24px'; expect(() => assertTables(canvasElement)).toThrow(); exhausted.style.removeProperty('padding-inline-start'); assertTables(canvasElement)
-    await userEvent.click(canvas.getByRole('button', { name: /Account Meadow research/ }))
+    await userEvent.click(canvas.getByRole('button', { name: 'cl/meadow-research' }))
     expect(await canvas.findByRole('region', { name: 'Meadow research usage details' })).toBeVisible()
     expect(canvas.getAllByText('Unreported').length).toBeGreaterThan(0)
     await userEvent.click(canvas.getByRole('button', { name: 'Close usage details' }))
