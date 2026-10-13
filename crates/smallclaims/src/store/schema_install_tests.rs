@@ -305,14 +305,9 @@ fn fresh_auxiliary_schema_families_share_durable_commits() {
             {
                 Some("graph")
             }
-            AuthAction::CreateTable { table_name }
-                if matches!(
-                    table_name,
-                    "claim_signatures" | "claim_verdicts" | "claim_verdict_links" | "held_keys"
-                ) =>
-            {
-                Some("principals")
-            }
+            AuthAction::CreateTable {
+                table_name: "claim_signatures" | "claim_verdicts" | "claim_verdict_links" | "held_keys",
+            } => Some("principals"),
             _ => None,
         };
         if let Some(family) = family {
