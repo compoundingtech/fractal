@@ -3963,7 +3963,7 @@ fn client_message_resources(
             "title": message.title,
             "content": message.content,
             "state": message.status,
-            "delivery": message_delivery_value(&message.to, &message.status, sent_at, client_now_ms()),
+            "delivery": message_delivery_value(store, &message.to, &message.status, sent_at, client_now_ms())?,
             "sent_at": client_timestamp(sent_at),
             "session_id": session_id,
             "in_reply_to": message.in_reply_to,
@@ -3989,13 +3989,25 @@ fn client_message_resources(
 
 /// Native acceptance and recipient read are separate evidence. A pending read never expires,
 /// and its age remains visible even on the sender's node, which cannot inspect a remote process.
-fn message_delivery_value(to: &str, status: &str, sent_at: u128, now: u128) -> Value {
+fn message_delivery_value(store: &Store, to: &str, status: &str, sent_at: u128, now: u128) -> anyhow::Result<Value> {
     let read = matches!(status, "read" | "closed");
     let age_ms = now.saturating_sub(sent_at);
     let path = delivery_presence::known(to);
     let blocked = !read && path.as_ref().is_some_and(|path| path.stale());
+    // Only mail still outside the native transport can be held. Use observed evidence,
+    // not work-derived readiness; the store fold fences it to the running incarnation.
+    let held = if matches!(status, "sent" | "staged") {
+        let index = store.index()?;
+        let harness = store.observed_harness_at(to, index)?;
+        harness.as_ref().is_some_and(|harness| harness.blocked_on.as_deref() == Some("human"))
+            && store.seat_observation_at(to, harness.as_ref(), index, now)? == "current"
+    } else {
+        false
+    };
     let reason = if read {
         "the recipient has read the message"
+    } else if held {
+        "held outside the native harness while the recipient waits for a human answer or approval"
     } else if blocked {
         path.as_ref()
             .and_then(|path| path.reason.as_deref())
@@ -4008,11 +4020,11 @@ fn message_delivery_value(to: &str, status: &str, sent_at: u128, now: u128) -> V
             _ => "waiting for recipient read",
         }
     };
-    json!({
-        "state": if read { "read" } else if blocked || age_ms > 10_000 { "waiting" } else { "pending" },
+    Ok(json!({
+        "state": if read { "read" } else if held || blocked || age_ms > 10_000 { "waiting" } else { "pending" },
         "phase": status, "reason": reason, "age_ms": age_ms,
         "recipient_delivery": path.map(|path| path.to_value()),
-    })
+    }))
 }
 
 async fn message_delivery(
@@ -4030,7 +4042,7 @@ async fn message_delivery(
         let claims = state.store.claims_for(&subject, Some("message.sent")).map_err(ApiError::internal)?;
         let sent_at = claims.first().map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
         Ok(Json(json!({ "id": subject, "from": message.from, "to": message.to,
-            "delivery": message_delivery_value(&message.to, &message.status, sent_at, client_now_ms()) })))
+            "delivery": message_delivery_value(&state.store, &message.to, &message.status, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
     }).await
 }
 
@@ -18086,16 +18098,17 @@ mission "expiring-work" state="ready" {
 
     #[test]
     fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
+        let store = Store::open_memory("message-delivery-test").unwrap();
         let to = "agent/remote/message-delivery-test";
         assert_eq!(
-            message_delivery_value(to, "sent", 1_000, 2_000)["state"],
+            message_delivery_value(&store, to, "sent", 1_000, 2_000).unwrap()["state"],
             "pending"
         );
-        let late = message_delivery_value(to, "staged", 1_000, 12_000);
+        let late = message_delivery_value(&store, to, "staged", 1_000, 12_000).unwrap();
         assert_eq!(late["state"], "waiting");
         assert_eq!(late["phase"], "staged");
         assert_eq!(late["recipient_delivery"], Value::Null);
-        let accepted = message_delivery_value(to, "delivered", 1_000, 12_000);
+        let accepted = message_delivery_value(&store, to, "delivered", 1_000, 12_000).unwrap();
         assert_eq!(accepted["state"], "waiting");
         assert!(
             accepted["reason"]
@@ -18104,9 +18117,119 @@ mission "expiring-work" state="ready" {
                 .contains("waiting for recipient read")
         );
         assert_eq!(
-            message_delivery_value(to, "read", 1_000, 12_000)["state"],
+            message_delivery_value(&store, to, "read", 1_000, 12_000).unwrap()["state"],
             "read"
         );
+    }
+
+    #[test]
+    fn message_delivery_holds_native_decisions_until_the_current_observation_clears() {
+        for driver in ["omp", "pi", "claude", "codex", "opencode"] {
+            for ask in ["question", "permission", "approval"] {
+                for release in ["answer", "cancel", "timeout"] {
+                    let store = Store::open_memory("message-decision-hold").unwrap();
+                    let to = "agent/remote/message-decision-hold";
+                    let append = |kind: &str, fields: Value| {
+                        store.append_claim(&ClaimInput {
+                            subject: to.into(),
+                            kind: kind.into(),
+                            actor: Some(to.into()),
+                            fields: serde_json::from_value(fields).unwrap(),
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: None,
+                        }).unwrap()
+                    };
+                    append("runtime.observed", json!({
+                        "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "first"
+                    }));
+                    let observed = append("harness.observed", json!({
+                        "state": "working", "driver": driver, "incarnation_id": "first",
+                        "blocked_on": "human", "ask": ask
+                    }));
+                    let now = observed.accepted_at_unix_ms;
+                    for phase in ["sent", "staged"] {
+                        let delivery = message_delivery_value(&store, to, phase, now, now).unwrap();
+                        assert_eq!(delivery["state"], "waiting", "{driver}/{ask}/{release}: {delivery}");
+                        assert_eq!(delivery["phase"], phase);
+                        assert_eq!(delivery["age_ms"], 0);
+                        assert!(delivery["reason"].as_str().unwrap().contains("held outside the native harness"));
+                        assert_eq!(delivery["recipient_delivery"], Value::Null);
+                    }
+                    for phase in ["delivered", "read", "closed"] {
+                        let delivery = message_delivery_value(&store, to, phase, now, now).unwrap();
+                        assert!(!delivery["reason"].as_str().unwrap().contains("held"));
+                        assert_eq!(delivery["phase"], phase);
+                        assert_eq!(delivery["state"], if phase == "delivered" { "pending" } else { "read" });
+                    }
+                    let resumed = append("harness.observed", json!({
+                        "state": "working", "driver": driver, "incarnation_id": "first",
+                        "blocked_on": null, "ask": null, "reason": release
+                    }));
+                    for phase in ["sent", "staged"] {
+                        let delivery = message_delivery_value(
+                            &store, to, phase, now, resumed.accepted_at_unix_ms
+                        ).unwrap();
+                        assert!(!delivery["reason"].as_str().unwrap().contains("held"),
+                            "{driver}/{ask}/{release}: {delivery}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn message_delivery_does_not_hold_stale_or_restarted_native_decisions() {
+        let store = Store::open_memory("message-decision-restart").unwrap();
+        let to = "agent/remote/message-decision-restart";
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&ClaimInput {
+                subject: to.into(),
+                kind: kind.into(),
+                actor: Some(to.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({
+            "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "first"
+        }));
+        let observed = append("harness.observed", json!({
+            "state": "blocked", "driver": "omp", "incarnation_id": "first",
+            "blocked_on": "human", "ask": "question"
+        }));
+        let now = observed.accepted_at_unix_ms;
+        assert!(message_delivery_value(&store, to, "staged", now, now).unwrap()["reason"]
+            .as_str().unwrap().contains("held"));
+        let stale = message_delivery_value(&store, to, "staged", now, now + 90_001).unwrap();
+        assert_eq!(stale["state"], "waiting");
+        assert!(!stale["reason"].as_str().unwrap().contains("held"));
+
+        let restarted = append("runtime.observed", json!({
+            "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "second"
+        }));
+        // Even a subsequently received old-incarnation block cannot restore the hold.
+        let late = append("harness.observed", json!({
+            "state": "blocked", "driver": "omp", "incarnation_id": "first",
+            "blocked_on": "human", "ask": "permission", "reason": "late old prompt"
+        }));
+        for phase in ["sent", "staged"] {
+            for at in [restarted.accepted_at_unix_ms, late.accepted_at_unix_ms] {
+                assert!(!message_delivery_value(&store, to, phase, now, at).unwrap()["reason"]
+                    .as_str().unwrap().contains("held"));
+            }
+        }
+        append("harness.observed", json!({
+            "state": "working", "driver": "omp", "incarnation_id": "second",
+            "blocked_on": "human", "ask": "question"
+        }));
+        let ended = append("harness.observed", json!({
+            "state": "ended", "driver": "omp", "incarnation_id": "second"
+        }));
+        assert!(!message_delivery_value(&store, to, "staged", now, ended.accepted_at_unix_ms)
+            .unwrap()["reason"].as_str().unwrap().contains("held"));
     }
 
     #[test]

@@ -431,6 +431,110 @@ assert.deepStrictEqual(
 );
 fs.rmSync(outboxPath, { force: true });
 
+// A native human hold overrides even a cap armed before the modal opened. The unrelated
+// batch result and a foreground continuation ending must not release or acknowledge mail.
+for (const modal of ["ask", "approval"]) {
+  await handlers.get("session_start")({}, holdCtx);
+  await handlers.get("agent_start")({}, holdCtx);
+  await toolCall(`before-${modal}`);
+  const beforeModal = handedOver.length;
+  const beforeReceipts = acknowledged().length;
+  sendMail(`before ${modal}`);
+  await pause(150);
+  if (modal === "ask") {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: "held-ask",
+      input: { questions: [{ question: "Proceed?" }] } }, holdCtx);
+  } else {
+    await handlers.get("tool_approval_requested")({ toolName: "bash" }, holdCtx);
+  }
+  sendMail(`during ${modal}`);
+  await toolResult(`before-${modal}`);
+  await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, holdCtx);
+  await pause(10_500);
+  assert.strictEqual(handedOver.length, beforeModal, `${modal} stays outside omp past the cap`);
+  assert.strictEqual(acknowledged().length, beforeReceipts, `${modal} mail is not delivered`);
+  if (modal === "ask") {
+    await handlers.get("tool_result")({ toolCallId: "unrelated" }, holdCtx);
+    assert.strictEqual(handedOver.length, beforeModal, "only the matching answer releases an ask");
+    await handlers.get("tool_result")({ toolCallId: "held-ask" }, holdCtx);
+  } else {
+    await handlers.get("tool_approval_resolved")({ approved: true }, holdCtx);
+  }
+  assert.deepStrictEqual(handedOver.slice(beforeModal), [{
+    content: `before ${modal}\n\nduring ${modal}`, options: { deliverAs: "steer" },
+  }], `${modal} answer delivers one FIFO batch before its handler returns`);
+  await pause(100);
+  assert.deepStrictEqual(acknowledged().slice(beforeReceipts),
+    [`message/hold-${mailSequence - 1}`, `message/hold-${mailSequence}`]);
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Ask cancellation and timeout use the same correlated tool-result boundary. A terminal
+// abort can end without a result. Idle-looking modal contexts must still retain mail.
+for (const resolution of ["cancel", "timeout", "abort", "denied"]) {
+  await handlers.get("session_start")({}, bareCtx);
+  if (resolution === "denied") {
+    await handlers.get("tool_approval_requested")({ toolName: "bash" }, bareCtx);
+  } else {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: `ask-${resolution}`,
+      input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+  }
+  const beforeResolution = handedOver.length;
+  sendMail(`after ${resolution}`);
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeResolution, "idle proof cannot override a modal");
+  if (resolution === "abort") {
+    await handlers.get("agent_end")({ messages: [{ role: "assistant", stopReason: "aborted" }] }, bareCtx);
+  } else if (resolution === "denied") {
+    await handlers.get("tool_approval_resolved")({ approved: false }, bareCtx);
+  } else {
+    await handlers.get("tool_result")({ toolCallId: `ask-${resolution}`, isError: resolution === "cancel" }, bareCtx);
+  }
+  await pause(100);
+  assert.deepStrictEqual(handedOver.slice(beforeResolution), [{ content: `after ${resolution}` }]);
+  assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Independent ask and approval surfaces both need resolution, regardless of answer order.
+for (const first of ["ask", "approval"]) {
+  await handlers.get("session_start")({}, bareCtx);
+  await handlers.get("tool_call")({ toolName: "ask", toolCallId: "overlapping-ask",
+    input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+  await handlers.get("tool_approval_requested")({ toolName: "bash" }, bareCtx);
+  const beforeOverlap = handedOver.length;
+  sendMail("after both answers");
+  await pause(150);
+  const answerAsk = () => handlers.get("tool_result")({ toolCallId: "overlapping-ask" }, bareCtx);
+  const answerApproval = () => handlers.get("tool_approval_resolved")({}, bareCtx);
+  await (first === "ask" ? answerAsk() : answerApproval());
+  assert.strictEqual(handedOver.length, beforeOverlap, "one open modal still holds mail");
+  await (first === "ask" ? answerApproval() : answerAsk());
+  assert.deepStrictEqual(handedOver.slice(beforeOverlap), [{ content: "after both answers" }]);
+  fs.rmSync(outboxPath, { force: true });
+}
+
+// Session restart drops the retired channel copy, not the durable mail. Its successor
+// re-sends the unacknowledged identity with no inherited human hold.
+await handlers.get("session_start")({}, bareCtx);
+await handlers.get("tool_call")({ toolName: "ask", toolCallId: "restart-ask",
+  input: { questions: [{ question: "Proceed?" }] } }, bareCtx);
+const restartMail = { type: "message", deliverAs: "steer", content: "after session restart",
+  meta: { messageId: "message/human-restart" } };
+const beforeHumanRestart = handedOver.length;
+fs.appendFileSync(outboxPath, JSON.stringify(restartMail) + "\n");
+await pause(150);
+assert.strictEqual(handedOver.length, beforeHumanRestart);
+fs.rmSync(outboxPath, { force: true });
+await handlers.get("session_start")({}, bareCtx);
+fs.appendFileSync(outboxPath, JSON.stringify(restartMail) + "\n");
+await pause(200);
+assert.deepStrictEqual(handedOver.slice(beforeHumanRestart), [{ content: "after session restart" }]);
+assert.strictEqual(acknowledged().filter(id => id === "message/human-restart").length, 1);
+fs.rmSync(outboxPath, { force: true });
+
+
 // A channel that dies during a hold must be replaced. The successor re-sends the unacknowledged
 // message; the retired channel's held copy must never be handed off or acknowledged.
 await handlers.get("session_start")({}, holdCtx);
