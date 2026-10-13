@@ -1752,9 +1752,17 @@ fn allocator_reclamation_follows_checkpoint_plan_view_and_proof_errors_once() {
     assert_eq!(after.1 - before.1, u64::from(cfg!(all(target_os = "linux", target_env = "gnu"))));
 
     let sealed = store.checkpoint_sealed_set(cut).unwrap();
+    let before = allocator_reclaim_stats_for_test();
+    let captured = store.checkpoint_plan_view_from_sealed(cut, sealed.clone(), scratch.path()).unwrap();
+    assert_eq!(serde_json::to_value(&captured).unwrap(), serde_json::to_value(&view).unwrap());
+    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,
+        "the separately scheduled captured plan retains its outer reclamation boundary");
     let plan = plan_drops(&sealed);
     let blocked = scratch.path().join("not-a-directory");
     std::fs::write(&blocked, b"occupied").unwrap();
+    let before = allocator_reclaim_stats_for_test();
+    assert!(store.checkpoint_plan_view_from_sealed(cut, sealed.clone(), &blocked).is_err());
+    assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1);
     let before = allocator_reclaim_stats_for_test();
     assert!(store.prove_checkpoint_plan(&sealed, &plan, &blocked).is_err());
     assert_eq!(allocator_reclaim_stats_for_test().0 - before.0, 1,

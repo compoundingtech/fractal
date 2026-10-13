@@ -297,14 +297,19 @@ allocator counters with RSS before attributing an RSS plateau to retained read c
 
 Writer-bound API handlers, replication receive, mailbox control and daemon maintenance
 wait asynchronously before entering Tokio's blocking pool. Each writer admits at most 32
-top-level callbacks by default. Set `SMALLCLAIMS_MAX_WRITE_WORKERS` in the **daemon's**
-environment to a positive integer to override this count; zero, invalid, or values beyond
-Tokio's semaphore capacity use 32. The value is read once per process.
+top-level synchronous writer-bound callbacks by default. Mutation handlers run as admitted
+future polls: when a body, service, mutex or receipt wait returns pending, its blocking worker and
+writer permit return before the future waits asynchronously for its next wake. Set
+`SMALLCLAIMS_MAX_WRITE_WORKERS` in the **daemon's** environment to a positive integer to
+override this count; zero, invalid, or values beyond Tokio's semaphore capacity use 32. The value is read once per process.
 
 Admission holds no SQLite connection or store lock. Dependent nested callbacks share their
 parent's capacity, including when a current-thread runtime needs a separate blocking child.
 Started callbacks retain capacity through completion or panic even if their awaiting task
 is dropped. API mutations keep their existing completion and acknowledgement behavior.
+Non-writing publication/git preflight, gate startup, attestation and terminal control effects
+run independently of writer admission; their mutation continuation admits again before
+polling store work. The request and result receipts still surround each terminal effect.
 Read workers and health checks have independent capacity. The existing writer queue still
 orders foreground jobs, drains fences and schedules background loans; admission does not
 change a callback's loan class. Synchronous/raw writer access remains available and does not

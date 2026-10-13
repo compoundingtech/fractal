@@ -10015,11 +10015,10 @@ async fn import_external_session_action(
     // until the exact native process has stopped, so two harnesses never own one native session.
     if let Some(process) = external.process.clone() {
         let driver = external.driver;
-        crate::api::read_deadline::spawn_blocking(move || {
+        super::blocking_external(move || {
             crate::external_sessions::terminate_exact_process(driver, &process)
         })
-        .await
-        .map_err(ApiError::internal)?
+        .await?
         .map_err(ApiError::internal)?;
     }
     state

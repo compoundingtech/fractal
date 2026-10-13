@@ -1506,7 +1506,24 @@ impl Store {
         scratch: &Path,
     ) -> Result<CheckpointPlanView> {
         let _completion = super::checkpoint_completion::Completion::outer();
-        let (plan, proof) = self.plan_checkpoint(cut_unix_ms, scratch)?;
+        let sealed = self.checkpoint_sealed_set_through(cut_unix_ms, None)?;
+        self.checkpoint_plan_view_from_sealed(cut_unix_ms, sealed, scratch)
+    }
+
+    /// Plan and prove an already captured sealed set without borrowing the live writer.
+    /// The caller can release writer admission after capture and run this scratch-copy
+    /// phase separately. Keep reclamation after the owned planning inputs have dropped.
+    pub fn checkpoint_plan_view_from_sealed(
+        &self,
+        cut_unix_ms: u128,
+        captured: SealedSet,
+        scratch: &Path,
+    ) -> Result<CheckpointPlanView> {
+        let _completion = super::checkpoint_completion::Completion::outer();
+        let sealed = captured;
+        self.runtime.checkpoint_preflight()?;
+        let plan = self.runtime.plan_checkpoint_drops(&sealed);
+        let proof = self.prove_checkpoint_plan(&sealed, &plan, scratch)?;
         Ok(CheckpointPlanView {
             checkpoint: checkpoint_name(cut_unix_ms),
             cut_unix_ms,
