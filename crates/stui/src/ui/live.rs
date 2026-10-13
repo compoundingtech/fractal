@@ -152,10 +152,11 @@ pub struct Context {
     pub person: String,
     pub cache_path: Option<std::path::PathBuf>,
     pub cached: Option<Model>,
-    /// `stui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
+    /// `st ui --glasses` / `--glass NAME`: open glasses instead of the sidebar layout, at the
     /// named glass or the last one used on this device.
     pub glass: Option<Option<String>>,
     pub(crate) open_timing: Option<super::open_timing::Trace>,
+    pub(crate) process_started: Instant,
 }
 
 /// The terminal the feed follows for the open terminal view.
@@ -186,6 +187,23 @@ fn usage_error(error: &st3_client::ClientError) -> String {
     }
 }
 
+/// A disappearing card can race the action's reply (including a refusal). Count
+/// landing only when both the action succeeded and a fresh window showed it gone.
+struct AnswerTiming {
+    sent: Instant,
+    accepted: bool,
+    gone: bool,
+    seen: bool,
+}
+impl AnswerTiming {
+    fn new(sent: Instant) -> Self {
+        Self { sent, accepted: false, gone: false, seen: false }
+    }
+    fn landed(&self) -> Option<Instant> {
+        (self.accepted && self.gone).then_some(self.sent)
+    }
+}
+
 enum Fetched {
     Content(super::content::Key, Result<(String, Vec<u8>), String>),
     Read(String, ReceiptOutcome),
@@ -202,6 +220,7 @@ enum Fetched {
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
+    AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
     Sessions(Collection),
     Session(String, Result<Box<st3_client::Session>, String>),
@@ -308,6 +327,7 @@ pub fn run(context: Context) -> Result<()> {
         cached,
         glass,
         mut open_timing,
+        process_started,
     } = context;
     let (fetched_tx, fetched) = mpsc::channel::<Fetched>();
     let mut model = cached.unwrap_or_default();
@@ -321,6 +341,10 @@ pub fn run(context: Context) -> Result<()> {
     let mut filled: BTreeMap<String, usize> = BTreeMap::new();
     // The agent or session whose conversation the feed holds.
     let mut conversing: Vec<String> = Vec::new();
+    let mut opens: BTreeMap<String, Instant> = BTreeMap::new();
+    let mut terminal_opens: BTreeMap<String, Instant> = BTreeMap::new();
+    let mut answers: BTreeMap<String, AnswerTiming> = BTreeMap::new();
+    let mut landed_answers: Vec<Instant> = Vec::new();
     // The session each conversation was last subscribed again for, so it is asked once.
     let mut resubscribed: BTreeMap<String, String> = BTreeMap::new();
     let mut sessions_requested = HashSet::new();
@@ -332,8 +356,15 @@ pub fn run(context: Context) -> Result<()> {
     let mut ui = Ui::new(adapt::world(&model, &person, &extras));
     ui.load_prefs();
     ui.drafts_path = super::drafts_store::path();
+    let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
-    if glass.is_some() { ui.resource_sidebar.load(&person); }
+    ui.quality = super::slo::Draw::new(process_started);
+    if earlier.is_some() {
+        super::slo::METRICS.add("drafts_restored_unclean", ui.drafts_saved.len() as u64);
+    }
+    if glass.is_some() {
+        ui.resource_sidebar.load(&person);
+    }
     ui.resource_sidebar.observe(&ui.world);
     ui.build = true;
     ui.live = true;
@@ -344,14 +375,13 @@ pub fn run(context: Context) -> Result<()> {
     ui.show_focused();
     if ui.glasses.is_none() {
         ui.flash(
-            "The classic layout is going away: plain stui opens spaces, with Ctrl+S for this list",
+            "The classic layout is going away: plain st opens spaces, with Ctrl+S for this list",
         );
     } else if std::env::args().any(|arg| arg == "--old") {
         ui.flash("The old screens are gone: this is spaces, and ? shows its keys");
     }
 
     // A stui killed from outside leaves its last picture on the screen; the next one says so.
-    let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     if let Some(note) = earlier {
         // Long enough to read: the usual flash ends after four seconds.
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
@@ -450,8 +480,10 @@ pub fn run(context: Context) -> Result<()> {
             match update {
                 feed::Update::GlassesVersion(version) => super::set_glasses_version(version),
                 feed::Update::Connected(member) => {
+                    ui.quality.live(false);
                     client = member;
-                    resources_generation += 1; resources_stale = true;
+                    resources_generation += 1;
+                    resources_stale = true;
                     machines_stale = true;
                     extras.live = false;
                     attached = None;
@@ -491,11 +523,36 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Window {
+                    received,
                     window,
                     snapshot,
                     items,
                     has_more,
                 } => {
+                    if matches!(window, Window::Attention | Window::Agents) {
+                        ui.quality
+                            .frame(received, if window == Window::Attention { 1 } else { 2 });
+                    }
+                    if window == Window::Attention && !has_more {
+                        // Reuse the pending-answer index: one lookup per card, rather
+                        // than scanning the whole window separately for every answer.
+                        for timing in answers.values_mut() { timing.seen = false; }
+                        for item in &items {
+                            if let Resource::Attention(card) = item
+                                && let Some(timing) = answers.get_mut(&card.header.id) {
+                                timing.seen = card.state != "resolved";
+                            }
+                        }
+                        answers.retain(|_, timing| {
+                            if !timing.seen { timing.gone = true; }
+                            if let Some(at) = timing.landed() {
+                                landed_answers.push(at);
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                    }
                     extras.window_errors.remove(&format!("{window:?}"));
                     if window == Window::Summary {
                         extras.summary = items.iter().find_map(|item| match item {
@@ -555,8 +612,18 @@ pub fn run(context: Context) -> Result<()> {
                     if let Some(trace) = &mut open_timing {
                         trace.received(&target, items.len());
                     }
+                    if opens.contains_key(&target)
+                        && adapt::unreadable_transcript(&items).is_some()
+                        && opens.remove(&target).is_some()
+                    {
+                        super::slo::METRICS.add("open_not_bound", 1);
+                    }
                     failed.remove(&target);
-                    if replace && !timelines.get(&target).is_some_and(|timeline| timeline.older.paged) {
+                    if replace
+                        && !timelines
+                            .get(&target)
+                            .is_some_and(|timeline| timeline.older.paged)
+                    {
                         filled.remove(&target);
                     }
                     ui.conversation_updated(&target);
@@ -588,7 +655,19 @@ pub fn run(context: Context) -> Result<()> {
                     target,
                     message,
                     permanent,
+                    code,
                 } => {
+                    if opens.remove(&target).is_some() {
+                        super::slo::METRICS.add(
+                            match code {
+                                Some(st3_client::ErrorCode::RemoteUnavailable) => {
+                                    "open_remote_unavailable"
+                                }
+                                _ => "open_cannot_load",
+                            },
+                            1,
+                        );
+                    }
                     // A permanent refusal is said once, without "retrying".
                     if !permanent {
                         ui.conversation_failed(&target, &message);
@@ -611,6 +690,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Degraded(reason) => {
+                    ui.quality.live(false);
                     // st answered; only its live stream is being replaced. Not offline, and
                     // nothing on screen is cleared.
                     extras.live = false;
@@ -623,6 +703,7 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::Offline(error) => {
+                    ui.quality.live(false);
                     extras.live = false;
                     extras.degraded = None;
                     extras.offline = Some(error);
@@ -661,6 +742,13 @@ pub fn run(context: Context) -> Result<()> {
                         }
                     }
                     TerminalUpdate::Ended { restarted, reason } => {
+                        if ui
+                            .terminal
+                            .as_ref()
+                            .is_some_and(|view| view.ended.is_none())
+                        {
+                            super::slo::METRICS.add("dead_terminal_tabs", 1);
+                        }
                         attached = None;
                         match ui.terminal.as_mut() {
                             Some(view) => {
@@ -722,18 +810,30 @@ pub fn run(context: Context) -> Result<()> {
                     extras.bodies.insert(id, (from, title, content));
                 }
                 Fetched::Notice(notice) => ui.flash(notice),
-                Fetched::Sessions(native) => {
-                    model.sessions = native;
-                }
-                Fetched::Session(id, outcome) => {
-                    match outcome {
-                        Ok(session) => model.add_opened_session(*session),
-                        Err(message) => {
-                            ui.flash(format!("Could not open {id}: {message}"));
-                            failed.insert(id, format!("{message} · open it again to retry"));
+                Fetched::AlertOutcome(id, accepted) => {
+                    if !accepted {
+                        answers.remove(&id);
+                    } else if let Some(timing) = answers.get_mut(&id) {
+                        timing.accepted = true;
+                        if let Some(at) = timing.landed() {
+                            landed_answers.push(at);
+                            answers.remove(&id);
                         }
                     }
                 }
+                Fetched::Sessions(native) => {
+                    model.sessions = native;
+                }
+                Fetched::Session(id, outcome) => match outcome {
+                    Ok(session) => model.add_opened_session(*session),
+                    Err(message) => {
+                        if opens.remove(&id).is_some() {
+                            super::slo::METRICS.add("open_cannot_load", 1);
+                        }
+                        ui.flash(format!("Could not open {id}: {message}"));
+                        failed.insert(id, format!("{message} · open it again to retry"));
+                    }
+                },
                 Fetched::SidebarSaved { write, outcome } => {
                     ui.resource_sidebar.saved(&write, outcome.is_ok());
                     if let Err(error) = outcome { ui.flash(format!("Sidebar edit not done: {error}")); }
@@ -807,8 +907,8 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
                 Fetched::Native { agent, direct } => {
-                    if let Some(waited) = attach_started.take().map(|at| at.elapsed())
-                        && waited >= Duration::from_secs(3)
+                    let waited = attach_started.take().map(|at| at.elapsed());
+                    if let Some(waited) = waited.filter(|waited| *waited >= Duration::from_secs(3))
                     {
                         ui.flash(format!(
                             "Attached after {}s: st was slow to answer",
@@ -854,6 +954,9 @@ pub fn run(context: Context) -> Result<()> {
                     runtime_ids,
                     reason,
                 } => {
+                    if terminal_opens.remove(&agent).is_some() {
+                        super::slo::METRICS.add("terminal_open_errors", 1);
+                    }
                     attach_started = None;
                     if agent.starts_with("terminal/") {
                         // A shell has no other view to fall back to.
@@ -1059,6 +1162,13 @@ pub fn run(context: Context) -> Result<()> {
         // Every conversation on screen rides the feed's socket (the focused one first): st
         // pushes each change, so nothing here reads one again on a timer.
         let wanted = ui.live_conversations();
+        for target in &wanted {
+            if !conversing.contains(target) {
+                super::slo::METRICS.add("conversation_opens", 1);
+                opens.insert(target.clone(), Instant::now());
+            }
+        }
+        opens.retain(|target, _| wanted.contains(target));
         if let Some(trace) = &mut open_timing {
             trace.intend(&wanted);
         }
@@ -1209,12 +1319,20 @@ pub fn run(context: Context) -> Result<()> {
                 });
                 continue;
             }
+            if let Effect::Attention { id, .. } = &effect {
+                if answers.len() < 256 || answers.contains_key(id) {
+                    answers.insert(id.clone(), AnswerTiming::new(Instant::now()));
+                } else {
+                    super::slo::METRICS.add("measurement_overflow", 1);
+                }
+            }
             ui.note_acted(&effect);
             match effect {
                 Effect::LoadContent(key) => {
                     content_reads.enqueue(key);
                 }
                 Effect::OpenTerminal { agent } => {
+                    terminal_opens.insert(agent.clone(), Instant::now());
                     // The PTY session's own bytes, through st's raw stream to whichever host owns
                     // it; st's screen view (the feed follows it on its socket) only when st cannot
                     // give a direct stream.
@@ -1450,6 +1568,10 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 other => (other, None, None),
             };
+            let alert = match &effect {
+                Effect::Attention { id, .. } => Some(id.clone()),
+                _ => None,
+            };
             let shell = matches!(effect, Effect::CreateTerminal { .. });
             let client = client.clone();
             let tx = fetched_tx.clone();
@@ -1458,6 +1580,9 @@ pub fn run(context: Context) -> Result<()> {
             runtime.spawn(async move {
                 let outcome =
                     perform_steadily(&client, &person, &model, effect, sent.as_deref()).await;
+                if let Some(id) = alert {
+                    let _ = tx.send(Fetched::AlertOutcome(id, outcome.is_ok()));
+                }
                 if let Some(token) = token {
                     let _ = tx.send(Fetched::Sent(
                         token,
@@ -1519,6 +1644,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.step_terminal_hold();
         ui.step_default_view();
         ui.step_terminal_tabs();
+        terminal_opens.retain(|target, _| ui.terminal_view(target).is_some());
         ui.step_drafts();
         execute!(io::stdout(), BeginSynchronizedUpdate)?;
         let mut links = Vec::new();
@@ -1556,6 +1682,34 @@ pub fn run(context: Context) -> Result<()> {
             || execute!(io::stdout(), EndSynchronizedUpdate),
             |target| ui.conversation_entry_visible(target),
         )?;
+        ui.quality.live(extras.live);
+        let top = u8::from(extras.live)
+            | (u8::from(extras.offline.is_some()) << 1)
+            | (u8::from(extras.degraded.is_some()) << 2);
+        let placeholders = u8::from(matches!(ui.world.attention, Load::Loading))
+            | (u8::from(matches!(ui.world.agents, Load::Loading)) << 1);
+        let visible_quality = ui.quality_visible();
+        ui.quality
+            .presented(ui.world.settled, top, placeholders, visible_quality);
+        opens.retain(|target, at| {
+            if ui.conversation_entry_visible(target) {
+                super::slo::METRICS.observe("conversation_open_ms", at.elapsed());
+                false
+            } else {
+                true
+            }
+        });
+        terminal_opens.retain(|target, at| {
+            if ui.terminal_ready_visible(target) {
+                super::slo::METRICS.observe("terminal_open_ms", at.elapsed());
+                false
+            } else {
+                true
+            }
+        });
+        for at in landed_answers.drain(..) {
+            super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
+        }
         let visible = ui.visible_messages();
         let incoming: HashSet<_> = timelines
             .values()
@@ -2542,6 +2696,24 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_answer_landing_requires_action_confirmation_and_the_fresh_window_in_either_order() {
+        let at = Instant::now();
+        let mut window_first = AnswerTiming::new(at);
+        window_first.gone = true;
+        assert!(
+            window_first.landed().is_none(),
+            "a card closed by another device is not our successful answer"
+        );
+        window_first.accepted = true;
+        assert_eq!(window_first.landed(), Some(at));
+        let mut reply_first = AnswerTiming::new(at);
+        reply_first.accepted = true;
+        assert!(reply_first.landed().is_none());
+        reply_first.gone = true;
+        assert_eq!(reply_first.landed(), Some(at));
+    }
+
     #[test]
     fn a_send_st_may_have_taken_is_unconfirmed_and_one_it_never_queued_is_tried_afresh() {
         let answer = |applied: &str, code: st3_client::ErrorCode| -> anyhow::Error {
