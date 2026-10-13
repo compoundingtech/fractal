@@ -1164,7 +1164,7 @@ impl Store {
                 // A retained stop belongs to a terminal run, so declaration_live deliberately
                 // excludes it. Its own revision, incarnation and runtime fences decide instead.
                 if !self
-                    .stop_deferral_faults_for(&[source.clone()], self.index()?)?
+                    .stop_deferral_faults_for(std::slice::from_ref(source), self.index()?)?
                     .contains_key(source)
                 {
                     continue;

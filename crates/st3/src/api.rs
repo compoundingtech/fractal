@@ -3325,7 +3325,7 @@ fn client_agent_cards_presented(
                     None
                 },
             });
-            if mailbox_faults.is_none() && member_fault.is_none() {
+            if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
             }

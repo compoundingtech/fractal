@@ -29720,7 +29720,7 @@ mission "held-stop" state="ready" {
         assert_eq!(stop.status, "completed", "{:?}", stop.blocked_reason);
         assert_eq!(run.status, "completed");
         let seat = format!("agent/{run_id}/worker");
-        let desired = store.desired_subjects_named(&[seat.clone()]).unwrap().remove(0);
+        let desired = store.desired_subjects_named(std::slice::from_ref(&seat)).unwrap().remove(0);
         assert_eq!(desired.kind, "stop");
         assert_eq!(desired.owner_step.as_deref(), Some(stop.subject.as_str()));
         assert!(reconciler.runtime.stops.lock().unwrap().is_empty());
@@ -29780,7 +29780,7 @@ mission "held-stop" state="ready" {
         .skipping_unneeded(true);
         let events = reconciler.event_notify.subscribe();
         let stop = store
-            .desired_subjects_named(&[seat.clone()])
+            .desired_subjects_named(std::slice::from_ref(&seat))
             .unwrap()
             .remove(0);
         let observation = runtime.ptys.lock().unwrap()[0].clone();
@@ -29814,13 +29814,13 @@ mission "held-stop" state="ready" {
         );
         assert!(
             store
-                .stop_deferral_faults_for(&[seat.clone()], before)
+                .stop_deferral_faults_for(std::slice::from_ref(&seat), before)
                 .unwrap()
                 .is_empty()
         );
         assert_eq!(
             store
-                .stop_deferral_faults_for(&[seat.clone()], store.index().unwrap())
+                .stop_deferral_faults_for(std::slice::from_ref(&seat), store.index().unwrap())
                 .unwrap()[&seat],
             faults[0].detail
         );
@@ -29899,6 +29899,119 @@ mission "held-stop" state="ready" {
     }
 
     #[test]
+    fn stop_deferral_reports_each_of_seventeen_retained_seats() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let agents = (0..17).map(|i| format!("  agent \"worker-{i}\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\" }}\n")).collect::<String>();
+        let stops = (0..17)
+            .map(|i| format!("    stop \"agent/${{ST_MISSION_RUN}}/worker-{i}\"\n"))
+            .collect::<String>();
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nmission \"orchid\" state=\"ready\" {{\n goal \"Retain seventeen seats.\"\n{agents} step \"work\" {{ assigned-to \"person/test\" }}\n finally {{ step \"stop-workers\" {{ agentless\n{stops} }} }}\n}}\n"
+            ),
+            "publish-seventeen",
+        );
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "orchid".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: None,
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-seventeen".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let seats = store.desired_subjects_for_owner_run(&run.subject).unwrap();
+        assert_eq!(seats.len(), 17);
+        for (i, seat) in seats.iter().enumerate() {
+            let member = seat.member.as_ref().unwrap();
+            let incarnation = format!("held-{i}");
+            runtime.ptys.lock().unwrap().push(RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation.clone()),
+            });
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.subject.clone(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        (
+                            "runtime_id".into(),
+                            Value::String(member.runtime_id.clone()),
+                        ),
+                        ("host".into(), Value::String("node".into())),
+                        ("incarnation_id".into(), Value::String(incarnation)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("message/held-{i}"),
+                    kind: "message.sent".into(),
+                    actor: Some("person/test".into()),
+                    fields: BTreeMap::from([
+                        ("from".into(), Value::String("person/test".into())),
+                        ("to".into(), Value::String(seat.subject.clone())),
+                        ("content".into(), Value::String("read me".into())),
+                        ("status".into(), Value::String("sent".into())),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        let work = run.steps.iter().find(|step| step.step == "work").unwrap();
+        store
+            .set_step_state(&work.subject, "completed", None)
+            .unwrap();
+        for _ in 0..20 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(
+            store.mission_run(&run.id).unwrap().unwrap().phase,
+            "terminal"
+        );
+        for seat in &seats {
+            age_stop_deferral(&store, &seat.subject);
+        }
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert_eq!(store.fault_items(None).unwrap().len(), 17);
+        assert_eq!(
+            store
+                .stop_deferral_faults_for(
+                    &seats
+                        .iter()
+                        .map(|seat| seat.subject.clone())
+                        .collect::<Vec<_>>(),
+                    store.index().unwrap()
+                )
+                .unwrap()
+                .len(),
+            17
+        );
+    }
+
+    #[test]
     fn stopped_and_replaced_runtimes_hide_their_aged_deferral_before_reconciliation() {
         for transition in ["stopped", "new-incarnation", "new-declaration"] {
             let (store, reconciler, run_id) = run_with_a_final_stop_of_a_held_seat();
@@ -29945,7 +30058,7 @@ mission "held-stop" state="ready" {
                     .unwrap();
                 assert_eq!(
                     store
-                        .stop_deferral_faults_for(&[seat.clone()], before)
+                        .stop_deferral_faults_for(std::slice::from_ref(&seat), before)
                         .unwrap()
                         .len(),
                     1
