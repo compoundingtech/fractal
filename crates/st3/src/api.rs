@@ -20179,6 +20179,148 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
     }
 
     #[tokio::test]
+    async fn event_page_owner_filter_preserves_populated_membership_and_scanned_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let subject_a = "agent/node.event-page-a";
+        let subject_b = "agent/node.event-page-b";
+        let mut intent = crate::graph::parse_test_intent(
+            &format!(
+                "version 2\n\
+                 agent \"event-page-a\" {{ command \"true\" }}\n\
+                 agent \"event-page-b\" {{ command \"true\" }}\n\
+                 mission \"event-page-owner-a\" state=\"ready\" {{\n\
+                   goal \"Own the first invented agent.\"\n\
+                   step \"work\" {{ assigned-to \"{subject_a}\" }}\n\
+                 }}\n\
+                 mission \"event-page-owner-b\" state=\"ready\" {{\n\
+                   goal \"Own the second invented agent.\"\n\
+                   step \"work\" {{ assigned-to \"{subject_b}\" }}\n\
+                 }}\n"
+            ),
+            "node",
+        )
+        .unwrap();
+        roster_fixture_apply(&state.store, &intent, "event-page-owners-initial");
+        let runs = ["event-page-owner-a", "event-page-owner-b"]
+            .into_iter()
+            .map(|mission| {
+                state
+                    .store
+                    .create_mission_run(&MissionRunRequest {
+                        mission: mission.into(),
+                        revision: None,
+                        workspace: root.path().display().to_string(),
+                        requester: Some("person/test".into()),
+                        mode: Some("run".into()),
+                        inputs: BTreeMap::new(),
+                        idempotency_key: format!("event-page-run-{mission}"),
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (subject, run) in [(subject_a, &runs[0]), (subject_b, &runs[1])] {
+            let desired = intent.subjects.get_mut(subject).unwrap();
+            desired.owner_run = Some(run.subject.clone());
+            desired.owner_generation = Some(run.generation.clone());
+            desired.owner_step = Some(run.steps[0].subject.clone());
+        }
+        roster_fixture_apply(&state.store, &intent, "event-page-owners-set");
+        let owned_a = state
+            .store
+            .desired_subjects_for_owner_run(&runs[0].subject)
+            .unwrap();
+        let owned_b = state
+            .store
+            .desired_subjects_for_owner_run(&runs[1].subject)
+            .unwrap();
+        assert!(owned_a.iter().any(|desired| desired.subject == subject_a));
+        assert!(!owned_a.iter().any(|desired| desired.subject == subject_b));
+        assert!(owned_b.iter().any(|desired| desired.subject == subject_b));
+        assert!(!owned_b.iter().any(|desired| desired.subject == subject_a));
+        let (_, setup_cursor) = state.store.event_bounds().unwrap();
+
+        let accepted = [subject_b, subject_b, subject_a, subject_a, subject_b]
+            .into_iter()
+            .enumerate()
+            .map(|(number, subject)| {
+                state
+                    .store
+                    .append_claim(&ClaimInput {
+                        subject: subject.into(),
+                        kind: "agent.presence".into(),
+                        actor: Some(subject.into()),
+                        fields: serde_json::from_value(json!({
+                            "presence": "available",
+                            "reason": format!("invented event {number}"),
+                        }))
+                        .unwrap(),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(format!("event-page-presence-{number}")),
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for subject in [subject_a, subject_b] {
+            let admitted = state.store.claims_for(subject, Some("agent.presence")).unwrap();
+            let expected_ids = accepted
+                .iter()
+                .filter(|claim| claim.subject == subject)
+                .map(|claim| &claim.id)
+                .collect::<Vec<_>>();
+            assert_eq!(admitted.iter().map(|claim| &claim.id).collect::<Vec<_>>(), expected_ids);
+        }
+
+        let app = router(state);
+        let path = |after| {
+            format!(
+                "/v1/events/page?after={after}&owner_run={}&limit=2&wait=false",
+                runs[0].subject.replace('/', "%2F")
+            )
+        };
+        let (status, first) = get_request(app.clone(), &path(setup_cursor)).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let first = first.get("value").unwrap_or(&first);
+        assert_eq!(first["items"], json!([]));
+        assert_eq!(first["next_after"], json!(accepted[1].store_index));
+        assert_eq!(first["has_more"], json!(true));
+
+        let (status, second) = get_request(app.clone(), &path(accepted[1].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{second}");
+        let second = second.get("value").unwrap_or(&second);
+        let expected_a = accepted[2..4]
+            .iter()
+            .map(|claim| {
+                json!({
+                    "store_index": claim.store_index,
+                    "kind": &claim.kind,
+                    "subject": &claim.subject,
+                    "body": &claim.body,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(second["items"], json!(expected_a));
+        assert_eq!(second["next_after"], json!(accepted[3].store_index));
+        assert_eq!(second["has_more"], json!(true));
+
+        let (status, third) = get_request(app.clone(), &path(accepted[3].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{third}");
+        let third = third.get("value").unwrap_or(&third);
+        assert_eq!(third["items"], json!([]));
+        assert_eq!(third["next_after"], json!(accepted[4].store_index));
+        assert_eq!(third["has_more"], json!(false));
+        assert!(third["frontier"].as_u64().unwrap() >= accepted[4].store_index);
+
+        let (status, done) = get_request(app, &path(accepted[4].store_index)).await;
+        assert_eq!(status, StatusCode::OK, "{done}");
+        let done = done.get("value").unwrap_or(&done);
+        assert_eq!(done["items"], json!([]));
+        assert_eq!(done["next_after"], Value::Null);
+        assert_eq!(done["has_more"], json!(false));
+    }
+
+    #[tokio::test]
     async fn retention_event_http_envelope_preserves_pacing_continuation_and_410() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
