@@ -13921,6 +13921,7 @@ async fn run_agent_new(
         );
     }
     let launch_client = match endpoint {
+        Endpoint::Unix(socket) if actor.starts_with("agent/") => Client::unix_agent(socket.clone(), &actor)?,
         Endpoint::Unix(socket) => Client::unix_as(socket.clone(), &actor)?,
         _ => client.clone(),
     };
@@ -14199,8 +14200,12 @@ async fn wait_for_agent_harness(
     let mut last_report = std::time::Instant::now();
     let mut replicated = stages.iter().any(|stage| stage["stage"] == "replicated");
     let mut requested_incarnation = None;
+    let mut after = None;
     loop {
-        let status: st3::agent_launch::LaunchStatus = match launch_client.get(&path).await {
+        let waiting_path = after.as_ref().map_or_else(|| path.clone(), |after: &String| {
+            format!("{path}&after={after}&wait_ms=10000")
+        });
+        let status: st3::agent_launch::LaunchStatus = match launch_client.get(&waiting_path).await {
             Ok(status) => status,
             Err(error) if matches!(st3::client::http_status(&error), Some(404 | 503)) => {
                 launch_progress(
@@ -14232,6 +14237,7 @@ async fn wait_for_agent_harness(
                 return Err(error).with_context(|| format!("observing requested launch on {host}"));
             }
         };
+        after = Some(st3::agent_launch::wait_marker(&status)?);
         if requested_incarnation.is_none() {
             requested_incarnation = status.incarnation_id.clone();
         }
@@ -14278,7 +14284,7 @@ async fn wait_for_agent_harness(
                 }
                 "replicated" => "waiting for destination host to launch the harness",
                 "launched" => "requested process launched; waiting for harness readiness",
-                "harness-ready" => "requested incarnation reports harness readiness",
+                "harness-ready" => "requested incarnation reached harness readiness",
                 _ => "observing requested launch",
             });
         if reported != status.stage || last_report.elapsed() >= Duration::from_secs(5) {
@@ -14344,9 +14350,8 @@ async fn wait_for_agent_harness(
             Err(GeneratedClientError::Api(ClientErrorCode::NotFound, _, _)) => {}
             Err(error) => return Err(error.into()),
         }
-        // Owner-local receipts are deliberately not replicated events. Pace bounded reads;
-        // the outer timeout bounds remote requests and every stage of this wait.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The destination waits on its existing change feed before the next unchanged
+        // response. The outer timeout still bounds this and every other creation stage.
     }
 }
 

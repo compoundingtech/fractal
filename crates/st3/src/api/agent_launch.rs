@@ -3,6 +3,9 @@ use super::*;
 pub(super) struct LaunchQuery {
     subject: String,
     token: String,
+    after: Option<String>,
+    #[serde(default)]
+    wait_ms: u64,
 }
 
 pub(super) async fn get(
@@ -11,8 +14,60 @@ pub(super) async fn get(
     Query(query): Query<LaunchQuery>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
+    // Retain the concrete actor across both the Unix and authenticated peer boundaries.
+    // This is not a per-agent ownership check; the route's reader policy needs cover.
+    let actor = headers
+        .get("x-st3-person")
+        .and_then(|value| value.to_str().ok())
+        .filter(|actor| {
+            !actor.chars().any(char::is_whitespace)
+                && (actor.starts_with("person/")
+                    && actor.matches('/').count() == 1
+                    && actor.len() > "person/".len()
+                    || actor.starts_with("agent/")
+                        && actor.split('/').all(|part| {
+                            !part.is_empty()
+                                && part
+                                    .bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                        }))
+        })
+        .ok_or_else(|| {
+            ApiError::bad(St3Error::new(
+                "missing-actor",
+                "launch observation needs a concrete actor",
+            ))
+        })?;
     let host = host.trim_start_matches("host/");
+    if query
+        .after
+        .as_ref()
+        .is_some_and(|after| after.len() != 64 || !after.bytes().all(|b| b.is_ascii_hexdigit()))
+        || query.wait_ms > 10_000
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "validation-failed",
+            "invalid launch wait marker or wait budget",
+        )));
+    }
     if host == state.node {
+        // Register before capturing. A commit between the read and await stays visible.
+        let mut changed = state.event_notify.subscribe();
+        let store = state.store.clone();
+        let subject = query.subject.clone();
+        let token = query.token.clone();
+        let status =
+            blocking_store(move || crate::agent_launch::read(&store, &subject, &token)).await?;
+        let marker = crate::agent_launch::wait_marker(&status).map_err(ApiError::internal)?;
+        if query.wait_ms == 0 || query.after.as_deref() != Some(marker.as_str()) {
+            return serde_json::to_value(status)
+                .map(Json)
+                .map_err(ApiError::internal);
+        }
+        // At most two bounded captures per request; never retain a Store loan across await.
+        // Even an unrelated change ends this wait. The caller receives truthful unchanged
+        // state instead of an unbounded read loop chasing a busy fleet's notifications.
+        let _ = tokio::time::timeout(Duration::from_millis(query.wait_ms), changed.changed()).await;
         let store = state.store.clone();
         return blocking_store(move || {
             crate::agent_launch::read(&store, &query.subject, &query.token)
@@ -22,16 +77,6 @@ pub(super) async fn get(
         .map(Json);
     }
     let host_id = client_host_id(host);
-    let actor = headers
-        .get("x-st3-person")
-        .and_then(|value| value.to_str().ok())
-        .filter(|actor| actor.starts_with("person/") || actor.starts_with("agent/"))
-        .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
-                "missing-actor",
-                "remote launch observation needs a concrete actor",
-            ))
-        })?;
     let relay = state
         .client_relay
         .as_ref()
@@ -46,6 +91,8 @@ pub(super) async fn get(
                 request: crate::peer::ClientReadOperation::AgentLaunch {
                     subject: query.subject,
                     token: query.token,
+                    after: query.after,
+                    wait_ms: query.wait_ms,
                 },
             },
         )

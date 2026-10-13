@@ -2005,6 +2005,14 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
     }))
     .unwrap();
     store.append_claim(&launched).unwrap();
+    let mut ready = claim_input("runtime.action.succeeded", "cost-launch-ready", 0, "");
+    ready.subject = launch_subject.into();
+    ready.actor = None;
+    ready.idempotency_key = Some(format!("launch-ready:{launch_subject}:{SEAT_RUNTIME}"));
+    ready.fields = serde_json::from_value(json!({
+        "action":"harness-ready", "incarnation_id":SEAT_RUNTIME,
+    })).unwrap();
+    store.append_claim(&ready).unwrap();
     fixture
         .items
         .insert("launch_subject", launch_subject.into());
@@ -2154,7 +2162,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
         !event_page["items"].as_array().unwrap().is_empty(),
         "measure a populated event page, not a refused or empty traversal"
     );
-    let launch: Value = client
+    let launch: Value = person
         .get(&fixture.fill(
             "/v1/hosts/bench-host/agent-launch?subject={launch_subject}&token={launch_token}",
             0,
@@ -2163,6 +2171,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
         .expect("the launch cost probe must read a successful owned launch");
     assert_eq!(launch["incarnation_id"], SEAT_RUNTIME);
     assert_eq!(launch["desired_token"], fixture.items["launch_token"]);
+    assert_eq!(launch["stage"], "harness-ready");
 
     let mut costs = BTreeMap::new();
     for probe in PROBES {
@@ -2190,7 +2199,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path) -> Measured {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
-                } else if path.starts_with("/v1/client/") || path == "/v1/notes" {
+                } else if path.starts_with("/v1/client/") || path == "/v1/notes"
+                    || path.ends_with("/agent-launch") || path.contains("/agent-launch?") {
                     person.clone()
                 } else {
                     client.clone()

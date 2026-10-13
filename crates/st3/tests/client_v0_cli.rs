@@ -3646,9 +3646,11 @@ async fn serve_creation_api_with_launch_status(
     let socket = root.join("st3.sock");
     let state = test_state(root);
     let store = state.store.clone();
+    let launch_events = state.event_notify.clone();
     let router = st3::api::router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
             let store = store.clone();
+            let launch_events = launch_events.clone();
             async move {
                 // This fixture supplies provider observations without launching a binary.
                 if request.uri().path() == "/v1/harnesses" {
@@ -3711,6 +3713,17 @@ async fn serve_creation_api_with_launch_status(
                             })
                             .unwrap();
                     }
+                    if launch_status.is_none() && matches!(harness_state, "ready" | "idle" | "working") {
+                        store.append_claim(&ClaimInput {
+                            subject: "agent/client-v0-cli.demo".into(),
+                            kind: "runtime.action.succeeded".into(), actor: None,
+                            fields: serde_json::from_value(serde_json::json!({
+                                "action":"harness-ready", "incarnation_id":"demo:1"
+                            })).unwrap(), evidence: vec![], expected_subject: None,
+                            idempotency_key: Some("launch-ready:agent/client-v0-cli.demo:demo:1".into()),
+                        }).unwrap();
+                    }
+                    launch_events.send_modify(|generation| *generation = generation.saturating_add(1));
                 }
                 response
             }

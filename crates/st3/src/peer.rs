@@ -125,6 +125,10 @@ pub enum ClientReadOperation {
     AgentLaunch {
         subject: String,
         token: String,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default)]
+        wait_ms: u64,
     },
     /// Up to 512 KiB of an attachment from `offset`, from the member that took the upload. The
     /// answer is base64 in JSON with the file's size; the reader asks again until it has it all.
@@ -172,7 +176,8 @@ impl ClientReadOperation {
     pub(crate) fn wait(&self) -> Duration {
         match self {
             Self::ConversationChanges { wait_ms, .. }
-            | Self::TerminalScreenChange { wait_ms, .. } => {
+            | Self::TerminalScreenChange { wait_ms, .. }
+            | Self::AgentLaunch { wait_ms, .. } => {
                 Duration::from_millis((*wait_ms).min(CLIENT_READ_MAX_WAIT_MS))
             }
             _ => Duration::ZERO,
@@ -1338,9 +1343,18 @@ async fn receive_client_read(
                     StatusCode::CONFLICT, format!("{error:#}")
                 ).into())
             }
-            ClientReadOperation::AgentLaunch { subject, token } => {
-                let local = crate::client::Client::unix(state.backend().socket());
-                local.get::<serde_json::Value>(&format!("/v1/hosts/{}/agent-launch?subject={}&token={}", urlencoding::encode(state.node()), urlencoding::encode(&subject), urlencoding::encode(&token))).await
+            ClientReadOperation::AgentLaunch { subject, token, after, wait_ms } => {
+                anyhow::ensure!(wait_ms <= CLIENT_READ_MAX_WAIT_MS, "the launch wait exceeds its bound");
+                let local = if request.authority_actor.starts_with("agent/") {
+                    crate::client::Client::unix_agent(state.backend().socket(), &request.authority_actor)?
+                } else {
+                    crate::client::Client::unix_as(state.backend().socket(), &request.authority_actor)?
+                };
+                let mut path = format!("/v1/hosts/{}/agent-launch?subject={}&token={}&wait_ms={wait_ms}", urlencoding::encode(state.node()), urlencoding::encode(&subject), urlencoding::encode(&token));
+                if let Some(after) = after {
+                    path.push_str(&format!("&after={}", urlencoding::encode(&after)));
+                }
+                local.get::<serde_json::Value>(&path).await
             }
             ClientReadOperation::AgentWorkspace { identity } => {
                 let workspace =
@@ -2294,14 +2308,15 @@ agent "example/launch" { host "owner-node"; workspace "/tmp"; command "true"; }
             urlencoding::encode(subject),
             urlencoding::encode(&token)
         );
-        let read_launch = || {
+        let read_launch = |actor: &str| {
+            let actor = actor.to_owned();
             let app = gateway_app.clone();
             let path = launch_path.clone();
             async move {
                 let response = app
                     .oneshot(
                         Request::get(path)
-                            .header("x-st3-person", "person/avery")
+                            .header("x-st3-person", actor)
                             .body(Body::empty())
                             .unwrap(),
                     )
@@ -2315,7 +2330,7 @@ agent "example/launch" { host "owner-node"; workspace "/tmp"; command "true"; }
                 body["value"].clone()
             }
         };
-        let before = read_launch().await;
+        let before = read_launch("person/avery").await;
         assert_eq!(before["stage"], "replicating");
         assert_eq!(before["host"], "owner-node");
         assert_eq!(
@@ -2341,7 +2356,7 @@ agent "example/launch" { host "owner-node"; workspace "/tmp"; command "true"; }
             owner_store.apply_replication_repairs().unwrap();
             owner_store.project_replication_backlog().unwrap();
         }
-        assert_eq!(read_launch().await["stage"], "replicated");
+        assert_eq!(read_launch("person/avery").await["stage"], "replicated");
         let append = |kind: &str, fields: Value| {
             owner_store
                 .append_claim(&crate::model::ClaimInput {
@@ -2374,11 +2389,12 @@ agent "example/launch" { host "owner-node"; workspace "/tmp"; command "true"; }
             })).unwrap(), evidence:vec![], expected_subject:None,
             idempotency_key:Some(format!("launch-output:{subject}:remote-first")),
         }).unwrap();
-        let failure = read_launch().await;
+        let failure = read_launch("person/avery").await;
         assert_eq!(failure["stage"], "exited");
         assert_eq!(failure["exit_code"], 29);
         assert_eq!(failure["incarnation_id"], "remote-first");
         assert_eq!(failure["output_tail"], "remote startup marker");
+        assert_eq!(read_launch("agent/example/requester").await["exit_code"], 29);
 
         let (status, body) = ask("owner-node", Some("person/avery"), "site").await;
         assert!(status.is_success(), "{body}");

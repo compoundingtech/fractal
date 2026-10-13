@@ -907,7 +907,26 @@ async fn a_new_ready_agent_attaches_to_its_requested_incarnation() {
         Arc::new(Store::open(&root.path().join("claims.sqlite3"), "attach-node").unwrap());
     let store = state.store.clone();
     let socket = root.path().join("st3.sock");
-    let server = serve_unix(state, &socket).await;
+    let events = state.event_notify.clone();
+    let router = st3::api::router(state).layer(axum::middleware::from_fn(
+        |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            if request.uri().path() == "/v1/harnesses" {
+                return axum::response::IntoResponse::into_response(axum::Json(json!({
+                    "api_version":"st3.v1", "value":["pi"]
+                })));
+            }
+            next.run(request).await
+        },
+    ));
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        st3::api::serve_unix(&server_socket, router).await.unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let mut command = st3::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
     command
         .env_clear()
@@ -980,6 +999,14 @@ async fn a_new_ready_agent_attaches_to_its_requested_incarnation() {
             })
             .unwrap();
     }
+    store.append_claim(&ClaimInput {
+        subject: SUBJECT.into(), kind: "runtime.action.succeeded".into(), actor: None,
+        fields: serde_json::from_value(json!({
+            "action":"harness-ready", "incarnation_id":incarnation(CREATED_AT),
+        })).unwrap(), evidence: vec![], expected_subject: None,
+        idempotency_key: Some(format!("launch-ready:{SUBJECT}:{}", incarnation(CREATED_AT))),
+    }).unwrap();
+    events.send_modify(|generation| *generation = generation.saturating_add(1));
     let output = tokio::time::timeout(Duration::from_secs(8), output)
         .await
         .unwrap()
