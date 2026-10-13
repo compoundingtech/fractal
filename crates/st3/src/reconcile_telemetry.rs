@@ -132,6 +132,7 @@ struct Instruments {
     wakes: Counter<u64>,
     observation_drops: Counter<u64>,
     duration: Histogram<f64>,
+    passes_per_wake: Histogram<u64>,
 }
 static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
     let meter = opentelemetry::global::meter("st3.reconcile");
@@ -147,6 +148,11 @@ static METRICS: LazyLock<Instruments> = LazyLock::new(|| {
         duration: meter
             .f64_histogram("st.reconcile.pass.duration")
             .with_unit("s")
+            .build(),
+        passes_per_wake: meter
+            .u64_histogram("st.reconcile.passes_per_wake")
+            .with_unit("{pass}")
+            .with_boundaries(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0])
             .build(),
     }
 });
@@ -173,6 +179,13 @@ pub(crate) fn record_runtime_observation_drop() {
 
 pub(crate) fn take_wake() -> WakeCause {
     WakeCause::ALL[PENDING.swap(WakeCause::Other as usize, Ordering::Relaxed)]
+}
+
+/// Count completed passes in one outer wake, including a wake that reaches the continuation cap.
+pub(crate) fn record_wake_passes(passes: usize, cause: WakeCause) {
+    if crate::otel::metrics_enabled() {
+        METRICS.passes_per_wake.record(passes as u64, &ATTRIBUTES[cause as usize]);
+    }
 }
 
 /// Fault isolation lets the pass continue, but its root must still be retained as an error.

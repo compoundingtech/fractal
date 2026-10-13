@@ -960,6 +960,8 @@ pub struct Reconciler<R = NativeRuntime> {
     background_dispatch_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     background_entry_hook: Option<BackgroundEntryHook>,
+    #[cfg(test)]
+    background_wake_hook: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
@@ -1134,6 +1136,8 @@ impl Reconciler<NativeRuntime> {
             background_dispatch_hook: Default::default(),
             #[cfg(test)]
             background_entry_hook: None,
+            #[cfg(test)]
+            background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
@@ -1233,6 +1237,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_dispatch_hook: Default::default(),
             #[cfg(test)]
             background_entry_hook: None,
+            #[cfg(test)]
+            background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
@@ -1514,7 +1520,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         if !admitted { return None; }
                         let started = now_ms();
-                        let before = this.store.index().ok();
+                        // Continue for this pass's own effects: a completed step can release
+                        // its successor or cleanup work. Other writers notify independently;
+                        // unrelated replication traffic must not keep this wake alive.
+                        let before = smallclaims::touched::writes();
                         let failed = match crate::profile::task("task reconcile-pass", || {
                             let _trigger_span = crate::profile::span(pass_trigger);
                             this.reconcile_once_with_cause(cause)
@@ -1542,7 +1551,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
-                        Some((before != this.store.index().ok(), failed, started))
+                        Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
                 };
@@ -1550,14 +1559,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.event_notify
                     .send_modify(|generation| *generation = generation.saturating_add(1));
                 quiet_pass_started = (!changed).then_some(started);
-                if !changed {
+                if !changed || pass == 63 {
+                    crate::reconcile_telemetry::record_wake_passes(pass + 1, wake_cause);
+                    #[cfg(test)]
+                    if let Some(hook) = &self.background_wake_hook {
+                        hook(pass + 1);
+                    }
+                    if changed {
+                        self.notify.notify_one();
+                    }
                     break;
                 }
-                if pass == 63 {
-                    self.notify.notify_one();
-                } else {
-                    tokio::task::yield_now().await;
-                }
+                tokio::task::yield_now().await;
             }
         }
     }
