@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Checkbox, CheckboxGroup, Input, Label, Radio, RadioGroup, Tab, TabList, TabPanel, Tabs, TextField, VisuallyHidden } from 'react-aria-components'
+import { Checkbox, CheckboxGroup, Input, Label, Radio, RadioGroup, Tab, TabList, TabPanel, Tabs, TextField } from 'react-aria-components'
 import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, geometryVars as g, geometryNumbers, radiusVars as r, spaceVars as s, typeVars as t } from '../composition-tokens.stylex'
 import { Button, IconButton, Tooltip } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
@@ -308,10 +308,11 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
         <TabList aria-label="Questions" {...stylex.props(styles.tabList, stacked && styles.tabListStacked)}>
           {questions.map((question, index) => {
             const answered = isQuestionAnswered(question, draftFor(answers, question.id))
-            return <Tab key={question.id} id={question.id} className={({ isSelected, isFocusVisible }) => stylex.props(styles.tab, stacked && styles.tabStacked, isSelected && styles.tabSelected, isFocusVisible && styles.focusRing).className ?? ''}>
-              <span {...stylex.props(styles.tabLabel, stacked && styles.tabLabelStacked)}>{question.header ?? `Question ${index + 1}`}</span>
+            const header = question.header ?? `Question ${index + 1}`
+            // An explicit name: the marker is a box, so content-derived names would read "Storage , answered".
+            return <Tab key={question.id} id={question.id} aria-label={answered ? `${header}, answered` : header} className={({ isSelected, isFocusVisible }) => stylex.props(styles.tab, stacked && styles.tabStacked, isSelected && styles.tabSelected, isFocusVisible && styles.focusRing).className ?? ''}>
+              <span {...stylex.props(styles.tabLabel, stacked && styles.tabLabelStacked)}>{header}</span>
               <span data-question-tab-marker={answered ? 'answered' : 'open'} {...stylex.props(styles.marker, answered && styles.markerAnswered)}>{answered && <Icon name="check" size={12} />}</span>
-              {answered && <VisuallyHidden>, answered</VisuallyHidden>}
             </Tab>
           })}
         </TabList>
