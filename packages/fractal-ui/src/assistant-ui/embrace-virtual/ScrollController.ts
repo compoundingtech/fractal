@@ -181,7 +181,9 @@ export class ScrollController {
       if (this.pendingAnchor?.key === this.leadingKey && this.pendingAnchor !== undefined) return
       if (this.pendingAnchor !== undefined && !this.userScrolling) return
       if (resized && this.following) return
-      if (!this.userScrolling && performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS)
+      // Once the reader's scroll has ended, a scroll that moves with the geometry is the
+      // layout's: RAC clamps scrollTop to an estimated content size as rows change.
+      if (!this.userScrolling && (resized || performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS))
         return
       this.captureAnchor()
       if (this.homeNavigation && this.leadingKey !== undefined && this.anchor?.key === this.firstKey) {

@@ -186,8 +186,9 @@ export const ToolResultArrivesLight: Story = { ...ToolResultArrives, args: { sch
 export const InsertAbovePressedRow: Story = { play: async ({ canvasElement }) => {
   const { viewport, canvas, jump, retries } = await ready(canvasElement)
   const retry = canvas.getByRole('button', { name: 'Retry' })
-  const row = retry.closest<HTMLElement>('[data-testid="user-message"]')!
-  const top = row.getBoundingClientRect().top
+  // RAC recycles row elements across keys; measure the failed send by its id.
+  const failedSend = () => viewport.querySelector<HTMLElement>('[data-embrace-entry-id="turn/40"]')!
+  const top = failedSend().getBoundingClientRect().top
   const height = viewport.scrollHeight
   await expect(viewport.scrollTop).toBeGreaterThan(viewport.clientHeight * 3)
   await pressAcross(retry, async () => {
@@ -199,15 +200,15 @@ export const InsertAbovePressedRow: Story = { play: async ({ canvasElement }) =>
     // The virtual lane's scrollHeight also re-measures estimated rows; the inserted row is the insertion.
     const inserted = await waitFor(() => { const found = viewport.querySelector('[data-embrace-entry-id="turn/41"]')?.closest<HTMLElement>('[role="row"]'); if (found == null) throw new Error('Inserted row not mounted'); return found })
     await expect(inserted.getBoundingClientRect().height, 'reply should reproduce the roughly 107px insertion').toBeLessThan(140)
-    await expect(Math.abs(row.getBoundingClientRect().top - top), 'pressed row moved under the pointer').toBeLessThanOrEqual(1)
+    await expect(Math.abs(failedSend().getBoundingClientRect().top - top), 'pressed row moved under the pointer').toBeLessThanOrEqual(1)
     await expect(jump).not.toBeVisible()
   })
   await waitFor(() => expect(retries).toHaveTextContent('1'))
-  await expect(Math.abs(row.getBoundingClientRect().top - top), 'pressed row snapped on release').toBeLessThanOrEqual(1)
+  await expect(Math.abs(failedSend().getBoundingClientRect().top - top), 'pressed row snapped on release').toBeLessThanOrEqual(1)
   await waitFor(() => expect(jump).toBeVisible())
   await settleFrames()
   await expect(retries).toHaveTextContent('1')
-  await expect(Math.abs(row.getBoundingClientRect().top - top), 'history anchor undid compensation after the dock settled').toBeLessThanOrEqual(1)
+  await expect(Math.abs(failedSend().getBoundingClientRect().top - top), 'history anchor undid compensation after the dock settled').toBeLessThanOrEqual(1)
 } }
 export const InsertAbovePressedRowLight: Story = { ...InsertAbovePressedRow, args: { scheme: 'light' } }
 
@@ -219,11 +220,12 @@ export const ScrollDuringPress: Story = { play: async ({ canvasElement }) => {
   viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
   viewport.scrollTop -= 100
   await settleFrames()
-  const row = retry.closest<HTMLElement>('[data-testid="user-message"]')!
-  const top = row.getBoundingClientRect().top
+  // RAC recycles row elements across keys; measure the failed send by its id.
+  const failedSend = () => viewport.querySelector<HTMLElement>('[data-embrace-entry-id="turn/40"]')!
+  const top = failedSend().getBoundingClientRect().top
   canvas.getByRole('button', { name: 'Insert reply above failed send' }).click()
   await settleFrames()
-  await expect(row.getBoundingClientRect().top - top, 'press anchoring fought manual scrolling').toBeGreaterThan(80)
+  await expect(failedSend().getBoundingClientRect().top - top, 'press anchoring fought manual scrolling').toBeGreaterThan(80)
   pointer(viewport, 'pointerup', 1, 'mouse')
 } }
 export const ScrollDuringPressLight: Story = { ...ScrollDuringPress, args: { scheme: 'light' } }

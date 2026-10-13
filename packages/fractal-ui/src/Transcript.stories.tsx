@@ -545,10 +545,13 @@ export const AppendedItems: Story = { render: args => <AppendedItemsStory scheme
   await userEvent.click(thinkingControl)
   await expect(thinkingControl).toHaveAttribute('aria-expanded', 'true')
   const lane = canvas.getByTestId('transcript-scroll')
-  // A reader scroll: input first, as in a browser. An input-less write is a host or measurement move.
+  // A reader scroll: input first, as in a browser, and finished before items arrive.
+  // An input-less write is a host or measurement move.
+  // The kit targets ES2022: no Promise.withResolvers.
+  const scrolled = new Promise<void>(resolve => lane.addEventListener('scrollend', () => resolve(), { once: true }))
   lane.dispatchEvent(new WheelEvent('wheel', { deltaY: -(lane.scrollTop - 48) }))
   lane.scrollTop = 48
-  lane.dispatchEvent(new Event('scroll'))
+  await scrolled
   const scrollTop = lane.scrollTop
   await expect(scrollTop).toBeGreaterThan(0)
   const retained = [turn, prompt, answerRow, work, tool, thinking]
