@@ -116,6 +116,8 @@ Failed-command reason lines select the final top-level named exception from a tr
 
 `ThreadHeader` shows **Toggle terminal drawer** only when `terminalAvailable` is set. A host that knows why the terminal is unavailable passes `terminalDisabledReason?: string`: the toggle then stays visible but disabled, keeps its exact name, and carries the reason as its accessible description and hover title. Without a reason the toggle stays hidden. `@smalltalk/fractal-ui/assistant-ui/shell` also exports `TerminalDrawer`. The `Thread header` stories cover both cases.
 
+`ThreadHeader` takes `layout?: ThreadHeaderLayout`. The default `'status-with-actions'` keeps the status and elapsed time in the trailing action group. `'status-beside-title'` places them directly after the title and pushes the native action slot, with every control after it, to the end edge; a long title truncates while the status and controls keep their width. Hosts pass the prop rather than restyling the header's internal nodes. The `Thread header layout` stories cover 440 and 1440 px in both schemes.
+
 
 ### Portable sync seam
 
