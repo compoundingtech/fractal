@@ -607,6 +607,7 @@ fn assert_plans(store: &Store) {
 
 #[test]
 fn actual_store_document_plans_seek_before_and_after_population_and_analyze() {
+    println!("document-page bundled SQLite: {}", rusqlite::version());
     let store = node();
     bind(&store, "doc/target/a", "target", 1000, "target", None);
     println!("document-page plan stage: initial");

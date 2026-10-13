@@ -56,10 +56,12 @@ fn query(
         // Equal inclusive BINARY bounds select exactly this name. Retaining a range
         // loop lets the planner prove the full index order even when ANALYZE estimates
         // one version per name and a correlated cursor predicate reduces that estimate.
+        // Do not simplify back to equality: actual_store_document_plans_seek_before_and_after_population_and_analyze
+        // guards this SQLite planner dependency on the real Store and bundled version.
         sql.push_str(" AND d.name>=?1 AND d.name<=?1");
     }
     if lower {
-        // A named page already seeks d.name=?1. Keep redundant range bounds on that
+        // A named page already seeks its exact name. Keep redundant range bounds on that
         // constant too: ranges on the column can spoil the binding-key order proof,
         // including the correlated latest lookup, under analyzed statistics.
         sql.push_str(if named {
