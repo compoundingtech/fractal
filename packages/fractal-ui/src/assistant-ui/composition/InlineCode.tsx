@@ -14,6 +14,7 @@ const styles = stylex.create({
   // An atomic box: a span that fits the line moves to the next line whole rather than wrapping inside;
   // only a span longer than the line wraps, within the line, instead of overflowing it.
   // The ink is the host's own C18 ink; the fill mixes the C18 muted ink, so both schemes follow without a new grey.
+  // 10% keeps fgMuted spans in semantic rows at AA on the canvas (4.65:1 dark, 4.86:1 light); 14% drops dark below 4.5.
   code: {
     display: 'inline-block',
     maxWidth: '100%',
@@ -21,7 +22,7 @@ const styles = stylex.create({
     verticalAlign: 'baseline',
     paddingInline: s.xs,
     borderRadius: r.inlineCode,
-    backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 14%, transparent)`,
+    backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 10%, transparent)`,
     color: 'inherit',
     fontFamily: t.fontMono,
     fontSize: t.inlineCodeSize,

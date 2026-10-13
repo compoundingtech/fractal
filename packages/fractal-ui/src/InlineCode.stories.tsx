@@ -52,7 +52,7 @@ function InlineCodeStory({ scheme, narrow, revision }: Args) {
   const embraceOptions = React.useMemo(() => ({ messages: embraceItems, isRunning: false, onNew: async () => {} }), [])
   return <main {...stylex.props(styles.root, narrow && styles.narrow, ...baselineTheme, scheme === 'light' ? lightTheme : embraceDarkTheme)}>
     <section aria-label="Transcript example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={transcriptOptions}><Transcript title="Inline code" turns={turns} sync={{ _tag: 'Live', since: clock }} now={clock} observedAt={clock} /></EmbraceRuntimeProvider></section>
-    <section aria-label="Embrace thread example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={embraceOptions}><EmbraceThread items={embraceItems} embrace="E3" composer={false} /></EmbraceRuntimeProvider></section>
+    <section aria-label="Embrace thread example" {...stylex.props(styles.transcript)}><EmbraceRuntimeProvider options={embraceOptions}><EmbraceThread items={embraceItems} embrace="E3" tools="cards" composer={false} /></EmbraceRuntimeProvider></section>
     <section aria-label="Markdown preview example"><EmbraceMarkdownPreview markdown="The preview keeps `preview-span` as code." /></section>
   </main>
 }
@@ -83,7 +83,7 @@ function resolved(host: HTMLElement, declarations: Partial<CSSStyleDeclaration>)
 function inlineCodeMismatches(code: HTMLElement, expectedInk: Ink): readonly string[] {
   const host = code.parentElement!
   const css = getComputedStyle(code)
-  const token = resolved(host, { fontFamily: t.fontMono, paddingInline: s.xs, borderRadius: r.inlineCode, backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 14%, transparent)`, color: inkVar[expectedInk] })
+  const token = resolved(host, { fontFamily: t.fontMono, paddingInline: s.xs, borderRadius: r.inlineCode, backgroundColor: `color-mix(in srgb, ${ink.fgMuted} 10%, transparent)`, color: inkVar[expectedInk] })
   const mismatches: string[] = []
   if (code.tagName !== 'CODE' || !code.hasAttribute('data-inline-code')) mismatches.push('not an InlineCode element')
   if (css.fontFamily !== token.fontFamily) mismatches.push(`font ${css.fontFamily}`)
