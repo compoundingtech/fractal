@@ -38,7 +38,7 @@ not replace it. The ready state is written before the diagnosis. Diagnostic and 
 are logged without failing admission or execution. The next evaluation records recovery when
 the run no longer waits for first readiness, and termination also closes the fault. Its durable
 fault and recovery history remain available. An open fault appears immediately in `st missions show
-mission-run/EXAMPLE`, `st doctor` (`mission-first-readiness`), and the mission blocker in stui.
+mission-run/EXAMPLE`, `st doctor` (`mission-first-readiness`), and the mission blocker in the terminal UI.
 The leaf mission-run response adds optional `scheduler_fault`. Mission client views project
 `state: "blocked"` while the fault is open and set `run.blocker.scope` to
 `"scheduler/first-readiness"` with the fault reason. Pending steps also show that reason. These
@@ -407,6 +407,7 @@ loop "improve" timeout="2h" {
   stop {
     plateau metric="quality" rounds=2
     repeated-failure 2
+    no-progress 3
     token-budget 50000
   }
 
@@ -480,6 +481,8 @@ Each round writes one `loop.round-result` claim. The result records the child ru
 
 The feedback document is immutable. The next round receives its exact reference through `${loop.feedback}`.
 
+After the exit gates answer, the round writes a second feedback document, `doc/loop-feedback/<loop>/<round>/outcome`, and the next round receives that one. It records the round's keep or discard decision, its metrics, and what each `until` gate answered (`passed`, `failed` with its reason, `not-yet`, or `pending`), plus the names of the gates that did not pass. A round whose exit gates are still running keeps the first document until they answer. The outcome document holds neither the round number nor the child run, so two rounds that end the same way store identical content.
+
 A metric has `direction="higher"` or `direction="lower"`. Its value must be a finite number.
 
 A metric can read a numeric resource field, run an exec command, or normalize one exit gate to zero or one.
@@ -492,7 +495,9 @@ An exec metric must print one finite number. Its `time-limit` defaults to two mi
 
 The loop has no built-in Git behavior. A failed keep or discard mission stops the loop immediately.
 
-`stop` can limit a plateau, repeated round failures, and total structured token use. A reached stop rule exhausts the loop.
+`stop` can limit a plateau, repeated round failures, no progress, and total structured token use. A reached stop rule exhausts the loop.
+
+`no-progress N` (2 to 100) stops the loop when the last N rounds' outcome documents are identical: the same metrics and the same exit gate answers, so nothing a round did changed what the loop can see. The loop ends with a verdict that says so and names the failing exit gates and their reasons, rather than running on to `max-rounds`. A gate whose reason changes from round to round, such as one that prints a timestamp, counts as progress. The rule applies to plain round loops; it is off unless declared. When a loop ends at `max-rounds` or by any other stop rule, the verdict also names the exit gates that were failing.
 
 `on-exhausted` defaults to `fail`. It can contain `succeed` or one human gate instead.
 
@@ -1000,7 +1005,9 @@ requesting changes, a custom choice, or feedback. A reply in words alone does no
 decision or a choice; `answer-required` lists the answer IDs. Feedback also accepts a plain
 `--summary`, so older clients can still send it. The `work.person-done` claim records the typed
 answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decline`,
-`request_changes`, `selected`, `custom` or `feedback`. The resumed origin step lists it in
+`request_changes`, `selected`, `custom`, `feedback` or `dismissed`. `--answer dismiss` (with an optional
+`--text` reason) sets any decision or choice aside without answering it: the asker is told the person
+dismissed it, and a request that defines its own `dismiss` answer keeps that meaning. The resumed origin step lists it in
 `person_answers` with the ask, respondent, time and summary; a person ask's own step does too,
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
@@ -1136,7 +1143,8 @@ without `report-stalls` / `report_stalls` keep stall reports enabled with the ex
 (30 minutes unless set).
 
 A stall is measured from the run's last sign of life: its last state change, any step's last
-change or progress record, and the end of any step's lease. A run in cleanup, and a run that
+change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
+including loop rounds and nested work, counts too. A run in cleanup, and a run that
 still waits on `after`, cannot stall. A stalled run is not failed and can go on; if it makes progress and then goes
 quiet again, that is a new stall and a new message. The daemon keeps each run's stall limit as a
 deadline on that run's evaluation, so a quiet fleet does no work to watch for stalls.

@@ -275,8 +275,11 @@ pub fn effective_agent_name<'a>(subject: &'a str, desired: Option<&'a Value>) ->
         .unwrap_or_else(|| subject.strip_prefix("agent/").unwrap_or(subject))
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct DesiredSubject {
+    /// Declared once on a person-authored root; used only by trace resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accountable: Option<String>,
     pub subject: String,
     pub kind: String,
     pub desired: Value,
@@ -288,6 +291,36 @@ pub struct DesiredSubject {
     pub owner_generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_step: Option<String>,
+}
+
+// Accountable roots carry a fields envelope too: legacy admission reads that envelope
+// before decoding DesiredSubject, and therefore retains the new field as unknown.
+impl Serialize for DesiredSubject {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // Desired revisions hash CBOR directly. Preserve the derived struct's
+        // definite map length as well as its field order for existing declarations.
+        let len = 3 + usize::from(self.member.is_some())
+            + usize::from(self.owner_run.is_some())
+            + usize::from(self.owner_generation.is_some())
+            + usize::from(self.owner_step.is_some())
+            + 2 * usize::from(self.accountable.is_some());
+        let mut map = serializer.serialize_struct("DesiredSubject", len)?;
+        map.serialize_field("subject", &self.subject)?;
+        map.serialize_field("kind", &self.kind)?;
+        map.serialize_field("desired", &self.desired)?;
+        if let Some(member) = &self.member { map.serialize_field("member", member)?; }
+        if let Some(run) = &self.owner_run { map.serialize_field("owner_run", run)?; }
+        if let Some(generation) = &self.owner_generation { map.serialize_field("owner_generation", generation)?; }
+        if let Some(step) = &self.owner_step { map.serialize_field("owner_step", step)?; }
+        if let Some(person) = &self.accountable {
+            map.serialize_field("accountable", person)?;
+            map.serialize_field("fields", &serde_json::json!({
+                "kind": self.kind, "desired": self.desired, "accountable": person,
+            }))?;
+        }
+        map.end()
+    }
 }
 
 impl DesiredSubject {
@@ -439,6 +472,10 @@ pub struct LoopStopSpec {
     pub plateau_rounds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repeated_failure: Option<u32>,
+    /// Stop when this many rounds in a row end with the same metrics and the same exit gate
+    /// results, so nothing a round did changed what the loop can see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_progress: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
 }
@@ -2028,7 +2065,31 @@ pub struct MessageView {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+    /// A long body's reference, `blob/<sha256>`, when `content` is only its preview. Absent for
+    /// a message whose `content` is the whole text, and on daemons that predate long bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_ref: Option<String>,
+    /// The length in bytes of the whole body, with `body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
+    /// The member holding the body's file, such as `host/laptop`, with `body_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_origin: Option<String>,
     pub created_index: u64,
+}
+
+impl MessageView {
+    /// A long body as the attachment record it is kept as: a file on the member that took the
+    /// send, fetched from there like an image. See [`crate::message_body`].
+    pub fn body_attachment(&self) -> Option<MessageAttachment> {
+        Some(MessageAttachment {
+            sha256: crate::message_body::parse_reference(self.body_ref.as_deref()?)?.to_owned(),
+            media_type: crate::message_body::MEDIA_TYPE.into(),
+            name: None,
+            size: self.body_bytes?,
+            origin: self.body_origin.clone()?,
+        })
+    }
 }
 
 /// The daemon's answer to a message send, and what a send's idempotency key landed as. Older

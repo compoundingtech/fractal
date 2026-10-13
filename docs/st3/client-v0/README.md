@@ -34,6 +34,43 @@ The collections socket's `CollectionCommand` and `CollectionFrame` definitions l
 schema as HTTP resources. The operation manifest's `streams` section names its route, protocol,
 command/frame definitions, and subscription bound; see [collections](collections.md).
 
+### Person directive notes
+
+`GET /v1/client/notes` requires `read.projections` and an identified person or
+agent. The response is `DirectiveNotes`, not a work item, message, private glass
+or delegation: each entry has `person`, `author`, `time`, `text`, `revision` and
+optional `expires_at`. A person reads their own note. An agent reads only notes
+of people it works for or who own it, using current declaration/account ownership
+and mission requesters. Missing relationships fail closed; there is no fleet-wide
+note listing. A query `actor`, if supplied, must match the authenticated authority.
+Anonymous Unix clients cannot select an actor merely through a query parameter.
+Ownership walks stop after 16 hops. Current-work relationships use indexed,
+bounded reads; more than 64 distinct source rows fail explicitly rather than
+silently omitting notes or reporting that no note exists.
+
+The generated Rust `notes_list`, Swift `notesList` and TypeScript `notesList`
+methods use the identified local session or the paired person's read authority.
+The [wire fixture](fixtures/directive-notes.json) shows the current value. Clear
+and expiry both remove a note from reads; edits replace the current note.
+Operational repairs exclude the repaired original from current-note selection,
+even when its immutable claim row remains retained. Incremental reads and full
+replay both select the latest unrepaired revision.
+The text is advisory only: no approval, gate, ask or assignment reads it as evidence.
+The daemon cost suite measures both the populated read and a real person-authenticated
+PUT replacement over Unix transport at two generated store sizes. Its fixture passes
+anchored membership and active-peer advertisements rather than measuring a refused write.
+
+The trusted local CLI writes with `PUT /v1/notes`, using a concrete person identity
+and a body containing that same `person` and `actor`, nullable `text`, and optional
+`expires_at`. Agents and paired-client delegated writes are refused. Text is
+nonblank and bounded to 4096 UTF-8 bytes. The replicated claim
+`person.directive-note-set` is admitted only with its person as author. Publication
+requires anchored fleet membership and `person_directive_note` version 1
+advertisement from every active member. Pending unsigned local membership changes
+also block publication until the replication writer seals them. Fence legacy
+peers before enabling notes: advertisements do not discover unknown legacy peers.
+Launch delivery, change notifications, and UI authoring are outside this read-path slice.
+
 ### Phone observations
 
 Paired sessions can send bounded disjoint UTC minute diagnostics with
@@ -305,7 +342,7 @@ The page omits it once the host has caught up.
 The notice's `state` is `diverged` instead while the host's graph has diverged from a peer's: both
 hold the same envelopes but project different graphs from them, so the page can be wrong, not just
 early, and more exchanges will not fix it. Each diverged peer carries `diverged_since`; a notice can
-list catching-up peers beside it. Clients say so prominently (stui's header shows `⚠ diverged`)
+list catching-up peers beside it. Clients say so prominently (the terminal UI's header shows `⚠ diverged`)
 until the page omits the notice.
 
 IDs are stable opaque strings with a type prefix. Renames change labels, not IDs. A detail response
@@ -432,7 +469,7 @@ the server returns `validation-failed` rather than an incomplete AST or KDL docu
 ### Usage over a period
 
 The optional `agent_messages` field adds a **daily estimate**, also shown by `st usage` and
-stui. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
+the terminal UI. It counts distinct agent-to-agent message subjects, excluding people, daemon sends and
 explicit delivery-probe/test tags, probe/soak seats and the audit's named test-title prefixes.
 Receipts and duplicate send claims add no messages. Bodies are never classified. Counts are
 maintained in the writer transaction and backfilled once on upgrade. Full UTC days use daily
@@ -477,7 +514,7 @@ not report a value leaves it out. Selection uses quota observation time, indepen
 context refresh and publication time. Within an hour of the account's freshest observation,
 the highest weekly reading in the latest reported reset window wins; ties use source time
 and seat identity. A new reset window can lower the reading, and an older high reading
-outside the hour cannot override it. This same selection serves `st usage`, stui, iOS,
+outside the hour cannot override it. This same selection serves `st usage`, terminal UI, iOS,
 account pools and the limits policy. The policy tests freshness against the selected source
 time, so a recent low publication cannot freshen an old high observation. Claim kinds and
 client fields remain compatible with older clients.
@@ -602,10 +639,10 @@ wording) gets a new card, so an action through the old one returns `stale-fence`
 nothing. A client then re-reads attention and, if a card of the same `attention_kind` for the
 same `source_id` is open, acts once more through it; it does not retry the old card. A review st
 no longer asks returns `validation-failed`, and its message says why: who already answered it
-and how, or what moved on since it was asked. stui does both on its live and classic screens.
+and how, or what moved on since it was asked. The terminal UI does both on its live and classic screens.
 
 Clients must evict removed source cards and replace their window from fresh snapshots on
-reconnect. The iOS cache version is 4 and stui's is 3; older cached cards are discarded. Offline
+reconnect. The iOS cache version is 4 and the terminal UI's is 3; older cached cards are discarded. Offline
 cards are marked stale and cannot submit actions. A future notification consumer should compare
 fixed-recipient snapshots at an explicit `as_of` and deduplicate transitions by source, person,
 and episode, notifying only when an episode first appears. There is no push delivery service.
@@ -851,7 +888,7 @@ Asks, attention actions, message sends and held effects are not pinned by this l
 rule: their existing deterministic durable claim identities and action receipts provide dedupe.
 Client actions keep their durable `custom.client.action-result` receipt; normal claim append
 uses its existing operation identity and checkpoint tombstones. Cleanup never deletes these
-claims. Rust SDK/CLI and stui use the client's transient-error classification; unknown codes
+claims. Rust SDK/CLI and the terminal UI use the client's transient-error classification; unknown codes
 follow `retryable`, and this new code is terminal. TypeScript/phone `isTransient` and
 `retryTransient` likewise stop on this code; the phone's fresh-fence `notApplied` retry list
 contains only stale-fence/rate-limited. Swift preserves unknown codes and `retryable: false`.
@@ -1000,6 +1037,20 @@ are not in the graph. [Attachments](../attachments.md) defines the limits, reten
   with the total `size`. `Client::blob` / `blob()` in each client assembles the file.
 - Errors: `blob-too-large`, `unsupported-media-type`, `blob-content-mismatch`,
   `blob-quota-exceeded`, `blob-not-found`, `blob-expired`.
+
+### Long messages
+
+A message body can be up to `limits.max_message_bytes` (262144; absent on older daemons, which take
+4096). Past 8 KiB a message resource and a timeline message body carry `body_ref` and
+`body_bytes`, and `content` is the first kilobyte; the whole text is a file on the machine that
+took the message. `GET /v1/client/message-bodies/{id}` (scope `read.projections`) asks that machine
+for it and answers `{message, bytes, text, complete}`; an owner that cannot be reached answers
+`remote-unavailable`, and a composer or reader then shows the preview and says where the text is.
+A send over the limit answers `message-too-large` (the text says the limit); `message-store-full`
+(the owner's quota) and `long-message-signature-unsupported` (a device that signs the whole text
+of a message; see [long messages](../long-messages.md#device-signatures)) are the other refusals.
+All are definite refusals that wrote nothing, so a composer keeps the person's text. See
+[long messages](../long-messages.md).
 
 ## Event feed and resynchronization
 
@@ -1402,7 +1453,7 @@ fields in the strict test view. No real user data is required for the conformanc
 ## Private glasses
 
 A glass is one person's named workspace. Its stable subject is `glass/person/NAME/UUID`;
-clients generate a lowercase UUID (stui uses UUIDv7). Renaming changes `body.name`, never the
+clients generate a lowercase UUID (terminal UI uses UUIDv7). Renaming changes `body.name`, never the
 ID. Names are free text and need not be unique. The client handles name lookup.
 
 `GET /v1/client/glasses` returns the ordinary paged resource list, ordered by ID, and
@@ -1747,6 +1798,56 @@ stream sends `resync`) and the refresher is asked for one. A continuation reads 
 published at its first page's cut; once that roster is gone it answers `page-cursor-expired`.
 A stream rereads when a newer roster is published.
 
+## Missions and work window freshness
+
+The `missions` and `work` collection streams answer from lists the daemon's background
+refreshers keep published, as the agents roster is; no window read folds a mission card or a
+work row. After commits, each refresher refolds only the missions or steps whose claims, worker
+leases or attention changed, at most once a second, and keeps the rest. Each frame's `snapshot`
+names the list's own cut (`store_index`, `created_at`) and when it was folded (`published_at`),
+which can be older than the subscription by about a second plus one fold. A work window with an
+`actor` filters the published list; its ready work follows the seat's queue order as it stood at
+the list's own cut. A work row's `execution_elapsed_ms` counts to the list's time, the
+projection time of its cut.
+
+Before the missions list's first publication, and while its refresher fails three folds in a
+row or after it stops, missions windows fold on read and follow commits as before, until a fold
+publishes again. When projections are replaced without a claim (a replay, trim or heal), they
+keep the newest rows, under their own cut, until the list's fold from nothing publishes.
+
+The work list is never folded on read while its refresher runs. Until it has a current
+publication (at startup, after its refresher withdrew it on three failed folds in a row, and
+after a replay, trim or heal until its fold from nothing publishes), a work window receives one
+retryable `resync`, then waits for the list's next publication; neither commits, the reread
+interval nor a repeat of that answer sends it anything more. A paired session's clock still
+rechecks its grant meanwhile, and an expired or revoked grant ends the window. If the work
+list's refresher stops for good, a work window receives one `error` frame and ends: its `code` is
+`internal`, and its `message` names `work-list-ended`. The daemon must restart.
+
+`GET /v1/client/work` (the current list, not `history=true`) answers the same way. A first
+page is a slice of the newest publication, under that publication's snapshot. A continuation
+is a slice of the same publication, even after a newer one, a withdrawal or the refresher's end
+(new first pages then refuse), until its cursor expires or a replay, trim or heal replaced the
+projections behind it (`page-cursor-expired`). Asking for the same first page again reuses its
+cursor and its original expiry: a cursor close to expiring can still expire before its next page
+is read, and the client restarts from a first page. The daemon keeps at most 32 cached first pages,
+oldest first out: 32 newer distinct first pages within a cursor's five minutes evict a pager that
+has gone quiet, whose next page then answers `page-cursor-expired` and restarts. Reading a page
+does not keep its entry from eviction. While there is
+no current publication, a first page answers HTTP 503, retryable, with
+`details.reason: "work-list-not-ready"`; after the refresher stops for good, HTTP 503, not
+retryable, with `details.reason: "work-list-ended"`. With `fresh=true`, the daemon waits up to
+two seconds for a publication at or after the store index when the request arrived; if none
+comes, it answers HTTP 503, retryable, with `details.reason: "work-list-not-fresh"` and the
+`wanted_cut` and `newest_cut`, and never older rows as fresh. On the wire these answers carry
+`code: "internal"`; `details.reason` tells them apart. `st work ls` asks for a fresh first page and
+asks again on a not-ready or not-fresh answer within `--daemon-wait`, measured once across every
+attempt. A client that does not retry, such as the TypeScript and Swift `workList` or a feed's
+model, gets that retryable 503 until the work list's first fold after the daemon starts, and again
+after each replay, trim or heal and each withdrawal until the next publication. HTTP pages of `/v1/client/missions` are unchanged.
+
+A daemon started with `ST3_PUBLISHED_LISTS=off` folds each window and page on read instead.
+
 ## Exact terminal lookup
 
 `GET /v1/client/terminals?owner=agent%2Fexample%2Fworker&state=running` matches the
@@ -1787,7 +1888,7 @@ and escaping test, server filter/paging tests, and TypeScript client checks run 
 
 With `X-St3-Features: conversation-blocks.v1`, native timeline entries include
 optional `body.blocks`. Top-level timeline types stay unchanged for old Swift/iOS
-and stui decoders. Block kinds are open strings; an unrecognized native block keeps
+and the terminal UI decoders. Block kinds are open strings; an unrecognized native block keeps
 its complete JSON in `payload.raw` before transport bounding. Reasoning explicitly
 present in the harness transcript and full structured tool arguments are shown
 without secret or token filtering. Without the feature, the server returns known

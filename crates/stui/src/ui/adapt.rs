@@ -29,8 +29,14 @@ pub struct Extras {
     pub window_errors: BTreeMap<String, String>,
     /// Whether the missions window is followed and has loaded.
     pub missions_followed: bool,
+    /// Whether st has sent the attention and agents windows on this run: until it has, what the
+    /// model holds is a cache from an earlier run, and nothing built on it is shown as current.
+    pub attention_live: bool,
+    pub agents_live: bool,
     /// st's own counts, when it serves them.
     pub summary: Option<st3_client::Summary>,
+    pub inventory_supported: Option<bool>,
+    pub inventory_partial: Vec<String>,
 }
 
 fn now() -> String {
@@ -161,7 +167,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let stale = extras
         .window_errors
         .iter()
-        .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str()))
+        .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
         .map(|(name, why)| format!("{name}: {why}"))
         .chain(
             extras
@@ -177,13 +184,14 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         diverged,
         stale,
         missions_followed: extras.missions_followed,
+        settled: extras.attention_live && extras.agents_live,
         active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents(model, &missions), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
-        machines: loaded(model.machines.snapshot.is_some(), machines(model)),
+        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model), extras.window_errors.get("machines")),
         worktrees: Load::Ready(super::demo::world().worktrees.items().to_vec()),
-        devices: loaded(
+        devices: loaded_or_why(
             model.devices.snapshot.is_some(),
             model
                 .devices()
@@ -197,6 +205,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
                     expires: device.expires_at.clone(),
                 })
                 .collect(),
+            extras.window_errors.get("devices"),
         ),
         conversations: extras.conversations.clone(),
         quiet_missions: quiet,
@@ -223,6 +232,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Err(why)) => Load::Failed(why.clone()),
             None => Load::Loading,
         },
+        inventory_supported: extras.inventory_supported,
+        inventory_partial: extras.inventory_partial.clone(),
     }
 }
 
@@ -1197,6 +1208,22 @@ mod tests {
                 "line",
                 "… st kept only the start of this output"
             ]
+        );
+    }
+
+    #[test]
+    fn a_preview_longer_than_its_line_budget_names_what_it_hides() {
+        let text = (0..450)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let entries = tool_pair(json!({"cmd":"cat notes.txt"}), Value::String(text));
+        let (_, _, output) = tool(&entries);
+        assert_eq!(output.len(), 401, "{:?}", output.last());
+        assert_eq!(output[399], "line 399");
+        assert_eq!(
+            output[400],
+            "… 50 more lines not shown in the timeline preview"
         );
     }
 

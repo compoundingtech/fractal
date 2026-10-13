@@ -59,12 +59,34 @@ pub struct SmalltalkRuntime {
     pub(crate) agent_roster_published: tokio::sync::watch::Sender<u64>,
     /// Every other collection's published view revisions, for the same rereads.
     pub(crate) published_views: published_views::PublishedViews,
+    /// The attention list a daemon's refresher publishes for collection windows.
+    pub(crate) attention_list: super::attention_list::AttentionList,
+    /// Every person's glasses and arrangements, published by the same refresher.
+    pub(crate) glass_list: super::owner_lists::OwnerList,
+    pub(crate) arrangement_list: super::owner_lists::OwnerList,
+    /// Each selected person's summary row, published by the same refresher.
+    pub(crate) summary_list: super::summary_list::SummaryList,
+    /// The current missions list, while a refresher keeps it published.
+    pub(crate) published_missions: published_list::PublishedList<mission_list::MissionRows>,
+    /// The current work list, while a refresher keeps it published.
+    pub(crate) published_work: published_list::PublishedList<work_list::WorkRows>,
     #[cfg(test)]
     pub(crate) agent_resources_builds: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) agent_resources_refolded_cards: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) agent_resources_largest_fold: std::sync::atomic::AtomicUsize,
+    /// Direct current-work reads, which an enabled work list never makes.
+    #[cfg(test)]
+    pub(crate) direct_work_reads: std::sync::atomic::AtomicUsize,
+    /// Seats whose queue order a work fold read; runs a warm fold looked up in its reverse
+    /// index; and the seats the last fold read.
+    #[cfg(test)]
+    pub(crate) seat_order_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) seat_lookups: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) last_seats_read: std::sync::Mutex<BTreeSet<String>>,
 }
 
 #[derive(Clone)]
@@ -82,6 +104,28 @@ pub(crate) struct AgentResourcesEntry {
 }
 
 impl SmalltalkRuntime {
+    fn finish_schema(&self, connection: &Connection) -> Result<()> {
+        connection.execute_batch(git_changes::SCHEMA)?;
+        usage_period::create_schema(connection)?;
+        migrate_local_usage_seen(connection)?;
+        backfill_message_index(connection)?;
+        idle_mail::create_schema(connection)?;
+        unread_mail::create_schema(connection)?;
+        resources::create_schema(connection)?;
+        custom::create_schema(connection)?;
+        agent_messages::create_schema(connection)?;
+        coordination::create_schema(connection)?;
+        glass_heads::create_schema(connection)?;
+        directive_notes::create_schema(connection)?;
+        limits::create_limits_schema(connection)?;
+        if let Some(views) = &self.ivm_views {
+            // Registered stores run this on every open; each view's schema hook must
+            // be idempotent, including reopen with persisted outputs and event cursors.
+            views.create_schema(connection)?;
+        }
+        Ok(())
+    }
+
     /// Explicitly register shadow views without changing the production readers.
     /// The source adapter must initialize/install and certify them separately.
     pub fn with_ivm_views(views: Arc<smallclaims::ivm::Views>) -> Self {
@@ -179,26 +223,14 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn create_schema(&self, connection: &Connection) -> Result<()> {
-        connection.execute_batch(SCHEMA)?;
-        connection.execute_batch(&RUNTIME_ID_INDEX)?;
-        connection.execute_batch(arrangements::SCHEMA)?;
-        usage_period::create_schema(connection)?;
-        migrate_local_usage_seen(connection)?;
-        backfill_message_index(connection)?;
-        idle_mail::create_schema(connection)?;
-        unread_mail::create_schema(connection)?;
-        resources::create_schema(connection)?;
-        custom::create_schema(connection)?;
-        agent_messages::create_schema(connection)?;
-        coordination::create_schema(connection)?;
-        glass_heads::create_schema(connection)?;
-        limits::create_limits_schema(connection)?;
-        if let Some(views) = &self.ivm_views {
-            // Registered stores run this on every open; each view's schema hook must
-            // be idempotent, including reopen with persisted outputs and event cursors.
-            views.create_schema(connection)?;
-        }
-        Ok(())
+        install_initial_schema(connection, false)?;
+        self.finish_schema(connection)
+    }
+
+    fn create_schema_for_fresh_store(&self, connection: &Connection) -> Result<()> {
+        // Existing stores use the per-statement path, preserving completed upgrade indexes.
+        install_initial_schema(connection, true)?;
+        self.finish_schema(connection)
     }
 
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()> {
@@ -226,6 +258,7 @@ impl Runtime for SmalltalkRuntime {
         custom::open(transaction)?;
         resources::open(transaction)?;
         glass_heads::open(transaction)?;
+        directive_notes::flush(transaction)?;
         agent_messages::open(transaction)?;
         arrangements::open(transaction)?;
         limits::open_limits(transaction)?;
@@ -343,6 +376,7 @@ impl Runtime for SmalltalkRuntime {
         custom::flush(transaction).map_err(internal)?;
         resources::flush(transaction).map_err(internal)?;
         glass_heads::flush(transaction).map_err(internal)?;
+        directive_notes::flush(transaction).map_err(internal)?;
         agent_messages::flush(transaction).map_err(internal)?;
         limits::flush_limits(transaction).map_err(internal)?;
         reapply_local_work_lease_renewals_tx(transaction)
@@ -371,6 +405,14 @@ impl Runtime for SmalltalkRuntime {
             .clear();
         *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
         self.agent_roster_published.send_modify(|revision| *revision += 1);
+        self.attention_list.forget();
+        self.glass_list.forget();
+        self.arrangement_list.forget();
+        self.summary_list.forget();
+        // Projections replaced without a new claim: the lists fold from nothing, dropping any
+        // fold under way, before the windows that read them are told to reread.
+        self.published_missions.forget();
+        self.published_work.forget();
         self.published_views.invalidate();
         self.agent_page_refs_cache
             .lock()
@@ -445,12 +487,200 @@ impl Runtime for SmalltalkRuntime {
 /// at once rather than on the next read.
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
-const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.arrangements.v2";
+const SHARED_PROJECTION_LAYOUT: &str = "st3.shared-projections.person-directive-notes.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub(crate) fn compatibility_digest(registry_digest: &str) -> String {
     canonical_hash(&(SHARED_PROJECTION_LAYOUT, registry_digest))
         .expect("projection compatibility identity serializes")
+}
+
+fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
+    if fresh {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute_batch(SCHEMA)?;
+        transaction.execute_batch(&RUNTIME_ID_INDEX)?;
+        transaction.execute_batch(arrangements::SCHEMA)?;
+        transaction.commit()?;
+    } else {
+        connection.execute_batch(SCHEMA)?;
+        connection.execute_batch(&RUNTIME_ID_INDEX)?;
+        connection.execute_batch(arrangements::SCHEMA)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod schema_install_tests {
+    use super::*;
+
+    #[test]
+    fn complete_runtime_schema_does_not_take_a_held_writer_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("schema.sqlite");
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        install_initial_schema(&writer, true).unwrap();
+        writer
+            .execute_batch("PRAGMA user_version=18; BEGIN IMMEDIATE;")
+            .unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader.busy_timeout(std::time::Duration::ZERO).unwrap();
+        install_initial_schema(&reader, false).unwrap();
+        assert!(reader.is_autocommit());
+        assert!(reader.execute_batch("BEGIN IMMEDIATE;").is_err());
+    }
+
+    #[test]
+    fn incomplete_runtime_schema_keeps_completed_ddl() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(smallclaims::store::SCHEMA)
+            .unwrap();
+        connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('preserved');").unwrap();
+        assert!(
+            SmalltalkRuntime::default()
+                .create_schema(&connection)
+                .is_err()
+        );
+        assert!(connection.is_autocommit());
+        assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')", [], |row| row.get::<_, bool>(0)).unwrap());
+        assert_eq!(
+            connection
+                .query_row("SELECT id FROM mission_runs", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "preserved"
+        );
+    }
+
+    #[test]
+    fn failed_runtime_schema_install_rolls_back_its_ddl_and_preserves_existing_data() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(smallclaims::store::SCHEMA)
+            .unwrap();
+        // This damaged table fails after the runtime's early claim indexes were created.
+        connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('existing');").unwrap();
+        let error = SmalltalkRuntime::default()
+            .create_schema_for_fresh_store(&connection)
+            .unwrap_err();
+        assert!(error.to_string().contains("mission_id"), "{error:#}");
+        assert!(connection.is_autocommit());
+        assert_eq!(
+            connection
+                .query_row("SELECT id FROM mission_runs", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "existing"
+        );
+        assert!(!connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')", [], |row| row.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn crashed_schema_chunks_recover_without_losing_existing_data() {
+        if std::env::var_os("ST3_SCHEMA_CRASH_PHASE").is_some() {
+            crash_during_schema_install_child();
+            unreachable!("the private child must exit at its crash point");
+        }
+        for phase in ["core", "runtime"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("schema.sqlite");
+            let marker = directory.path().join("crash-marker");
+            {
+                let connection = Connection::open(&path).unwrap();
+                connection.execute_batch("CREATE TABLE fixture_marker(value TEXT); INSERT INTO fixture_marker VALUES('preserved'); PRAGMA user_version=18;").unwrap();
+                if phase == "runtime" {
+                    connection
+                        .execute_batch(smallclaims::store::SCHEMA)
+                        .unwrap();
+                }
+            }
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "store::runtime::schema_install_tests::crashed_schema_chunks_recover_without_losing_existing_data",
+                    "--nocapture",
+                ])
+                .env("ST3_SCHEMA_CRASH_PATH", &path)
+                .env("ST3_SCHEMA_CRASH_MARKER", &marker)
+                .env("ST3_SCHEMA_CRASH_PHASE", phase)
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(86), "{phase}: crash hook must run");
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), phase);
+            {
+                let connection = Connection::open(&path).unwrap();
+                let partial = if phase == "core" {
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IN ('meta','batches'))"
+                } else {
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')"
+                };
+                assert!(
+                    !connection
+                        .query_row(partial, [], |row| row.get::<_, bool>(0))
+                        .unwrap(),
+                    "{phase}: uncommitted DDL survived the process crash"
+                );
+            }
+            let recovered = Store::open(&path, "birch").unwrap();
+            let reader = recovered.readers.get();
+            assert_eq!(
+                reader
+                    .query_row("SELECT value FROM fixture_marker", [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "preserved"
+            );
+            assert_eq!(
+                reader
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                18
+            );
+            assert_eq!(
+                recovered
+                    .connection
+                    .write()
+                    .pragma_query_value(None, "synchronous", |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                2
+            );
+        }
+    }
+
+    fn crash_during_schema_install_child() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        let path = std::env::var_os("ST3_SCHEMA_CRASH_PATH").expect("private child database path");
+        let marker =
+            std::env::var_os("ST3_SCHEMA_CRASH_MARKER").expect("private child marker path");
+        let phase = std::env::var("ST3_SCHEMA_CRASH_PHASE").expect("private child phase");
+        let target = match phase.as_str() {
+            "core" => "claims",
+            "runtime" => "mission_runs",
+            _ => panic!("unknown private crash phase"),
+        };
+        let connection = Connection::open(path).unwrap();
+        let marked_phase = phase.clone();
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(context.action, AuthAction::CreateTable { table_name } if table_name == target) {
+                std::fs::write(&marker, &marked_phase).unwrap();
+                // SAFETY: this private child must exit without SQLite or Rust cleanup.
+                unsafe { libc::_exit(86) };
+            }
+            Authorization::Allow
+        }));
+        if phase == "core" {
+            connection
+                .execute_batch(smallclaims::store::FRESH_SCHEMA)
+                .unwrap();
+        } else {
+            SmalltalkRuntime::default()
+                .create_schema_for_fresh_store(&connection)
+                .unwrap();
+        }
+        panic!("the crash point was not reached");
+    }
 }
 
 #[cfg(test)]
