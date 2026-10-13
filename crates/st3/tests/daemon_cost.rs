@@ -118,6 +118,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/client/alerts/{*id}",
         "the GET /v1/client/attention/{*id} handler, which is measured",
     ),
+    (
+        "GET /v1/harnesses",
+        "probes the account login-shell PATH and filesystem; reads no claim store and has no graph-size-dependent cost",
+    ),
     // Sekrets: neither reads the claim store beyond one primary-key lookup.
     (
         "POST /v1/sekrets/attest",
@@ -910,6 +914,7 @@ const PROBES: &[Probe] = &[
         |store, fixture, attempt| {
             let (agent, step, incarnation) = &fixture.subjects.held[0];
             let request = st3::model::WorkRequest {
+                wait_ms: None,
                 actor: Some(agent.clone()),
                 incarnation: Some(incarnation.clone()),
                 summary: None,
@@ -2504,6 +2509,7 @@ fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
                     &work.subject,
                     "claim",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(actor.clone()),
                         incarnation: Some(incarnation.clone()),
                         summary: None,

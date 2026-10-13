@@ -4581,6 +4581,16 @@ fn controlled_tui_args(
     Ok(args)
 }
 
+/// Whether a `-c key=value` entry sets permissions, which a remote TUI rejects while resuming.
+fn is_permission_config(config: &str) -> bool {
+    let key = config.split('=').next().unwrap_or_default().trim();
+    matches!(
+        key,
+        "default_permissions" | "permissions" | "approval_policy" | "approvals_reviewer" | "sandbox_mode"
+    ) || key.starts_with("permissions.")
+        || key.starts_with("sandbox_workspace_write")
+}
+
 fn resume_compatible_root_args(authored_prefix: &[String]) -> Vec<String> {
     let mut compatible = Vec::with_capacity(authored_prefix.len());
     let mut index = 0;
@@ -4592,6 +4602,26 @@ fn resume_compatible_root_args(authored_prefix: &[String]) -> Vec<String> {
                 | "--dangerously-bypass-approvals-and-sandbox"
                 | "--dangerously-bypass-hook-trust"
         ) {
+            index += 1;
+            continue;
+        }
+        if matches!(argument, "-c" | "--config") {
+            // The remote TUI refuses permission config on a resume as it does permission flags
+            // ("Permission overrides are not supported when resuming a remote task"). The app server
+            // already holds every one of these entries, and `thread/resume` selects the profile.
+            let value = authored_prefix.get(index + 1);
+            if !value.is_some_and(|value| is_permission_config(value)) {
+                compatible.push(authored_prefix[index].clone());
+                compatible.extend(value.cloned());
+            }
+            index += 2;
+            continue;
+        }
+        if argument
+            .strip_prefix("--config=")
+            .or_else(|| argument.strip_prefix("-c").filter(|value| !value.is_empty()))
+            .is_some_and(is_permission_config)
+        {
             index += 1;
             continue;
         }

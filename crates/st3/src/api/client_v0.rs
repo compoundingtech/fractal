@@ -96,7 +96,7 @@ mod inventory;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
-mod summary;
+pub(in crate::api) mod summary;
 
 #[cfg(test)]
 mod stream_start_tests;
@@ -181,6 +181,10 @@ struct CollectionSubscription {
     view_revision: u64,
     /// When the client subscribed, until its first snapshot is sent.
     opened: Option<std::time::Instant>,
+    /// The window's last read found its governed view not ready, and the client was told: it
+    /// waits for the view's next change. A paired session's clock still reads it, so an expired
+    /// or revoked grant still ends it, but another not-ready read sends nothing.
+    waiting_for_view: bool,
 }
 
 const COLLECTION_MAX_SUBSCRIPTIONS: usize = 16;
@@ -602,8 +606,103 @@ async fn collection_items_with_windows(
                 } else {
                     None
                 };
+                // While a refresher serves the missions list, a missions window serves its newest
+                // publication under that list's own cut and never folds the missions it shows.
+                // Before the first publication, or while the refresher is failing, it folds on
+                // read as without one.
+                let published_missions = (collection == "missions")
+                    .then(|| store.published_missions())
+                    .flatten();
+                // A work window serves the published list for its actor while its refresher runs,
+                // and never folds it on read meanwhile: with no current publication it is not
+                // ready, and once the refresher has ended, unavailable. With no refresher started
+                // it reads directly, as before.
+                let published_work = if collection == "work" {
+                    use crate::store::published_list::ListRead;
+                    match store.published_work_list().current() {
+                        ListRead::Served(publication, _) => Some(publication),
+                        // Held: a refresher governs it, though it has not started yet.
+                        ListRead::NeverStarted if store.collection_view_published("work") => {
+                            return Ok(Err(super::published_lists::work_list_not_ready()));
+                        }
+                        // Explicit off, or nothing ever governed it: the direct read.
+                        ListRead::NeverStarted => None,
+                        ListRead::NotReady => {
+                            store.published_work_list().request_refresh();
+                            return Ok(Err(super::published_lists::work_list_not_ready()));
+                        }
+                        ListRead::Ended => return Ok(Err(super::published_lists::work_list_ended())),
+                    }
+                } else {
+                    None
+                };
+                let list_cut = published_missions.as_ref().map(|list| (list.cut, list.published_at_unix_ms))
+                    .or_else(|| published_work.as_ref().map(|list| (list.cut, list.published_at_unix_ms)));
+                if let Some((cut, at)) = list_cut {
+                    published = Some(cut);
+                    published_at = Some(at);
+                }
                 // A window hit reuses rows an earlier exact fold computed at this cut.
                 let folded = std::cell::Cell::new(false);
+                // A daemon's windows never fold attention or read glasses and arrangements:
+                // they serve the newest published view under that view's own cut, and wake its
+                // refresher when it is older.
+                let published_rows = if store.published_view_serving(&collection) {
+                    use super::published_attention::{published_attention_rows, published_owner_rows};
+                    use crate::store::owner_lists::OwnerView;
+                    let rows = match collection.as_str() {
+                        "attention" => Some(published_attention_rows(
+                            &store, index, person.as_deref(), limit.saturating_add(1),
+                        )),
+                        "summary" => {
+                            use crate::store::summary_list::PublishedSummary;
+                            match store.published_summary(person.as_deref()) {
+                                PublishedSummary::Row(cut, at, row) => {
+                                    if cut < index {
+                                        store.request_attention_list_refresh();
+                                    }
+                                    Some(Some((cut, at, vec![row])))
+                                }
+                                // Not published yet: counted at once from the published
+                                // shared counts and attention rows, as the refresher will.
+                                PublishedSummary::Pending => {
+                                    store.request_attention_list_refresh();
+                                    Some(summary::published_row(&store, person.as_deref())
+                                        .map(|(cut, at, row)| (cut, at, vec![row])))
+                                }
+                                // A selection it does not serve: this window reads its own.
+                                PublishedSummary::Unserved => None,
+                            }
+                        }
+                        "glasses" => Some(published_owner_rows(
+                            &store, OwnerView::Glasses, index,
+                            person.as_deref().expect("authenticated glass owner"),
+                        )),
+                        "arrangements" => Some(published_owner_rows(
+                            &store, OwnerView::Arrangements, index,
+                            person.as_deref().expect("explicit arrangement owner"),
+                        ).map(|(cut, at, mut rows)| {
+                            if let Some(subject) = &subject {
+                                rows.retain(|row| row["id"] == subject.as_str());
+                            }
+                            (cut, at, rows)
+                        })),
+                        _ => None,
+                    };
+                    match rows {
+                        Some(Some((cut, at, rows))) => {
+                            published = Some(cut);
+                            published_at = Some(at);
+                            Some(rows)
+                        }
+                        Some(None) => {
+                            return Ok(Err(super::published_attention::published_view_not_ready(&collection)));
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let snapshot = match published_at {
                     Some(at) => super::roster_snapshot(&state, published.unwrap_or(index), at),
                     None => client_snapshot_at(&state, index),
@@ -612,8 +711,15 @@ async fn collection_items_with_windows(
                 let compute = || {
                     let mut items = match collection.as_str() {
                         "summary" => {
+                            if let Some(rows) = &published_rows {
+                                return Ok((rows.clone(), false));
+                            }
                             return Ok((summary::native(&state, &current, &request, &snapshot,
                                 now, windows.as_deref(), commits)?, false));
+                        }
+                        "missions" if published_missions.is_some() => {
+                            let publication = published_missions.as_ref().expect("published missions");
+                            return super::published_lists::mission_window(&publication.rows, limit);
                         }
                         "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals" => {
                             return inventory::items(&state, &current, &request, &snapshot);
@@ -626,6 +732,9 @@ async fn collection_items_with_windows(
                             let mut items = mission_list_cards_at(&store, &ids, now)?;
                             has_more |= bound_mission_cards(&mut items)?;
                             return Ok((items, has_more));
+                        }
+                        "glasses" | "arrangements" if published_rows.is_some() => {
+                            published_rows.clone().expect("published rows")
                         }
                         "glasses" => store.glasses(
                             person.as_deref().expect("authenticated glass owner"),
@@ -641,9 +750,10 @@ async fn collection_items_with_windows(
                                 )?
                             }
                         }
-                        "attention" => {
-                            client_attention_resources_at(&store, person.as_deref(), false, now)?
-                        }
+                        "attention" => match &published_rows {
+                            Some(rows) => rows.clone(),
+                            None => client_attention_resources_at(&store, person.as_deref(), false, now)?,
+                        },
                         "agents" => {
                             // Published cards already exist; a cold unfiltered window folds
                             // only its visible cards and gets has_more from shallow membership.
@@ -659,6 +769,12 @@ async fn collection_items_with_windows(
                                     client_agent_resources_cached(&store, false, index)?
                                 }
                             }
+                        }
+                        "work" if published_work.is_some() => {
+                            let publication = published_work.as_ref().expect("published work");
+                            return Ok(super::published_lists::work_window(
+                                &publication.rows, actor.as_deref(), limit,
+                            ));
                         }
                         "work" => client_work_resources(
                             &store,
@@ -814,6 +930,9 @@ enum Refreshed {
     Current,
     /// A retryable read failed; keep the subscription and schedule another read.
     Retry,
+    /// A published view's refresher has nothing current to serve: keep the subscription. A view
+    /// its refresher governs is read again when it next changes, not on the reread interval.
+    NotReady,
     /// A permanent refusal ended the subscription.
     Dropped,
     /// The socket closed.
@@ -842,6 +961,8 @@ async fn deliver_collection(
             .await;
             return if !sent {
                 Refreshed::Closed
+            } else if retryable && error.code == super::published_lists::WORK_LIST_NOT_READY {
+                Refreshed::NotReady
             } else if retryable {
                 Refreshed::Retry
             } else {
@@ -1702,7 +1823,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         refresh.push(request.id.clone());
                         // Collection results and conversation frames share the same generation fence.
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -1730,19 +1851,35 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                     }
                 }
+                let governed = state.store.collection_view_published(&subscription.request.collection);
                 let first_span = first_frames.get(&id).map(|first| first.span.clone());
                 let refreshed = first_frame_work(first_span, async {
                     match result {
+                        // Already told: the same not-ready answer is not sent again. The read still
+                        // rechecked a paired session's authority before it got this far.
+                        CollectionRead::Legacy(Err(error)) if subscription.waiting_for_view && governed
+                            && error.code == super::published_lists::WORK_LIST_NOT_READY
+                            && client_error_retryable(error.status, Some(&error.code)) => Refreshed::NotReady,
                         CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result).await,
                         CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh).await,
                     }
                 }).await;
                 if subscription.delivered { first_frames.remove(&id); }
+                subscription.waiting_for_view = matches!(refreshed, Refreshed::NotReady) && governed;
                 match refreshed {
                     Refreshed::Current => {}
                     Refreshed::Retry => {
                         if subscription.ivm.is_some() { subscription.dirty = true; }
                         else { reread_due.insert(id.clone()); }
+                    }
+                    // A governed view rereads when it next changes: its next publication, hold
+                    // or invalidation bumps the revision this read started at. A reread already
+                    // due stays due: it may be that change's.
+                    Refreshed::NotReady => {
+                        if !governed {
+                            if subscription.ivm.is_some() { subscription.dirty = true; }
+                            else { reread_due.insert(id.clone()); }
+                        }
                     }
                     Refreshed::Dropped => { subscriptions.remove(&id); reread_due.remove(&id); first_frames.remove(&id); }
                     Refreshed::Closed => return,
@@ -2114,13 +2251,17 @@ pub(super) async fn agent_declaration(
         crate::graph::redact_agent_env_values(&mut tree);
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree).map_err(ApiError::bad)?;
-    Ok(Json(json!({
+    let accountable = st3_schema::accountable::from_desired(&tree)
+        .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
+    let mut value = json!({
         "id": subject,
         "revision": revision,
         "tree": tree,
         "kdl": kdl,
         "revisions": revisions,
-    })))
+    });
+    if let Some(person) = accountable { value["accountable"] = json!(person); }
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
@@ -2883,7 +3024,17 @@ fn mission_list_cards_at(
     ids: &[String],
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    let attention = store.human_attention_runs()?;
+    mission_list_cards_with(store, ids, at_unix_ms, &store.human_attention_runs()?)
+}
+
+/// [`mission_list_cards_at`] with the runs that wait on a person already read, as the published
+/// missions list keeps them.
+pub(super) fn mission_list_cards_with(
+    store: &Store,
+    ids: &[String],
+    at_unix_ms: u128,
+    attention: &BTreeSet<String>,
+) -> anyhow::Result<Vec<Value>> {
     let definitions = store
         .mission_definitions_for_ids(ids)?
         .into_iter()
@@ -2953,7 +3104,7 @@ fn mission_list_cards_at(
     }).collect()
 }
 
-fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
+pub(super) fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
     // Reserve room for the envelope, continuation cursor and fleet sync notice.
     let budget = CLIENT_MAX_RESPONSE_BYTES.saturating_sub(128_000);
     let mut used = 0;
@@ -6551,6 +6702,10 @@ fn timeline_first_page(
             continue;
         }
         if claim.subject == owner && claim.kind == "harness.diagnostic" {
+            // Protocol initialization is informational component evidence, not an error.
+            if fields.get("code").and_then(Value::as_str) == Some("claude-channel-initialized") {
+                continue;
+            }
             if !applies_to_incarnation(fields) {
                 continue;
             }
@@ -10791,6 +10946,7 @@ async fn dispatch_action(
                     &target,
                     action.trim_start_matches("work."),
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some(authority_actor.clone()),
                         incarnation: request.fence.runtime_incarnation.clone(),
                         summary: p.get("summary").and_then(Value::as_str).map(str::to_owned),
@@ -11747,6 +11903,10 @@ pub(super) async fn action(
     result["snapshot_id"] = Value::String(new_client_snapshot(&state).id);
     Ok(Json(result))
 }
+
+#[cfg(test)]
+#[path = "client_v0/published_attention_tests.rs"]
+mod published_attention_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12842,7 +13002,7 @@ mission "queue-parity" state="ready" {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn fresh_agent_roster_read_cuts_the_refresh_pause_short_and_plain_reads_do_not() {
+    async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let subject = "agent/fresh-pause";
@@ -12891,21 +13051,41 @@ mission "queue-parity" state="ready" {
             "plain reads must not shorten the refresher's minimum pause",
         );
 
-        // Changed: a fresh read waits for one fold, not the rest of the pause (about 750 ms here).
+        // A healthy attempt is already in flight; a fresh read must wait for its result.
+        let _admission = state.store.admit_agent_resources("other").await;
+        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one",
+            "observed_at_ms":2}));
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
         let started = std::time::Instant::now();
-        let (Extension(snapshot), Json(page)) = list(true).await.unwrap();
+        let read = list(true);
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (Extension(snapshot), Json(page)) = read.await.unwrap();
+        worker.await.unwrap().unwrap();
         let waited = started.elapsed();
         assert!(snapshot.store_index >= idle, "a fresh read shows what was written before it");
         assert_eq!(page.items[0]["harness_state"], "idle");
-        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the pause");
+        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the healthy attempt");
         // The fresh read's wait and page, and the refresher's folds, land in their stage rows.
         let stages = crate::api::request_latency_snapshot().into_iter()
             .filter(|row| row["scope"] == "agents-roster")
             .filter_map(|row| row["stage"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
-        for stage in ["fresh-wait", "fresh-page", "refresh"] {
+        for stage in ["fresh-wait", "fresh-page"] {
             assert!(stages.contains(stage), "{stage} recorded: {stages:?}");
         }
+        assert!(stages.contains("refresh") || stages.contains("refresh-cold"),
+            "a warm or cold refresher fold is recorded: {stages:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -13093,13 +13273,29 @@ mission "queue-parity" state="ready" {
         assert_eq!(index, cut, "the unchanged roster is served under its own cut");
         assert_eq!(page.items, before.items);
 
-        // A claim about the agent changes its card: the fresh read still waits for a roster
-        // at or after it, and shows it.
+        // A claim about the agent changes its card. Start a healthy attempt and hold it:
+        // the fresh read must wait for this attempt's publication, not answer early.
+        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
         assert!(!state.store.published_agent_roster_unchanged_through(written, false).unwrap());
-        let (_, index, page) = fresh().await;
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
+        let read = fresh();
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (_, index, page) = read.await;
+        worker.await.unwrap().unwrap();
         assert_eq!(index, written);
         assert_ne!(page.items, before.items, "the fresh read shows the claim it waited for");
         assert!(*published.borrow_and_update() > revision);
@@ -14587,6 +14783,24 @@ mission "queue-parity" state="ready" {
         .await
         .unwrap_err();
         assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn accountable_root_declaration_read_exposes_typed_person() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = "version 2\nagent \"example/root\" { accountable \"person/avery\"; command \"true\"; }";
+        let intent = crate::graph::parse_intent(source, "terminal-test").unwrap();
+        let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
+        state.store.apply_as(&intent, &expected, "accountable-read", Some("person/avery")).unwrap();
+        let value = agent_declaration(State(state),
+            Extension(ClientSession::local(Some("person/avery")).unwrap()),
+            AxumPath("example/root".into()), Query(AgentDeclarationQuery {
+                revision: None, show_env_values: false,
+            })).await.unwrap().0;
+        assert_eq!(value["accountable"], "person/avery");
+        let decoded: st3_client::AgentDeclaration = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.accountable.as_deref(), Some("person/avery"));
     }
 
     #[tokio::test]
@@ -16783,6 +16997,7 @@ mission "example/steps" state="ready" {
             // A seat holds one step at a time: the first run's is claimed and under way.
             if run == 0 {
                 let request = |summary: Option<&str>, key: &str| crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: summary.map(str::to_owned),
@@ -16888,6 +17103,7 @@ mission "example/steps" state="ready" {
         assert!(no_progress["steps"].as_array().unwrap().iter().all(|step| step["progress_at"].is_null()));
         // Renewing the operational lease does not prove the claimant made progress.
         state.store.work_action(&progressed.subject, "renew", &crate::model::WorkRequest {
+            wait_ms: None,
             actor: progressed.claimant.clone(),
             incarnation: Some("builder-1".into()),
             summary: None,
@@ -20044,6 +20260,15 @@ mission "example/zero-run" state="ready" {
             "timeline-diagnostic",
         );
         append(
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("code".into(), json!("claude-channel-initialized")),
+                ("reason".into(), json!("informational initialization")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            "timeline-initialization",
+        );
+        append(
             "harness.usage",
             BTreeMap::from([
                 (
@@ -20140,6 +20365,8 @@ mission "example/zero-run" state="ready" {
                 .content,
             "do the work"
         );
+        assert!(!entries.iter().any(|entry| entry["body"]["code"] == "claude-channel-initialized"));
+        assert!(entries.iter().any(|entry| entry["body"]["code"] == "provider-warning"));
         let types = entries
             .iter()
             .filter_map(|entry| entry["type"].as_str())
@@ -20512,6 +20739,7 @@ mission "example/zero-run" state="ready" {
         let store = Store::open_memory("usage-attribution-node").unwrap();
         let desired = [
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-a".into(),
                 kind: "agent".into(),
                 desired: json!({}),
@@ -20521,6 +20749,7 @@ mission "example/zero-run" state="ready" {
                 owner_step: Some("step-run/gen-one/step-a".into()),
             },
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-b".into(),
                 kind: "agent".into(),
                 desired: json!({}),
@@ -20530,6 +20759,7 @@ mission "example/zero-run" state="ready" {
                 owner_step: Some("step-run/gen-one/step-b".into()),
             },
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-other".into(),
                 kind: "agent".into(),
                 desired: json!({}),

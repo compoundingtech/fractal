@@ -1,4 +1,6 @@
 //! Portable offline evidence commands and a protected selector-only CI observation command.
+use crate::cli_println as println;
+
 use super::*;
 use clap::{Args, Subcommand};
 
@@ -19,6 +21,9 @@ pub enum EvidenceCommand {
         attempt: u64,
         #[arg(long)]
         artifact: u64,
+        /// Immutable degraded check records; the observer authenticates their jobs itself.
+        #[arg(long = "re-attest")]
+        predecessors: Vec<String>,
     },
     /// Import an observation: signed full/test, or explicitly unsigned degraded.
     Put {
@@ -64,7 +69,8 @@ pub fn run(args: EvidenceArgs) -> Result<()> {
             run,
             attempt,
             artifact,
-        } => ci_transport::observe_ci(run, attempt, artifact)?,
+            predecessors,
+        } => ci_transport::observe_ci(run, attempt, artifact, &predecessors)?,
         EvidenceCommand::Put {
             repo,
             record,

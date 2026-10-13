@@ -95,6 +95,7 @@ export type AgentCreateParameters = {
 };
 
 export type AgentDeclaration = {
+  accountable?: string;
   id: Id;
   kdl: string;
   revision: string;

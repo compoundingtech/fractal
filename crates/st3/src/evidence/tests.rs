@@ -941,3 +941,278 @@ fn malformed_configured_signer_is_rejected_before_any_observation_write() {
     );
     assert!(records(f.repo()).unwrap().is_empty());
 }
+
+#[test]
+fn protected_reattest_links_only_authenticated_fresh_same_keyed_check_and_measures_issuance() {
+    let f = Fixture::new();
+    let (binding, run, receipt, mut jobs) = ci_observation(&f);
+    let now = chrono::Utc::now();
+    jobs[1]["started_at"] = (now - chrono::Duration::minutes(11)).to_rfc3339().into();
+    jobs[1]["completed_at"] = (now - chrono::Duration::minutes(10)).to_rfc3339().into();
+    let old = observers::produce_ci(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Unavailable,
+    )
+    .unwrap();
+    let old_id = old[0].record.clone();
+    let predecessors = vec![(old_id.clone(), run.clone(), jobs[1].clone())];
+    let mut next_binding = binding;
+    next_binding.attempt = 3;
+    let mut next_run = run;
+    next_run["run_attempt"] = 3.into();
+    let mut next_receipt = receipt;
+    next_receipt.run_attempt = "3".into();
+    let mut next_jobs = jobs.clone();
+    for job in &mut next_jobs {
+        job["run_attempt"] = 3.into();
+    }
+    next_jobs[1]["id"] = 12.into();
+    next_jobs[1]["started_at"] = (now - chrono::Duration::minutes(4)).to_rfc3339().into();
+    next_jobs[1]["completed_at"] = (now - chrono::Duration::minutes(1)).to_rfc3339().into();
+    let statements = observers::ci_statements(
+        f.repo(),
+        &next_binding,
+        &next_run,
+        &next_receipt,
+        &next_jobs,
+    )
+    .unwrap();
+    let links = ci_reattest::prepare(
+        f.repo(),
+        &next_binding.repository,
+        &statements,
+        &next_jobs,
+        &predecessors,
+    )
+    .unwrap();
+    let signed = observers::produce_ci_linked(
+        f.repo(),
+        &next_binding,
+        &next_run,
+        &next_receipt,
+        &next_jobs,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.key,
+        },
+        &links,
+    )
+    .unwrap();
+    let full = verify_record(f.repo(), &signed[0].record, &f.trusted).unwrap();
+    assert_eq!(full.predicate.re_attests, Some(old_id.clone()));
+    assert_eq!(
+        show(f.repo(), &old_id).unwrap().predicate.tier,
+        TrustTier::Degraded
+    );
+    let metrics = ci_reattest::measurements(f.repo(), &signed).unwrap();
+    // Includes the minute since rerun completion, not merely the nine-minute check gap.
+    assert!(metrics[0]["elapsed_ms"].as_i64().unwrap() >= 599_000);
+    let replay = observers::produce_ci_linked(
+        f.repo(),
+        &next_binding,
+        &next_run,
+        &next_receipt,
+        &next_jobs,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.key,
+        },
+        &links,
+    )
+    .unwrap();
+    assert!(
+        ci_reattest::measurements(f.repo(), &replay)
+            .unwrap()
+            .is_empty()
+    );
+    // The original degraded job can never itself supply a re-attestation.
+    let old_statements = observers::ci_statements(
+        f.repo(),
+        &next_binding,
+        &next_run,
+        &next_receipt,
+        &next_jobs,
+    )
+    .unwrap();
+    let mut same_execution = predecessors.clone();
+    same_execution[0].2["output"] = "tampered after completion".into();
+    assert!(
+        ci_reattest::prepare(
+            f.repo(),
+            &next_binding.repository,
+            &old_statements,
+            &next_jobs,
+            &same_execution
+        )
+        .is_err()
+    );
+    let mut wrong_workflow = predecessors.clone();
+    wrong_workflow[0].1["path"] = ".github/workflows/other.yml".into();
+    assert!(
+        ci_reattest::prepare(
+            f.repo(),
+            &next_binding.repository,
+            &statements,
+            &next_jobs,
+            &wrong_workflow
+        )
+        .is_err()
+    );
+    let mut bad_start = next_jobs.clone();
+    bad_start[1]["started_at"] = (now - chrono::Duration::minutes(12)).to_rfc3339().into();
+    assert!(
+        ci_reattest::prepare(
+            f.repo(),
+            &next_binding.repository,
+            &statements,
+            &bad_start,
+            &predecessors
+        )
+        .is_err()
+    );
+    let mut other_tree = statements.clone();
+    other_tree[0].subject[0]
+        .digest
+        .insert("gitTree".into(), tree(f.repo(), &f.base).unwrap());
+    assert!(
+        ci_reattest::prepare(
+            f.repo(),
+            &next_binding.repository,
+            &other_tree,
+            &next_jobs,
+            &predecessors
+        )
+        .is_err()
+    );
+    let mut other_command = statements.clone();
+    if let Fact::Tests { checks, .. } = &mut other_command[0].predicate.fact {
+        checks
+            .get_mut("unit-tests")
+            .unwrap()
+            .command
+            .push("different".into());
+    }
+    assert!(
+        ci_reattest::prepare(
+            f.repo(),
+            &next_binding.repository,
+            &other_command,
+            &next_jobs,
+            &predecessors
+        )
+        .is_err()
+    );
+    let mut other_inputs = statements.clone();
+    if let Fact::Tests { inputs, .. } = &mut other_inputs[0].predicate.fact {
+        inputs.insert("new-input".into(), "digest".into());
+    }
+    assert!(
+        ci_reattest::prepare(
+            f.repo(),
+            &next_binding.repository,
+            &other_inputs,
+            &next_jobs,
+            &predecessors
+        )
+        .is_err()
+    );
+    let mut same_runner = statements.clone();
+    if let Fact::Tests { runner, .. } = &mut same_runner[0].predicate.fact {
+        *runner = format!(
+            "github:{}/actions/runs/123/attempts/2/jobs/11",
+            next_binding.repository
+        );
+    }
+    assert!(
+        ci_reattest::prepare(
+            f.repo(),
+            &next_binding.repository,
+            &same_runner,
+            &jobs,
+            &predecessors
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn fresh_rerun_signing_outage_keeps_degraded_tier_and_does_not_attach_or_promote_link() {
+    let f = Fixture::new();
+    let (mut binding, mut run, mut receipt, mut jobs) = ci_observation(&f);
+    let now = chrono::Utc::now();
+    jobs[1]["started_at"] = (now - chrono::Duration::minutes(3)).to_rfc3339().into();
+    jobs[1]["completed_at"] = (now - chrono::Duration::minutes(2)).to_rfc3339().into();
+    let old = observers::produce_ci(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Unavailable,
+    )
+    .unwrap();
+    let predecessors = vec![(old[0].record.clone(), run.clone(), jobs[1].clone())];
+    binding.attempt = 3;
+    run["run_attempt"] = 3.into();
+    receipt.run_attempt = "3".into();
+    for job in &mut jobs {
+        job["run_attempt"] = 3.into();
+    }
+    jobs[1]["id"] = 12.into();
+    jobs[1]["started_at"] = (now - chrono::Duration::minutes(1)).to_rfc3339().into();
+    jobs[1]["completed_at"] = now.to_rfc3339().into();
+    let statements = observers::ci_statements(f.repo(), &binding, &run, &receipt, &jobs).unwrap();
+    let links = ci_reattest::prepare(
+        f.repo(),
+        &binding.repository,
+        &statements,
+        &jobs,
+        &predecessors,
+    )
+    .unwrap();
+    let grade = observers::produce_ci_linked(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.repo().join("missing-key"),
+        },
+        &links,
+    )
+    .unwrap();
+    assert_eq!(grade[0].tier, TrustTier::Degraded);
+    assert!(
+        show(f.repo(), &grade[0].record)
+            .unwrap()
+            .predicate
+            .re_attests
+            .is_none()
+    );
+    let repeated = observers::produce_ci_linked(
+        f.repo(),
+        &binding,
+        &run,
+        &receipt,
+        &jobs,
+        &observers::ObserverSigner::Full {
+            principal: "fleet/fixture-observer",
+            key: &f.key,
+        },
+        &links,
+    )
+    .unwrap();
+    assert_eq!(repeated[0].record, grade[0].record);
+    assert_eq!(repeated[0].tier, TrustTier::Degraded);
+    assert!(
+        ci_reattest::measurements(f.repo(), &repeated)
+            .unwrap()
+            .is_empty()
+    );
+}

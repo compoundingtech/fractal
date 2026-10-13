@@ -265,7 +265,6 @@ fn calendar_occurrence(
     Ok((key, calendar_instant(zone, calendar.at_minute, next)?))
 }
 
-
 /// Keep the existing Claude regression cases exercising the shared driver classifier.
 #[cfg(test)]
 fn claude_login_expired(screen: &str) -> Option<&str> {
@@ -288,6 +287,32 @@ fn claude_trust_prompt(screen: &str) -> bool {
     ]
     .iter()
     .all(|phrase| screen.contains(phrase))
+}
+
+fn claude_development_channel_prompt(screen: &str) -> bool {
+    let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    const OPTION: &str = "❯ 1. I am using this for local development";
+    let fixed = [
+        "WARNING: Loading development channels",
+        "--dangerously-load-development-channels",
+        OPTION,
+        "2. Exit",
+        "Enter to confirm",
+        "Esc to cancel",
+    ];
+    if !fixed.iter().all(|text| screen.contains(text)) {
+        return false;
+    }
+    // Approve the dialog only when it lists exactly the one st channel: any other development
+    // channel in the same dialog is the person's to accept.
+    let Some((_, listed)) = screen.split_once("Channels:") else {
+        return false;
+    };
+    let listed = listed.split_once(OPTION).map_or(listed, |(before, _)| before);
+    matches!(
+        listed.split_whitespace().collect::<Vec<_>>().as_slice(),
+        ["plugin:st-channel@st"] | ["server:st3"]
+    )
 }
 
 /// How long a resume that ended without a reason waits for its driver's typed refusal.
@@ -797,6 +822,13 @@ fn reconcile_decision_admitted(subject: &str) -> bool {
     !subject.starts_with("gate-operation/")
 }
 
+struct LaunchEvidence {
+    source_epoch: Option<(i64, bool)>,
+    member: Option<MemberSpec>,
+    epoch: (u64, i64, bool),
+    checked_at_ms: u128,
+}
+
 pub struct Reconciler<R = NativeRuntime> {
     store: Arc<Store>,
     runtime: Arc<R>,
@@ -852,9 +884,11 @@ pub struct Reconciler<R = NativeRuntime> {
     /// index of the subject's newest declaration it was read from.
     declared_checkouts: Mutex<HashMap<String, (u64, Option<(Checkout, String)>)>>,
     materialized_mission_generations: Mutex<BTreeSet<String>>,
-    /// Each running seat's incarnation and the member it was launched from, read once per
-    /// incarnation, so a pass compares the declared launch without reading the store.
-    launched_members: Mutex<HashMap<String, (String, Option<MemberSpec>)>>,
+    /// Found launch evidence is immutable for one origin and incarnation. Missing evidence
+    /// is checked again on a subject change or the existing full-pass safety interval.
+    launched_members: Mutex<HashMap<(String, String, String), LaunchEvidence>>,
+    #[cfg(test)]
+    launch_evidence_reads: std::sync::atomic::AtomicUsize,
     retired_predecessor_generations: Mutex<BTreeSet<String>>,
     /// The person whose published launch geometry terminal seats start at.
     person: Option<String>,
@@ -1006,6 +1040,8 @@ impl Reconciler<NativeRuntime> {
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
             launched_members: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
@@ -1090,6 +1126,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
             launched_members: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
             retired_predecessor_generations: Mutex::new(BTreeSet::new()),
             #[cfg(test)]
             mission_declaration_parses: std::sync::atomic::AtomicUsize::new(0),
@@ -2140,6 +2178,10 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_pass(&self) -> Result<()> {
         let observe_span = crate::profile::span("pass/changes");
         self.incremental.observe(&self.store)?;
+        self.incremental.observe_value(
+            "publication-launch-evidence",
+            format!("{:?}", self.store.publication_cache_epoch()),
+        );
         drop(observe_span);
         let _runners_span = crate::profile::span("pass/gate-runners");
         let gate_runners = self.gate_runners()?;
@@ -2705,7 +2747,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             Some(observation) if observation.status == "running" => {
                                 self.record_member(subject, &observation, true)?;
                                 if let Some(changes) =
-                                    self.declared_launch_changes(subject, member, &observation)?
+                                    self.declared_launch_changes(subject, &observation)?
                                 {
                                     // Rendering must succeed before we shut down a still-running seat.
                                     if let Some(error) = blocked.take() {
@@ -2766,6 +2808,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     member,
                                     &observation,
                                     now_ms(),
+                                )?;
+                                self.reconcile_claude_channel_consent(
+                                    subject,
+                                    member,
+                                    &observation,
+                                    screen.as_deref(),
                                 )?;
                                 self.reconcile_driver_readiness(
                                     subject,
@@ -3980,6 +4028,74 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok((claim.map(|claim| claim.id), key))
     }
 
+    /// Admit the measured st development-channel startup dialog once per incarnation.
+    fn reconcile_claude_channel_consent(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+    ) -> Result<()> {
+        if subject.kind != "agent" || member.driver.as_deref() != Some("claude") || !member.terminal
+        {
+            return Ok(());
+        }
+        let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            return Ok(());
+        };
+        if !screen.is_some_and(claude_development_channel_prompt)
+            || self
+                .store
+                .harness_was_ready(&subject.subject, incarnation)?
+        {
+            return Ok(());
+        }
+        let Some(runtime_claim) = self.running_runtime_claim(&subject.subject, incarnation)? else {
+            return Ok(());
+        };
+        if now_ms().saturating_sub(runtime_claim.accepted_at_unix_ms)
+            > HARNESS_READINESS_DEADLINE_MS
+            || self
+                .store
+                .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?
+                .iter()
+                .any(|claim| {
+                    claim
+                        .body
+                        .pointer("/fields/decision")
+                        .and_then(Value::as_str)
+                        == Some("channel-consent")
+                        && claim.body.pointer("/fields/key").and_then(Value::as_str)
+                            == Some(incarnation)
+                })
+        {
+            return Ok(());
+        }
+        // Record the bounded attempt before input; replay must never press Return twice.
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("key".into(), Value::String(incarnation.into())),
+                ("decision".into(), Value::String("channel-consent".into())),
+                (
+                    "reason".into(),
+                    Value::String("attempt the st development-channel startup consent once".into()),
+                ),
+            ]),
+            evidence: vec![runtime_claim.id],
+            expected_subject: None,
+            idempotency_key: Some(format!(
+                "claude-channel-consent:{}:{incarnation}",
+                subject.subject
+            )),
+        })?;
+        self.signal_changed();
+        self.runtime
+            .send_key_if(&member.runtime_id, "return", incarnation)
+    }
+
     /// Claude's workspace trust prompt appears before any hook or channel can report the session,
     /// so the terminal screen is the only evidence of it. The prompt fences the incarnation as not
     /// ready with its reason. Recovery stops that exact incarnation so its replacement's driver
@@ -4662,60 +4778,90 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(self.store.launch_lineage(subject)?.pop().unwrap_or_default())
     }
 
-    /// Whether the latest launch was for the selected declaration, or for a revision it only
-    /// relabels. Older launches do not count: after A → B → A the seat runs A again.
-    /// What a running seat's declaration changed about how it launches since its running
-    /// incarnation started, when that matters: its host, workspace, harness, terminal, command,
-    /// model or arguments. A seat st did not launch, or whose launch it no longer has, has
-    /// nothing to compare and keeps running.
+    /// Judge the running incarnation using the same launch boundary as publication.
     fn declared_launch_changes(
         &self,
         subject: &DesiredSubject,
-        member: &MemberSpec,
         observation: &RuntimeObservation,
     ) -> Result<Option<Vec<&'static str>>> {
-        if subject.kind != "agent" || member.lifecycle != MemberLifecycle::Service {
+        smallclaims::touched::note_read(|| "publication-launch-evidence".to_owned());
+        let preliminary = crate::publication::interruption(
+            subject,
+            observation.status == "running",
+            observation.incarnation_id.as_deref(),
+            None,
+        );
+        if preliminary != crate::publication::Interruption::Unknown {
             return Ok(None);
         }
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
             return Ok(None);
         };
-        let mut launched = self
+        let key = (
+            subject.subject.clone(),
+            self.host.clone(),
+            incarnation.to_owned(),
+        );
+        let now = now_ms();
+        let source_epoch = self.store.publication_cache_epoch();
+        let mut cache = self
             .launched_members
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let launched = match launched.get(&subject.subject) {
-            Some((known, launched)) if known == incarnation => launched.clone(),
-            _ => {
-                // The latest start this node made launched the running incarnation; an adopted
-                // runtime it did not start has none, or an older one it then outlived.
-                let read = self
-                    .store
-                    .observations_for(&subject.subject, "runtime.action.succeeded")?
-                    .iter()
-                    .rev()
-                    .find_map(|claim| {
-                        claim
-                            .body
-                            .pointer("/fields/desired_token")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .map(|token| self.store.claim_by_id(&token))
-                    .transpose()?
-                    .flatten()
-                    .and_then(|claim| serde_json::from_value::<DesiredSubject>(claim.body).ok())
-                    .and_then(|desired| desired.member);
-                launched.insert(
-                    subject.subject.clone(),
-                    (incarnation.to_owned(), read.clone()),
-                );
-                read
+        // Retained payloads are immutable only while their source remains admitted.
+        // Repair, trim and replay can change that validity without an append frontier.
+        if source_epoch.is_none_or(|(_, ready)| !ready) {
+            cache.clear();
+            return Ok(None);
+        }
+        let launched = match cache
+            .get(&key)
+            .filter(|known| known.source_epoch == source_epoch)
+        {
+            Some(known) if known.member.is_some() => known.member.clone(),
+            known => {
+                let epoch = self.store.publication_evidence_epoch(&subject.subject)?;
+                if let Some(known) = known
+                    && known.epoch == epoch
+                    && now.saturating_sub(known.checked_at_ms)
+                        < crate::incremental::FULL_PASS_INTERVAL_MS
+                {
+                    None
+                } else {
+                    #[cfg(test)]
+                    self.launch_evidence_reads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let member = self
+                        .store
+                        .publication_launch(&subject.subject, incarnation)?;
+                    cache.retain(|(seat, _, _), _| seat != &subject.subject);
+                    cache.insert(
+                        key,
+                        LaunchEvidence {
+                            source_epoch,
+                            member: member.clone(),
+                            epoch,
+                            checked_at_ms: now,
+                        },
+                    );
+                    member
+                }
             }
         };
-        Ok(launched
-            .map(|launched| member.launch_changes(&launched))
-            .filter(|changes| !changes.is_empty()))
+        match crate::publication::interruption(
+            subject,
+            observation.status == "running",
+            observation.incarnation_id.as_deref(),
+            launched.as_ref(),
+        ) {
+            crate::publication::Interruption::Restart(changes) => Ok(Some(changes)),
+            // An adopted runtime can keep running, but Unknown is never proof that a
+            // publication is non-interrupting. The commit guard refuses it.
+            crate::publication::Interruption::Unknown | crate::publication::Interruption::None => {
+                Ok(None)
+            }
+            crate::publication::Interruption::Stop => Ok(None),
+        }
     }
 
     fn member_was_launched_for_selected_desired(&self, subject: &str) -> Result<bool> {
@@ -7774,13 +7920,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .insert(run.generation.clone());
             }
         }
-        let mut normal_failed = flat.iter().any(|step| {
-            !step.spec.finally
-                && views.get(step.spec.path.as_str()).is_some_and(|view| {
-                    (view.status == "failed" && view.attempt >= step.spec.retry.attempts)
-                        || view.status == "cancelled"
-                })
-        });
+        let mut normal_failed = false;
+        for step in flat.iter().filter(|step| !step.spec.finally) {
+            if let Some(view) = views.get(step.spec.path.as_str())
+                && (view.status == "cancelled" || self.failed_step_is_final(run, step.spec, view)?)
+            {
+                normal_failed = true;
+                break;
+            }
+        }
         let mut normal_failure_reason = normal_failed.then(|| "a normal step failed".to_owned());
         let completion_selected = run.phase == "normal"
             && ((normal_failed && mission.completion.is_some())
@@ -7926,7 +8074,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         return Ok(changed);
                     }
                     if view.status == "failed" {
-                        if view.attempt < step.spec.retry.attempts {
+                        if !self.failed_step_is_final(run, step.spec, view)? {
                             changed |= self.store.retry_step(
                                 &view.subject,
                                 "the step repeat policy permits another attempt",
@@ -8397,6 +8545,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .into_iter()
                 .filter(|runner| owner_runs.contains(&runner.owner_run))
                 .map(|runner| DesiredSubject {
+                    accountable: None,
                     subject: runner.subject,
                     kind: "stop".into(),
                     desired: Value::Null,
@@ -8592,6 +8741,41 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(changed)
     }
 
+    /// A failed step has no attempt left when it used its retries, or when it is a loop that
+    /// stopped: a loop that ends on a stop rule or at its exhaustion has said it is finished,
+    /// and another attempt would only run the rounds the rule just ended.
+    fn failed_step_is_final(
+        &self,
+        run: &MissionRunView,
+        spec: &StepSpec,
+        view: &crate::model::StepRunView,
+    ) -> Result<bool> {
+        if view.status != "failed" {
+            return Ok(false);
+        }
+        if view.attempt >= spec.retry.attempts {
+            return Ok(true);
+        }
+        if spec.loop_spec.is_none() {
+            return Ok(false);
+        }
+        let loop_subject = format!(
+            "loop-run/{}/{}",
+            run.generation
+                .strip_prefix("run-generation/")
+                .unwrap_or(&run.generation),
+            spec.path
+        );
+        Ok(self
+            .store
+            .latest_claim(&loop_subject, Some("loop.state"))?
+            .is_some_and(|claim| {
+                claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("failed")
+                    && claim.body.pointer("/fields/round").and_then(Value::as_u64)
+                        == Some(u64::from(view.attempt))
+            }))
+    }
+
     fn mission_completion_selected(
         &self,
         run: &MissionRunView,
@@ -8602,16 +8786,23 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         };
         match completion {
-            crate::model::CompletionSpec::AllStepsExhausted => Ok(flatten_mission_steps(mission)
-                .into_iter()
-                .filter(|step| !step.spec.finally)
-                .all(|step| {
-                    views.get(step.spec.path.as_str()).is_some_and(|view| {
-                        view.status == "completed"
-                            || view.status == "cancelled"
-                            || (view.status == "failed" && view.attempt >= step.spec.retry.attempts)
-                    })
-                })),
+            crate::model::CompletionSpec::AllStepsExhausted => {
+                for step in flatten_mission_steps(mission)
+                    .into_iter()
+                    .filter(|step| !step.spec.finally)
+                {
+                    let Some(view) = views.get(step.spec.path.as_str()) else {
+                        return Ok(false);
+                    };
+                    if !(view.status == "completed"
+                        || view.status == "cancelled"
+                        || self.failed_step_is_final(run, step.spec, view)?)
+                    {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
             crate::model::CompletionSpec::Dependencies { dependencies } => {
                 let variables = crate::store::mission_run_variables(run, &run.revision);
                 for dependency in dependencies {
@@ -8800,14 +8991,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut variables = run_variables(run, step, view);
         variables.insert("ST_LOOP_ROUND".into(), view.attempt.to_string());
         variables.insert("loop.round".into(), view.attempt.to_string());
-        let prior_feedback = self
-            .store
-            .claims_for(&loop_subject, Some("loop.round-result"))?
-            .last()
-            .and_then(|claim| claim.body.pointer("/fields/feedback"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let prior_feedback = self.loop_prior_feedback(&loop_subject)?;
         variables.insert("ST_LOOP_FEEDBACK".into(), prior_feedback.clone());
         variables.insert("loop.feedback".into(), prior_feedback.clone());
         variables.insert("ST_LOOP_ITEM_ID".into(), String::new());
@@ -9049,20 +9233,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     None,
                 )?;
                 let (best_round, best_metrics) = self.loop_best(&loop_subject, loop_spec)?;
-                self.record_once(
-                    &loop_subject,
-                    "loop.state",
-                    BTreeMap::from([
-                        ("status".into(), Value::String("running".into())),
-                        ("round".into(), Value::from(view.attempt)),
-                        ("best_round".into(), Value::from(best_round)),
-                        ("best_metrics".into(), serde_json::to_value(&best_metrics)?),
-                        ("feedback".into(), Value::String(feedback.clone())),
-                    ]),
-                )?;
                 let mut passed = !loop_spec.until.is_empty();
                 let mut waiting = false;
+                let mut gate_results = Vec::new();
                 for gate in &loop_spec.until {
+                    let gate_name = crate::graph::gate_name(gate).to_owned();
                     match self.evaluate_context_gate(
                         run,
                         &loop_subject,
@@ -9072,7 +9247,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         gate,
                         &variables,
                     )? {
-                        GateOutcome::Pass => {}
+                        GateOutcome::Pass => gate_results.push(LoopGateResult::new(gate_name, "passed", None)),
                         GateOutcome::Pending
                             if matches!(
                                 gate,
@@ -9091,14 +9266,43 @@ impl<R: RuntimeControl> Reconciler<R> {
                             passed = false;
                             break;
                         }
-                        GateOutcome::Pending | GateOutcome::NotYet | GateOutcome::Fail(_) => {
-                            passed = false
+                        GateOutcome::Pending => {
+                            passed = false;
+                            gate_results.push(LoopGateResult::new(gate_name, "pending", None));
+                        }
+                        GateOutcome::NotYet => {
+                            passed = false;
+                            gate_results.push(LoopGateResult::new(gate_name, "not-yet", None));
+                        }
+                        GateOutcome::Fail(reason) => {
+                            passed = false;
+                            gate_results.push(LoopGateResult::new(gate_name, "failed", Some(reason)));
                         }
                     }
                 }
+                // The next round reads what this round's exit gates said, not only what the
+                // round produced. A round whose gates are still running keeps the pre-gate
+                // feedback until they answer.
+                let feedback = if waiting {
+                    feedback
+                } else {
+                    self.write_loop_outcome(&loop_subject, view.attempt, &metrics, keep, &gate_results)?
+                };
+                self.record_once(
+                    &loop_subject,
+                    "loop.state",
+                    BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("round".into(), Value::from(view.attempt)),
+                        ("best_round".into(), Value::from(best_round)),
+                        ("best_metrics".into(), serde_json::to_value(&best_metrics)?),
+                        ("feedback".into(), Value::String(feedback.clone())),
+                    ]),
+                )?;
                 if waiting {
                     return Ok(false);
                 }
+                let failing = failing_gates_summary(&gate_results);
                 if passed {
                     self.record_once(
                         &loop_subject,
@@ -9113,17 +9317,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     )?;
                     return self.store.set_step_state(&view.subject, "completed", None);
                 }
-                if self.loop_stop_reason(&loop_subject, loop_spec)?.is_some() {
-                    let reason = self
-                        .loop_stop_reason(&loop_subject, loop_spec)?
-                        .expect("the stop reason was present");
+                if let Some(reason) = self.loop_stop_reason(&loop_subject, loop_spec)? {
                     return self.finish_exhausted_loop(
                         run,
                         view,
                         loop_spec,
                         &loop_subject,
                         &variables,
-                        &reason,
+                        &with_failing_gates(&reason, &failing),
                     );
                 }
                 if view.attempt >= loop_spec.max_rounds {
@@ -9133,13 +9334,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                         loop_spec,
                         &loop_subject,
                         &variables,
-                        "the loop reached max-rounds without satisfying until",
+                        &with_failing_gates(
+                            "the loop reached max-rounds without satisfying until",
+                            &failing,
+                        ),
                     )
                 } else {
                     self.store.set_step_state(
                         &view.subject,
                         "failed",
-                        Some("the loop exit gates did not pass"),
+                        Some(&with_failing_gates("the loop exit gates did not pass", &failing)),
                     )
                 }
             }
@@ -9343,6 +9547,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         self.perform_start(
             &DesiredSubject {
+                accountable: None,
                 subject: subject.clone(),
                 kind: "gate".into(),
                 desired: Value::Null,
@@ -9398,6 +9603,71 @@ impl<R: RuntimeControl> Reconciler<R> {
                 prior - current >= metric.min_improvement
             }
         }))
+    }
+
+    /// The feedback the next round reads: the latest outcome document, which says what the
+    /// exit gates answered, else the feedback its last round result recorded.
+    fn loop_prior_feedback(&self, loop_subject: &str) -> Result<String> {
+        if let Some(outcome) = self
+            .store
+            .claims_for(loop_subject, Some("loop.state"))?
+            .iter()
+            .rev()
+            .find_map(|claim| {
+                claim
+                    .body
+                    .pointer("/fields/feedback")
+                    .and_then(Value::as_str)
+                    .filter(|feedback| loop_outcome_reference(feedback).is_some())
+                    .map(str::to_owned)
+            })
+        {
+            return Ok(outcome);
+        }
+        Ok(self
+            .store
+            .claims_for(loop_subject, Some("loop.round-result"))?
+            .last()
+            .and_then(|claim| claim.body.pointer("/fields/feedback"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned())
+    }
+
+    /// Record what a finished round and its exit gates said. The body carries neither the round
+    /// nor the round's mission run, so two rounds that end the same way store the same content,
+    /// and the loop can tell that nothing changed.
+    fn write_loop_outcome(
+        &self,
+        loop_subject: &str,
+        round: u32,
+        metrics: &BTreeMap<String, f64>,
+        keep: bool,
+        results: &[LoopGateResult],
+    ) -> Result<String> {
+        let name = format!(
+            "doc/loop-feedback/{}/{round}/outcome",
+            loop_subject
+                .strip_prefix("loop-run/")
+                .unwrap_or(loop_subject),
+        );
+        let body = serde_json::to_vec_pretty(&serde_json::json!({
+            "decision": if keep { "keep" } else { "discard" },
+            "metrics": metrics,
+            "exit_gates": results,
+            "failing_gates": results
+                .iter()
+                .filter(|result| result.outcome != "passed")
+                .map(|result| result.gate.as_str())
+                .collect::<Vec<_>>(),
+        }))?;
+        let document = self.store.put_document(
+            &name,
+            &body,
+            &None,
+            &format!("loop-outcome:{loop_subject}:{round}"),
+        )?;
+        Ok(format!("{}@{}", document.name, document.hash))
     }
 
     fn write_loop_feedback(
@@ -10663,6 +10933,34 @@ impl<R: RuntimeControl> Reconciler<R> {
                 )));
             }
         }
+        if let Some(rounds) = loop_spec.stop.no_progress {
+            // One outcome per round, in order. The reference ends in the document's content
+            // hash, so equal hashes mean equal metrics and equal exit gate answers.
+            let mut outcomes: Vec<(&str, &str)> = Vec::new();
+            let states = self.store.claims_for(loop_subject, Some("loop.state"))?;
+            for reference in states.iter().filter_map(|claim| {
+                claim
+                    .body
+                    .pointer("/fields/feedback")
+                    .and_then(Value::as_str)
+                    .and_then(loop_outcome_reference)
+            }) {
+                if outcomes.last().is_some_and(|(name, _)| *name == reference.0) {
+                    outcomes.pop();
+                }
+                outcomes.push(reference);
+            }
+            let rounds = rounds as usize;
+            if outcomes.len() >= rounds
+                && outcomes[outcomes.len() - rounds..]
+                    .windows(2)
+                    .all(|pair| pair[0].1 == pair[1].1)
+            {
+                return Ok(Some(format!(
+                    "the loop made no progress: its metrics and exit gate answers were the same for {rounds} rounds in a row"
+                )));
+            }
+        }
         Ok(None)
     }
 
@@ -10820,6 +11118,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         claim_expires_at_unix_ms: None,
                         carried_claimant: None,
                         execution_started_at_unix_ms: None,
+                        execution_paused_until_unix_ms: None,
+                        execution_waited_ms: 0,
                         execution_elapsed_ms: 0,
                         timeout_ms: None,
                         timeout_extension_ms: 0,
@@ -11786,9 +12086,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         if elapsed >= timeout as u128 {
             return Ok(true);
         }
-        if !matches!(view.status.as_str(), "claimed" | "working")
-            || view.execution_started_at_unix_ms.is_none()
-        {
+        if !matches!(view.status.as_str(), "claimed" | "working") {
+            return Ok(false);
+        }
+        if view.execution_started_at_unix_ms.is_none() {
+            // A declared wait has stopped the clock; look again when it ends on its own.
+            if let (Some(paused_until), Ok(handle)) = (
+                view.execution_paused_until_unix_ms,
+                tokio::runtime::Handle::try_current(),
+            ) {
+                let remaining = paused_until.saturating_sub(now_ms()).max(1) as u64;
+                self.arm_step_deadline(&handle, &view.subject, remaining);
+            }
             return Ok(false);
         }
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -12009,67 +12318,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_schedules(&self, desired: &[DesiredSubject]) -> Result<()> {
-        if self.skip_unneeded {
-            self.incremental.observe(&self.store)?;
-        }
-        let full = !self.skip_unneeded || self.incremental.take_full_pass("schedule", now_ms());
-        let mut active = BTreeSet::new();
         for schedule in desired.iter().filter(|item| item.kind == "schedule") {
-            let item = format!("schedule:{}", schedule.subject);
-            active.insert(item.clone());
-            let context = self.incremental.observe_context(&item, schedule);
-            self.reconcile_selected_intake(
-                "schedule",
-                &item,
-                &schedule.subject,
-                !full && context,
-                || self.reconcile_schedule(schedule),
-            );
+            self.isolate("schedule", &schedule.subject, || {
+                self.reconcile_schedule(schedule)
+            });
         }
-        self.incremental.retain("schedule:", &active);
         Ok(())
-    }
-
-    /// Skip before fault/recovery reporting and before any evaluation SQL. A selected item
-    /// retains the existing effect checks. Failed full evaluations must retry even when the
-    /// preceding cached evaluation was clean; clean skips never clear a retained fault.
-    fn reconcile_selected_intake(
-        &self,
-        section: &'static str,
-        item: &str,
-        subject: &str,
-        skip: bool,
-        work: impl FnOnce() -> Result<()>,
-    ) {
-        if skip && !self.incremental.needs(item, now_ms()) {
-            return;
-        }
-        // Register from the selected active consumer, never from an async callback. This
-        // retains a first/failed evaluation's completion without invalidating unrelated work.
-        self.incremental.register_intake_completion(item);
-        let completion = self.incremental.intake_completion_token(item);
-        if self
-            .isolate(section, subject, || {
-                self.reconcile_item(section, item, skip, || {
-                    smallclaims::touched::note_read(|| item.to_owned());
-                    smallclaims::touched::note_read(|| subject.to_owned());
-                    // Repair and owned-set receipts may change a previously selected declaration or
-                    // an absent dependency. Until full old/new closure exists these stay broad.
-                    smallclaims::touched::note_read(|| "kind:record.repaired".into());
-                    smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
-                    if section.starts_with("schedule") {
-                        // The active-started-run join has negative as well as positive run deps.
-                        smallclaims::touched::note_read(|| "kind:mission-run.state".into());
-                        smallclaims::touched::note_read(|| "kind:mission-run.created".into());
-                    }
-                    work()
-                })
-            })
-            .is_none()
-        {
-            self.incremental.touch(item);
-        }
-        self.incremental.retain_intake_completion(item, completion);
     }
 
     fn schedules_caught_up(&self) -> Result<bool> {
@@ -12194,22 +12448,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             scheduled_at
         };
         let operation = format!("{}:{revision}:{occurrence}", schedule.subject);
-        let timer_due = scheduled_at.max(0) as u128;
         if !self
             .armed_schedules
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(operation.clone())
         {
-            // A sleeping arm still needs deadline discovery. Once its instant is reached,
-            // that arm owns progress and signals completion/rejection; do not keep selecting
-            // no-op evaluations while it waits to run or finish its existing work.
-            if timer_due > now_ms() {
-                smallclaims::touched::note_due(timer_due);
-            }
             return Ok(());
         }
-        smallclaims::touched::note_due(timer_due);
         let request = self.store.append_claim(&ClaimInput {
             subject: schedule.subject.clone(),
             kind: "schedule.occurrence-scheduled".into(),
@@ -12239,7 +12485,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         let store = self.store.clone();
         let notify = self.notify.clone();
         let event_notify = self.event_notify.clone();
-        let incremental = self.incremental.clone();
         let armed = self.armed_schedules.clone();
         let schedule_subject = schedule.subject.clone();
         let schedule_declaration = schedule.clone();
@@ -12277,8 +12522,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
-                    incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                    incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -12305,8 +12548,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
-                    incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                    incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -12370,8 +12611,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
                             .remove(&operation);
-                        incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                        incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                         signal_changed(&notify, &event_notify);
                         return;
                     };
@@ -12402,8 +12641,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&operation);
-                incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                 signal_changed(&notify, &event_notify);
             });
         } else {
@@ -12424,11 +12661,6 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_scheduled_work(&self, desired: &[DesiredSubject]) -> Result<()> {
-        if self.skip_unneeded {
-            self.incremental.observe(&self.store)?;
-        }
-        let full =
-            !self.skip_unneeded || self.incremental.take_full_pass("schedule-work", now_ms());
         let schedules = desired
             .iter()
             .filter(|item| item.kind == "schedule")
@@ -12438,30 +12670,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|subject, _| schedules.contains(subject.as_str()));
-        let mut active = BTreeSet::new();
         for schedule in desired.iter().filter(|item| item.kind == "schedule") {
-            let item = format!("schedule-work:{}", schedule.subject);
-            active.insert(item.clone());
-            let context = {
-                // Retry state can change without an append record. Fingerprint its current
-                // request/deadline alongside the declaration, releasing this lock before
-                // evaluation. Unchanged retries still rely on their recorded due time.
-                let retries = self
-                    .schedule_workspace_retries
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                self.incremental
-                    .observe_context(&item, &(schedule, retries.get(&schedule.subject)))
-            };
-            self.reconcile_selected_intake(
-                "schedule-work",
-                &item,
-                &schedule.subject,
-                !full && context,
-                || self.reconcile_schedule_work(schedule),
-            );
+            self.isolate("schedule-work", &schedule.subject, || {
+                self.reconcile_schedule_work(schedule)
+            });
         }
-        self.incremental.retain("schedule-work:", &active);
         Ok(())
     }
 
@@ -12644,12 +12857,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let run = match created {
                 Ok(run) => run,
-                Err(error) if error.code == "mission-run-capacity" => {
-                    // Capacity policy can reload without an append-feed record. Keep the
-                    // existing run-state dependency and a clock retry for that case too.
-                    smallclaims::touched::note_due(now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
-                    continue;
-                }
+                Err(error) if error.code == "mission-run-capacity" => continue,
                 Err(error) if start_waits_for_replication(&error) => {
                     waiting.push(format!("request {}: {error}", request.id));
                     continue;
@@ -13246,10 +13454,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         desired: &[DesiredSubject],
         agents: &[DesiredSubject],
     ) -> Result<()> {
-        if self.skip_unneeded {
-            self.incremental.observe(&self.store)?;
-        }
-        let full = !self.skip_unneeded || self.incremental.take_full_pass("observer", now_ms());
         let observer_resources = desired
             .iter()
             .filter(|item| item.kind == "observer")
@@ -13295,36 +13499,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
                 .collect::<Vec<_>>(),
         );
-        let workspaces_known = self
-            .incremental
-            .observe_context("observer-workspaces", agent_workspaces.as_ref());
-        let mut active = BTreeSet::new();
         for observer in desired.iter().filter(|item| item.kind == "observer") {
-            let item = format!("observer:{}", observer.subject);
-            active.insert(item.clone());
-            let resource = crate::graph::observer_spec(&observer.desired).map(|spec| spec.resource);
-            let selected = resource
-                .as_ref()
-                .and_then(|resource| subscriptions_by_resource.get(resource));
-            let context = self
-                .incremental
-                .observe_context(&item, &(observer, selected));
-            self.reconcile_selected_intake(
-                "observer",
-                &item,
-                &observer.subject,
-                !full && context && workspaces_known,
-                || {
-                    smallclaims::touched::note_read(|| "observer-workspaces".into());
-                    self.reconcile_resource_observer(
-                        observer,
-                        &subscriptions_by_resource,
-                        &agent_workspaces,
-                    )
-                },
-            );
+            self.isolate("observer", &observer.subject, || {
+                self.reconcile_resource_observer(
+                    observer,
+                    &subscriptions_by_resource,
+                    &agent_workspaces,
+                )
+            });
         }
-        self.incremental.retain("observer:", &active);
         Ok(())
     }
 
@@ -13446,23 +13629,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             let mut armed = self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner);
             armed.retain(|key| !key.starts_with(&operation_prefix) || key.starts_with(&cadence_prefix));
-            if armed.iter().any(|key| key.starts_with(&cadence_prefix)) {
-                // Preserve future timer discovery, but consume an elapsed deadline while the
-                // existing arm/provider owns progress. Its completion signals a fresh pass
-                // and records the next cadence or retry deadline.
-                if next_check > now_ms() {
-                    smallclaims::touched::note_due(next_check);
-                }
-                return Ok(());
-            }
+            if armed.iter().any(|key| key.starts_with(&cadence_prefix)) { return Ok(()); }
             armed.insert(operation.clone());
         }
-        smallclaims::touched::note_due(next_check);
         let store = self.store.clone();
         let provider = self.resource_provider.clone();
         let notify = self.notify.clone();
         let event_notify = self.event_notify.clone();
-        let incremental = self.incremental.clone();
         let armed = self.armed_observers.clone();
         #[cfg(test)]
         let completion_fault = self.fault_injection.clone();
@@ -13511,7 +13684,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
-                    incremental.intake_completed(&format!("observer:{observer_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -13540,7 +13712,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if !current()
                     || store.selected_desired_revision(&observer_subject).ok().flatten().as_deref() != Some(revision.as_str()) {
                     armed.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
-                    incremental.intake_completed(&format!("observer:{observer_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -13702,7 +13873,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if let Some(injection) = &completion_fault {
                     injection.fault("observer-completion-finished", &observer_subject);
                 }
-                incremental.intake_completed(&format!("observer:{observer_subject}"));
                 signal_changed(&notify, &event_notify);
             });
         } else {
@@ -14186,6 +14356,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             terminal_size: None,
         };
         let desired = DesiredSubject {
+            accountable: None,
             subject: operation.clone(),
             kind: "gate".into(),
             desired: Value::Null,
@@ -14714,6 +14885,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             terminal_size: None,
         };
         let desired = DesiredSubject {
+            accountable: None,
             subject: result_subject,
             kind: "gate".into(),
             desired: Value::Null,
@@ -15983,6 +16155,52 @@ fn token_usage_total(usage: &serde_json::Map<String, Value>) -> Option<u64> {
     found.then_some(total)
 }
 
+/// What one exit gate answered at the end of a loop round.
+#[derive(Debug, serde::Serialize)]
+struct LoopGateResult {
+    gate: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl LoopGateResult {
+    fn new(gate: String, outcome: &'static str, reason: Option<String>) -> Self {
+        Self {
+            gate,
+            outcome,
+            reason,
+        }
+    }
+}
+
+/// The failing exit gates and what each said, for the loop's verdict.
+fn failing_gates_summary(results: &[LoopGateResult]) -> String {
+    results
+        .iter()
+        .filter(|result| result.outcome != "passed")
+        .map(|result| match &result.reason {
+            Some(reason) => format!("`{}` {}: {reason}", result.gate, result.outcome),
+            None => format!("`{}` {}", result.gate, result.outcome),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn with_failing_gates(reason: &str, failing: &str) -> String {
+    if failing.is_empty() {
+        reason.to_owned()
+    } else {
+        format!("{reason}; failing exit gates: {failing}")
+    }
+}
+
+/// The document name and content hash of a round's outcome document reference.
+fn loop_outcome_reference(reference: &str) -> Option<(&str, &str)> {
+    let (name, hash) = reference.rsplit_once('@')?;
+    name.ends_with("/outcome").then_some((name, hash))
+}
+
 #[derive(Debug)]
 enum GateOutcome {
     Pass,
@@ -16460,7 +16678,6 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     mod channel_recovery;
-    mod changed_intake;
     mod differential;
     mod doctor_eligibility_tests;
     mod first_readiness_tests;
@@ -18234,6 +18451,7 @@ mission "nested-wake" state="ready" {
             .find(|step| step.step == "outer/work/second")
             .unwrap();
         let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -18952,6 +19170,7 @@ version 2
                     &step.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/node.worker".into()),
                         incarnation: Some("test".into()),
                         summary: Some("published the change".into()),
@@ -19089,6 +19308,7 @@ version 2
                 &compile.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.planner".into()),
                     incarnation: Some("test".into()),
                     summary: None,
@@ -19113,6 +19333,7 @@ version 2
                 &compile.subject,
                 "complete",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.planner".into()),
                     incarnation: Some("test".into()),
                     summary: Some("published the complete mission".into()),
@@ -19151,6 +19372,7 @@ version 2
                     &execute.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/node.planner".into()),
                         incarnation: Some("test".into()),
                         summary: None,
@@ -19206,6 +19428,7 @@ version 2
                         &step.subject,
                         action,
                         &crate::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some("agent/node.planner".into()),
                             incarnation: Some("test".into()),
                             summary: None,
@@ -19650,6 +19873,7 @@ mission "feedback-review" state="ready" {
         let claimant = step.assigned_to.clone().unwrap();
         store.set_step_state(&step.subject, "ready", None).unwrap();
         let work = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some(claimant.clone()),
             incarnation: Some("test-incarnation".into()),
             summary: Some("Draft submitted".into()),
@@ -19733,6 +19957,391 @@ mission "feedback-review" state="ready" {
         assert_eq!(structured_token_usage("the gate finished"), None);
     }
 
+    #[test]
+    fn publication_launch_evidence_is_read_once_for_repeated_running_seat_passes() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let count = 12;
+        let source = format!(
+            "version 2\n{}",
+            (0..count)
+                .map(|i| format!(
+                    "agent \"example/worker-{i}\" {{ workspace \"/tmp\"; command \"true\"; }}\n"
+                ))
+                .collect::<String>()
+        );
+        apply_source(&store, &source, "many-seats");
+        let runtime = Arc::new(FakeRuntime::default());
+        for (i, desired) in store.desired_subjects().unwrap().iter().enumerate() {
+            let incarnation = format!("incarnation-{i}");
+            let token = store
+                .selected_desired_token(&desired.subject)
+                .unwrap()
+                .unwrap();
+            store
+                .append_claim(&ClaimInput {
+                    subject: desired.subject.clone(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("action".into(), serde_json::json!("start")),
+                        ("incarnation_id".into(), serde_json::json!(incarnation)),
+                        ("desired_token".into(), serde_json::json!(token)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            let member = desired.member.as_ref().unwrap();
+            runtime.ptys.lock().unwrap().push(RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation),
+            });
+        }
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            count
+        );
+        for _ in 0..4 {
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            count
+        );
+        let desired = store.desired_subjects().unwrap();
+        let observations = runtime.ptys.lock().unwrap().clone();
+        let source_epoch = store.publication_cache_epoch();
+        for (subject, observation) in desired.iter().zip(&observations) {
+            store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(), kind: "runtime.observed".into(),
+                actor: Some("agent/example/writer".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), serde_json::json!("running")),
+                    ("incarnation_id".into(), serde_json::json!(observation.incarnation_id)),
+                ]), evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        assert_eq!(store.publication_cache_epoch(), source_epoch,
+            "runtime observations must not invalidate retained launch proofs");
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        for _ in 0..4 {
+            for (subject, observation) in desired.iter().zip(&observations) {
+                assert!(
+                    reconciler
+                        .declared_launch_changes(subject, observation)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        let cost = scope.finish();
+        assert_eq!(
+            cost.statements, 0,
+            "found evidence must use no SQLite statements on repeated passes: {cost:?}"
+        );
+        assert!(runtime.stops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn publication_found_launch_cache_invalidates_on_retained_source_mutations() {
+        // Mutate the native source tables here to cover the same-frontier seam which
+        // the append feed cannot see. Native admission/repair/trim paths are exercised
+        // separately by the materialized evidence coverage tests.
+        for mutation in [
+            "local-trim",
+            "shared-trim",
+            "definition-trim",
+            "definition-repair",
+            "replay",
+        ] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(
+                &store,
+                "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+                "original",
+            );
+            let subject = "agent/example/worker";
+            let token = store.selected_desired_token(subject).unwrap().unwrap();
+            let receipt = store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "runtime.action.succeeded".into(),
+                    actor: (mutation == "shared-trim").then(|| "agent/fixture".into()),
+                    fields: BTreeMap::from([
+                        ("action".into(), serde_json::json!("start")),
+                        ("incarnation_id".into(), serde_json::json!("one")),
+                        ("desired_token".into(), serde_json::json!(token)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            apply_source(
+                &store,
+                "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"false\"; }",
+                "proposed",
+            );
+            let proposed = store
+                .desired_subject_with_writer(subject)
+                .unwrap()
+                .unwrap()
+                .0;
+            let observation = RuntimeObservation {
+                runtime_id: proposed.member.as_ref().unwrap().runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some("one".into()),
+            };
+            let reconciler = Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            assert_eq!(
+                reconciler
+                    .declared_launch_changes(&proposed, &observation)
+                    .unwrap(),
+                Some(vec!["launch"]),
+                "{mutation}"
+            );
+            let epoch = store.publication_cache_epoch();
+            {
+                let mut writer = store.connection.write();
+                let tx = writer.transaction().unwrap();
+                tx.execute("DELETE FROM local_publication_starts", [])
+                    .unwrap();
+                tx.rollback().unwrap();
+            }
+            assert_eq!(
+                store.publication_cache_epoch(),
+                epoch,
+                "rollback must retain valid cache"
+            );
+            {
+                let mut writer = store.connection.write();
+                let tx = writer.transaction().unwrap();
+                match mutation {
+                    "local-trim" => {
+                        tx.execute("DELETE FROM local_observations WHERE subject=?1 AND kind='runtime.action.succeeded'", [subject]).unwrap();
+                    }
+                    "shared-trim" => {
+                        tx.execute("DELETE FROM claims WHERE id=?1", [&receipt.id])
+                            .unwrap();
+                    }
+                    "definition-trim" => {
+                        // Native trimming retires operation identities before their
+                        // canonical claims. Preserve that foreign-key ordering here.
+                        tx.execute(
+                            "DELETE FROM operations WHERE canonical_claim_id=?1",
+                            [&token],
+                        )
+                        .unwrap();
+                        tx.execute("DELETE FROM claims WHERE id=?1", [&token])
+                            .unwrap();
+                    }
+                    "definition-repair" => {
+                        tx.execute(
+                            "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)",
+                            [&token],
+                        )
+                        .unwrap();
+                    }
+                    "replay" => {
+                        tx.execute("DELETE FROM local_publication_bootstrap", [])
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                tx.commit().unwrap();
+            }
+            assert_ne!(store.publication_cache_epoch(), epoch, "{mutation}");
+            assert!(
+                store.publication_launch(subject, "one").unwrap().is_none(),
+                "{mutation}"
+            );
+            assert_eq!(
+                reconciler
+                    .declared_launch_changes(&proposed, &observation)
+                    .unwrap(),
+                None,
+                "retired or unready proof must not cause a restart: {mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn publication_absent_launch_evidence_rechecks_on_new_subject_evidence() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "seat",
+        );
+        let desired = store
+            .desired_subject_with_writer("agent/example/worker")
+            .unwrap()
+            .unwrap()
+            .0;
+        let token = store
+            .selected_desired_token(&desired.subject)
+            .unwrap()
+            .unwrap();
+        let observation = RuntimeObservation {
+            runtime_id: desired.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("one".into()),
+        };
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..4 {
+            assert!(
+                reconciler
+                    .declared_launch_changes(&desired, &observation)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), serde_json::json!("start")),
+                    ("incarnation_id".into(), serde_json::json!("one")),
+                    ("desired_token".into(), serde_json::json!(token)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        assert!(
+            reconciler
+                .declared_launch_changes(&desired, &observation)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            reconciler
+                .launch_evidence_reads
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[test]
+    fn publication_launch_comparison_is_shared_with_reconcile_and_scoped_to_incarnation() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "original",
+        );
+        let original = store
+            .desired_subject_with_writer("agent/example/worker")
+            .unwrap()
+            .unwrap()
+            .0;
+        let token = store
+            .selected_desired_token(&original.subject)
+            .unwrap()
+            .unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: original.subject.clone(),
+                kind: "runtime.action.succeeded".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), serde_json::json!("start")),
+                    ("incarnation_id".into(), serde_json::json!("one")),
+                    ("desired_token".into(), serde_json::json!(token)),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"false\"; }",
+            "drift",
+        );
+        let proposed = store
+            .desired_subject_with_writer(&original.subject)
+            .unwrap()
+            .unwrap()
+            .0;
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime,
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let mut observation = RuntimeObservation {
+            runtime_id: proposed.member.as_ref().unwrap().runtime_id.clone(),
+            terminal: true,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some("one".into()),
+        };
+        assert_eq!(
+            reconciler
+                .declared_launch_changes(&proposed, &observation)
+                .unwrap(),
+            Some(vec!["launch"])
+        );
+        assert_eq!(
+            reconciler
+                .declared_launch_changes(&original, &observation)
+                .unwrap(),
+            None
+        );
+        observation.incarnation_id = Some("replacement".into());
+        assert_eq!(
+            reconciler
+                .declared_launch_changes(&proposed, &observation)
+                .unwrap(),
+            None
+        );
+        assert!(
+            store
+                .publication_launch(&original.subject, "replacement")
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn a_successful_launch_records_its_action_incarnation_and_desired_token() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -21913,6 +22522,7 @@ mission "proof" state="ready" {{
             .subject
             .clone();
         let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: Some("Merged the change.".into()),
@@ -22613,6 +23223,7 @@ mission "asks" state="ready" {
                 &step,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.asker".into()),
                     incarnation: Some("asker-one".into()),
                     summary: None,
@@ -23926,7 +24537,6 @@ schedule "orchard" {{
         );
     }
 
-
     #[tokio::test]
     async fn daily_calendar_reaches_once_and_preserves_durable_claim_key() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -24002,7 +24612,6 @@ schedule "daily" {{
         assert_eq!(reached[0].body["fields"]["occurrence"], key);
         assert_eq!(reached[0].body["fields"]["scheduled_at_unix_ms"], recorded);
     }
-
 
 
     #[test]
@@ -24737,15 +25346,6 @@ schedule "{name}" {{
 
     #[tokio::test]
     async fn scheduled_work_waits_for_an_available_workspace() {
-        scheduled_work_workspace_recovery(false).await;
-    }
-
-    #[tokio::test]
-    async fn scheduled_work_workspace_retry_changes_select_skipped_items() {
-        scheduled_work_workspace_recovery(true).await;
-    }
-
-    async fn scheduled_work_workspace_recovery(skip_unneeded: bool) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let revision = scheduled_mission_revision(&store);
         let root = tempfile::tempdir().unwrap();
@@ -24766,8 +25366,7 @@ schedule "{name}" {{
             Arc::new(FakeRuntime::default()),
             "node".into(),
             Arc::new(Notify::new()),
-        )
-        .skipping_unneeded(skip_unneeded);
+        );
         reconciler.reconcile_once().unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         reconciler.reconcile_once().unwrap();
@@ -25203,6 +25802,7 @@ schedule "{name}" {{
                 &result.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: result.assigned_to.clone(),
                     incarnation: Some("worker-one".into()),
                     summary: None,
@@ -25246,6 +25846,7 @@ schedule "{name}" {{
                     &stuck.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: stuck.assigned_to.clone(),
                         incarnation: Some("worker-one".into()),
                         summary: None,
@@ -25347,6 +25948,7 @@ schedule "{name}" {{
             .find(|step| step.step == "slow")
             .unwrap();
         let request = |key: &str, reason: Option<&str>| crate::model::WorkRequest {
+            wait_ms: None,
             actor: step.assigned_to.clone(),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -26955,6 +27557,180 @@ mission "stops" state="ready" {
         assert_eq!(reconciler.repeated_loop_failures(subject).unwrap(), 2);
     }
 
+    fn run_never_ready_loop(stop: &str, max_rounds: u32, key: &str) -> (Arc<Store>, MissionRunView) {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = format!(
+            r#"
+version 2
+resource "result" {{ kind "custom.test.loop-result" }}
+mission "stuck" state="ready" {{
+  goal "Repeat a bounded graph whose exit gate never answers differently."
+  completion {{ when "all-steps-exhausted" }}
+  loop "review" {{
+    max-rounds {max_rounds}
+    {stop}
+    until {{ gate "ready" {{ field "state" "resource/result" is "ready" }} }}
+    round {{
+      completion {{ when "all-steps-exhausted" }}
+      step "work" {{
+        agentless
+        goal "Complete round ${{loop.round}}."
+      }}
+    }}
+  }}
+}}
+"#
+        );
+        apply_source(&store, &source, key);
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "stuck".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: format!("{key}-run"),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..80 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let run = store.mission_run(&run.id).unwrap().unwrap();
+        (store, run)
+    }
+
+    #[test]
+    fn a_loop_that_makes_no_progress_ends_with_a_verdict_naming_the_gate_not_max_rounds() {
+        let (store, run) = run_never_ready_loop("stop { no-progress 3 }", 6, "no-progress-loop");
+        assert_eq!(run.status, "failed");
+        let view = &run.loops[0];
+        assert_eq!(view.status, "failed");
+        let states: Vec<String> = store
+            .claims_for(&view.subject, Some("loop.state"))
+            .unwrap()
+            .iter()
+            .map(|claim| claim.body["fields"].to_string())
+            .collect();
+        assert_eq!(
+            view.round, 3,
+            "the loop stops after three identical rounds, not at max-rounds: {:?} {states:#?}",
+            view.reason
+        );
+        let reason = view.reason.as_deref().unwrap();
+        assert!(reason.contains("made no progress"), "{reason}");
+        assert!(reason.contains("3 rounds in a row"), "{reason}");
+        assert!(reason.contains("failing exit gates: `ready`"), "{reason}");
+        assert!(!reason.contains("max-rounds"), "{reason}");
+
+        // The round after the first receives what the first round's exit gates said.
+        let second = store
+            .mission_run(&store.mission_run_subject_for_idempotency_key(&format!(
+                "loop-round:{}:2",
+                run.steps[0].subject
+            )))
+            .unwrap()
+            .unwrap();
+        let feedback = &second.inputs[LOOP_FEEDBACK_INPUT].value;
+        let (name, hash) = loop_outcome_reference(feedback)
+            .unwrap_or_else(|| panic!("round 2 received `{feedback}`"));
+        assert!(name.ends_with("/1/outcome"), "{name}");
+        let outcome: Value =
+            serde_json::from_slice(&store.get_document(name, hash).unwrap().unwrap()).unwrap();
+        assert_eq!(outcome["failing_gates"], serde_json::json!(["ready"]));
+        assert_eq!(outcome["exit_gates"][0]["gate"], "ready");
+        assert_eq!(outcome["decision"], "keep");
+    }
+
+    #[test]
+    fn without_a_no_progress_rule_the_max_rounds_verdict_still_names_the_failing_gate() {
+        let (_store, run) = run_never_ready_loop("", 3, "max-rounds-loop");
+        let view = &run.loops[0];
+        assert_eq!(view.status, "failed");
+        assert_eq!(view.round, 3);
+        let reason = view.reason.as_deref().unwrap();
+        assert!(reason.contains("max-rounds"), "{reason}");
+        assert!(reason.contains("failing exit gates: `ready`"), "{reason}");
+    }
+
+    #[test]
+    fn a_no_progress_rule_needs_two_to_a_hundred_rounds_and_appears_once() {
+        let parse = |stop: &str| {
+            let source = format!(
+                "version 2\nmission \"m\" state=\"ready\" {{ goal \"g\"; loop \"l\" {{ max-rounds 3; stop {{ {stop} }}; round {{ completion {{ when \"all-steps-exhausted\" }}; step \"s\" {{ agentless }} }} }} }}"
+            );
+            crate::graph::parse_intent(&source, "node")
+        };
+        assert!(parse("no-progress 2").is_ok());
+        assert!(parse("no-progress 100").is_ok());
+        assert!(parse("no-progress 1").is_err());
+        assert!(parse("no-progress 101").is_err());
+        assert!(parse("no-progress 2; no-progress 3").is_err());
+    }
+
+    #[test]
+    fn rounds_with_different_gate_answers_are_progress_and_equal_ones_are_not() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let intent = crate::graph::parse_intent(
+            "version 2\nmission \"m\" state=\"ready\" { goal \"g\"; loop \"l\" { max-rounds 9; stop { no-progress 3 }; round { completion { when \"all-steps-exhausted\" }; step \"s\" { agentless } } } }",
+            "node",
+        )
+        .unwrap();
+        let spec = intent.missions["m"].steps["l"]
+            .loop_spec
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .clone();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let subject = "loop-run/01990000000070008000000000000001/l";
+        let written = std::cell::Cell::new(0_u32);
+        let state = |round: u32, hash: &str| {
+            written.set(written.get() + 1);
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "loop.state".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("round".into(), Value::from(round)),
+                        (
+                            "feedback".into(),
+                            Value::String(format!("doc/loop-feedback/x/l/{round}/outcome@{hash}")),
+                        ),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("state-{round}-{hash}-{}", written.get())),
+                })
+                .unwrap();
+        };
+        let stop = || reconciler.loop_stop_reason(subject, &spec).unwrap();
+        state(1, "aaaa");
+        state(2, "aaaa");
+        assert_eq!(stop(), None, "two equal rounds are fewer than three");
+        state(3, "bbbb");
+        assert_eq!(stop(), None, "a changed answer is progress");
+        state(4, "bbbb");
+        state(5, "bbbb");
+        assert!(stop().unwrap().contains("no progress"));
+        // A second state claim for the same round counts that round once.
+        state(5, "bbbb");
+        assert!(stop().unwrap().contains("3 rounds in a row"));
+    }
+
     #[test]
     #[should_panic(expected = "removed-loop-shape")]
     fn a_removed_for_each_loop_is_rejected_before_reconciliation() {
@@ -27647,6 +28423,7 @@ mission "waiting" state="ready" {
             reconciler.reconcile_once().unwrap();
         }
         let work = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.builder".into()),
             incarnation: Some("builder-one".into()),
             summary: Some("Draft built".into()),
@@ -27844,6 +28621,122 @@ mission "waiting" state="ready" {
                 .is_empty()
         );
         assert!(store.attention_items(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unstarted_cancelled_loop_has_no_fault_but_started_and_failed_loops_do() {
+        for case in ["queued-cancel", "started-cancel", "unstarted-fail"] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(
+                &store,
+                r#"
+    version 2
+    resource "never" { kind "custom.test.loop-result" }
+    mission "hold" state="ready" {
+      goal "Hold the successor outside admission."
+      step "hold" {
+    agentless
+    gate "released" { field "state" "resource/never" is "ready" }
+      }
+    }
+    mission "looping" state="ready" {
+      goal "Wait in a bounded loop."
+      loop "review" {
+    max-rounds 3
+    until { gate "done" { field "state" "resource/never" is "done" } }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "wait" {
+        agentless
+        gate "released" { field "state" "resource/never" is "ready" }
+      }
+    }
+      }
+    }
+    "#,
+                "cancel-loop-missions",
+            );
+            let start = |id: &str, mission: &str, after: Option<&str>| {
+                let revision = store.mission_spec(mission, None).unwrap().unwrap().revision;
+                let after = after.map_or(String::new(), |id| format!("  after {id:?}\n"));
+                let source = format!(
+                    "version 2\nmission-run {id:?} {{\n  mission \"mission/{mission}@{revision}\"\n  workspace \"/tmp\"\n  requester \"person/operator\"\n{after}}}\n",
+                );
+                apply_source(&store, &source, &format!("start-{id}"));
+            };
+            start("predecessor", "hold", None);
+            start(
+                "successor",
+                "looping",
+                (case == "queued-cancel").then_some("predecessor"),
+            );
+            let reconciler = Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            if case != "unstarted-fail" {
+                for _ in 0..10 {
+                    reconciler.reconcile_once().unwrap();
+                }
+            }
+            let run = store.mission_run("successor").unwrap().unwrap();
+            let step = run.steps.iter().find(|step| step.step == "review").unwrap();
+            let child = store.mission_run_for_parent_step(&step.subject).unwrap();
+            assert_eq!(child.is_some(), case == "started-cancel", "{case}");
+            if case == "queued-cancel" {
+                assert_eq!(step.status, "pending");
+                assert_eq!(
+                    run.steps
+                        .iter()
+                        .find(|step| step.step == "after-run")
+                        .unwrap()
+                        .status,
+                    "working"
+                );
+            }
+            if case == "unstarted-fail" {
+                store
+                    .set_step_state(&step.subject, "failed", Some("invalid loop input"))
+                    .unwrap();
+            } else {
+                store
+                    .request_mission_run_cancellation(&run.id, "no longer needed")
+                    .unwrap();
+            }
+            // Read during cancellation, before terminal cleanup closes the run's items.
+            // Checking only after cleanup would miss the spurious fault's lifetime.
+            let items = store.fault_items(Some("person/operator")).unwrap();
+            if case == "queued-cancel" {
+                assert!(
+                    items.is_empty(),
+                    "An unstarted queued loop raised a fault: {items:?}"
+                );
+                for _ in 0..5 {
+                    reconciler.reconcile_once().unwrap();
+                    assert!(
+                        store
+                            .fault_items(Some("person/operator"))
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+                assert_eq!(
+                    store.mission_run("successor").unwrap().unwrap().status,
+                    "cancelled"
+                );
+                assert!(
+                    store
+                        .mission_run_for_parent_step(&step.subject)
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                assert_eq!(items.len(), 1, "{case}: {items:?}");
+                assert_eq!(items[0].title, "Loop `review` stopped");
+            }
+        }
     }
 
     fn stopping_loop_run(
@@ -28219,6 +29112,7 @@ mission "queue-nested" state="ready" {
                 &first.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(first_work.assigned_to.clone().unwrap()),
                     incarnation: Some("current".into()),
                     summary: None,
@@ -28232,6 +29126,7 @@ mission "queue-nested" state="ready" {
         assert!(store.step_run(&first.subject).unwrap().is_some());
 
         let work = |key: &str, actor: String| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some(actor),
             incarnation: Some("current".into()),
             summary: None,
@@ -28623,6 +29518,7 @@ mission "eval/demo" state="ready" timeout="1m" {
             })
             .unwrap();
         let stop = DesiredSubject {
+            accountable: None,
             subject: subject.into(),
             kind: "stop".into(),
             desired: Value::Null,
@@ -29450,6 +30346,7 @@ version 2
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.one".into()),
                     incarnation: Some("incarnation-one".into()),
                     summary: None,
@@ -29475,6 +30372,7 @@ version 2
                 &work[0].subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.missing".into()),
                     incarnation: Some("other".into()),
                     summary: None,
@@ -33930,6 +34828,7 @@ version 2
                 &old.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(worker.clone()),
                     incarnation: Some("keep-incarnation".into()),
                     summary: None,
@@ -36214,6 +37113,104 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         );
     }
 
+    const DEVELOPMENT_CHANNEL_SCREEN: &str = "WARNING: Loading development channels\n--dangerously-load-development-channels is for local channel development only.\nPlease use --channels to run a list of approved channels.\nChannels: plugin:st-channel@st\n❯ 1. I am using this for local development\n  2. Exit\nEnter to confirm · Esc to cancel";
+
+    #[test]
+    fn development_channel_consent_is_once_before_readiness_and_checks_incarnation() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"seat\" { workspace \"/tmp\"; harness \"claude\" {} }",
+            "consent",
+        );
+        let desired = store.desired_subjects().unwrap().remove(0);
+        let member = desired.member.as_ref().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let observation = running_observation(member, "one");
+        runtime.ptys.lock().unwrap().push(observation.clone());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: member_fields(member, "running", Some("one"), true),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("consent-one-running".into()),
+            })
+            .unwrap();
+        assert!(super::claude_development_channel_prompt(
+            DEVELOPMENT_CHANNEL_SCREEN
+        ));
+        assert!(!super::claude_development_channel_prompt(
+            &DEVELOPMENT_CHANNEL_SCREEN.replace("❯ 1.", "1.")
+        ));
+        assert!(!super::claude_development_channel_prompt(
+            "I am using this for local development"
+        ));
+        for listed in [
+            "plugin:st-channel@st plugin:other@market",
+            "server:other plugin:st-channel@st",
+            "plugin:st-channel@st, server:st3",
+            "plugin:other@market",
+            "",
+        ] {
+            assert!(
+                !super::claude_development_channel_prompt(
+                    &DEVELOPMENT_CHANNEL_SCREEN
+                        .replace("Channels: plugin:st-channel@st", &format!("Channels: {listed}"))
+                ),
+                "approved a dialog that lists {listed:?}"
+            );
+        }
+        assert!(super::claude_development_channel_prompt(
+            &DEVELOPMENT_CHANNEL_SCREEN.replace("plugin:st-channel@st", "server:st3")
+        ));
+        for _ in 0..2 {
+            reconciler
+                .reconcile_claude_channel_consent(
+                    &desired,
+                    member,
+                    &observation,
+                    Some(DEVELOPMENT_CHANNEL_SCREEN),
+                )
+                .unwrap();
+        }
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+        assert_eq!(
+            store
+                .claims_for(&desired.subject, Some("runtime.reconcile-decision"))
+                .unwrap()
+                .len(),
+            1
+        );
+        mark_harness_ready(&store, &desired.subject, member, "claude", "ready");
+        let ready = running_observation(member, "ready");
+        runtime.ptys.lock().unwrap().clear();
+        runtime.ptys.lock().unwrap().push(ready.clone());
+        reconciler
+            .reconcile_claude_channel_consent(
+                &desired,
+                member,
+                &ready,
+                Some(DEVELOPMENT_CHANNEL_SCREEN),
+            )
+            .unwrap();
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+        assert!(
+            runtime
+                .send_key_if(&member.runtime_id, "return", "stale")
+                .is_err()
+        );
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+    }
+
     fn mark_harness_ready(
         store: &Store,
         subject: &str,
@@ -36783,6 +37780,70 @@ mission "pair" state="ready" {
         );
     }
 
+    #[tokio::test]
+    async fn a_revision_never_leaves_a_blocked_step_without_its_reason() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |goal: &str| {
+            format!(
+                r#"version 2
+mission "carry" state="ready" {{
+  goal "Carry a blocked step."
+  step "work" {{ assigned-to "agent/node.ghost"; goal "Do the work." }}
+  step "other" {{ goal "{goal}" }}
+}}
+"#
+            )
+        };
+        apply_source(&store, &source("Use the first goal."), "carry-blocked-one");
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "carry".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "carry-blocked-run".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let work = |run: &str| {
+            let run = store.mission_run(run).unwrap().unwrap();
+            run.steps.into_iter().find(|step| step.step == "work").unwrap()
+        };
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let before = work(&run.id);
+        assert_eq!(before.status, "blocked", "{before:?}");
+        assert!(before.blocked_reason.is_some(), "{before:?}");
+
+        let second = source("Use the second goal.");
+        apply_source(&store, &second, "carry-blocked-two");
+        let intent = parse_intent(&second, "node").unwrap();
+        store
+            .adopt_mission_revision(
+                &run.id,
+                intent.missions.values().next().unwrap(),
+                "person/test",
+                "revise the other step",
+                "carry-blocked-revision",
+            )
+            .unwrap();
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let after = work(&run.id);
+        assert_ne!(after.subject, before.subject, "{after:?}");
+        assert_eq!(after.status, "blocked", "{after:?}");
+        assert!(after.blocked_reason.is_some(), "{after:?}");
+    }
+
     /// One seat holds both steps of a run. Whatever ends the seat's claim on the first step,
     /// the second must be recomputed and its seat told within one pass, never left `blocked`
     /// with no reason.
@@ -36871,6 +37932,7 @@ mission "pair" state="ready" {
             summary: None,
             reason: Some("handing it back".into()),
             evidence: Vec::new(),
+            wait_ms: None,
             idempotency_key: format!("{key}-{ending}"),
         };
         observe("working", "pair-working");
@@ -37232,6 +38294,7 @@ mission "work-alert" state="ready" {
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.worker".into()),
                     incarnation: Some("worker-two".into()),
                     summary: None,
@@ -37328,6 +38391,7 @@ mission "ios-proof-blocked" state="ready" {
         reconciler.reconcile_once().unwrap();
         let subject = run.steps[0].subject.clone();
         let work = |key: &str, reason: Option<&str>| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.ios-owner".into()),
             incarnation: Some("ios-owner-one".into()),
             summary: None,
@@ -37440,6 +38504,8 @@ mission "ios-proof-blocked" state="ready" {
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -37593,6 +38659,8 @@ mission "ios-proof-blocked" state="ready" {
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -37994,6 +39062,8 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -38132,6 +39202,7 @@ mission "context" state="ready" {
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(SEAT.into()),
                     incarnation: Some(incarnation.into()),
                     summary: None,
@@ -38521,6 +39592,7 @@ mission "gated" state="ready" {
                     step,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(SEAT.into()),
                         incarnation: Some("seat-one".into()),
                         summary: None,
@@ -39144,6 +40216,7 @@ mission "draining" state="ready" revision-cutover="when-idle" {
                 &helper_step,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.helper".into()),
                     incarnation: Some("helper-one".into()),
                     summary: None,
