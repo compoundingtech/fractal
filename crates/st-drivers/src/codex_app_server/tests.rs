@@ -8361,11 +8361,32 @@ fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resu
     assert!(bypass.ends_with(&plain[1..]));
     let auto = managed_codex_argv(AccessMode::Auto, socket, workspace, plain).unwrap();
     assert!(!auto.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    // The remote TUI drops the named profile's network table; only the legacy key reaches the
+    // thread, and without it a seat's claim gets EPERM on the daemon socket.
+    let has_config = |value: &str| auto.windows(2).any(|pair| pair[0] == "-c" && pair[1] == value);
+    assert!(has_config("sandbox_workspace_write.network_access=true"));
+    assert!(has_config("web_search=\"live\""));
+    assert!(!bypass.iter().any(|arg| arg.starts_with("sandbox_workspace_write")));
     let profile = auto.iter().find(|value| value.starts_with("permissions.st-managed=")).unwrap();
     let parsed: toml::Value = toml::from_str(profile).unwrap();
     assert_eq!(parsed["permissions"]["st-managed"]["workspace_roots"]["/work/example"].as_bool(), Some(true));
     assert_eq!(parsed["permissions"]["st-managed"]["network"]["unix_sockets"]["/run/example/st.sock"].as_str(), Some("allow"));
     let resumed = prepare_controlled_launch_args("unix:///control.sock", &auto[1..], Some("prior")).unwrap();
+    // Codex 0.160.1 refuses a remote resume whose argv carries any permission config, so the
+    // resumed TUI keeps the non-permission options only; the app server holds the permission ones.
+    let tui_config: Vec<&str> = resumed
+        .tui_args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert!(tui_config.iter().all(|value| !is_permission_config(value)), "{tui_config:?}");
+    assert!(tui_config.contains(&"web_search=\"live\""), "{tui_config:?}");
+    assert_eq!(&resumed.tui_args[..3], ["--remote", "unix:///control.sock", "resume"].map(String::from));
+    assert!(resumed.tui_args.contains(&"prior".to_string()));
+    for key in ["permissions.st-managed=", "default_permissions=", "approvals_reviewer=", "sandbox_workspace_write.network_access="] {
+        assert!(resumed.server_args.iter().any(|arg| arg.starts_with(key)), "the app server keeps {key}");
+    }
     let overrides = resumed.resume_permissions.unwrap();
     assert_eq!(overrides.permissions.as_deref(), Some("st-managed"));
     assert_eq!(overrides.approval_policy.as_deref(), Some("on-request"));
@@ -8393,6 +8414,32 @@ fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resu
     let prompt = vec!["codex".into(), "--".into(), "--dangerously-bypass-approvals-and-sandbox".into()];
     let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, prompt).unwrap();
     assert!(merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+}
+
+#[test]
+fn an_authored_permission_config_leaves_the_resume_argv_and_is_projected_through_thread_resume() {
+    // The remote TUI refuses permission config on a resume, with or without a managed profile, so
+    // an authored `-c` permission entry used to fail a resume too. It now leaves the TUI argv, and
+    // the typed thread/resume carries what it can express; `sandbox_workspace_write.*` and
+    // permission profile tables stay on the app server only.
+    let authored: Vec<String> = [
+        "--model", "gpt-example", "-c", "sandbox_mode=\"read-only\"", "--config=approval_policy=never",
+        "-c", "sandbox_workspace_write.network_access=true", "-c", "web_search=\"live\"", "boot",
+    ]
+    .map(String::from)
+    .to_vec();
+    let resumed = prepare_controlled_launch_args("unix:///control.sock", &authored, Some("prior")).unwrap();
+    let joined = resumed.tui_args.join(" ");
+    for gone in ["sandbox_mode", "approval_policy", "sandbox_workspace_write"] {
+        assert!(!joined.contains(gone), "{gone} must leave the resume argv: {joined}");
+    }
+    assert!(joined.contains("web_search=\"live\"") && joined.contains("--model gpt-example"), "{joined}");
+    let overrides = resumed.resume_permissions.unwrap();
+    assert_eq!(overrides.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(overrides.approval_policy.as_deref(), Some("never"));
+    for kept in ["sandbox_mode=", "approval_policy=never", "sandbox_workspace_write.network_access=true"] {
+        assert!(resumed.server_args.iter().any(|arg| arg.contains(kept)), "the app server keeps {kept}");
+    }
 }
 
 #[test]

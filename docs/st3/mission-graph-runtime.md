@@ -38,7 +38,7 @@ not replace it. The ready state is written before the diagnosis. Diagnostic and 
 are logged without failing admission or execution. The next evaluation records recovery when
 the run no longer waits for first readiness, and termination also closes the fault. Its durable
 fault and recovery history remain available. An open fault appears immediately in `st missions show
-mission-run/EXAMPLE`, `st doctor` (`mission-first-readiness`), and the mission blocker in stui.
+mission-run/EXAMPLE`, `st doctor` (`mission-first-readiness`), and the mission blocker in the terminal UI.
 The leaf mission-run response adds optional `scheduler_fault`. Mission client views project
 `state: "blocked"` while the fault is open and set `run.blocker.scope` to
 `"scheduler/first-readiness"` with the fault reason. Pending steps also show that reason. These
@@ -345,6 +345,8 @@ A retry repeats one failed step attempt. It handles a bounded transient failure.
 
 `timeout` is an execution budget for one step attempt. It advances only while a worker holds a live claim in `claimed` or `working`; dependency waits, assignment waits, blocked gates, ready time, verification, and time after lease expiry do not consume it. Release and reclaim resume the same attempt's accumulated budget, while retry starts a new attempt with a fresh budget. Work projections expose the active interval start, accumulated execution milliseconds, and configured timeout so an operator can explain an expiry after restart or replication. A step cannot use a deadline gate because its timeout is its worker-execution budget.
 
+Waiting is not execution. A worker that holds a step while it waits for something outside the seat, such as a host build slot or GitHub's merge queue, declares it with `st work wait STEP --as AGENT --for 2h --reason "build slot"`. The wait is a `work.progress` claim with `clock: "paused"` and a `wait_until_unix_ms` deadline: it closes the running interval, and the attempt's execution clock stays stopped through the lease renewals and progress records that follow. `st work resume STEP` (a `work.progress` claim with `clock: "running"`) opens a new interval. A wait nobody resumes ends at its deadline, and the clock then runs again, so a seat that stopped answering cannot hide a hung step. Waits draw on one budget of 12 hours per step attempt, counted as time actually spent waiting: a wait that is resumed early gives back what it did not use, a wait that runs to its deadline spends its full length, and declaring again during a wait spends the time so far. A declaration larger than what is left is refused with `wait-budget-exhausted` and says how much remains, so a live seat that never finishes cannot chain waits past the execution timeout. A new claim in the same attempt keeps the spent budget; a retry is a new attempt with a fresh one. The lease still needs its renewals: a lapsed lease ends the interval as it always did, and a new claim ends any earlier holder's wait. `work show` prints the stopped clock with the time its wait ends and the wait budget used and left, and the wait's reason is the step's blocked reason until it resumes. A wait adds no time to the budget, so a step that waits two hours and then reviews for ten minutes has used ten minutes; `work extend` remains the way to give a step more work time.
+
 A step with a worker does not fail when its budget runs out. st raises one fault for the step, which arrives as a message to the agent assigned to it, and the step and its mission go on. The owner answers with `st work extend STEP --as AGENT --by 2h --reason TEXT`, which adds up to seven days to this attempt's budget and renews the lease, with `work complete` when the goals are met, or with `work fail`. An extension is a `work.extended` claim. The fault ends when the owner extends, completes, fails or releases the step. A step that runs out of the extended budget raises a new fault. Only a step with no worker, such as an agentless step, fails when its budget runs out, because nobody holds it to answer. A step submitted for verification has already used its time and is never timed out.
 
 If a step produces a native harness driver, the step waits for a ready, working, or idle harness observation from the current runtime incarnation. An observation with another incarnation cannot satisfy the step. An old observation without an incarnation applies only when it was recorded after the current runtime epoch began.
@@ -407,6 +409,7 @@ loop "improve" timeout="2h" {
   stop {
     plateau metric="quality" rounds=2
     repeated-failure 2
+    no-progress 3
     token-budget 50000
   }
 
@@ -480,6 +483,8 @@ Each round writes one `loop.round-result` claim. The result records the child ru
 
 The feedback document is immutable. The next round receives its exact reference through `${loop.feedback}`.
 
+After the exit gates answer, the round writes a second feedback document, `doc/loop-feedback/<loop>/<round>/outcome`, and the next round receives that one. It records the round's keep or discard decision, its metrics, and what each `until` gate answered (`passed`, `failed` with its reason, `not-yet`, or `pending`), plus the names of the gates that did not pass. A round whose exit gates are still running keeps the first document until they answer. The outcome document holds neither the round number nor the child run, so two rounds that end the same way store identical content.
+
 A metric has `direction="higher"` or `direction="lower"`. Its value must be a finite number.
 
 A metric can read a numeric resource field, run an exec command, or normalize one exit gate to zero or one.
@@ -492,11 +497,15 @@ An exec metric must print one finite number. Its `time-limit` defaults to two mi
 
 The loop has no built-in Git behavior. A failed keep or discard mission stops the loop immediately.
 
-`stop` can limit a plateau, repeated round failures, and total structured token use. A reached stop rule exhausts the loop.
+`stop` can limit a plateau, repeated round failures, no progress, and total structured token use. A reached stop rule exhausts the loop.
+
+`no-progress N` (2 to 100) stops the loop when the last N rounds' outcome documents are identical: the same metrics and the same exit gate answers, so nothing a round did changed what the loop can see. The loop ends with a verdict that says so and names the failing exit gates and their reasons, rather than running on to `max-rounds`. A gate whose reason changes from round to round, such as one that prints a timestamp, counts as progress. The rule applies to plain round loops; it is off unless declared. When a loop ends at `max-rounds` or by any other stop rule, the verdict also names the exit gates that were failing.
 
 `on-exhausted` defaults to `fail`. It can contain `succeed` or one human gate instead.
 
-Every loop that stops short raises one attention item: a loop that fails at exhaustion or in its
+Cancelling a loop before its first round starts, including a run still waiting on `after`,
+does not raise a stopped-loop item. Failures still raise an item even before the first round.
+Every loop that starts and stops short raises one attention item: a loop that fails at exhaustion or in its
 human review, and a loop that a cancelled round or a failed keep or discard branch stops. The item
 targets the loop and its run. It names the cause and the command that continues or ends the loop:
 `st work retry STEP` for a failed step, which runs the next round, or `st missions cancel RUN` and
@@ -1138,7 +1147,8 @@ without `report-stalls` / `report_stalls` keep stall reports enabled with the ex
 (30 minutes unless set).
 
 A stall is measured from the run's last sign of life: its last state change, any step's last
-change or progress record, and the end of any step's lease. A run in cleanup, and a run that
+change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
+including loop rounds and nested work, counts too. A run in cleanup, and a run that
 still waits on `after`, cannot stall. A stalled run is not failed and can go on; if it makes progress and then goes
 quiet again, that is a new stall and a new message. The daemon keeps each run's stall limit as a
 deadline on that run's evaluation, so a quiet fleet does no work to watch for stalls.

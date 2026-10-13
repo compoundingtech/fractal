@@ -5,16 +5,18 @@
 //! conversation, so callers never join lists themselves or read item by item. When the socket drops,
 //! the feed opens a new one, subscribes again, and attaches the open terminal again. Nothing
 //! here polls projections while connected: frames arrive only when something changed. Remote
-//! devices also make a bounded liveness read so an idle network blackhole becomes offline.
+//! devices use the protocol heartbeat so an idle network blackhole becomes offline.
 
 #![doc = include_str!("../README.md")]
 
 pub mod cache;
 pub mod model;
+mod inventory;
 mod terminal;
 pub mod tree;
 
 pub use terminal::{action_pair, terminal_fence, terminal_screen_fence};
+pub use inventory::{Inventories, Inventory};
 
 use st3_client::{
     CapabilityState, Client, ClientError, CollectionEvent, CollectionStream, ErrorCode, Fence,
@@ -68,6 +70,7 @@ pub enum Window {
     Summary,
     /// The selected person’s sidebar organization, when supported.
     Arrangements,
+    Inventory(Inventory),
 }
 
 impl Window {
@@ -81,6 +84,7 @@ impl Window {
             Self::Glasses => "glasses",
             Self::Summary => "summary",
             Self::Arrangements => "arrangements",
+            Self::Inventory(inventory) => inventory.collection(),
         }
     }
 
@@ -89,6 +93,7 @@ impl Window {
             .into_iter()
             .chain([Self::Glasses, Self::Summary, Self::Arrangements])
             .find(|window| window.id() == id)
+            .or_else(|| Inventory::from_id(id).map(Self::Inventory))
     }
 
     /// How many items to follow: every glass a person may keep, a page of anything else.
@@ -120,8 +125,12 @@ pub enum Update {
     /// The granted glasses shape, delivered before its window. The embedding UI chooses how
     /// to store glasses for this version; the feed owns no application state.
     GlassesVersion(u32),
+    /// Optional inventory admission and the member build, discovered once per connection.
+    InventorySupport { granted: bool, member_build: Option<String> },
     /// A window's current items, in st's display order.
     Window {
+        /// Client monotonic receipt time, before incremental view maintenance.
+        received: std::time::Instant,
         window: Window,
         snapshot: Snapshot,
         items: Vec<Resource>,
@@ -150,6 +159,8 @@ pub enum Update {
     /// st said it never can (`permanent`).
     ConversationFailed {
         target: String,
+        /// Typed refusal for content-free client error accounting.
+        code: Option<ErrorCode>,
         message: String,
         permanent: bool,
     },
@@ -188,6 +199,8 @@ pub enum Command {
     Missions {
         follow: bool,
     },
+    /// Hold exactly these optional screen lists; the UI owns its leave grace.
+    Inventories(Inventories),
     /// Keep exactly these agents' or sessions' conversations live, at most
     /// `MAX_CONVERSATIONS`: the first is the focused one. An empty list follows none.
     Converse {
@@ -276,6 +289,7 @@ pub async fn run_members_with_sidebar(
         return;
     }
     let mut missions = missions;
+    let mut inventories = Inventories::default();
     let mut failures = 0_usize;
     let mut member = 0;
     let mut following: Option<Following> = None;
@@ -315,6 +329,7 @@ pub async fn run_members_with_sidebar(
                 &mut conversing,
                 &mut missions,
                 &mut failures,
+                &mut inventories,
             )
             .await
             {
@@ -359,6 +374,7 @@ pub async fn run_members_with_sidebar(
                     Some(Command::Reconnect) => { failures = 0; break; }
                     Some(Command::Unfollow) => following = None,
                     Some(Command::Missions { follow }) => missions = follow,
+                    Some(Command::Inventories(wanted)) => inventories = wanted,
                     Some(Command::Converse { targets }) => {
                         conversing = targets.into_iter().take(MAX_CONVERSATIONS).map(Conversing::new).collect();
                     }
@@ -469,6 +485,7 @@ async fn connected(
     conversing: &mut Vec<Conversing>,
     missions: &mut bool,
     failures: &mut usize,
+    inventories: &mut Inventories,
 ) -> Ended {
     // A blackholed network, or a wedged daemon, can leave a socket open and silent while the
     // views say live. Nothing is asked of st while the stream speaks: any frame is proof of
@@ -482,10 +499,12 @@ async fn connected(
     // Glasses are followed only where st grants them in the shape this stui reads (splits of
     // tab groups, version 1); elsewhere stui keeps them on the device. A member still on the
     // earlier shape would send glasses this stui cannot decode, and that drops the connection.
-    let capabilities = client.capabilities().await.ok();
+    let capabilities = match client.capabilities().await {
+        Ok(capabilities) => capabilities,
+        Err(error) => return Ended::Dropped(error.plain()),
+    };
     let version = if glasses {
-        capabilities.as_ref().and_then(|capabilities| {
-            capabilities
+        capabilities
                 .value
                 .capabilities
                 .iter()
@@ -495,21 +514,23 @@ async fn connected(
                         && capability.state == CapabilityState::Granted
                 })
                 .map(|capability| capability.version)
-        })
     } else {
         None
     };
     let supports = |id: &str| {
-        capabilities.as_ref().is_some_and(|capabilities| {
-            capabilities.value.capabilities.iter().any(|capability| {
-                capability.id == id
-                    && capability.version >= 1
-                    && capability.state == CapabilityState::Granted
-            })
+        capabilities.value.capabilities.iter().any(|capability| {
+            capability.id == id
+                && capability.version >= 1
+                && capability.state == CapabilityState::Granted
         })
     };
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
+    let inventory_granted = supports("inventory-collections") && supports("collections");
+    if updates.send(Update::InventorySupport {
+        granted: inventory_granted,
+        member_build: capabilities.value.machine_version.clone(),
+    }).is_err() { return Ended::Closed; }
     // Older sockets are already full with glasses, a terminal and three conversations.
     let sidebar_person = person.filter(|person| {
         person.starts_with("person/") && supports("arrangements") && supports("collections")
@@ -537,6 +558,11 @@ async fn connected(
     if let Some(person) = sidebar_person
         && let Err(error) = stream.subscribe_arrangements("arrangements", person, GLASSES, None).await {
         return Ended::Dropped(error.to_string());
+    }
+    if inventory_granted {
+        for inventory in inventories.windows() {
+            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
+        }
     }
     for current in conversing.iter_mut() {
         if let Err(error) = converse(stream, current).await {
@@ -595,13 +621,14 @@ async fn connected(
                     Ok(None) => return Ended::Dropped("st closed the connection".into()),
                     Err(error) => return Ended::Dropped(error.to_string()),
                 };
+                let received = std::time::Instant::now();
                 *failures = 0;
                 match event {
                     CollectionEvent::Snapshot { id, snapshot, items, order, has_more } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         // A frame already on its way when the window was left: the socket was
                         // heard from, but nothing of the window comes back.
-                        if left(window, *missions) {
+                        if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
                         }
                         *failures = 0;
@@ -610,13 +637,13 @@ async fn connected(
                         let rows = windows.entry(window).or_default();
                         rows.clear();
                         rows.extend(items.into_iter().map(|item| (item.header().id.clone(), item)));
-                        if !send_window(updates, window, snapshot, rows, &order, has_more) {
+                        if !send_window(updates, received, window, snapshot, rows, &order, has_more) {
                             return Ended::Closed;
                         }
                     }
                     CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more } => {
                         let Some(window) = Window::from_id(&id) else { continue };
-                        if left(window, *missions) {
+                        if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
                         }
                         window_retries.loaded(window);
@@ -626,7 +653,7 @@ async fn connected(
                             rows.remove(&id);
                         }
                         rows.extend(upserts.into_iter().map(|item| (item.header().id.clone(), item)));
-                        if !send_window(updates, window, snapshot, rows, &order, has_more) {
+                        if !send_window(updates, received, window, snapshot, rows, &order, has_more) {
                             return Ended::Closed;
                         }
                     }
@@ -635,7 +662,7 @@ async fn connected(
                     CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
                         let Some(current) = conversing.iter().find(|current| current.id == id) else { continue };
                         let message = st3_client::plain_message(code.as_ref(), &message);
-                        if updates.send(Update::ConversationFailed { target: current.target.clone(), message, permanent: false }).is_err() {
+                        if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent: false }).is_err() {
                             return Ended::Closed;
                         }
                     }
@@ -645,8 +672,15 @@ async fn connected(
                     // one good snapshot resets the wait.
                     CollectionEvent::Resync { id, code, message } => {
                         if let Some(window) = Window::from_id(&id)
-                            && !left(window, *missions)
+                            && !(left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
                         {
+                            if matches!(window, Window::Inventory(_)) {
+                                if let Some(message) = message {
+                                    let plain = st3_client::plain_message(code.as_ref(), &message);
+                                    if updates.send(Update::WindowFailed(window, plain)).is_err() { return Ended::Closed; }
+                                }
+                                continue;
+                            }
                             // Said once, with st's own reason when it gave one (its source is
                             // not ready); the retries are quiet until the window loads.
                             let first = window_retries.failed(window, Instant::now());
@@ -673,13 +707,18 @@ async fn connected(
                             current.retry_at = Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
                             current.failures += 1;
                         }
-                        if updates.send(Update::ConversationFailed { target: current.target.clone(), message, permanent }).is_err() {
+                        if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent }).is_err() {
                             return Ended::Closed;
                         }
                     }
                     CollectionEvent::Error { id, code, message } => {
                         if let Some(window) = Window::from_id(&id) {
-                            if left(window, *missions) {
+                            if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
+                                continue;
+                            }
+                            if matches!(window, Window::Inventory(_)) {
+                                let plain = st3_client::plain_message(code.as_ref(), &message);
+                                if updates.send(Update::WindowFailed(window, plain)).is_err() { return Ended::Closed; }
                                 continue;
                             }
                             // Said once; the retries are quiet until it loads.
@@ -730,6 +769,21 @@ async fn connected(
                         if updates.send(Update::WindowStopped(Window::Missions)).is_err() {
                             return Ended::Closed;
                         }
+                    }
+                }
+                Some(Command::Inventories(wanted)) => {
+                    let previous = *inventories;
+                    *inventories = wanted;
+                    if !inventory_granted { continue; }
+                    for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
+                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.plain()); }
+                        let window = Window::Inventory(inventory);
+                        windows.remove(&window); window_retries.loaded(window);
+                        pending_reports.retain(|(pending, _, _)| *pending != window);
+                        if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
+                    }
+                    for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
+                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
                     }
                 }
                 Some(Command::Converse { targets }) => {
@@ -894,6 +948,7 @@ impl WindowRetries {
 
 fn send_window(
     updates: &mpsc::Sender<Update>,
+    received: std::time::Instant,
     window: Window,
     snapshot: Snapshot,
     rows: &BTreeMap<String, Resource>,
@@ -906,6 +961,7 @@ fn send_window(
         .collect();
     updates
         .send(Update::Window {
+            received,
             window,
             snapshot,
             items,
@@ -1418,9 +1474,10 @@ mod tests {
         ));
     }
 
-    fn test_state(root: &Path) -> st3::api::AppState {
+    pub(super) fn test_state(root: &Path) -> st3::api::AppState {
         st3::api::AppState {
-            store: Arc::new(st3::store::Store::open_memory("stui-feed").unwrap()),
+            // Socket reads overlap graph writes, as on a real WAL-backed member.
+            store: Arc::new(st3::store::Store::open(&root.join("graph.db"), "stui-feed").unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
             node: "stui-feed".into(),
@@ -1435,7 +1492,7 @@ mod tests {
         }
     }
 
-    async fn next_window(updates: &mpsc::Receiver<Update>, wanted: Window) -> Vec<Resource> {
+    pub(super) async fn next_window(updates: &mpsc::Receiver<Update>, wanted: Window) -> Vec<Resource> {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             match updates.try_recv() {
@@ -1875,3 +1932,6 @@ mod tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+mod inventory_tests;
