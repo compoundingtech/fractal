@@ -192,6 +192,8 @@ pub(crate) mod work_list;
 #[cfg(test)]
 mod tombstones_tests;
 #[cfg(test)]
+mod step_wait_tests;
+#[cfg(test)]
 mod work_renew_tests;
 pub use runtime::SmalltalkRuntime;
 #[cfg(test)]
@@ -525,6 +527,19 @@ pub struct AgentWorkQueue {
 const AGENT_WORK_PREVIEW_LIMIT: usize = 5;
 /// The most one `work extend` adds to a step attempt's execution budget.
 const MAX_STEP_EXTENSION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// The longest one `work wait` stops the execution clock. A wait past it must be declared again,
+/// so a seat that stopped answering cannot hide behind a wait.
+pub const MAX_STEP_WAIT_MS: u64 = 12 * 60 * 60 * 1000;
+
+/// A wait span as hours and minutes, for the budget error and the step view.
+pub fn format_wait_span(milliseconds: u128) -> String {
+    let minutes = milliseconds / 60_000;
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes}m"),
+        (hours, 0) => format!("{hours}h"),
+        (hours, minutes) => format!("{hours}h{minutes:02}m"),
+    }
+}
 
 /// smalltalk's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
@@ -8746,6 +8761,7 @@ impl Store {
             subject,
             "release",
             &WorkRequest {
+                wait_ms: None,
                 actor: Some(input.actor.clone()),
                 incarnation: input.incarnation.clone(),
                 summary: Some(input.note.clone()),
@@ -8787,6 +8803,32 @@ impl Store {
             return Err(St3Error::new(
                 "invalid-work-action",
                 "only an extension adds time",
+            ));
+        }
+        if action == "wait" {
+            if !request
+                .wait_ms
+                .is_some_and(|by| (1..=MAX_STEP_WAIT_MS).contains(&by))
+            {
+                return Err(St3Error::new(
+                    "invalid-wait",
+                    "a wait stops the execution clock for between 1 millisecond and 12 hours",
+                ));
+            }
+            if request
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(St3Error::new(
+                    "wait-needs-reason",
+                    "a wait records what the step waits for; pass --reason",
+                ));
+            }
+        } else if request.wait_ms.is_some() {
+            return Err(St3Error::new(
+                "invalid-work-action",
+                "only a wait stops the execution clock",
             ));
         }
         let subject = normalize_step_run(subject);
@@ -9047,6 +9089,27 @@ impl Store {
                     .clone()
                     .or_else(|| Some(requested_incarnation.to_owned()));
                 let actor_incarnation = effective_incarnation.clone();
+                if action == "wait" {
+                    // Waits draw on one budget per attempt, so a seat that keeps declaring them
+                    // cannot hide a hung step from the execution timeout. The budget is time
+                    // spent waiting, not time declared: a resumed wait gives back what it did
+                    // not use.
+                    let spent = step_execution_clock_at(transaction, &subject, current.attempt, now, true)
+                        .map_err(internal)?
+                        .waited;
+                    let left = u128::from(MAX_STEP_WAIT_MS).saturating_sub(spent);
+                    if u128::from(request.wait_ms.unwrap_or_default()) > left {
+                        return Err(St3Error::new(
+                            "wait-budget-exhausted",
+                            format!(
+                                "this attempt has waited {} of its {} wait budget; {} is left",
+                                format_wait_span(spent),
+                                format_wait_span(u128::from(MAX_STEP_WAIT_MS)),
+                                format_wait_span(left),
+                            ),
+                        ));
+                    }
+                }
                 let (status, worker_reported, claimant, claim_incarnation, claim_expiry) = match action {
                     "claim" => {
                         if current.status != "ready" && current.status != "claimed" {
@@ -9079,6 +9142,14 @@ impl Store {
                     ),
                     "extend" => (
                         current.status.as_str(),
+                        current.worker_reported,
+                        Some(actor.clone()),
+                        effective_incarnation,
+                        Some(now + 600_000),
+                    ),
+                    // A wait or a resume is a progress record that moves the execution clock.
+                    "wait" | "resume" => (
+                        "working",
                         current.worker_reported,
                         Some(actor.clone()),
                         effective_incarnation,
@@ -9154,13 +9225,23 @@ impl Store {
                 if let Some(extend_ms) = extend_ms {
                     body["fields"]["extend_ms"] = json!(extend_ms);
                 }
+                match action {
+                    "wait" => {
+                        body["fields"]["clock"] = json!("paused");
+                        body["fields"]["wait_until_unix_ms"] = json!(
+                            now.saturating_add(u128::from(request.wait_ms.unwrap_or_default()))
+                        );
+                    }
+                    "resume" => body["fields"]["clock"] = json!("running"),
+                    _ => {}
+                }
                 if let Some(input) = handoff {
                     adhoc_work::transfer_tx(transaction, &self.origin, &current, input, &mut body)?;
                 }
                 let claim_kind = match action {
                     "claim" => "work.claimed",
                     "renew" => "work.renewed",
-                    "progress" => "work.progress",
+                    "progress" | "wait" | "resume" => "work.progress",
                     "complete" => "work.submitted",
                     "fail" => "work.failed",
                     "release" => "work.released",
@@ -26773,6 +26854,7 @@ mission "garden" state="ready" {
                     subject,
                     "claim",
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some(actor.into()),
                         incarnation: Some(incarnation.into()),
                         summary: None,
@@ -26789,6 +26871,7 @@ mission "garden" state="ready" {
                 step,
                 "complete",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(actor.into()),
                     incarnation: Some(incarnation.into()),
                     summary: None,
@@ -26911,6 +26994,146 @@ mission "garden" state="ready" {
                 .submitted_incarnation
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_step_wait_waits_on_older_members_and_converges_after_they_upgrade() {
+        let anchor_key = key();
+        let older_key = key();
+        let current = node("current", Some(&anchor_key), Some(&anchor_key));
+        admit(&current, "current", &anchor_key, "anchor", None);
+        admit(&current, "older", &older_key, "invite", None);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("older.sqlite3");
+        let older = Store::open(&path, "older").unwrap();
+        older.bind_fleet(FLEET).unwrap();
+        older.pin_fleet_anchor(anchor_key.public()).unwrap();
+        older.set_member_key(Some(older_key.clone())).unwrap();
+        // A build from before the wait: work.progress has neither new field.
+        let mut registry = st3_schema::registry().clone();
+        for field in ["clock", "wait_until_unix_ms"] {
+            registry
+                .claims
+                .get_mut("work.progress")
+                .unwrap()
+                .fields
+                .remove(field)
+                .unwrap();
+        }
+        older.set_claim_registry(registry.clone());
+        sync(&current, &older);
+        let intent = crate::graph::parse_test_intent(
+            r#"version 2
+agent "garden/worker" { workspace "/tmp"; command "true" }
+mission "garden" state="ready" {
+  goal "Wait for a build slot without spending the execution clock."
+  step "review" timeout="30m" { assigned-to "agent/garden/worker" }
+}
+"#,
+            "current",
+        )
+        .unwrap();
+        current.apply_internal(&intent, "garden").unwrap();
+        let run = current
+            .create_mission_run(&MissionRunRequest {
+                mission: "garden".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/ada".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "garden-run".into(),
+            })
+            .unwrap();
+        let step = run.steps[0].subject.clone();
+        let request = |key: &str, wait_ms: Option<u64>, reason: Option<&str>| WorkRequest {
+            wait_ms,
+            actor: Some("agent/garden/worker".into()),
+            incarnation: Some("garden:one".into()),
+            summary: None,
+            reason: reason.map(Into::into),
+            evidence: vec![],
+            idempotency_key: key.into(),
+        };
+        current.set_step_state(&step, "ready", None).unwrap();
+        current
+            .work_action(&step, "claim", &request("claim", None, None))
+            .unwrap();
+        current
+            .work_action(
+                &step,
+                "wait",
+                &request("wait", Some(60 * 60 * 1000), Some("build slot")),
+            )
+            .unwrap();
+        let waiting = current
+            .latest_claim(&step, Some("work.progress"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.body["fields"]["clock"], "paused");
+        let fields = schema_fields_for_body(&waiting.kind, &waiting.body).unwrap();
+        assert_eq!(
+            registry
+                .validate_claim(&step, "work.progress", &fields)
+                .unwrap_err()
+                .code,
+            "unknown-claim-field"
+        );
+        assert!(matches!(
+            classify_replicated_claim_with_registry(&waiting, &registry).unwrap(),
+            ReplicatedClaimAdmission::UnknownField
+        ));
+        assert!(
+            current
+                .step_run(&step)
+                .unwrap()
+                .unwrap()
+                .execution_paused_until_unix_ms
+                .is_some()
+        );
+
+        // The older member keeps every claim it knows, holds the wait as an unknown record, and
+        // never applies it, so it does not stop the clock until it is upgraded.
+        let later = note(&current, "A known claim after the wait");
+        let admission = sync(&current, &older);
+        assert_eq!(admission.unknown, 1);
+        assert_eq!(admission.invalid, 0);
+        assert!(!admitted(&older, &waiting));
+        assert!(admitted(&older, &later));
+        let held = older.step_run(&step).unwrap().unwrap();
+        assert_eq!(held.execution_paused_until_unix_ms, None);
+        assert_eq!(held.execution_waited_ms, 0);
+        let local = note(&older, "The older member can still write known claims");
+        sync(&older, &current);
+        assert!(admitted(&current, &local));
+        let before = older.replication_status(true, Some(FLEET), &[]).unwrap();
+        let source = current.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(before.waiting_claims, 1);
+        assert_eq!(before.invalid_records, 0);
+        assert_eq!(before.unhealthy_projections, 0);
+        assert_eq!(before.authority_digest, source.authority_digest);
+        assert_eq!(
+            older.replica_records(true).unwrap()[0].error_code.as_deref(),
+            Some("unknown-claim-field")
+        );
+        drop(older);
+
+        // Upgrading retries the held claim with the new registry and converges on the same graph.
+        let upgraded = Store::open(&path, "older").unwrap();
+        upgraded.set_member_key(Some(older_key)).unwrap();
+        upgraded.validate_replication_backlog().unwrap();
+        upgraded.apply_replication_repairs().unwrap();
+        upgraded.project_replication_backlog().unwrap();
+        let after = upgraded.replication_status(true, Some(FLEET), &[]).unwrap();
+        assert_eq!(after.waiting_claims, 0);
+        assert_eq!(after.authority_digest, before.authority_digest);
+        assert_eq!(after.graph_digest, source.graph_digest);
+        assert_eq!(after.projection_digests, source.projection_digests);
+        let learned = upgraded.claim_by_id(&waiting.id).unwrap().unwrap();
+        assert_eq!(learned.body, waiting.body);
+        let view = upgraded.step_run(&step).unwrap().unwrap();
+        assert!(view.execution_paused_until_unix_ms.is_some());
+        assert_eq!(view.blocked_reason.as_deref(), Some("build slot"));
     }
 
     #[test]
@@ -32392,6 +32615,8 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
         claim_expires_at_unix_ms: lease.and_then(|value| value.parse().ok()),
         carried_claimant: None,
         execution_started_at_unix_ms: None,
+        execution_paused_until_unix_ms: None,
+        execution_waited_ms: 0,
         execution_elapsed_ms: 0,
         timeout_ms: None,
         timeout_extension_ms: 0,
@@ -32451,15 +32676,17 @@ fn enrich_step_queue_at(
     #[cfg(test)]
     STEPS_ENRICHED.with(|enriched| enriched.set(enriched.get() + 1));
     apply_effective_step_state(connection, view, snapshot_unix_ms)?;
-    let (execution_started_at_unix_ms, execution_elapsed_ms) = step_execution_timing_at(
+    let timing = step_execution_clock_at(
         connection,
         &view.subject,
         view.attempt,
         snapshot_unix_ms,
         matches!(view.status.as_str(), "claimed" | "working"),
     )?;
-    view.execution_started_at_unix_ms = execution_started_at_unix_ms;
-    view.execution_elapsed_ms = execution_elapsed_ms;
+    view.execution_started_at_unix_ms = timing.started;
+    view.execution_paused_until_unix_ms = timing.paused_until;
+    view.execution_waited_ms = timing.waited;
+    view.execution_elapsed_ms = timing.elapsed;
     view.timeout_extension_ms =
         step_timeout_extension_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?;
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
@@ -32943,6 +33170,7 @@ fn harness_incarnation_for_key_at(
     Ok(None)
 }
 
+#[cfg(test)]
 fn step_execution_timing_at(
     connection: &Connection,
     subject: &str,
@@ -32951,6 +33179,21 @@ fn step_execution_timing_at(
     currently_active: bool,
 ) -> rusqlite::Result<(Option<u128>, u128)> {
     Ok(fold_step_timing(
+        &step_timing_events(connection, subject)?,
+        attempt,
+        snapshot_unix_ms,
+        currently_active,
+    ))
+}
+
+fn step_execution_clock_at(
+    connection: &Connection,
+    subject: &str,
+    attempt: u32,
+    snapshot_unix_ms: u128,
+    currently_active: bool,
+) -> rusqlite::Result<StepTiming> {
+    Ok(fold_step_clock(
         &step_timing_events(connection, subject)?,
         attempt,
         snapshot_unix_ms,
@@ -33006,6 +33249,32 @@ fn step_timing_events(
         .collect())
 }
 
+/// A step's execution timing as of one snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct StepTiming {
+    /// The start of the interval that is running now.
+    pub started: Option<u128>,
+    /// What earlier intervals and the running one have used.
+    pub elapsed: u128,
+    /// When a declared wait ends on its own, while the clock is stopped for one.
+    pub paused_until: Option<u128>,
+    /// The time this attempt has spent in declared waits so far, a wait still running included.
+    pub waited: u128,
+}
+
+/// Close the wait that began at `pause_started` and add what it spent to `waited`.
+fn end_wait(
+    waited: &mut u128,
+    pause_started: &mut Option<u128>,
+    paused_until: &mut Option<u128>,
+    at: u128,
+) {
+    if let Some(began) = pause_started.take() {
+        *waited = waited.saturating_add(at.saturating_sub(began));
+    }
+    *paused_until = None;
+}
+
 /// Fold a step's execution timing from its step and work events in canonical order: the active
 /// interval of `attempt` as of `snapshot_unix_ms`, and the time elapsed in earlier intervals.
 /// An interval closes when the next event arrives after its lease expiry. The checkpoint
@@ -33016,8 +33285,28 @@ pub(crate) fn fold_step_timing(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> (Option<u128>, u128) {
-    let (mut started, mut elapsed, lease_expires) =
-        fold_step_timing_open(events, attempt, snapshot_unix_ms);
+    let timing = fold_step_clock(events, attempt, snapshot_unix_ms, currently_active);
+    (timing.started, timing.elapsed)
+}
+
+/// [`fold_step_timing`] with the end of a declared wait. A `work.progress` record with
+/// `clock: "paused"` closes the running interval and stops the clock until a record with
+/// `clock: "running"` reopens it, or until its `wait_until_unix_ms`, whichever comes first, so a
+/// seat that never resumes cannot hide a hung step. Renewals and ordinary progress during a wait
+/// keep the lease and leave the clock stopped.
+pub(crate) fn fold_step_clock(
+    events: &[(String, Value, u128)],
+    attempt: u32,
+    snapshot_unix_ms: u128,
+    currently_active: bool,
+) -> StepTiming {
+    let ClockFold {
+        mut started,
+        mut elapsed,
+        lease_expires,
+        paused_until,
+        waited,
+    } = fold_step_clock_open(events, attempt, snapshot_unix_ms);
     if let Some(interval_start) = started {
         let interval_end =
             lease_expires.map_or(snapshot_unix_ms, |expiry| snapshot_unix_ms.min(expiry));
@@ -33029,7 +33318,12 @@ pub(crate) fn fold_step_timing(
             started = None;
         }
     }
-    (started, elapsed)
+    StepTiming {
+        started,
+        elapsed,
+        paused_until: paused_until.filter(|_| currently_active),
+        waited,
+    }
 }
 
 /// [`fold_step_timing`]'s events folded up to `snapshot_unix_ms`: the open interval's start,
@@ -33039,9 +33333,30 @@ fn fold_step_timing_open(
     attempt: u32,
     snapshot_unix_ms: u128,
 ) -> (Option<u128>, u128, Option<u128>) {
+    let fold = fold_step_clock_open(events, attempt, snapshot_unix_ms);
+    (fold.started, fold.elapsed, fold.lease_expires)
+}
+
+/// The events folded up to the snapshot, before the interval that is running is settled.
+struct ClockFold {
+    started: Option<u128>,
+    elapsed: u128,
+    lease_expires: Option<u128>,
+    paused_until: Option<u128>,
+    waited: u128,
+}
+
+fn fold_step_clock_open(
+    events: &[(String, Value, u128)],
+    attempt: u32,
+    snapshot_unix_ms: u128,
+) -> ClockFold {
     let mut elapsed = 0_u128;
     let mut started = None;
     let mut lease_expires = None;
+    let mut paused_until: Option<u128> = None;
+    let mut pause_started: Option<u128> = None;
+    let mut waited = 0_u128;
     for (kind, body, accepted) in events {
         let accepted = *accepted;
         if accepted > snapshot_unix_ms {
@@ -33054,6 +33369,13 @@ fn fold_step_timing_open(
             continue;
         }
 
+        // A wait ends at its deadline whether or not anyone resumed.
+        if let Some(deadline) = paused_until
+            && accepted > deadline
+        {
+            started = Some(deadline);
+            end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
+        }
         if let (Some(interval_start), Some(expiry)) = (started, lease_expires)
             && accepted > expiry
         {
@@ -33072,12 +33394,15 @@ fn fold_step_timing_open(
                 // Agentless execution has no `work.claimed` event. Its reconciler-owned
                 // `working` transition is therefore the authoritative opening edge. Worker
                 // claims may also carry this projection; keeping the earliest edge is
-                // idempotent and their following work event supplies the lease.
-                if started.is_none() {
+                // idempotent and their following work event supplies the lease. A declared
+                // wait keeps the clock stopped.
+                if started.is_none() && paused_until.is_none() {
                     started = Some(accepted);
                 }
             }
             "work.claimed" => {
+                // A new claim ends any wait the previous holder declared.
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
                 if started.is_none() {
                     started = Some(accepted);
                 }
@@ -33096,6 +33421,7 @@ fn fold_step_timing_open(
                         .get("claimant")
                         .is_some_and(|claimant| !claimant.is_null()) =>
             {
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
                 if started.is_none() {
                     started = Some(accepted);
                 }
@@ -33104,7 +33430,40 @@ fn fold_step_timing_open(
                     .and_then(Value::as_u64)
                     .map(u128::from);
             }
-            "work.renewed" | "work.progress" | "work.extended" if started.is_some() => {
+            "work.renewed" | "work.progress" | "work.extended"
+                if started.is_some() || paused_until.is_some() =>
+            {
+                let clock = if kind == "work.progress" {
+                    fields.get("clock").and_then(Value::as_str)
+                } else {
+                    None
+                };
+                let wait_until = fields
+                    .get("wait_until_unix_ms")
+                    .and_then(Value::as_u64)
+                    .map(u128::from)
+                    .filter(|deadline| *deadline > accepted);
+                match (clock, wait_until) {
+                    (Some("paused"), Some(deadline)) => {
+                        // Declaring again while a wait runs spends the time so far and starts
+                        // the next span, so chained declarations draw on one budget.
+                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
+                        pause_started = Some(accepted);
+                        if let Some(interval_start) = started {
+                            let interval_end =
+                                lease_expires.map_or(accepted, |expiry| accepted.min(expiry));
+                            elapsed = elapsed
+                                .saturating_add(interval_end.saturating_sub(interval_start));
+                        }
+                        started = None;
+                        paused_until = Some(deadline);
+                    }
+                    (Some("running"), _) if paused_until.is_some() => {
+                        end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
+                        started = Some(accepted);
+                    }
+                    _ => {}
+                }
                 lease_expires = fields
                     .get("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
@@ -33118,6 +33477,7 @@ fn fold_step_timing_open(
                 }
                 started = None;
                 lease_expires = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
             }
             "step-run.state"
                 if fields
@@ -33132,11 +33492,28 @@ fn fold_step_timing_open(
                 }
                 started = None;
                 lease_expires = None;
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
             }
             _ => {}
         }
     }
-    (started, elapsed, lease_expires)
+
+    if let Some(deadline) = paused_until
+        && snapshot_unix_ms > deadline
+    {
+        started = Some(deadline);
+        end_wait(&mut waited, &mut pause_started, &mut paused_until, deadline);
+    }
+    if let Some(began) = pause_started {
+        waited = waited.saturating_add(snapshot_unix_ms.saturating_sub(began));
+    }
+    ClockFold {
+        started,
+        elapsed,
+        lease_expires,
+        paused_until,
+        waited,
+    }
 }
 
 fn apply_effective_step_state(
@@ -34154,15 +34531,17 @@ fn mission_run_view_with_enrichment_tx(
             enrich_step_queue(connection, step)?;
         } else {
             enrich_step_queue_for_reconcile_at(connection, step, now_ms())?;
-            let (started, elapsed) = step_execution_timing_at(
+            let timing = step_execution_clock_at(
                 connection,
                 &step.subject,
                 step.attempt,
                 now_ms(),
                 matches!(step.status.as_str(), "claimed" | "working"),
             )?;
-            step.execution_started_at_unix_ms = started;
-            step.execution_elapsed_ms = elapsed;
+            step.execution_started_at_unix_ms = timing.started;
+            step.execution_paused_until_unix_ms = timing.paused_until;
+            step.execution_waited_ms = timing.waited;
+            step.execution_elapsed_ms = timing.elapsed;
             step.timeout_extension_ms =
                 step_timeout_extension_at(connection, &step.subject, step.attempt, now_ms())?;
         }
@@ -39729,6 +40108,7 @@ version 2
             );
         }
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -41662,6 +42042,7 @@ version 2
                     &step,
                     action,
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/worker.one".into()),
                         incarnation: Some("worker-generation".into()),
                         summary: Some("the remote work is complete".into()),
@@ -41749,6 +42130,7 @@ version 2
                 step,
                 action,
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/worker.one".into()),
                     incarnation: Some("worker-generation".into()),
                     summary: summary.map(str::to_owned),
@@ -41766,6 +42148,7 @@ version 2
                 step,
                 "extend",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/worker.one".into()),
                     incarnation: Some("worker-generation".into()),
                     summary: None,
@@ -42763,6 +43146,7 @@ version 2
         for working in [false, true] {
             let (controller, worker, step) = replicated_step_pair();
             let request = |reason: Option<&str>, key: &str| WorkRequest {
+                wait_ms: None,
                 actor: Some("agent/worker.one".into()),
                 incarnation: Some("worker-generation".into()),
                 summary: None, reason: reason.map(str::to_owned), evidence: Vec::new(),
@@ -48004,6 +48388,7 @@ version 2
             "a closed wake must not leave an overdue reconcile deadline"
         );
         let request = |incarnation: &str, key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some(incarnation.into()),
             summary: None,
@@ -48013,6 +48398,7 @@ version 2
         };
 
         let missing = WorkRequest {
+            wait_ms: None,
             incarnation: None,
             ..request("one", "claim-without-incarnation")
         };
@@ -48165,6 +48551,7 @@ version 2
         assert_eq!(waiting.timeout_ms, Some(3_600_000));
 
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/source.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -48269,6 +48656,7 @@ mission "external-blocker" state="ready" {
         let subject = run.steps[0].subject.clone();
         store.set_step_state(&subject, "ready", None).unwrap();
         let request = |key: &str, reason: Option<&str>| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/source.ios-owner".into()),
             incarnation: Some("ios-owner-one".into()),
             summary: None,
@@ -48388,6 +48776,7 @@ version 2
             .map(|step| (step.step.clone(), step.subject.clone()))
             .collect::<BTreeMap<_, _>>();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/source.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -48759,6 +49148,7 @@ version 2
                 &step,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.worker".into()),
                     incarnation: Some("worker-one".into()),
                     summary: None,
@@ -49126,6 +49516,7 @@ mission "dispatch-repair" state="ready" {
             .find(|step| step.step == "compile/work/publish")
             .unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.planner".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -49221,6 +49612,7 @@ mission "nested-work" state="ready" {
             .find(|step| step.step == "outer/work/first")
             .unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -49295,6 +49687,7 @@ mission "nested-work" state="ready" {
         let subject = &run.steps[0].subject;
         store.set_step_state(subject, "ready", None).unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -51109,6 +51502,7 @@ mission "retry" state="ready" {
             .unwrap();
         let subject = &run.steps[0].subject;
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -51499,6 +51893,7 @@ mission "takeover" state="ready" {
                 &step,
                 "renew",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/worker.one".into()),
                     incarnation: Some("worker-generation".into()),
                     summary: None,
@@ -52860,6 +53255,7 @@ mission "summaries" state="ready" {
             .unwrap();
         let subject = &run.steps[0].subject;
         let request = |key: &str, summary: Option<&str>| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: summary.map(str::to_owned),
@@ -53086,6 +53482,7 @@ version 2
             .clone();
         store.set_step_state(&submitted, "ready", None).unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some(worker.clone()),
             incarnation: Some("worker-one".into()),
             summary: Some("the result is ready for verification".into()),
@@ -53188,6 +53585,7 @@ version 2
             .clone();
         store.set_step_state(&active, "ready", None).unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some(worker.clone()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -53296,6 +53694,7 @@ version 2
         assert_eq!(carried.claimant.as_deref(), Some(worker.as_str()));
         assert_eq!(carried.claim_incarnation.as_deref(), Some("worker-one"));
         let stranger = WorkRequest {
+            wait_ms: None,
             actor: Some(format!("agent/{}/stranger", run.id)),
             ..request("stale-generation-complete")
         };
@@ -53425,6 +53824,7 @@ version 2
 
     fn carry_request(incarnation: &str, key: &str) -> WorkRequest {
         WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some(incarnation.into()),
             summary: None,
@@ -53987,6 +54387,7 @@ version 2
             .set_step_state(&waiting.subject, "ready", None)
             .unwrap();
         let request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some(worker.clone()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -53995,6 +54396,7 @@ version 2
             idempotency_key: key.into(),
         };
         let child_request = |key: &str| WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -54216,6 +54618,7 @@ version 2
                     .subject,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.worker".into()),
                     incarnation: Some("worker-incarnation".into()),
                     summary: None,

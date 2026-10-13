@@ -38,6 +38,10 @@ pub fn refuse_person_recipient(recipient: &str) -> Result<(), St3Error> {
     Ok(())
 }
 
+fn is_zero_u128(value: &u128) -> bool {
+    *value == 0
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -2531,6 +2535,12 @@ pub struct StepRunView {
     pub carried_claimant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_started_at_unix_ms: Option<u128>,
+    /// While a declared wait has stopped the execution clock: when the wait ends on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_paused_until_unix_ms: Option<u128>,
+    /// What this attempt has spent in declared waits; a wait has a budget per attempt.
+    #[serde(default, skip_serializing_if = "is_zero_u128")]
+    pub execution_waited_ms: u128,
     #[serde(default)]
     pub execution_elapsed_ms: u128,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2728,6 +2738,10 @@ pub struct WorkRequest {
     pub reason: Option<String>,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// `work wait`: how long the execution clock stays stopped at most. Absent for every other
+    /// action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
     pub idempotency_key: String,
 }
 

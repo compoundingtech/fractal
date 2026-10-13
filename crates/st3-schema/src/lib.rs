@@ -2787,6 +2787,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("claim_expires_at_unix_ms", integer()),
             ("readiness_epoch", integer()),
             ("extend_ms", integer()),
+            ("clock", enumeration(&["paused", "running"])),
+            ("wait_until_unix_ms", integer()),
             ("handoff_key", string()),
             ("handoff_request", object()),
             ("handoff_to", reference()),
