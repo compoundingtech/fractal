@@ -1340,6 +1340,28 @@ export const ConversationHeader = /*#__PURE__*/ (() => Schema.Struct({
 export type ConversationHeader = typeof ConversationHeader.Type
 export type ConversationHeaderEncoded = typeof ConversationHeader.Encoded
 
+export const ConnectedClient = /*#__PURE__*/ (() => Schema.Struct({
+  "actor": Schema.String,
+  "client": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "connected": Schema.Boolean,
+  "device_id": optionalKey(Schema.String),
+  "device_name": optionalKey(Schema.String),
+  "follows": Schema.Array(Schema.String),
+  "id": Id,
+  "kind": Schema.Literal("connected-client"),
+  "last_seen": Timestamp,
+  "member": Schema.String,
+  "operational": optionalKey(Operational),
+  "person": Schema.String,
+  "revision": Revision,
+  "since": Timestamp,
+  "streams": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "updated_at": Timestamp,
+  "via": Schema.Literals(["local","gateway","tailscale"])
+}).annotate({ identifier: "ConnectedClient" }))()
+export type ConnectedClient = typeof ConnectedClient.Type
+export type ConnectedClientEncoded = typeof ConnectedClient.Encoded
+
 export const Device = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": optionalKey(Schema.Never), "grant_kind": optionalKey(Schema.Literal("person")), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": optionalKey(AssistantMinimalReadMode), "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": Id, "policy_revision": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))), "principal": optionalKey(Schema.Never), "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": optionalKey(Schema.Never), "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp }),
   Schema.Struct({ "expires_at": Timestamp, "grant_expires_at": optionalKey(Timestamp), "grant_id": Id, "grant_kind": Schema.Literal("assistant"), "id": Id, "kind": Schema.Literal("device"), "minimal_read_mode": AssistantMinimalReadMode, "name": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "operational": optionalKey(Operational), "person_id": optionalKey(Schema.Never), "policy_revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "principal": AssistantPrincipal, "revision": Revision, "scopes": Schema.Array(Schema.String).check(Schema.isUnique()), "sender_class": AssistantSenderClass, "session_actor": Id, "state": Schema.Literals(["active","expired","revoked"]), "updated_at": Timestamp })
@@ -3067,7 +3089,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literal("st3.client.v0"),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, PairingChallenge, PairedSession, AssistantGrant, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
