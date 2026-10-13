@@ -92,6 +92,13 @@ mod client_observations;
 mod terminal_view;
 mod work_response;
 mod published_lists;
+#[cfg(target_os = "linux")]
+mod tile_endpoint;
+#[cfg(target_os = "linux")]
+pub use tile_endpoint::{
+    SOCKET as TILE_ENDPOINT_SOCKET, spawn as spawn_tile_endpoints,
+    spawn_from as spawn_tile_endpoints_from,
+};
 pub use published_lists::start_published_lists;
 
 pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;

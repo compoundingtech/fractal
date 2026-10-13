@@ -6832,6 +6832,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
     };
+    // Tiles this daemon's user supervises reach it only through their restricted endpoint.
+    #[cfg(target_os = "linux")]
+    st3::api::spawn_tile_endpoints(state.clone());
     st3::gate_check::set_endpoint(config.socket.display().to_string());
     let reconciler = Arc::new(Reconciler::native(
         store.clone(),
