@@ -1,5 +1,5 @@
-// Generated; do not edit. Inputs: agent-trace-runtime/v1 JSON Schema without $comment, ../schema-registry/rust/Cargo.toml, ../schema-registry/rust/src/lib.rs, ../schema-registry/rust/src/numbers.rs, ../schema-registry/rust/src/runtime.rs, ../schema-registry/rust/src/bin/schema-registry-rust.rs.
-// Regenerate: pnpm run generate; sha256=d36fd2f56a9c31aa0cdad9c042af2f8280f250986b636055169d16c70f7e5411
+// Generated; do not edit. Inputs: root name AgentTraceRuntimeV1, agent-trace-runtime/v1 JSON Schema without $comment, ../schema-registry/rust/Cargo.toml, ../schema-registry/rust/src/lib.rs, ../schema-registry/rust/src/numbers.rs, ../schema-registry/rust/src/runtime.rs, ../schema-registry/rust/src/bin/schema-registry-rust.rs.
+// Regenerate: pnpm run generate; sha256=cfdd2d2cdb41b19b4d1a5910996dc4c45687e5464a6056539ded30121bb29d21
 pub mod __schema_registry_runtime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error { Invalid(String) }
