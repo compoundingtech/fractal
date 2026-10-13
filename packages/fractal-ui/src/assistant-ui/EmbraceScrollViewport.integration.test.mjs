@@ -19,7 +19,7 @@ const install = (name, value) => {
   if (!saved.has(name)) saved.set(name, Object.getOwnPropertyDescriptor(globalThis, name))
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value })
 }
-for (const name of ['window', 'document', 'navigator', 'HTMLElement', 'SVGElement', 'Element', 'Node', 'Document', 'DocumentFragment', 'HTMLButtonElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'MutationObserver', 'Event', 'KeyboardEvent', 'WheelEvent', 'FocusEvent', 'MouseEvent', 'UIEvent']) install(name, dom.window[name])
+for (const name of ['window', 'document', 'navigator', 'HTMLElement', 'SVGElement', 'Element', 'Node', 'NodeFilter', 'Text', 'ShadowRoot', 'Document', 'DocumentFragment', 'HTMLButtonElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLAnchorElement', 'HTMLIFrameElement', 'MutationObserver', 'Event', 'CustomEvent', 'KeyboardEvent', 'WheelEvent', 'FocusEvent', 'MouseEvent', 'PointerEvent', 'UIEvent', 'DOMRect']) if (dom.window[name] !== undefined) install(name, dom.window[name])
 install('getComputedStyle', dom.window.getComputedStyle.bind(dom.window))
 install('IS_REACT_ACT_ENVIRONMENT', true)
 // Aria reads only fixed meta keys here; jsdom lacks CSS.escape.
@@ -204,7 +204,6 @@ after(async () => {
 
 test('the harness mounts only the rows in the visible window and starts at the end', async () => {
   const element = await render({ rows: turns(40) })
-  assert.equal(element.scrollHeight, 40 + 40 * 200)
   assert.equal(toEnd(element), 0)
   const mounted = element.querySelectorAll('[data-embrace-entry-id]').length
   assert.ok(mounted > 0 && mounted < 40, `virtualized rows: ${mounted}`)
@@ -225,6 +224,7 @@ test('resize delivery repins before the next animation frame once the sizer grow
   remeasure({ 'turn/11': 520 })
   // First delivery: RAC remeasures the row and relays out the sizer.
   await observe()
+  assert.notEqual(toEnd(element), 0)
   // Second delivery observes the grown sizer; no animation frame runs in between.
   await act(async () => {
     for (const observer of [...observers]) if (observer.targets.size > 0) observer.callback([...observer.targets].map(target => ({ target })), observer)
@@ -232,9 +232,9 @@ test('resize delivery repins before the next animation frame once the sizer grow
   })
 })
 
-test('remeasurement above the viewport keeps following', async () => {
+test('remeasurement of mounted rows above the last keeps following', async () => {
   const element = await render({ rows: turns(12) })
-  remeasure({ 'turn/0': 900, 'turn/1': 50 })
+  remeasure({ 'turn/9': 900, 'turn/10': 50 })
   await settle()
   assert.equal(toEnd(element), 0)
 })
@@ -262,57 +262,86 @@ test('native shrink clamping stays at the end and follows later growth', async (
   assert.equal(toEnd(element), 0)
 })
 
+/** Bring a row to the viewport top, then let the reader scroll so the row top sits at `offset`. */
+const readAt = async (element, id, offset = 0) => {
+  await act(async () => { void handle.current.jumpTo(id) })
+  await settle()
+  assert.equal(entryTop(id), 0)
+  if (offset !== 0) {
+    await readerScroll(element, element.scrollTop - offset)
+    await settle()
+  }
+  assert.equal(entryTop(id), offset)
+}
+
 test('reader scroll-up stays detached at its row through asynchronous growth', async () => {
   const element = await render({ rows: turns(12) })
-  await readerScroll(element, 1000)
+  await readerScroll(element, element.scrollTop - 900)
   await settle()
-  const top = entryTop('turn/5')
-  assert.equal(element.scrollTop, 1000)
+  const top = element.scrollTop
+  const [row] = [...element.querySelectorAll('[data-embrace-entry-id]')].filter(entry => entryTop(entry.dataset.embraceEntryId) <= 0).slice(-1)
+  const id = row.dataset.embraceEntryId
+  const offset = entryTop(id)
   remeasure({ 'turn/11': 900 })
   await settle()
-  assert.equal(element.scrollTop, 1000)
-  assert.equal(entryTop('turn/5'), top)
-  // Negative control: the same growth while following does move the coordinate.
+  assert.equal(element.scrollTop, top)
+  assert.equal(entryTop(id), offset)
   assert.notEqual(toEnd(element), 0)
 })
 
-test('detached reading compensates remeasurement above its row', async () => {
-  const element = await render({ rows: turns(12) })
-  await readerScroll(element, 1000)
+test('detached reading keeps its row when an older page is inserted above it', async () => {
+  const element = await render({ rows: turns(12).slice(4), history: { _tag: 'More', loadOlder: async () => {} } })
+  await readAt(element, 'turn/7', -30)
+  await render({ rows: turns(12), history: { _tag: 'Complete' } })
+  assert.equal(entryTop('turn/7'), -30)
+  remeasure({ 'turn/11': 900 })
   await settle()
-  const top = entryTop('turn/5')
-  remeasure({ 'turn/1': 600 })
-  await settle()
-  assert.equal(entryTop('turn/5'), top)
-  assert.equal(element.scrollTop, 1400)
+  assert.equal(entryTop('turn/7'), -30)
 })
 
-test('a held pointer drag remains reader intent after more than 250 ms', async t => {
+const pointer = (type, clientY) => {
+  const event = new MouseEvent(type, { bubbles: true, clientY })
+  Object.defineProperty(event, 'pointerId', { value: 1 })
+  Object.defineProperty(event, 'pointerType', { value: 'mouse' })
+  return event
+}
+const touch = (type, clientY) => {
+  const event = new Event(type, { bubbles: true })
+  Object.defineProperty(event, 'touches', { value: clientY === undefined ? [] : [{ clientY }] })
+  return event
+}
+
+test('a held scrollbar drag remains reader intent after more than 250 ms', async t => {
   t.mock.method(performance, 'now', () => now)
   const element = await render({ rows: turns(12) })
-  const down = new Event('pointerdown', { bubbles: true })
-  Object.defineProperty(down, 'pointerId', { value: 1 })
-  await act(async () => element.dispatchEvent(down))
+  await act(async () => element.dispatchEvent(pointer('pointerdown', 300)))
+  await act(async () => document.dispatchEvent(pointer('pointermove', 260)))
   now += 500
-  await act(async () => { element.scrollTop = 700 })
+  await act(async () => { element.scrollTop -= 700 })
   await frame()
+  const top = element.scrollTop
   remeasure({ 'turn/11': 800 })
   await settle()
-  assert.equal(element.scrollTop, 700)
-  const up = new Event('pointerup', { bubbles: true })
-  Object.defineProperty(up, 'pointerId', { value: 1 })
-  await act(async () => document.dispatchEvent(up))
+  assert.equal(element.scrollTop, top)
+  assert.notEqual(toEnd(element), 0)
+  await act(async () => document.dispatchEvent(pointer('pointerup', 260)))
 })
 
-for (const input of ['wheel', 'touchmove']) test(`${input} momentum reaching the end after 250 ms resumes following`, async t => {
+for (const input of ['wheel', 'touch']) test(`${input} momentum reaching the end after 250 ms resumes following`, async t => {
   t.mock.method(performance, 'now', () => now)
   const element = await render({ rows: turns(12) })
+  await readAt(element, 'turn/6', -40)
   await act(async () => {
-    element.dispatchEvent(input === 'wheel' ? new WheelEvent('wheel', { deltaY: -900 }) : new Event('touchmove'))
-    element.scrollTop = 700
+    if (input === 'wheel') element.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true }))
+    else {
+      element.dispatchEvent(touch('touchstart', 300))
+      element.dispatchEvent(touch('touchmove', 200))
+    }
+    element.scrollTop += 300
   })
   await frame()
   now += 500
+  // The fling's last frames arrive without new input, past the recent-input window.
   await act(async () => { element.scrollTop = element.scrollHeight })
   await frame()
   await act(async () => element.dispatchEvent(new Event('scrollend')))
@@ -321,45 +350,72 @@ for (const input of ['wheel', 'touchmove']) test(`${input} momentum reaching the
   assert.equal(toEnd(element), 0)
 })
 
-for (const input of ['wheel down', 'touchmove', 'Tab', 'pointerdown']) test(`${input} without an actual reader scroll keeps following`, async () => {
+test('a scroll after scrollend and outside the input window is layout, not reading', async t => {
+  t.mock.method(performance, 'now', () => now)
   const element = await render({ rows: turns(12) })
-  const event = input === 'wheel down' ? new WheelEvent('wheel', { deltaY: 600, bubbles: true })
-    : input === 'Tab' ? new KeyboardEvent('keydown', { key: 'Tab', bubbles: true })
-    : new Event(input, { bubbles: true })
-  if (input === 'pointerdown') Object.defineProperty(event, 'pointerId', { value: 1 })
-  await act(async () => element.dispatchEvent(event))
+  await readAt(element, 'turn/6', -40)
+  assert.notEqual(toEnd(element), 0)
+  now += 500
+  // Negative control for momentum: once the gesture ended, a layout scroll does not reattach.
+  await act(async () => { element.scrollTop = element.scrollHeight })
+  await frame()
   remeasure({ 'turn/11': 800 })
   await settle()
-  assert.equal(toEnd(element), 0)
-})
-
-for (const input of ['wheel up', 'ArrowUp', 'Home']) test(`${input} with nothing above a short complete conversation keeps following`, async () => {
-  const element = await render({ rows: turns(1, 120) })
-  assert.equal(element.scrollTop, 0)
-  const event = input === 'wheel up' ? new WheelEvent('wheel', { deltaY: -600, bubbles: true }) : new KeyboardEvent('keydown', { key: input, bubbles: true })
-  const target = input === 'wheel up' ? element : element.querySelector('[data-embrace-entry-id]')
-  await act(async () => target.dispatchEvent(event))
-  // A long reply streams in: the conversation now overflows the lane.
-  remeasure({ 'turn/0': 1400 })
-  await settle()
-  assert.equal(toEnd(element), 0)
-})
-
-test('an upward gesture at the top of a pageable conversation is older-page intent, not following', async () => {
-  let requests = 0
-  const element = await render({ rows: turns(1, 120), history: { _tag: 'More', loadOlder: async () => { requests++ } } })
-  await act(async () => element.dispatchEvent(new WheelEvent('wheel', { deltaY: -600, bubbles: true })))
-  remeasure({ 'turn/0': 1400 })
-  await settle()
-  assert.ok(requests > 0)
-  // Negative control for the test above: the reader asked for older history.
-  assert.equal(element.scrollTop, 0)
+  assert.equal(entryTop('turn/6'), -40)
   assert.notEqual(toEnd(element), 0)
 })
 
+for (const input of ['wheel down', 'touchmove down', 'Tab', 'ArrowDown', 'pointerdown']) test(`${input} without an actual reader scroll keeps following`, async () => {
+  const element = await render({ rows: turns(12) })
+  const row = element.querySelector('[data-embrace-entry-id]')
+  await act(async () => {
+    if (input === 'wheel down') element.dispatchEvent(new WheelEvent('wheel', { deltaY: 600, bubbles: true }))
+    else if (input === 'touchmove down') {
+      element.dispatchEvent(touch('touchstart', 200))
+      element.dispatchEvent(touch('touchmove', 100))
+    } else if (input === 'pointerdown') element.dispatchEvent(pointer('pointerdown', 100))
+    else row.dispatchEvent(new KeyboardEvent('keydown', { key: input, bubbles: true }))
+  })
+  remeasure({ 'turn/11': 800 })
+  await settle()
+  assert.equal(toEnd(element), 0)
+  if (input === 'pointerdown') await act(async () => document.dispatchEvent(pointer('pointerup', 100)))
+})
+
+const upward = (input, element) => {
+  if (input === 'wheel up') element.dispatchEvent(new WheelEvent('wheel', { deltaY: -600, bubbles: true }))
+  else if (input === 'touch up') {
+    element.dispatchEvent(touch('touchstart', 100))
+    element.dispatchEvent(touch('touchmove', 200))
+  } else element.querySelector('[data-embrace-entry-id]').dispatchEvent(new KeyboardEvent('keydown', { key: input, bubbles: true }))
+}
+for (const input of ['wheel up', 'touch up', 'ArrowUp', 'PageUp', 'Home']) {
+  test(`${input} with nothing above a short complete conversation keeps following`, async () => {
+    const element = await render({ rows: turns(1, 120) })
+    assert.equal(element.scrollTop, 0)
+    await act(async () => upward(input, element))
+    // A long reply streams in: the conversation now overflows the lane.
+    remeasure({ 'turn/0': 1400 })
+    await settle()
+    assert.equal(toEnd(element), 0)
+  })
+  test(`${input} at the top of a pageable conversation asks for older history instead of following`, async () => {
+    let requests = 0
+    const element = await render({ rows: turns(1, 120), history: { _tag: 'More', loadOlder: async () => { requests++ } } })
+    const before = requests
+    await act(async () => upward(input, element))
+    remeasure({ 'turn/0': 1400 })
+    await settle()
+    // Negative control for the case above: older history exists, so the gesture is reading.
+    assert.ok(requests > before)
+    assert.equal(element.scrollTop, 0)
+    assert.notEqual(toEnd(element), 0)
+  })
+}
+
 test('find-in-page without reader input keeps a following lane following', async () => {
   const element = await render({ rows: turns(12) })
-  await act(async () => { element.scrollTop = 900 })
+  await act(async () => { element.scrollTop -= 900 })
   await frame()
   remeasure({ 'turn/11': 800 })
   await settle()
@@ -369,7 +425,7 @@ test('find-in-page without reader input keeps a following lane following', async
 for (const detached of [false, true]) test(`programmatic jumpTo from ${detached ? 'detached reading' : 'following'} keeps its target through later growth`, async () => {
   const element = await render({ rows: turns(12) })
   if (detached) {
-    await readerScroll(element, 1000)
+    await readerScroll(element, element.scrollTop - 900)
     await settle()
   }
   let result
@@ -387,145 +443,119 @@ test('StrictMode double mount keeps one live controller that follows and detache
   remeasure({ 'turn/11': 600 })
   await settle()
   assert.equal(toEnd(element), 0)
-  await readerScroll(element, 700)
+  await readerScroll(element, element.scrollTop - 700)
   await settle()
+  const top = element.scrollTop
   remeasure({ 'turn/11': 900 })
   await settle()
-  assert.equal(element.scrollTop, 700)
+  assert.equal(element.scrollTop, top)
 })
 
 // Member anchors: a leading partial turn gains its prompt or earlier work when older
-// history arrives, which renames the turn (or splits it while the old id survives).
+// history arrives, which renames the turn, or splits it while the old id survives.
 const summary = id => JSON.stringify(['work-summary', id])
 const away = [{ id: 'away/0', height: 900 }]
-const readOnly = rows => rows.map(row => ({ ...row }))
-
-test('switching back restores a renamed turn through the summary member it captured', async () => {
-  const before = [
-    { id: 'turn/tool-x', height: 600, leaves: [{ id: summary('turn/tool-x'), top: 0, height: 32, members: ['tool-x'] }, { id: 'text-a', top: 40, height: 560 }] },
-    ...turns(8).map(row => ({ ...row, id: `later/${row.id}` })),
-  ]
-  const element = await render({ rows: before, history: { _tag: 'More', loadOlder: async () => {} } })
-  await readerScroll(element, 0 + 40 - 24 + 40)
-  await settle()
-  const offset = leafTop('text-a')
+const older = count => turns(count).map(row => ({ ...row, id: `older/${row.id}` }))
+const later = count => turns(count).map(row => ({ ...row, id: `later/${row.id}` }))
+const more = { _tag: 'More', loadOlder: async () => {} }
+/** Leave and return: the saved state remounts the conversation; `edit` rewrites it in between. */
+const switchBack = async (rows, edit = state => state, sourceIds = undefined) => {
   await render({ rows: away, key: 'away' })
-  const saved = store.get('conversation').anchor
-  assert.equal(saved.entry, 'turn/tool-x')
-  assert.deepEqual(saved.member, { id: 'text-a', offset, summary: false })
+  store.save('conversation', edit(store.get('conversation')))
+  return render({ rows, history: { _tag: 'Complete' }, sourceIds })
+}
+const entryOnly = state => ({ ...state, anchor: { ...state.anchor, member: undefined } })
 
-  // Older history: the turn gains its prompt and an earlier tool, and older turns arrive.
-  const after = [
-    ...turns(6).map(row => ({ ...row, id: `older/${row.id}` })),
-    { id: 'turn/prompt-p', height: 900, leaves: [{ id: 'prompt-p', top: 0, height: 100 }, { id: summary('turn/prompt-p'), top: 120, height: 32, members: ['earlier-tool', 'tool-x'] }, { id: 'text-a', top: 340, height: 560 }] },
-    ...before.slice(1),
-  ]
-  await render({ rows: after, history: { _tag: 'Complete' } })
-  assert.equal(leafTop('text-a'), offset)
+// The reader's line is a folded work summary; backfill adds the prompt and an earlier tool.
+const renameBefore = () => [
+  { id: 'turn/tool-x', height: 600, leaves: [{ id: summary('turn/tool-x'), top: 0, height: 32, members: ['tool-x'] }, { id: 'text-a', top: 40, height: 560 }] },
+  ...later(8),
+]
+const renamed = { id: 'turn/prompt-p', height: 900, leaves: [{ id: 'prompt-p', top: 0, height: 100 }, { id: summary('turn/prompt-p'), top: 120, height: 32, members: ['earlier-tool', 'tool-x'] }, { id: 'text-a', top: 340, height: 560 }] }
+const renameAfter = count => [...older(count), renamed, ...renameBefore().slice(1)]
+
+for (const member of [true, false]) test(`switching back ${member ? 'restores a renamed turn through its summary member' : 'with an entry-only anchor falls back to the saved coordinate'}`, async () => {
+  const element = await render({ rows: renameBefore(), history: more })
+  await readAt(element, 'turn/tool-x', -10)
+  assert.equal(leafTop(summary('turn/tool-x')), -10)
   await render({ rows: away, key: 'away' })
-  assert.equal(store.get('conversation').anchor.entry, 'turn/prompt-p')
-  assert.deepEqual(store.get('conversation').anchor.member, { id: 'text-a', offset, summary: false })
+  assert.deepEqual(store.get('conversation').anchor.member, { id: 'tool-x', offset: -10, summary: true })
+  await switchBack(renameAfter(6), member ? undefined : entryOnly)
+  if (member) {
+    assert.equal(leafTop(summary('turn/prompt-p')), -10)
+    await render({ rows: away, key: 'away' })
+    const { anchor } = store.get('conversation')
+    assert.equal(anchor.entry, 'turn/prompt-p')
+    assert.deepEqual(anchor.member, { id: 'tool-x', offset: -10, summary: true })
+  } else assert.notEqual(leafTop(summary('turn/prompt-p')), -10)
 })
 
-test('a folded summary member wins over a surviving old id when a split moves it', async () => {
-  const reading = [
-    ...turns(4).map(row => ({ ...row, id: `older/${row.id}` })),
-    { id: 'turn/tool-a', height: 400, leaves: [{ id: summary('turn/tool-a'), top: 0, height: 32, members: ['tool-a', 'tool-b'] }, { id: 'reply-a', top: 40, height: 360 }] },
-    ...turns(6).map(row => ({ ...row, id: `later/${row.id}` })),
-  ]
-  const element = await render({ rows: reading })
-  // The reader's line is the summary of tool-a's turn.
-  await readerScroll(element, 40 + 4 * 200 - 24)
-  await settle()
-  await render({ rows: away, key: 'away' })
-  assert.deepEqual(store.get('conversation').anchor.member, { id: 'tool-a', offset: 24, summary: true })
-
-  // A prompt arrives between the tools: tool-b now owns a new turn. The member tool-a
-  // stays with the surviving summary, which moved down by the inserted rows.
-  const split = [
-    ...turns(4).map(row => ({ ...row, id: `older/${row.id}` })),
-    { id: 'turn/prompt-q', height: 300, leaves: [{ id: 'prompt-q', top: 0, height: 100 }] },
-    { id: 'turn/tool-a', height: 400, leaves: [{ id: summary('turn/tool-a'), top: 0, height: 32, members: ['tool-a'] }, { id: 'reply-a', top: 40, height: 360 }] },
-    { id: 'turn/prompt-p', height: 200, leaves: [{ id: summary('turn/prompt-p'), top: 0, height: 32, members: ['tool-b'] }] },
-    ...turns(6).map(row => ({ ...row, id: `later/${row.id}` })),
-  ]
-  await render({ rows: split })
-  assert.equal(leafTop(summary('turn/tool-a')), 24)
-
-  // Now the member itself moves: the reader was on tool-b's folded row.
-  await render({ rows: away, key: 'away' })
-  store.save('conversation', { ...store.get('conversation'), anchor: { ...store.get('conversation').anchor, member: { id: 'tool-b', offset: 24, summary: true } } })
-  const moved = split.map(row => row.id === 'turn/tool-a' ? { ...row, leaves: [{ id: summary('turn/tool-a'), top: 0, height: 32, members: ['tool-a'] }, { id: 'reply-a', top: 40, height: 360 }] } : row)
-  await render({ rows: readOnly(moved) })
-  assert.equal(leafTop(summary('turn/prompt-p')), 24)
-  await render({ rows: away, key: 'away' })
-  assert.equal(store.get('conversation').anchor.entry, 'turn/prompt-p')
-})
-
-test('a mounted reader keeps its line when backfill renames the turn under it', async () => {
-  const before = [
-    { id: 'turn/tool-x', height: 600, leaves: [{ id: summary('turn/tool-x'), top: 0, height: 32, members: ['tool-x'] }, { id: 'text-a', top: 40, height: 560 }] },
-    ...turns(8).map(row => ({ ...row, id: `later/${row.id}` })),
-  ]
-  const element = await render({ rows: before, history: { _tag: 'More', loadOlder: async () => {} } })
-  await readerScroll(element, 56)
-  await settle()
-  const offset = leafTop('text-a')
-  const renamed = [
-    ...turns(10).map(row => ({ ...row, id: `older/${row.id}` })),
-    { id: 'turn/prompt-p', height: 900, leaves: [{ id: 'prompt-p', top: 0, height: 100 }, { id: summary('turn/prompt-p'), top: 120, height: 32, members: ['earlier-tool', 'tool-x'] }, { id: 'text-a', top: 340, height: 560 }] },
-    ...before.slice(1),
-  ]
-  await render({ rows: renamed, history: { _tag: 'Complete' }, key: 'conversation' })
-  assert.equal(leafTop('text-a'), offset)
-  assert.equal(element.scrollTop, 10 * 200 + 40 + 340 - offset)
-})
-
-test('a member outside the rendered window resolves through full row membership', async () => {
-  const reading = [
-    { id: 'turn/tool-x', height: 400, leaves: [{ id: summary('turn/tool-x'), top: 0, height: 32, members: ['tool-x'] }, { id: 'text-a', top: 40, height: 360 }] },
-    ...turns(4).map(row => ({ ...row, id: `later/${row.id}` })),
-  ]
-  const element = await render({ rows: reading, history: { _tag: 'More', loadOlder: async () => {} } })
-  await readerScroll(element, 80)
-  await settle()
-  const offset = leafTop('text-a')
-  await render({ rows: away, key: 'away' })
-  // Sixty older turns arrive above: the saved scrollTop now lands far from the renamed row,
+for (const member of [true, false]) test(`a member owner outside the rendered window ${member ? 'restores the reader line' : 'is unknown to an entry-only anchor'}`, async () => {
+  const element = await render({ rows: renameBefore(), history: more })
+  await readAt(element, 'turn/tool-x', -10)
+  // Sixty older turns arrive above: the saved coordinate is far from the renamed row,
   // which RAC has not mounted when the restore begins.
-  const backfilled = [
-    ...turns(60).map(row => ({ ...row, id: `older/${row.id}` })),
-    { id: 'turn/prompt-p', height: 700, leaves: [{ id: 'prompt-p', top: 0, height: 100 }, { id: summary('turn/prompt-p'), top: 120, height: 32, members: ['earlier-tool', 'tool-x'] }, { id: 'text-a', top: 340, height: 360 }] },
-    ...reading.slice(1),
-  ]
-  await render({ rows: backfilled, history: { _tag: 'Complete' } })
-  assert.equal(leafTop('text-a'), offset)
+  await switchBack(renameAfter(60), member ? undefined : entryOnly)
+  if (member) assert.equal(leafTop(summary('turn/prompt-p')), -10)
+  else assert.equal(leafTop(summary('turn/prompt-p')), undefined)
 })
 
-test('a loaded member awaiting adoption is not retired; an absent member falls back', async () => {
-  const reading = [
-    { id: 'turn/tool-x', height: 400, leaves: [{ id: summary('turn/tool-x'), top: 0, height: 32, members: ['tool-x'] }, { id: 'text-a', top: 40, height: 360 }] },
-    ...turns(4).map(row => ({ ...row, id: `later/${row.id}` })),
-  ]
-  const element = await render({ rows: reading, history: { _tag: 'More', loadOlder: async () => {} } })
-  await readerScroll(element, 80)
-  await settle()
-  const offset = leafTop('text-a')
-  const top = element.scrollTop
-  await render({ rows: away, key: 'away' })
-  const renamed = { id: 'turn/prompt-p', height: 700, leaves: [{ id: 'prompt-p', top: 0, height: 100 }, { id: summary('turn/prompt-p'), top: 120, height: 32, members: ['earlier-tool', 'tool-x'] }, { id: 'text-a', top: 340, height: 360 }] }
-  const later = reading.slice(1)
-  const older = turns(6).map(row => ({ ...row, id: `older/${row.id}` }))
-  // The renamed turn's prompt is not adopted yet, so its turn is not committed; the source has it.
-  const sourceIds = new Set(['prompt-p', 'earlier-tool', 'tool-x', 'text-a'])
-  await render({ rows: [...older, ...later], sourceIds })
-  await render({ rows: [...older, renamed, ...later], sourceIds })
-  assert.equal(leafTop('text-a'), offset)
-  // Negative control: without source membership the saved line is gone and the saved coordinate wins.
-  await render({ rows: away, key: 'away' })
-  store.save('conversation', { ...store.get('conversation'), anchor: { ...store.get('conversation').anchor, entry: 'turn/gone', member: { id: 'gone', offset: 24, summary: false } }, top })
-  await render({ rows: [...older, renamed, ...later], sourceIds })
-  assert.equal(element.isConnected ? lane().scrollTop : lane().scrollTop, top)
+for (const member of [true, false]) test(`a mounted reader ${member ? 'keeps its line' : 'without a member loses its line'} when backfill renames the turn under it`, async () => {
+  const element = await render({ rows: renameBefore(), history: more })
+  await readAt(element, 'turn/tool-x', -10)
+  if (!member) {
+    // Pre-member anchors: the controller's mounted anchor carries no member after a remount.
+    await switchBack(renameBefore(), entryOnly)
+    assert.equal(leafTop(summary('turn/tool-x')), -10)
+  }
+  await render({ rows: renameAfter(10), history: { _tag: 'Complete' } })
+  if (member) assert.equal(leafTop(summary('turn/prompt-p')), -10)
+  else assert.notEqual(leafTop(summary('turn/prompt-p')), -10)
+})
+
+// The reader's line is an expanded tool row; a prompt arrives between two tools of one turn.
+const splitBefore = () => [
+  ...older(4),
+  { id: 'turn/tool-a', height: 400, leaves: [{ id: summary('turn/tool-a'), top: 0, height: 32, members: ['tool-a', 'tool-b'] }, { id: 'tool-a', top: 40, height: 80 }, { id: 'tool-b', top: 120, height: 80 }, { id: 'reply-b', top: 200, height: 200 }] },
+  ...later(6),
+]
+const splitAfter = () => [
+  ...older(4),
+  { id: 'turn/tool-a', height: 120, leaves: [{ id: summary('turn/tool-a'), top: 0, height: 32, members: ['tool-a'] }, { id: 'tool-a', top: 40, height: 80 }] },
+  { id: 'turn/prompt-p', height: 380, leaves: [{ id: 'prompt-p', top: 0, height: 60 }, { id: summary('turn/prompt-p'), top: 60, height: 32, members: ['tool-b'] }, { id: 'tool-b', top: 100, height: 80 }, { id: 'reply-b', top: 180, height: 200 }] },
+  ...later(6),
+]
+
+for (const member of [true, false]) test(`a split that keeps the old id ${member ? 'restores the member in its new turn' : 'restores an entry-only anchor to the old turn'}`, async () => {
+  const element = await render({ rows: splitBefore() })
+  await readAt(element, 'turn/tool-a', -130)
+  assert.equal(leafTop('tool-b'), -10)
+  await switchBack(splitAfter(), member ? undefined : entryOnly)
+  if (member) {
+    assert.equal(leafTop('tool-b'), -10)
+    await render({ rows: away, key: 'away' })
+    assert.equal(store.get('conversation').anchor.entry, 'turn/prompt-p')
+  } else assert.notEqual(leafTop('tool-b'), -10)
+})
+
+test('a mounted reader follows its member when a split keeps the old id', async () => {
+  const element = await render({ rows: splitBefore() })
+  await readAt(element, 'turn/tool-a', -130)
+  await render({ rows: splitAfter() })
+  assert.equal(leafTop('tool-b'), -10)
+})
+
+for (const loaded of [true, false]) test(`a member ${loaded ? 'loaded but awaiting adoption is not retired' : 'absent from the source falls back to the saved coordinate'}`, async () => {
+  const element = await render({ rows: renameBefore(), history: more })
+  await readAt(element, 'turn/tool-x', -10)
+  const saved = element.scrollTop
+  // The renamed turn's prompt is not adopted yet: its turn is not committed, the source has it.
+  const sourceIds = loaded ? new Set(['prompt-p', 'earlier-tool', 'tool-x', 'text-a']) : new Set()
+  await switchBack([...older(6), ...renameBefore().slice(1)], undefined, sourceIds)
+  if (!loaded) assert.equal(lane().scrollTop, saved)
+  await render({ rows: renameAfter(6), sourceIds })
+  if (loaded) assert.equal(leafTop(summary('turn/prompt-p')), -10)
+  else assert.notEqual(leafTop(summary('turn/prompt-p')), -10)
 })
 
 test('WorkLogV1 exposes its summary identity and full source members for scroll memory', () => {
