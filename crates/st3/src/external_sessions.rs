@@ -1818,8 +1818,6 @@ impl LineTimelineFold {
                 0, &timestamp(session.updated_at_unix_ms), "system", "truncation",
                 json!({
                     "reason": "the native transcript prefix is outside the bounded read window; not fetchable through this owner read",
-                    "fetchable": false,
-                    "limit_bytes": MAX_TIMELINE_BYTES,
                     "omitted_from_sequence": 0,
                     "omitted_to_sequence": 0
                 }),
@@ -3202,8 +3200,6 @@ fn opencode_timeline(session: &ExternalSession) -> Result<(Vec<Value>, u64)> {
                 "truncation",
                 json!({
                     "reason": "the native OpenCode history prefix is outside the bounded read window; not fetchable through this owner read",
-                    "fetchable": false,
-                    "limit_bytes": MAX_TIMELINE_BYTES,
                     "omitted_from_sequence": 0,
                     "omitted_to_sequence": 0
                 }),
@@ -7278,8 +7274,8 @@ mod tests {
         assert_eq!(entries.len(), 1, "no partial JSON masquerading as a record");
         let notice = &entries[0];
         assert_eq!(notice["type"], "truncation");
-        assert_eq!(notice["body"]["fetchable"], false);
-        assert_eq!(notice["body"]["limit_bytes"], MAX_TIMELINE_BYTES);
+        assert!(notice["body"].get("fetchable").is_none());
+        assert!(notice["body"].get("limit_bytes").is_none());
         assert!(
             notice["body"]["reason"]
                 .as_str()
@@ -7296,7 +7292,7 @@ mod tests {
         file.write_all(b"\n").unwrap();
         file.flush().unwrap();
         let entries = normalized_timeline(&session).unwrap();
-        assert_eq!(entries[0]["body"]["fetchable"], false);
+        assert!(entries[0]["body"].get("fetchable").is_none());
         assert!(texts(&entries).contains(&"after the oversized line"));
         let entry = entries
             .iter()
@@ -7560,7 +7556,6 @@ mod tests {
                 0, &timestamp(session.updated_at_unix_ms), "system", "truncation",
                 json!({
                     "reason": "the native transcript prefix is outside the bounded read window; not fetchable through this owner read",
-                    "fetchable": false, "limit_bytes": MAX_TIMELINE_BYTES,
                     "omitted_from_sequence": 0, "omitted_to_sequence": 0
                 }),
             ));
