@@ -728,6 +728,7 @@ mission "example/review" state="ready" {{
                         step,
                         action,
                         &st3::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),
@@ -2144,6 +2145,50 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
                     .timeout_extension_ms,
                 3_600_000
             );
+            cli_value(
+                daemon
+                    .cli(
+                        WORKER,
+                        &[
+                            "work",
+                            "wait",
+                            step,
+                            "--as",
+                            WORKER,
+                            "--incarnation",
+                            "4242:fixture",
+                            "--for",
+                            "1h",
+                            "--reason",
+                            "build slot",
+                        ],
+                    )
+                    .await,
+            );
+            daemon.restart().await;
+            let waiting = daemon.store().step_run(step).unwrap().unwrap();
+            assert_eq!(waiting.execution_started_at_unix_ms, None);
+            assert!(waiting.execution_paused_until_unix_ms.is_some());
+            assert_eq!(waiting.blocked_reason.as_deref(), Some("build slot"));
+            cli_value(
+                daemon
+                    .cli(
+                        WORKER,
+                        &[
+                            "work",
+                            "resume",
+                            step,
+                            "--as",
+                            WORKER,
+                            "--incarnation",
+                            "4242:fixture",
+                        ],
+                    )
+                    .await,
+            );
+            let running = daemon.store().step_run(step).unwrap().unwrap();
+            assert!(running.execution_started_at_unix_ms.is_some());
+            assert_eq!(running.execution_paused_until_unix_ms, None);
         }
     }
     daemon.restart().await;
@@ -4228,6 +4273,7 @@ mission "example/review" state="ready" {{
                         step,
                         action,
                         &st3::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),

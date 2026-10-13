@@ -14,9 +14,11 @@ route totals, so do not add counts across scopes. The seven action buckets are i
 
 `GET /v1/client/agents` also gets `scope: "agents-read"` rows, `method: "GET"`, with `read` set to
 `first-page`, `fresh` or `continuation` (any page with a `cursor`). A `fresh=true` first page waits
-by design, up to two seconds, until the roster refresher publishes a roster at or after the
-read's own cut. The other two answer at once from a published roster. Count the fresh row against
-its own target rather than leaving it out: the route total still includes it.
+up to two seconds for a refresh to publish at or after the read's own cut, including when the
+refresher is idle. Only a failed latest attempt with no newer attempt in flight returns the
+newest publication at once. Its original snapshot cut and publication time show its age.
+The other two answer at once from a published roster. Count the fresh row against its own
+target: the route total includes it.
 
 `scope: "agents-roster"` rows (also under route `/v1/client/agents`) time where that wait goes,
 each in its own last-512 sample, `duration_scope: "roster-stage"`. Stage `refresh` is one refresher
@@ -101,8 +103,9 @@ phone's live share is a minimum over foreground milliseconds, so it is not in th
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
 the targets, not every path's snapshot.
 
-`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo` serves it
-to the phone and the web app. An objective is a target with windows and an error budget: a p99
+`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo`, the daemon's own route
+beside `/v1/usage`, serves it to the CLI. The phone and the web app read it through a client route
+that comes later, with its capability, schema and generated clients. An objective is a target with windows and an error budget: a p99
 target may have 1% of its samples over, so `LEFT` is how much of that 1% the last hour has not
 spent; a max target has no allowance, so it is whole or empty; CPU and the database's size read
 against their own ceilings; a phone's live share against the disconnected time its minimum
