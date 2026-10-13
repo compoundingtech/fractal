@@ -391,6 +391,63 @@ fn specialized_pages_match_old_full_metadata_filters_cursors_and_randomized_name
         .unwrap()
         .is_empty()
     );
+    // Explicit named-prefix intersections: matching/nonmatching bounds and every
+    // relation of max(prefix,cursor) to the name, with real and missing cursor rows.
+    for prefix in [
+        "",
+        "doc/",
+        "doc/named",
+        name,
+        "doc/named-cursor/",
+        "doc/a",
+        "doc/z",
+        "\u{10ffff}",
+    ] {
+        for history in [false, true] {
+            for limit in [0, 1, 2, 10] {
+                parity(&store, Some(name), Some(prefix), history, None, limit);
+                for (cursor_name, index) in [
+                    (below.subject.as_str(), below.store_index),
+                    (name, middle.store_index),
+                    (above.subject.as_str(), above.store_index),
+                ] {
+                    for cursor_index in [index, 0] {
+                        parity(
+                            &store,
+                            Some(name),
+                            Some(prefix),
+                            history,
+                            Some((cursor_name, cursor_index)),
+                            limit,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // An all-maximal prefix has no upper bound. Exercise both matching and excluded
+    // named rows, including a cursor beyond the name, rather than only an empty result.
+    let maximal_name = "\u{10ffff}/tail";
+    let maximal = bind(&store, maximal_name, "maximal", 60_000, "maximal", None);
+    for prefix in ["", "\u{10ffff}", "\u{10ffff}\u{10ffff}", "doc/"] {
+        for history in [false, true] {
+            parity(&store, Some(maximal_name), Some(prefix), history, None, 10);
+            for cursor in [
+                (name, middle.store_index),
+                (maximal_name, maximal.store_index),
+                ("\u{10ffff}\u{10ffff}", 0),
+            ] {
+                parity(
+                    &store,
+                    Some(maximal_name),
+                    Some(prefix),
+                    history,
+                    Some(cursor),
+                    10,
+                );
+            }
+        }
+    }
     parity(&store, Some("doc/missing"), None, true, None, 5);
 }
 
@@ -505,9 +562,20 @@ fn assert_plans(store: &Store) {
         "core name uses default BINARY: {sql}"
     );
     for name in [None, Some("doc/target/a")] {
-        for prefix in [None, Some(""), Some("doc/target/")] {
+        for prefix in [
+            None,
+            Some(""),
+            Some("doc/target/"),
+            Some("doc/z/"),
+            Some("\u{10ffff}"),
+        ] {
             for history in [false, true] {
-                for after in [None, Some(("doc/target/a", 0))] {
+                for after in [
+                    None,
+                    Some(("doc/a", 0)),
+                    Some(("doc/target/a", 0)),
+                    Some(("doc/z", 0)),
+                ] {
                     let (old, new) = plans(store, name, prefix, history, after);
                     let context = format!("OLD={old:?} NEW={new:?}");
                     let driven = new
@@ -541,6 +609,7 @@ fn assert_plans(store: &Store) {
 fn actual_store_document_plans_seek_before_and_after_population_and_analyze() {
     let store = node();
     bind(&store, "doc/target/a", "target", 1000, "target", None);
+    println!("document-page plan stage: initial");
     assert_plans(&store);
     for n in 0..256 {
         bind(
@@ -552,8 +621,10 @@ fn actual_store_document_plans_seek_before_and_after_population_and_analyze() {
             None,
         );
     }
+    println!("document-page plan stage: populated distinct blobs");
     assert_plans(&store);
     store.connection.write().execute_batch("ANALYZE").unwrap();
+    println!("document-page plan stage: analyzed distinct blobs");
     assert_plans(&store);
 }
 
