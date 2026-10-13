@@ -18,10 +18,10 @@ use sha2::{Digest as _, Sha256};
 pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
-pub const STORAGE_VERSION: u32 = 18;
+pub use st_storage_version::STORAGE_VERSION;
 pub const LOCAL_STORAGE_SCHEMA: &str = r#"## Local checkpoint capture storage
 
-SQLite `user_version` is 18. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
+SQLite `user_version` is 19. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
 ```sql
 CREATE TABLE IF NOT EXISTS checkpoint_capture_epoch (
@@ -56,6 +56,12 @@ Capture does not read envelope signatures/holds, projection-health rows, peer/cu
 Triggers persist and increment the epoch in the mutation's own transaction on every connection, without connection-local hooks or SQL functions. Rollback rolls back the increment too. A trigger-version migration atomically drops/recreates the old predicates, increments `value`, and stores `trigger_version=3`; captures using the old guard must restart. Earlier version-18 PR-head stores receive `cut_unix_ms` and `trigger_version` columns with default zero while preserving their epoch and frontier. Version-2 stores retain their active cut/frontier through the version-3 predicate migration. Ordinary reopens preserve all bounds and do not repeat the migration.
 
 Upgrade requires the normal process restart, not a history migration; its restart duration has not been measured. Stable older binaries reject storage version 18. Earlier version-18 PR-head binaries are not rollback targets: guard version 1 cannot safely operate the cut-aware schema, and guard version 2 rejects trigger version 3 on open. Their copied stores can migrate forward only. Binary rollback requires restoring a pre-upgrade database snapshot; otherwise roll forward. No replicated claim, checkpoint rule, wire protocol, or response shape changes.
+
+## Local runtime start operations
+
+Storage version 19 adds the owner-local `local_runtime_starts` ledger and its admission/pending indexes transactionally. It retains immutable prepared input, original declaration and operation identity, dispatch/result status, revocation and verified cleanup. The ledger does not replicate or enter graph digests, checkpoints or claim backups. Unresolved operations are never trimmed. Existing request receipts precede dispatch and revocation; completion receipts commit only while their original declaration remains selected and the operation remains unrevoked.
+
+The old version-18 binary refuses version 19. Do not lower `user_version` for rollback: drain starts, revoke pending operations and verify that all producers and operation-owned runtimes have ended, preserve the ledger as evidence, then restore a consistent pre-upgrade database with its matching binary under Operations supervision. A claim-only restore does not carry cancellation tombstones and cannot safely authorize starting old unresolved producers. Roll forward if closure cannot be proved. See [seat lifecycle](../seat-lifecycle.md#pending-runtime-starts).
 "#;
 
 pub fn storage_digest() -> String {

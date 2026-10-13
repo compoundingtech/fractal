@@ -5639,6 +5639,26 @@ async fn client_agents_detail(
         )?;
         add_agent_todos(&store, &mut items, snapshot_index)?;
         overlay_agent_resources(&store, &mut items, &created_at)?;
+        for item in &mut items {
+            if let Some(subject) = item["id"].as_str()
+                && let Some(operation) = store.runtime_start_for(subject)?
+            {
+                let phase = if operation.revoked_by.is_some() { "revoked" }
+                    else if operation.finished { "completed" }
+                    else if operation.dispatched { "running" } else { "queued" };
+                let (running_jobs, revoked_running_jobs) = store.runtime_start_counts()?;
+                let (unresolved_jobs, revoked_unresolved_jobs) = store.unresolved_runtime_start_counts()?;
+                item["runtime_start"] = json!({
+                    "operation_id": operation.id, "phase": phase,
+                    "worker_running": operation.dispatched && !operation.finished,
+                    "cleanup_verified": operation.cleanup_verified,
+                    "running_jobs": running_jobs,
+                    "revoked_running_jobs": revoked_running_jobs,
+                    "unresolved_jobs": unresolved_jobs,
+                    "revoked_unresolved_jobs": revoked_unresolved_jobs,
+                });
+            }
+        }
         Ok(items)
     })
     .await?;

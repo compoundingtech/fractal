@@ -33,6 +33,8 @@ pub struct ExecGeneration {
     pub isolation_mode: String,
     #[serde(default)]
     pub scope_unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_operation: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,6 +155,7 @@ impl ExecRuntime {
             group_exited: false,
             isolation_mode: isolation_name(crate::isolation_mode()).into(),
             scope_unit: (crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
+            start_operation: env.get("ST3_START_OPERATION").cloned(),
         };
         self.write_generation(id, &generation)?;
         self.owned_children
@@ -617,6 +620,7 @@ mod tests {
             group_exited: true,
             isolation_mode: "detached".into(),
             scope_unit: None,
+            start_operation: None,
         };
         fs::create_dir_all(&runtime.state_dir).unwrap();
         runtime.write_generation("completed", &generation).unwrap();
@@ -625,6 +629,21 @@ mod tests {
             runtime.observe("completed").unwrap(),
             Some(ExecObservation::Exited(generation))
         );
+    }
+
+    #[test]
+    fn launch_operation_is_bound_to_the_persisted_exec_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        environment.insert("ST3_START_OPERATION".into(), "operation-one".into());
+        let launched = runtime.spawn("operation-proof", &crate::Launch::Argv(vec!["sh".into(), "-c".into(), "exit 0".into()]), root.path(), &environment).unwrap();
+        assert_eq!(launched.start_operation.as_deref(), Some("operation-one"));
+        let exited = wait_for_exit(&runtime, "operation-proof");
+        assert_eq!(exited.generation_id, launched.generation_id);
+        assert_eq!(exited.start_operation, launched.start_operation);
+        let reopened = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(reopened.observe("operation-proof").unwrap(), Some(ExecObservation::Exited(exited)));
     }
 
     fn wait_for_exit(runtime: &ExecRuntime, id: &str) -> ExecGeneration {

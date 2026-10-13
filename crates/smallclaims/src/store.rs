@@ -719,7 +719,7 @@ WHERE operation_id IS NOT NULL AND request_digest IS NOT NULL;
 "#;
 
 /// The store's schema version, set once the graph's and the runtime's tables exist.
-pub const SCHEMA_VERSION: &str = "PRAGMA user_version = 18;";
+pub use st_storage_version::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;
 
 /// `(host/NAME, key)` for every member incarnation fleet membership admits.
 pub type MemberRoots = BTreeSet<(String, String)>;
@@ -922,8 +922,8 @@ impl Store {
         // Reassigning user_version dirties the database header even when it is unchanged.
         // Upgrade once, then let ordinary reopens avoid that write and its durable commit.
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 18 {
-            connection.execute_batch(SCHEMA_VERSION)?;
+        if version != CURRENT_SCHEMA_VERSION {
+            connection.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
         }
         document_index::initialize(connection)?;
         connection.execute_batch(WRITE_CLOCK)?;
@@ -1509,11 +1509,11 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     anyhow::ensure!(
-        table_count == 0 || matches!(version, 10..=18),
+        table_count == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
         "this database uses an unsupported st schema; start with a new state directory"
     );
     anyhow::ensure!(
-        matches!(version, 0 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18),
+        version == 0 || (10..=CURRENT_SCHEMA_VERSION).contains(&version),
         "this database uses unsupported st schema version {version}"
     );
     Ok(())

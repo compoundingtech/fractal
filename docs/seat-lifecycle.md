@@ -379,3 +379,15 @@ any seat. A bound harness must act as itself, and rename preserves the original 
 [`examples/st3/seats`](../examples/st3/seats) has a seat file for each harness.
 
 Ordinary messages are `silent` or `wake` (the default for every sender and seat). Silent mail stays unread without waking; each real wake offers at most eight, with older mail available on demand. There is no per-seat wake policy or inferred question type. See [silent messages](st3/silent-messages.md).
+
+## Pending runtime starts
+
+Starts run on two dedicated launch workers, with one outstanding operation per seat. A blocked launch retains its slot; revocation does not free it until the backend call returns. Other reconciliation, physical stops and safety checks continue. When both workers are occupied, another start remains durably queued and completion wakes its admission.
+
+`st agents show` displays `START` with the pending operation ID and queued, running, completed or revoked phase. `START JOBS` counts this owner's running launch calls and revoked calls still running. `START OPEN` counts unresolved operations, including revoked operations whose producer or runtime closure remains unverified after their launch call returned. These detail fields are local to the runtime owner. Revoked means authority was withdrawn; it does not mean the producer or runtime has ended. No launch input or environment is exposed in this view.
+
+Stop requests revoke pending starts before physical control. An absent observation does not establish a completed stop while a launch remains unresolved. A stale or revoked completion cannot write a start-success or starting observation. If a revoked runtime publishes later, cleanup requires its recorded operation tag and exact incarnation; missing or conflicting provenance leaves the operation unresolved and raises a diagnostic. Same-name replacement identity never authorizes that cleanup.
+
+This dispatch change does not guarantee that a detached PTY producer cannot publish after revocation. That needs a producer-side cancellation boundary. A returned error or an absent runtime is not proof that the producer closed. Failed starts retain admission unless the backend proves that the exact operation created no runtime and has no producer remaining. Unresolved records survive daemon restart without replaying the launch.
+
+The additive ledger migration advances local storage to version 19. Before rollback, Operations must drain launch calls, revoke pending work and verify closure of every producer and operation-owned runtime. Preserve the upgraded database and ledger as evidence, then restore a consistent pre-upgrade database with its matching binary. Never downgrade the header in place or use a claim-only backup to erase unresolved cancellation authority. If closure cannot be established, roll forward.
