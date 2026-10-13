@@ -25,7 +25,7 @@ function Frame({ scheme, children }: { scheme: Scheme; children: React.ReactNode
 }
 
 function Sidebar({ label, height, width, onOpenAccount }: { label: string; height: Height; width: Width; onOpenAccount: (id: string) => void }) {
-  return <aside aria-label={label} data-quota-story-sidebar={width} {...stylex.props(styles.sidebar, height === 'short' ? styles.short : styles.tall, width === 208 ? styles.width208 : width === 256 ? styles.width256 : width === 320 ? styles.width320 : styles.width360)}>
+  return <aside aria-label={label} data-quota-story-sidebar={width} {...stylex.props(styles.sidebar, height === 'short' ? styles.short : styles.tall, widthStyles[width])}>
     <ul aria-label={`${label} agents`} {...stylex.props(styles.roster)}>{roster.map(name => <li key={name} {...stylex.props(styles.agent)}>{name}</li>)}</ul>
     <QuotaSidebarFooter rows={accounts} status={status} onOpenAccount={onOpenAccount} />
   </aside>
@@ -134,7 +134,7 @@ export const Tall: Story = {
     await expect(scroller.scrollHeight).toBeLessThanOrEqual(scroller.clientHeight)
     await expect(footer.getBoundingClientRect().height).toBeLessThanOrEqual(sidebar.clientHeight / 2 + 0.5)
     await expectNoNativeTitles(footer)
-    await expect(trigger).toHaveAccessibleName(/^Usage.*most pressing.*1w 100%.*cx\/harbor-lab$/)
+    await expect(trigger).toHaveAccessibleName(/^Usage 1w 100% ?, most pressing · cx\/harbor-lab$/)
     await expect(footer.textContent).not.toMatch(/unknown/i)
 
     const north = footer.querySelector<HTMLElement>('[data-quota-footer-account="north"]')!
@@ -194,7 +194,7 @@ export const Short: Story = {
     const headerHeight = trigger.getBoundingClientRect().bottom - footer.getBoundingClientRect().top
     await expect(footer.getBoundingClientRect().height).toBeLessThanOrEqual(headerHeight + 0.5)
     await expect(footer.querySelector('[data-quota-footer-pressing]')?.textContent).toContain('1w')
-    await expect(trigger).toHaveAccessibleName(/^Usage.*most pressing.*1w 100%.*cx\/harbor-lab$/)
+    await expect(trigger).toHaveAccessibleName(/^Usage 1w 100% ?, most pressing · cx\/harbor-lab$/)
     // The rule, with a control: the 13 rows need 13 × 22px plus the status line; this sidebar's half is too small, four times its height is not.
     const rowsHeight = (accounts.length + 1) * 22
     await expect(quotaFooterStartsExpanded({ panelHeight: rowsHeight, headerHeight, sidebarHeight: sidebar.clientHeight })).toBe(false)
@@ -224,13 +224,11 @@ export const Short: Story = {
     last.blur()
 
     // The choice holds after the footer re-measures a shorter and then the restored sidebar.
-    const remeasured = () => waitFor(() => expect(getComputedStyle(scroller).maxBlockSize).toBe(`${Math.floor(sidebar.clientHeight / 2 - headerHeight)}px`), settle)
-    sidebar.style.height = '200px'
-    await remeasured()
-    await expectExpanded(footer, true, 'user')
-    sidebar.style.removeProperty('height')
-    await remeasured()
-    await expectExpanded(footer, true, 'user')
+    for (const height of ['200px', '']) {
+      sidebar.style.height = height
+      await waitFor(() => expect(getComputedStyle(scroller).maxBlockSize).toBe(`${Math.floor(sidebar.clientHeight / 2 - headerHeight)}px`), settle)
+      await expectExpanded(footer, true, 'user')
+    }
     trigger.focus()
     await userEvent.keyboard(' ')
     await expectExpanded(footer, false, 'user')
@@ -279,3 +277,4 @@ const styles = stylex.create({
   agent: { height: geometry.controlMd, display: 'flex', alignItems: 'center', color: ink.fgSoft, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   caption: { margin: 0, color: ink.fgMuted },
 })
+const widthStyles: Record<Width, stylex.StyleXStyles> = { 208: styles.width208, 256: styles.width256, 320: styles.width320, 360: styles.width360 }

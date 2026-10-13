@@ -128,11 +128,10 @@ export const QuotaSidebarFooter = ({ rows, status: observation, onOpenAccount }:
     <Heading level={2} {...stylex.props(styles.heading)}>
       <Button ref={trigger} slot="trigger" data-quota-footer-trigger {...stylex.props(styles.trigger, styles.focusRing)}>
         <Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} />
-        <span {...stylex.props(styles.title)}>Usage</span>
+        <span {...stylex.props(styles.title)}>Usage</span>{' '}
         {pressing !== undefined && <span data-quota-footer-pressing {...stylex.props(styles.pressing)}>
-          <VisuallyHidden elementType="span">, most pressing </VisuallyHidden>
           <Reading meter={pressing.governing} stale={pressing.stale} bar={false} />
-          <VisuallyHidden elementType="span">{` · ${pressing.identity}`}</VisuallyHidden>
+          <VisuallyHidden elementType="span">{`, most pressing · ${pressing.identity}`}</VisuallyHidden>
         </span>}
       </Button>
     </Heading>
