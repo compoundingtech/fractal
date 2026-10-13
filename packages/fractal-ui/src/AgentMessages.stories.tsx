@@ -80,9 +80,40 @@ const rejectOldMessageRhythm = async (message: HTMLElement) => {
 const meta = { title: 'Fractal UI/Agent Messages', component: AgentMessage, parameters: { layout: 'fullscreen' }, args: { ...agentMessage, onCopyId: fn(), onLoadFull: fn(), onOpenReply: fn() }, argTypes: { scheme: { control: 'select', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } }, decorators: [(Story, context) => <main data-scheme={context.args.scheme ?? context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, (context.args.scheme ?? context.parameters.scheme) === 'light' && lightTheme, (context.args.width ?? context.parameters.width) === 1440 ? styles.wide : styles.narrow)}><Story /></main>] } satisfies Meta<AgentMessageProps & { readonly scheme?: 'dark' | 'light'; readonly width?: 440 | 1440 }>
 export default meta
 type Story = StoryObj<typeof meta>
+/** Every visible word and glyph of a message header sits inside its row box; visually hidden copies are skipped. */
+const assertHeaderInsideRow = async (article: HTMLElement) => {
+  const header = article.querySelector<HTMLElement>('[data-message-header]')!
+  const row = header.getBoundingClientRect()
+  const hidden = (element: Element | null): boolean => element !== null && element !== header && (getComputedStyle(element).clipPath !== 'none' || hidden(element.parentElement))
+  const outside: string[] = []
+  const walker = document.createTreeWalker(header, NodeFilter.SHOW_TEXT)
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    if (node.textContent!.trim() === '' || hidden(node.parentElement)) continue
+    const range = document.createRange()
+    range.selectNodeContents(node)
+    for (const rect of range.getClientRects()) if (rect.top < row.top - 1 || rect.bottom > row.bottom + 1) outside.push(`${node.textContent} ${Math.round(rect.top)}..${Math.round(rect.bottom)}`)
+  }
+  for (const glyph of header.querySelectorAll('svg')) {
+    const rect = glyph.getBoundingClientRect()
+    if (!hidden(glyph) && (rect.top < row.top - 1 || rect.bottom > row.bottom + 1)) outside.push(`svg ${glyph.getAttribute('data-icon')} ${Math.round(rect.top)}..${Math.round(rect.bottom)}`)
+  }
+  await expect(outside).toEqual([])
+}
+/** The header check rejects a counterpart that wraps onto a second line, then the restored header passes again. */
+const assertHeaderInsideRowWithControl = async (article: HTMLElement) => {
+  await assertHeaderInsideRow(article)
+  const wrap = document.createElement('span')
+  wrap.style.display = 'block'
+  wrap.textContent = 'Injected'
+  article.querySelector('[data-message-header] strong')!.append(wrap)
+  try { await expect(assertHeaderInsideRow(article)).rejects.toThrow() } finally { wrap.remove() }
+  await assertHeaderInsideRow(article)
+}
 export const Short: Story = { play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByRole('article', { name: 'Message from Parent.Review' })).toHaveAttribute('data-harness-weight', 'card')
+  // "From Parent › Review → Parent › Build · IRC" stays on the 16-high header row at every width.
+  await assertHeaderInsideRowWithControl(canvas.getByRole('article', { name: 'Message from Parent.Review' }))
   await expect(canvas.getByText('Please review the patch')).toHaveProperty('tagName', 'STRONG')
   await expect(canvas.queryByRole('button', { name: 'Show full message' })).toBeNull()
   await expect(canvas.getByText('IRC')).toBeVisible()
@@ -127,21 +158,41 @@ export const Reply: Story = { args: { replyTo: 'Parent.Question', subject: 'Rele
   await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
 } }
 const openTooltips = () => [...document.querySelectorAll<HTMLElement>('[role="tooltip"]')].map(tooltip => tooltip.textContent)
+/** Distinct rendered text lines of an element. */
+const textLineCount = (element: HTMLElement) => {
+  const range = document.createRange()
+  range.selectNodeContents(element)
+  return new Set([...range.getClientRects()].filter(rect => rect.width > 0).map(rect => Math.round(rect.top))).size
+}
+/** The open card is readable: its short label renders on one line, not one character per line. A squeezed card is rejected. */
+const assertReadableCard = async () => {
+  const card = document.querySelector<HTMLElement>('[role="tooltip"]')!
+  await expect(textLineCount(card)).toBe(1)
+  card.style.width = '0px'
+  try { await expect(textLineCount(card)).toBeGreaterThan(1) } finally { card.style.removeProperty('width') }
+  await expect(textLineCount(card)).toBe(1)
+}
 /**
- * The kit hover card is the visible path for a fact that used to be a native title: exactly one card on keyboard focus and on hover.
- * React Aria opens focus cards only in keyboard modality and hover cards only in pointer modality, so reach the target with real
- * Tab presses first, then switch to pointer modality with a real click on the page before hovering.
+ * The kit hover card is the visible path for a fact that used to be a native title: exactly one readable card on keyboard
+ * focus and on hover, and the focused trigger draws the kit focus ring. React Aria opens focus cards only in keyboard modality
+ * and hover cards only in pointer modality, so reach the target with real Tab presses first, then switch to pointer modality
+ * with a real click on the page before hovering.
  */
 const assertKitTooltip = async (target: HTMLElement, label: string) => {
   for (let step = 0; step < 12 && target.ownerDocument.activeElement !== target; step++) await userEvent.tab()
   await expect(target).toHaveFocus()
+  await expect(getComputedStyle(target).outlineStyle).toBe('solid')
+  await expect(parseFloat(getComputedStyle(target).outlineWidth)).toBeGreaterThan(0)
   await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
+  await assertReadableCard()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
   await userEvent.click(target.ownerDocument.body)
   await expect(target).not.toHaveFocus()
+  await expect(getComputedStyle(target).outlineStyle).not.toBe('solid')
   await userEvent.hover(target)
   await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
+  await assertReadableCard()
   await userEvent.unhover(target)
   await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
 }
@@ -156,6 +207,7 @@ export const ReplyMarker: Story = { args: { replyTo: 'Parent.Question', subject:
   await noTitles()
   await assertKitTooltip(marker, 'Reply to Parent.Question')
   await noTitles()
+  await assertHeaderInsideRowWithControl(canvasElement.querySelector<HTMLElement>('[data-message-variant]')!)
 } }
 export const ReplyLight440: Story = { ...Reply, parameters: { scheme: 'light', width: 440 } }
 export const ReplyDark1440: Story = { ...Reply, parameters: { scheme: 'dark', width: 1440 } }
@@ -544,6 +596,8 @@ export const ObservedCommandAndOrphanSend: Story = { render: () => <EmbraceRunti
   await expect(work.querySelectorAll('[data-tool-status]')).toHaveLength(1)
   await expect(within(work).getAllByTestId('work-log-outgoing-message')).toHaveLength(1)
   await expect(within(work).getByTestId('work-log-outgoing-message')).toHaveAttribute('data-item-id', 'orphan-send')
+  // Production composition: Tab scrolls the send row into view inside the transcript; the card must survive that scroll.
+  await assertKitTooltip(within(work).getByRole('button', { name: /Please review the release report/ }), outgoingMessage.at!)
 } }
 export const ObservedCommandAndOrphanSendLight440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'light', width: 440 } }
 export const ObservedCommandAndOrphanSendDark1440: Story = { ...ObservedCommandAndOrphanSend, parameters: { scheme: 'dark', width: 1440 } }

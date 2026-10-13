@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Promoted agent-message cards and folded outgoing delivery rows. Outgoing rows and the icon-only reply marker use no native title tooltips: the send time and the reply target show in the kit hover card on hover and keyboard focus, the send time is also the row trigger's accessible description, and a failed receipt is named by recipient and status with its reason as the description.",
+  "summary": "Promoted agent-message cards and folded outgoing delivery rows. Outgoing rows and the icon-only reply marker use no native title tooltips: the full send date and the reply target show in the kit hover card on hover and keyboard focus, the send date is also the row trigger's accessible description, and a failed receipt is named by recipient and status with its reason as the description. Send rows and the reply marker draw the kit focus ring, and incoming headers keep dotted agent ids on one line. The shared kit hover card now sizes to its text up to the tooltip maximum instead of collapsing to one character per line, and a card opened by keyboard focus reopens after the scroll that brings its trigger into view.",
   "replay": {"status": "none", "detail": "UI rendering changes do not alter replay or recovery triggers."},
   "schema": {"status": "none", "detail": "No database schema, tables, indexes or migrations change."},
   "rules": {"status": "none", "detail": "No checkpoint rules, digests or mixed-build coordination change."},

@@ -43,8 +43,8 @@ export interface AgentMessageProps {
   readonly fullMessageUnavailableReason?: string
 }
 
-/** Dotted harness identifiers preserve the parent/child relation without inventing labels. */
-export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}>{id.includes('.') ? <><span aria-hidden="true">{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></> : id}</span>
+/** Dotted harness identifiers preserve the parent/child relation without inventing labels. The parts stay one inline run: kit SVGs are block-level, so a bare chevron would break the header line. */
+export const AgentIdHierarchy = ({ id }: { readonly id: string }) => <span data-agent-id={id}>{id.includes('.') ? <><span aria-hidden="true" {...stylex.props(styles.hierarchy)}>{id.split('.').map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden elementType="span">{id}</VisuallyHidden></> : id}</span>
 
 /** Large untrusted bodies bypass Markdown parsing and mount only one bounded window. */
 const MessageBody = ({ text, foreground = false }: { readonly text: string; readonly foreground?: boolean }) => {
@@ -123,6 +123,7 @@ export interface OutgoingMessageRowProps {
   readonly message: string
   readonly recipients: readonly { readonly id: string; readonly receipt?: AgentMessageReceipt }[]
   readonly delivery: { readonly _tag: 'Single' } | { readonly _tag: 'Broadcast'; readonly recipientCount?: number }
+  /** Full reported send date, time and zone; shown only in the trigger's hover card and as its description. */
   readonly at?: string
   readonly subject?: string
   readonly onCopy?: () => void
@@ -187,6 +188,7 @@ const styles = stylex.create({
   openedBody: { marginTop: s.xs2, marginLeft: g.textColumn, paddingBlock: s.md, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.border, borderRadius: r.sm, display: 'flex', flexDirection: 'column', gap: s.md },
   openedSubject: { margin: 0, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
+  hierarchy: { display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', verticalAlign: 'top' },
   counterpart: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   direction: { flex: '0 0 auto', width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: textVars.fgMuted },
   sender: { color: textVars.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium },
@@ -199,9 +201,9 @@ const styles = stylex.create({
   subject: { margin: 0, marginTop: s.xs, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   button: { padding: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   headerAction: { flex: '0 1 auto', minWidth: 0, height: g.icon, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fgSoft, cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  replyMarker: { flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
+  replyMarker: { flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset, ':focus-visible': { outlineStyle: 'solid', outlineWidth: g.focusRing } },
   copy: { pointerEvents: 'auto', opacity: { default: 0, ':hover': 1, ':focus-visible': 1 }, flex: '0 0 auto', width: g.icon },
-  trigger: { gridColumn: '2 / 5', gridRow: 1, height: g.toolRow, minWidth: 0, display: 'grid', gridTemplateColumns: 'subgrid', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  trigger: { gridColumn: '2 / 5', gridRow: 1, height: g.toolRow, minWidth: 0, display: 'grid', gridTemplateColumns: 'subgrid', alignItems: 'center', gap: s.sm, borderWidth: 0, padding: 0, backgroundColor: surfaceVars.transparent, color: textVars.fg, textAlign: 'left', cursor: 'pointer', outlineColor: accentVars.primary, outlineOffset: g.focusOffset, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, ':focus-visible': { outlineStyle: 'solid', outlineWidth: g.focusRing } },
   excerpt: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: textVars.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   receipt: { flex: '0 1 auto', minWidth: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.denseSize, lineHeight: t.metaLeading, color: textVars.fgMuted, paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, outlineColor: accentVars.primary, outlineOffset: g.focusOffset },
   danger: { color: statusVars.dangerFg },
