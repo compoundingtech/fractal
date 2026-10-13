@@ -13,6 +13,7 @@ import { Icon, type IconName } from '../assistant-ui/composition/Icons'
 import { EmbraceRuntimeProvider } from '../assistant-ui/EmbraceRuntime'
 import type { TextItem } from '../assistant-ui/embrace-data/model'
 import { WorkLogV1 } from '../assistant-ui/taste/WorkLogV1'
+import { formatWorkDuration } from '../assistant-ui/taste/work-log'
 import { baselineTheme } from '../assistant-ui/neutral-theme'
 import { lightTheme } from '../assistant-ui/composition-theme'
 import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../assistant-ui/composition-tokens.stylex'
@@ -36,11 +37,8 @@ const clock = (at: string) => clockFormat.format(new Date(at))
 const exact = (at: string) => exactFormat.format(new Date(at))
 const isDivider = (block: TurnBlock, previous?: TurnBlock) => block.kind !== 'Seat' && (previous === undefined || Date.parse(block.at) - Date.parse(previous.at) >= 300000 || dayFormat.format(new Date(block.at)) !== dayFormat.format(new Date(previous.at)))
 const tokenCount = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
-const usd = new Intl.NumberFormat('en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const wallclock = (ms: number) => {
-  const seconds = Math.round(ms / 1000), minutes = Math.floor(seconds / 60)
-  return minutes === 0 ? `${seconds}s` : seconds % 60 === 0 ? `${minutes}m` : `${minutes}m ${seconds % 60}s`
-}
+// Spend keeps sub-cent amounts readable ($0.004, never $0.00), like the sidebar's spend count.
+const usd = new Intl.NumberFormat('en', { style: 'currency', currency: 'USD', notation: 'compact', maximumSignificantDigits: 2 })
 type SummaryPart = { readonly name: 'wallclock' | 'tokens' | 'spend'; readonly text: string } | { readonly name: 'wallclock' | 'tokens' | 'spend'; readonly pending: string }
 /** Known usage renders, Pending renders a placeholder, Unknown is omitted: never 0 and never the word. */
 function seriesPart<A>(name: SummaryPart['name'], series: TraceSeries<A>, format: (value: A) => string): SummaryPart[] {
@@ -48,7 +46,7 @@ function seriesPart<A>(name: SummaryPart['name'], series: TraceSeries<A>, format
   return series._tag === 'Pending' ? [{ name, pending: `${name === 'wallclock' ? 'Duration' : name === 'tokens' ? 'Tokens' : 'Spend'} pending` }] : []
 }
 const summaryParts = (trace: TurnTrace): SummaryPart[] => [
-  ...seriesPart('wallclock', trace.wallclockMs, wallclock),
+  ...seriesPart('wallclock', trace.wallclockMs, formatWorkDuration),
   ...seriesPart('tokens', trace.tokens, split => `${tokenCount.format(split.input + split.cacheRead + split.cacheWrite)} in / ${tokenCount.format(split.output)} out`),
   ...seriesPart('spend', trace.spend, spend => usd.format(spend.sessionUsd + spend.subagentsUsd)),
 ]
@@ -91,6 +89,9 @@ function Block({ block, previous, turn, kind, meta, placement, marker = false }:
   const placed = seat && placement !== 'M1'
   const gutter = seat && (placement === 'GL' || placement === 'GR') ? placement : undefined
   const collapsedKind = kind === 'K3' && (block.kind === 'Relay' || block.kind === 'System')
+  // A title that opens with its sender ('Session restored.') carries the w500 sender itself instead of repeating it.
+  const title = block.text.split('\n')[0] ?? ''
+  const senderLeads = title.toLowerCase().startsWith(block.sender.toLowerCase())
   React.useLayoutEffect(() => {
     const element = root.current
     if (element === null) return
@@ -123,7 +124,7 @@ function Block({ block, previous, turn, kind, meta, placement, marker = false }:
     {meta === 'M3' && isDivider(block, previous) ? <div data-time-divider {...stylex.props(styles.divider)}>{time}</div> : null}
     {meta === 'M1' && seat && !placed ? <div data-seat-meta-overlay data-affordance="reveal" {...stylex.props(styles.seatMeta)}><span data-meta-time>{time}</span>{copy}</div> : null}
     {gutter !== undefined ? <div data-seat-gutter={gutter} data-affordance="reveal" {...stylex.props(styles.seatMeta, gutter === 'GL' ? styles.gutterLeft : styles.gutterRight, gutter === 'GL' && turn === `T${3}` && styles.gutterLeftPastGlyph)}><span data-meta-time>{time}</span>{copy}</div> : null}
-    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary, meta === 'M4' && styles.trailingSummary, marker && styles.marker)}><span data-input-kind-icon aria-hidden="true" {...stylex.props(styles.summarySlot)}><Icon name={glyphs[block.kind]} scale="status" /></span><strong data-input-sender {...stylex.props(styles.summarySender)}>{block.sender}</strong><span data-input-title {...stylex.props(styles.summaryText)}><span data-input-title-run {...stylex.props(styles.summaryRun)}>{block.text.split('\n')[0]}</span></span><span data-input-chevron data-expanded={expanded || undefined} {...stylex.props(styles.summarySlot)}><Icon name="chevron-right" scale="disclosure" /></span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{expanded ? <>{header}{body}</> : null}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
+    {collapsedKind ? <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}><Button slot="trigger" {...stylex.props(styles.summary, meta === 'M4' && styles.trailingSummary, marker && styles.marker)}><span data-input-kind-icon aria-hidden="true" {...stylex.props(styles.summarySlot)}><Icon name={glyphs[block.kind]} scale="status" /></span>{senderLeads ? null : <strong data-input-sender {...stylex.props(styles.summarySender)}>{block.sender}</strong>}<span data-input-title {...stylex.props(styles.summaryText)}><span data-input-title-run {...stylex.props(styles.summaryRun)}>{senderLeads ? <><strong data-input-sender {...stylex.props(styles.leadSender)}>{title.slice(0, block.sender.length)}</strong>{title.slice(block.sender.length)}</> : title}</span></span><span data-input-chevron data-expanded={expanded || undefined} {...stylex.props(styles.summarySlot)}><Icon name="chevron-right" scale="disclosure" /></span>{meta === 'M4' && !expanded ? <span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span> : null}</Button><DisclosurePanel>{expanded ? <>{header}{body}</> : null}</DisclosurePanel></Disclosure> : <>{header}{body}</>}
     {meta === 'M1' && collapsedKind && !expanded ? <span data-collapsed-meta {...stylex.props(styles.collapsedMeta, marker && styles.markerMeta)}>{copy}<span data-meta-time>{time}</span></span> : null}
     {meta === 'M2' && !placed ? <div data-meta-time data-affordance="reveal" {...stylex.props(styles.timeOverlay, styles.gutterTime)}>{time}</div> : null}
     {meta === 'M4' && !placed && tail !== null && (!collapsedKind || expanded) ? createPortal(<span data-meta-time {...stylex.props(styles.trailing)}>{' '}{time}</span>, tail) : null}
@@ -147,9 +148,10 @@ function TurnSummary({ block, turn }: { readonly block: TurnBlock; readonly turn
 }
 
 function Lane({ args }: { args: ExploreArgs }) {
-  const variant = `${args.turn} ${args.kind} ${args.meta} ${args.placement}`
+  // The placement shares the M1 id with the M dimension, so captions and names prefix it.
+  const variant = `${args.turn} ${args.kind} ${args.meta} P:${args.placement}`
   return <section data-lane data-recommended={args.recommended || undefined} data-turn-variant={args.turn} data-kind-variant={args.kind} data-meta-variant={args.meta} data-placement-variant={args.placement} data-scheme={args.scheme} data-width={args.width} aria-label={`${variant} · ${args.scheme} · ${args.width}`} {...stylex.props(styles.lane)}>
-    <h2 {...stylex.props(styles.laneTitle)}>{args.recommended ? 'Recommended · pending ratification · ' : ''}{args.turn} · {args.kind} · {args.meta} · {args.placement} / {args.scheme} / {args.width}</h2>
+    <h2 {...stylex.props(styles.laneTitle)}>{args.recommended ? 'Recommended · pending ratification · ' : ''}{args.turn} · {args.kind} · {args.meta} · P:{args.placement} / {args.scheme} / {args.width}</h2>
     <EmbraceRuntimeProvider options={{ messages: replyItems, isRunning: false, onNew: async () => {} }}><ThreadPrimitive.Root {...stylex.props(styles.thread)}>{turnBlocks.map((block, index) => <React.Fragment key={block.id}>
       <Block block={block} previous={turnBlocks[index - 1]} turn={args.turn} kind={args.recommended && block.kind === 'System' ? 'K3' : args.kind} meta={args.meta} placement={args.placement} marker={args.recommended && block.kind === 'System'} />
       {index === 7 ? <div data-work-fixture {...stylex.props(styles.work)}><WorkLogV1 turn={workTurn} ariaLabel={`Work log · ${variant}`} /></div> : null}
@@ -214,7 +216,7 @@ function Explorer(initialArgs: ExploreArgs) {
 // Every geometry value comes from composition tokens (including the locked hierarchy step).
 const projectionCss = `
 [data-turns-explorer] [data-turn-content] p:last-child { margin-bottom: 0; }
-[data-turns-explorer] [data-meta="M4"] [data-turn-content] p:last-child { padding-inline-end: ${geometry.trailingWidth}; }
+[data-turns-explorer] [data-meta="M4"]:is(:not([data-seat-placement]), [data-seat-placement="M1"]) [data-turn-content] p:last-child { padding-inline-end: ${geometry.trailingWidth}; }
 [data-turns-explorer] [data-turn-block] [data-affordance="reveal"] { opacity: 0; }
 [data-turns-explorer] [data-turn-block][data-hovered] [data-affordance="reveal"],
 [data-turns-explorer] [data-turn-block]:focus-within [data-affordance="reveal"],
@@ -280,9 +282,11 @@ const styles = stylex.create({
   // A beside-the-text gutter takes no row, so the block keeps the plain 8px gap.
   gutterBlockLeft: { marginTop: { default: `calc(-1 * ${s.xs})`, '@container (min-width: 836px)': 0 } },
   gutterBlockRight: { marginTop: { default: `calc(-1 * ${s.xs})`, '@container (min-width: 880px)': 0 } },
-  // S: one dim, always-visible line closing the turn; it wraps at 440 instead of clipping.
-  summaryRow: { display: 'flex', alignItems: 'center', gap: s.md, minHeight: t.metaLeading, marginTop: `calc(-1 * ${s.xs})`, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
+  // S: one dim, always-visible Marker closing the turn (E42: 20px, 12/16 type, 8px after the turn's last block); it
+  // wraps at 440 instead of clipping.
+  summaryRow: { display: 'flex', alignItems: 'center', gap: s.md, minHeight: t.uiLeading, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   summaryLine: { minWidth: 0, flex: '0 1 auto', fontVariantNumeric: 'tabular-nums' },
+  leadSender: { fontWeight: t.weightMedium },
   stackedRow: { height: g.toolRow },
   identityClipControl: { width: g.controlLg, maxWidth: '100%', fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap' },
   ellipsisLine: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

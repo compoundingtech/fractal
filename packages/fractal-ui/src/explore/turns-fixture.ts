@@ -16,7 +16,7 @@ export const turnBlocks: readonly TurnBlock[] = [
   { id: 'reply-resume', kind: 'Seat', sender: 'worktree/mutationlane', verified: true, at: '2026-10-07T09:49:00Z', text: "Before your correction arrived, the resume nudge led me to do two things:\n\n- **Re-filed decision:** I re-filed q4 as Q1 (record `137j9t`) in this seat's decision store. I didn't withdraw it because it is the same question as before, not a new one. Michelle can answer it or ignore it when he resumes this seat.\n- **Message:** I sent the manager a summary of that question (message `4517c7f8ccbd84e6`).\n\nNothing else changed. Everything needed to resume is in `tmp/mutation-lane-review/`." },
   { id: 'human', kind: 'Person', sender: 'Alex', verified: true, at: '2026-10-07T09:51:00Z', text: 'Keep pending-only coverage. Please include the keyboard path in the review.\n\n— Alex' },
   { id: 'mail', kind: 'Agent', sender: 'Workspace.Review', verified: false, subject: 'Refresh the retained review', at: '2026-10-07T09:52:00Z', text: 'The review bridge now keeps typed choices. Run `review refresh` once in the owning seat. It opens a typed card for each pending ask and cancels the old mirror only after the card exists. If your shell reports an older command, use the current seat binary. Report failures to the review owner.' },
-  { id: 'notice', kind: 'System', sender: 'Session', verified: true, at: '2026-10-07T09:53:00Z', text: 'Restored from durable notes; retained messages are available.' },
+  { id: 'notice', kind: 'System', sender: 'Session', verified: true, at: '2026-10-07T09:53:00Z', text: 'Session restored. Durable notes and retained messages are available.' },
 ]
 export const replyItems: readonly (TextItem & { role: 'assistant' })[] = turnBlocks.filter(block => block.kind === 'Seat').map(block => ({ _tag: 'Text', role: 'assistant', id: block.id, text: block.text, attachments: [], streaming: false, at: block.at }))
 export const workTurn: WorkLogTurn = { durationMs: 9000, running: false, failed: false, interrupted: false, commands: 1, calls: [{ id: 'review-read', kind: 'read', title: 'Read retained review', argsSummary: 'notes/mutation-review/', status: 'success', startedAt: '2026-10-07T09:50:00Z', endedAt: '2026-10-07T09:50:09Z', detail: 'The retained review contains the pending coverage choice and the keyboard path.' }] }
@@ -32,10 +32,10 @@ export interface TokenSplit { readonly input: number; readonly cacheRead: number
 export interface SpendTotals { readonly sessionUsd: number; readonly subagentsUsd: number }
 /** One turn's usage: wallclock from the trigger to the reply, its token split and its spend. */
 export interface TurnTrace { readonly wallclockMs: TraceSeries<number>; readonly tokens: TraceSeries<TokenSplit>; readonly spend: TraceSeries<SpendTotals> }
-// Synthetic usage covering every series state: all Known; Unknown wallclock; Unknown spend; Pending tokens.
+// Synthetic usage covering every series state: all Known; Unknown wallclock with sub-cent spend; Unknown spend; Pending tokens.
 export const turnTraces: Readonly<Record<string, TurnTrace>> = {
   'reply-hold': { wallclockMs: { _tag: 'Known', value: 108000 }, tokens: { _tag: 'Known', value: { input: 3100, cacheRead: 18400, cacheWrite: 1200, output: 640 } }, spend: { _tag: 'Known', value: { sessionUsd: 0.21, subagentsUsd: 0 } } },
-  'reply-release': { wallclockMs: { _tag: 'Unknown', reason: 'not-retained' }, tokens: { _tag: 'Known', value: { input: 900, cacheRead: 21600, cacheWrite: 0, output: 210 } }, spend: { _tag: 'Known', value: { sessionUsd: 0.06, subagentsUsd: 0 } } },
+  'reply-release': { wallclockMs: { _tag: 'Unknown', reason: 'not-retained' }, tokens: { _tag: 'Known', value: { input: 900, cacheRead: 21600, cacheWrite: 0, output: 210 } }, spend: { _tag: 'Known', value: { sessionUsd: 0.004, subagentsUsd: 0 } } },
   'reply-routing': { wallclockMs: { _tag: 'Known', value: 131000 }, tokens: { _tag: 'Known', value: { input: 2400, cacheRead: 22800, cacheWrite: 600, output: 1180 } }, spend: { _tag: 'Unknown', reason: 'not-attributed' } },
   'reply-resume': { wallclockMs: { _tag: 'Known', value: 124000 }, tokens: { _tag: 'Pending' }, spend: { _tag: 'Known', value: { sessionUsd: 0.38, subagentsUsd: 0.04 } } },
 }
