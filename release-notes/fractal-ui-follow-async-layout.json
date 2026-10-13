@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "fractal-ui virtual transcripts keep following through asynchronous layout changes, and an upward gesture with nothing above no longer leaves following",
+  "summary": "fractal-ui virtual transcripts no longer leave following on an upward gesture with nothing above, and a jsdom suite now covers following through asynchronous layout changes",
   "replay": {
     "status": "none",
     "detail": "No replay or rebuild."
