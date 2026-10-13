@@ -148,23 +148,26 @@ impl<R: RuntimeControl> Reconciler<R> {
                 guard()?;
                 backend_entered = true;
                 runtime.start_guarded(&prepared.launch_member, &guard)?;
-                let observation = if prepared.member.terminal {
-                    runtime.snapshot_ptys().ok().and_then(|items| items.into_iter().find(|o| o.runtime_id == prepared.member.runtime_id))
-                } else { runtime.observe_exec(&prepared.member.runtime_id).ok().flatten() };
+                let (observation, observation_error) = match runtime.observe_start(&prepared.launch_member) {
+                    Ok(observation) => (observation, None),
+                    Err(error) => (None, Some(format!("{error:#}"))),
+                };
                 let incarnation = observation.and_then(|o| o.incarnation_id);
                 let (verified, verification_error) = match incarnation.as_deref() {
                     Some(incarnation) => match runtime.start_operation(&prepared.member.runtime_id, prepared.member.terminal, incarnation) {
                         Ok(operation) => (operation.as_deref() == Some(id.as_str()), None),
                         Err(error) => (false, Some(format!("{error:#}"))),
                     },
-                    None => (false, None),
+                    None => (false, observation_error),
                 };
                 Ok((incarnation, verified, verification_error))
             });
             let mut result = match result {
-                Ok((incarnation, verified, error)) => serde_json::json!({"incarnation": incarnation, "verification": if verified {"operation-incarnation"} else {"launch-accepted-unverified"}, "verification_error": error}),
+                Ok((incarnation, verified, error)) => serde_json::json!({"incarnation": if verified {incarnation.clone()} else {None}, "candidate_incarnation": incarnation, "verification": if verified {"operation-incarnation"} else {"launch-accepted-unverified"}, "verification_error": error}),
                 Err(error) => {
-                    let (closed, verification_error) = if !backend_entered { (true, None) }
+                    let rejected = error.downcast_ref::<st_runtime::StartRejected>()
+                        .is_some_and(|proof| proof.operation.as_deref() == Some(id.as_str()));
+                    let (closed, verification_error) = if !backend_entered || rejected { (true, None) }
                         else { match runtime.start_operation_closed(&prepared.launch_member) {
                             Ok(closed) => (closed, None),
                             Err(error) => (false, Some(format!("{error:#}"))),
@@ -178,7 +181,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             result["subject"] = Value::from(subject.clone());
             result["origin"] = Value::from(store.origin());
             result["owner"] = Value::from(owner);
-            result["phase"] = Value::from(if result["error"].is_string() { "failed" } else { "completed" });
+            result["phase"] = Value::from(if result["error"].is_string() { "failed" } else if result["verification"] == "operation-incarnation" { "completed" } else { "unknown" });
             result["expected_incarnation"] = serde_json::json!(prepared.expected_incarnation);
             result["runtime_kind"] = Value::from(if prepared.member.terminal { "pty" } else { "exec" });
             result["desired_token"] = Value::from(prepared.desired_token);
@@ -289,6 +292,55 @@ impl<R: RuntimeControl> Reconciler<R> {
         if operation.finished && !operation.applied {
             let revoked = self.store.runtime_start_revoked(&operation.id)? || !current;
             if !revoked {
+                if operation.result.as_ref().is_some_and(|result| {
+                    !result["error"].is_string()
+                        && result["verification"] != "operation-incarnation"
+                }) {
+                    let observation = self.runtime.observe_start(&prepared.launch_member)?;
+                    if let Some(incarnation) = observation.and_then(|item| item.incarnation_id) {
+                        if self
+                            .runtime
+                            .start_operation(
+                                &prepared.member.runtime_id,
+                                prepared.member.terminal,
+                                &incarnation,
+                            )?
+                            .as_deref()
+                            != Some(operation.id.as_str())
+                        {
+                            return Ok(());
+                        }
+                        if !self
+                            .store
+                            .verify_runtime_start(&operation.id, &incarnation)?
+                        {
+                            return Ok(());
+                        }
+                        let result = operation
+                            .result
+                            .as_mut()
+                            .context("start finished without result")?;
+                        result["incarnation"] = Value::from(incarnation);
+                        result["verification"] = Value::from("operation-incarnation");
+                        result["phase"] = Value::from("completed");
+                    } else {
+                        if !self
+                            .runtime
+                            .start_operation_closed(&prepared.launch_member)?
+                            || !self.store.close_unverified_runtime_start(&operation.id)?
+                        {
+                            return Ok(());
+                        }
+                        let result = operation
+                            .result
+                            .as_mut()
+                            .context("start finished without result")?;
+                        result["error"] = Value::from("producer closed without a verified launch");
+                        result["producer_closed"] = Value::from(true);
+                        result["verification"] = Value::from("producer-closed");
+                        result["phase"] = Value::from("failed");
+                    }
+                }
                 let result = operation
                     .result
                     .as_ref()
@@ -469,6 +521,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             "exited" | "stopped" | "vanished"
         ) && operation.finished
         {
+            if !member.terminal
+                && !self
+                    .runtime
+                    .start_operation_closed(&prepared.launch_member)?
+            {
+                return Ok(());
+            }
             self.store.runtime_start_cleanup_verified(&operation.id)?;
             self.start_changed(&operation.subject);
             return Ok(());

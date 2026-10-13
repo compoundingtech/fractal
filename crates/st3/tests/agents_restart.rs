@@ -26,6 +26,11 @@ struct Runtime {
     snapshot_unavailable: Mutex<bool>,
 }
 impl RuntimeControl for Runtime {
+    fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.starts.lock().unwrap().iter().enumerate()
+            .find(|(index, member)| member.runtime_id == id && incarnation == format!("fixture:{}", index + 1))
+            .and_then(|(_, member)| member.tags.get("st3.start-operation").cloned()))
+    }
     fn start_operation_closed(&self, _: &MemberSpec) -> anyhow::Result<bool> {
         // Rejected fixture starts create neither a runtime nor a detached producer.
         Ok(true)

@@ -13,6 +13,8 @@ struct BarrierRuntime {
     operations: Mutex<HashMap<String, String>>,
     started: mpsc::UnboundedSender<String>,
     reject_gates: AtomicBool,
+    verification_hidden: AtomicBool,
+    provenance_error: AtomicBool,
 }
 
 impl RuntimeControl for BarrierRuntime {
@@ -21,6 +23,28 @@ impl RuntimeControl for BarrierRuntime {
     }
     fn observe_exec(&self, id: &str) -> Result<Option<RuntimeObservation>> {
         self.inner.observe_exec(id)
+    }
+    fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
+        if self.verification_hidden.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if self
+            .operations
+            .lock()
+            .unwrap()
+            .contains_key(&member.runtime_id)
+        {
+            Ok(self
+                .inner
+                .ptys
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|item| item.runtime_id == member.runtime_id)
+                .cloned())
+        } else {
+            self.inner.observe_start(member)
+        }
     }
     fn start(&self, member: &MemberSpec) -> Result<()> {
         self.start_guarded(member, &|| Ok(()))
@@ -67,8 +91,12 @@ impl RuntimeControl for BarrierRuntime {
         _terminal: bool,
         incarnation: &str,
     ) -> Result<Option<String>> {
+        anyhow::ensure!(
+            !self.provenance_error.load(Ordering::Acquire),
+            "fixture provenance unavailable"
+        );
         if incarnation != "blocked-start-incarnation" {
-            return Ok(None);
+            return self.inner.start_operation(id, _terminal, incarnation);
         }
         Ok(self.operations.lock().unwrap().get(id).cloned())
     }
@@ -201,6 +229,8 @@ fn fixture(
         operations: Mutex::default(),
         started,
         reject_gates: AtomicBool::new(false),
+        verification_hidden: AtomicBool::new(false),
+        provenance_error: AtomicBool::new(false),
     });
     let reconciler = Arc::new(Reconciler::new(
         store.clone(),
@@ -266,6 +296,8 @@ agent "example/worker" { workspace "/tmp"; command "true" }
         operations: Mutex::default(),
         started,
         reject_gates: AtomicBool::new(false),
+        verification_hidden: AtomicBool::new(false),
+        provenance_error: AtomicBool::new(false),
     });
     let notify = Arc::new(Notify::new());
     let reconciler = Arc::new(
@@ -673,4 +705,208 @@ async fn asynchronous_gate_start_failures_are_broken_checks_without_relaunch() {
     assert!(matches!(llm(), GateOutcome::Broken(_)));
     assert!(matches!(llm(), GateOutcome::Broken(_)));
     assert_eq!(runtime.inner.starts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn accepted_but_unverified_starts_retain_admission_until_exact_verification_or_retirement() {
+    for revoke in [false, true] {
+        let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+            "verification-start",
+        );
+        runtime.verification_hidden.store(true, Ordering::Release);
+        assert!(launch(&reconciler, "agent/example/worker"));
+        tokio::time::timeout(Duration::from_secs(30), entered.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        release.0.send(()).unwrap();
+        workers_done(&reconciler).await;
+        reconciler.reconcile_start_jobs().unwrap();
+        let operation = store
+            .runtime_start_for("agent/example/worker")
+            .unwrap()
+            .unwrap();
+        assert!(operation.finished && !operation.applied && !operation.receipted);
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (1, 0));
+        assert!(!launch(&reconciler, "agent/example/worker"));
+        assert!(
+            store
+                .observations_for("agent/example/worker", "runtime.action.succeeded")
+                .unwrap()
+                .is_empty()
+        );
+        if revoke {
+            reconciler.revoke_start("agent/example/worker").unwrap();
+        }
+        runtime.verification_hidden.store(false, Ordering::Release);
+        runtime
+            .operations
+            .lock()
+            .unwrap()
+            .insert("example.worker".into(), "foreign-operation".into());
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(
+            store
+                .runtime_start_for("agent/example/worker")
+                .unwrap()
+                .is_some()
+        );
+        assert!(runtime.inner.stops.lock().unwrap().is_empty());
+        runtime
+            .operations
+            .lock()
+            .unwrap()
+            .insert("example.worker".into(), operation.id.clone());
+        runtime.provenance_error.store(true, Ordering::Release);
+        reconciler.reconcile_start_jobs().unwrap();
+        assert!(
+            store
+                .runtime_start_for("agent/example/worker")
+                .unwrap()
+                .is_some()
+        );
+        runtime.provenance_error.store(false, Ordering::Release);
+        reconciler.reconcile_start_jobs().unwrap();
+        if revoke {
+            assert_eq!(*runtime.inner.stops.lock().unwrap(), ["example.worker"]);
+            runtime.inner.ptys.lock().unwrap()[0].status = "exited".into();
+            reconciler.reconcile_start_jobs().unwrap();
+            assert!(
+                store
+                    .observations_for("agent/example/worker", "runtime.action.succeeded")
+                    .unwrap()
+                    .is_empty()
+            );
+        } else {
+            let succeeded = store
+                .observations_for("agent/example/worker", "runtime.action.succeeded")
+                .unwrap();
+            assert_eq!(succeeded.len(), 1);
+            assert_eq!(
+                succeeded[0].body["fields"]["incarnation_id"],
+                "blocked-start-incarnation"
+            );
+            assert!(
+                succeeded[0].body["evidence"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|evidence| evidence == &operation.body["start_request"])
+            );
+        }
+        assert!(
+            store
+                .runtime_start_for("agent/example/worker")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+    }
+}
+
+#[test]
+fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_seat() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    for failure in ["missing-program", "missing-cwd"] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
+        let runtime = Arc::new(NativeRuntime::new(
+            root.path(),
+            None,
+            Path::new("unused-pty"),
+        ));
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        // Exercise NativeRuntime's producer boundary directly through the durable jobs.
+        // The ordinary exec member preparation wraps its command in the st3 driver;
+        // a missing command inside that wrapper is a later readiness failure.
+        let dispatch = |desired: &DesiredSubject| {
+            let member = desired.member.as_ref().unwrap().clone();
+            reconciler.dispatch_start(start_jobs::PreparedStart {
+                subject: desired.clone(),
+                launch_member: member.clone(),
+                member,
+                reason: "native producer closure regression".into(),
+                request: None,
+                desired_token: reconciler.launch_token(&desired.subject).unwrap(),
+                selected_token: store.selected_desired_token(&desired.subject).unwrap(),
+                placement_evidence: Vec::new(),
+                start_request: String::new(),
+                expected_incarnation: None,
+                resume_operation: None,
+            })
+        };
+        let cwd = if failure == "missing-cwd" {
+            root.path().join("missing-cwd")
+        } else {
+            root.path().to_owned()
+        };
+        let program = if failure == "missing-program" {
+            root.path().join("missing-program").display().to_string()
+        } else {
+            "/bin/sleep".into()
+        };
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nexec \"example/rejected\" {{ workspace {:?}; argv {:?} \"1000\"; }}",
+                cwd.display().to_string(),
+                program
+            ),
+            "rejected-native",
+        );
+        let desired = store
+            .desired_subjects_named(&["exec/example/rejected".into()])
+            .unwrap()
+            .remove(0);
+        assert!(dispatch(&desired).is_err());
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
+        let result: String = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT result FROM local_runtime_starts WHERE subject=?1 ORDER BY id DESC LIMIT 1",
+                [&desired.subject],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&result).unwrap()["producer_closed"],
+            true
+        );
+        apply_source(
+            &store,
+            &format!(
+                "version 2\nexec \"example/rejected\" {{ workspace {:?}; argv \"/bin/sleep\" \"1000\"; }}",
+                root.path().display().to_string()
+            ),
+            "valid-native",
+        );
+        let desired = store
+            .desired_subjects_named(&["exec/example/rejected".into()])
+            .unwrap()
+            .remove(0);
+        assert!(dispatch(&desired).unwrap());
+        assert!(store.runtime_start_for(&desired.subject).unwrap().is_none());
+        let observation = runtime
+            .observe_exec(&desired.member.as_ref().unwrap().runtime_id)
+            .unwrap()
+            .unwrap();
+        runtime
+            .kill(
+                &observation.runtime_id,
+                false,
+                observation.incarnation_id.as_deref(),
+            )
+            .unwrap();
+    }
 }

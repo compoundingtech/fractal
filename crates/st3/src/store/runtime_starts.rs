@@ -150,6 +150,12 @@ impl Store {
                 if operation.revoked_by.is_some() || operation.applied || !operation.finished {
                     return Ok(false);
                 }
+                if operation.result.as_ref().is_some_and(|result| {
+                    !result["error"].is_string()
+                        && result["verification"] != "operation-incarnation"
+                }) {
+                    return Ok(false);
+                }
                 let selected =
                     current_desired_row_tx(tx, &operation.subject)?.map(|row| row.claim_id);
                 let expected = operation.body["selected_token"].as_str().map(str::to_owned);
@@ -369,11 +375,36 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn verify_runtime_start(&self, id: &str, incarnation: &str) -> Result<bool> {
+        self.connection.batched(|tx| -> Result<bool> {
+            Ok(tx.execute(
+                "UPDATE local_runtime_starts SET result=json_set(result,
+                    '$.incarnation',?2,'$.verification','operation-incarnation','$.phase','completed')
+                 WHERE id=?1 AND finished=1 AND applied=0 AND receipted=0
+                    AND revoked_by IS NULL AND json_extract(result,'$.error') IS NULL",
+                params![id, incarnation])? == 1)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
+    pub(crate) fn close_unverified_runtime_start(&self, id: &str) -> Result<bool> {
+        self.connection.batched(|tx| -> Result<bool> {
+            Ok(tx.execute(
+                "UPDATE local_runtime_starts SET cleanup_verified=1, result=json_set(result,
+                    '$.error','producer closed without a verified launch',
+                    '$.producer_closed',json('true'),'$.verification','producer-closed','$.phase','failed')
+                 WHERE id=?1 AND finished=1 AND applied=0 AND receipted=0
+                    AND revoked_by IS NULL AND json_extract(result,'$.error') IS NULL",
+                [id])? == 1)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
     pub fn runtime_start_applied(&self, id: &str) -> Result<()> {
         self.connection
             .batched(|tx| {
                 tx.execute(
-                    "UPDATE local_runtime_starts SET applied=1 WHERE id=?1",
+                    "UPDATE local_runtime_starts SET applied=1 WHERE id=?1 AND finished=1
+                        AND (revoked_by IS NOT NULL OR json_extract(result,'$.error') IS NOT NULL
+                            OR json_extract(result,'$.verification')='operation-incarnation')",
                     [id],
                 )?;
                 release_evidence(tx, id)
@@ -522,8 +553,15 @@ mod tests {
         let start = operation("one", subject, None);
         store.admit_runtime_start(&mut start.clone(), 2).unwrap();
         store
-            .finish_runtime_start("one", &serde_json::json!({"incarnation": "one"}))
+            .finish_runtime_start("one", &serde_json::json!({"incarnation": null, "verification": "launch-accepted-unverified"}))
             .unwrap();
+        assert!(
+            !store
+                .apply_runtime_start_result("one", &[receipt(subject)])
+                .unwrap()
+        );
+        assert!(store.runtime_start_for(subject).unwrap().is_some());
+        assert!(store.verify_runtime_start("one", "one").unwrap());
         assert!(
             store
                 .apply_runtime_start_result("one", &[receipt(subject)])

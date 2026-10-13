@@ -342,6 +342,14 @@ pub struct RuntimeObservation {
 pub trait RuntimeControl: Send + Sync + 'static {
     fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>>;
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>>;
+    /// Inspect the resulting runtime. Callers must still verify its operation provenance.
+    fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
+        if member.terminal {
+            Ok(self.snapshot_ptys()?.into_iter().find(|item| item.runtime_id == member.runtime_id))
+        } else {
+            self.observe_exec(&member.runtime_id)
+        }
+    }
     fn start(&self, member: &MemberSpec) -> Result<()>;
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         guard()?;
@@ -609,6 +617,20 @@ impl RuntimeControl for NativeRuntime {
         self.start_checked(member, Some(guard))
     }
 
+    fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
+        let Some(operation) = member.tags.get(start_jobs::OPERATION_TAG) else {
+            return Ok(false);
+        };
+        if member.terminal {
+            // The current PTY producer has no operation-bound closure acknowledgment.
+            return Ok(false);
+        }
+        Ok(matches!(self.exec.observe(&member.runtime_id)?,
+            Some(st_runtime::ExecObservation::Exited(generation))
+                if generation.start_operation.as_ref() == Some(operation)
+                    && generation.group_exited))
+    }
+
     fn stop(
         &self,
         runtime_id: &str,
@@ -682,6 +704,25 @@ impl NativeRuntime {
         member: &MemberSpec,
         guard: Option<&dyn Fn() -> Result<()>>,
     ) -> Result<()> {
+        let mut producer_entered = false;
+        self.start_checked_inner(member, guard, &mut producer_entered)
+            .map_err(|error| {
+                if producer_entered {
+                    error
+                } else {
+                    error.context(st_runtime::StartRejected {
+                        operation: member.tags.get(start_jobs::OPERATION_TAG).cloned(),
+                    })
+                }
+            })
+    }
+
+    fn start_checked_inner(
+        &self,
+        member: &MemberSpec,
+        guard: Option<&dyn Fn() -> Result<()>>,
+        producer_entered: &mut bool,
+    ) -> Result<()> {
         let executable = launch_executable()?;
         let environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
@@ -730,6 +771,7 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
+                    *producer_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
                         &launch,
@@ -743,6 +785,7 @@ impl NativeRuntime {
                         guard,
                     )
                 } else {
+                    *producer_entered = true;
                     runtime.spawn_after(
                         &member.runtime_id,
                         &launch,
@@ -759,6 +802,7 @@ impl NativeRuntime {
                 if let Some(guard) = guard {
                     guard()?;
                 }
+                *producer_entered = true;
                 runtime.spawn(
                     &member.runtime_id,
                     &launch,
@@ -773,6 +817,7 @@ impl NativeRuntime {
             if let Some(guard) = guard {
                 guard()?;
             }
+            *producer_entered = true;
             self.exec
                 .spawn(&member.runtime_id, &launch, &cwd, &environment)
                 .map(|_| ())
@@ -16982,6 +17027,26 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
+            // This fixture models launch effects separately from planner observations,
+            // which individual tests replace to exercise lifecycle transitions.
+            Ok(self.started_members.lock().unwrap().iter().rev()
+                .find(|started| started.tags.get(start_jobs::OPERATION_TAG)
+                    == member.tags.get(start_jobs::OPERATION_TAG))
+                .map(|started| RuntimeObservation {
+                    runtime_id: started.runtime_id.clone(),
+                    terminal: started.terminal,
+                    status: "running".into(),
+                    exit_code: None,
+                    incarnation_id: Some(format!("fake-start:{}", started.tags[start_jobs::OPERATION_TAG])),
+                }))
+        }
+        fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> Result<Option<String>> {
+            Ok(self.started_members.lock().unwrap().iter().find(|member|
+                member.runtime_id == id && member.tags.get(start_jobs::OPERATION_TAG)
+                    .is_some_and(|operation| incarnation == format!("fake-start:{operation}")))
+                .and_then(|member| member.tags.get(start_jobs::OPERATION_TAG).cloned()))
+        }
         fn start_operation_closed(&self, _member: &MemberSpec) -> Result<bool> {
             // This fixture spawns no process or detached producer. Observable mocked
             // runtimes are still retired through the normal incarnation-fenced path.

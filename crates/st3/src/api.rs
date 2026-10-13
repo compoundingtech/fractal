@@ -5645,6 +5645,7 @@ async fn client_agents_detail(
                 && let Some(operation) = store.runtime_start_for(subject)?
             {
                 let phase = if operation.revoked_by.is_some() { "revoked" }
+                    else if operation.result.as_ref().is_some_and(|result| result["phase"] == "unknown") { "unknown" }
                     else if operation.finished { "completed" }
                     else if operation.dispatched { "running" } else { "queued" };
                 let (running_jobs, revoked_running_jobs) = store.runtime_start_counts()?;
