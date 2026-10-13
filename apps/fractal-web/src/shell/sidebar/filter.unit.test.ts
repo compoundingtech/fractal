@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it } from '@effect/vitest'
+import { Effect } from 'effect'
+import * as fc from 'fast-check'
 
 import { applyOp, createFolder, emptyDoc, place, project } from '../../folders/core.mts'
 import { dailyDriver } from '../fixtures/layouts.ts'
-import { filterFolders, sortMembers, type SidebarRow } from './filter.ts'
+import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './filter.ts'
 import { defaultFilters } from './state.ts'
 
 const row = (
@@ -91,5 +93,71 @@ describe('sidebar view projection', () => {
       }),
     ).toEqual([])
     expect(folders[0]?.members).toEqual(['c'])
+  })
+})
+
+describe('sidebar machine query', () => {
+  it.each([
+    ['', '', []],
+    ['  compiler  sidebar ', 'compiler sidebar', []],
+    ['machine:dev3', '', [['dev3']]],
+    ['machine:dev3,,dev5,', '', [['dev3', 'dev5']]],
+    ['HOST:DEV machine:dev3', '', [['dev'], ['dev3']]],
+    ['machine: host:,, compiler', 'compiler', []],
+    ['compiler machine:dev3 sidebar host:DEV', 'compiler sidebar', [['dev3'], ['dev']]],
+    ['other:dev3 compiler-machine:dev3', 'other:dev3 compiler-machine:dev3', []],
+  ] as const)('parses %j without highlighting facets', (input, query, machines) => {
+    expect(parseSidebarQuery(input)).toEqual({ query, machines })
+  })
+
+  const machineRows = [
+    row('dev3', 'Compiler', 'idle', 'host/dev3', 0),
+    row('dev5', 'Sidebar', 'idle', 'DEV5', 0),
+    row('other', 'Compiler', 'idle', 'host/laptop24', 0),
+  ]
+  it.each([
+    ['machine:dev3', '', ['dev3']],
+    ['machine:dev3,dev5', '', ['dev3', 'dev5']],
+    ['HOST:DEV', '', ['dev3', 'dev5']],
+    ['machine:dev machine:dev3', '', ['dev3']],
+    ['machine:dev3 host:dev5', '', []],
+    ['machine:dev9', '', []],
+    ['machine:', '', ['dev3', 'dev5', 'other']],
+    ['machine:,,', '', ['dev3', 'dev5', 'other']],
+    ['machine:dev3,,', '', ['dev3']],
+    ['compiler machine:dev', '', ['dev3']],
+    ['laptop machine:dev', '', []],
+    ['machine:dev', 'host/dev3', ['dev3']],
+    ['machine:dev3', 'DEV5', []],
+    ['machine:dev', 'dev3', []],
+  ] as const)('matches %j AND the exact menu host %j', (query, host, expected) => {
+    expect(machineRows.filter((candidate) =>
+      matchesRow({ row: candidate, filters: { ...defaultFilters, query, host }, context: '' }),
+    ).map((candidate) => candidate.workspace.id)).toEqual(expected)
+  })
+
+  it.live('case and alias preserve every generated host prefix match', () => Effect.sync(() => {
+    fc.assert(fc.property(
+      fc.array(fc.constantFrom('a', 'b', 'c', 'd', 'e', 'v', '3', '5'), { minLength: 1, maxLength: 20 }),
+      fc.nat(),
+      (letters, index) => {
+        const host = letters.join('')
+        const prefix = host.slice(0, 1 + index % host.length)
+        const candidate = row('generated', 'Compiler', 'idle', `host/${host}`, 0)
+        for (const key of ['machine', 'HOST']) {
+          const query = `${key}:${prefix.toUpperCase()},,`
+          expect(parseSidebarQuery(query)).toEqual({ query: '', machines: [[prefix]] })
+          expect(matchesRow({ row: candidate, filters: { ...defaultFilters, query }, context: '' })).toBe(true)
+        }
+      },
+    ))
+  }))
+
+  it('ignores empty facets when projecting empty folders', () => {
+    const doc = emptyDoc()
+    applyOp(doc, createFolder('empty', 'Empty', null, 'V', [1, 0, 't']))
+    const folders = project(doc, []).folders
+    expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine: host:,, ' }, sort: 'manual' })).toEqual(folders)
+    expect(filterFolders({ folders, rows, filters: { ...defaultFilters, query: 'machine:dev9' }, sort: 'manual' })).toEqual([])
   })
 })
