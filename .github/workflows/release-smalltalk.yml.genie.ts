@@ -1,4 +1,5 @@
-import { linuxActionlintConfig, linuxRunner, linuxRunnerProfile, macosRunnerProfile } from './workspace-ci.ts'
+import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
+import { linuxActionlintConfig } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
@@ -6,7 +7,7 @@ import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 // Preserve release triggers, source verification and publishing permissions. Every commit on main
 // also builds and verifies both archives and keeps them as short-lived artifacts, so release
 // breakage fails on main instead of at tag time (the daily release publishes those artifacts).
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(readyPRJobs(auditCaches({
   actionlint: linuxActionlintConfig,
   "name": "Smalltalk tag release",
   "on": {
@@ -20,6 +21,7 @@ export default githubWorkflow(auditCaches({
     },
     "workflow_dispatch": null,
     "pull_request": {
+      types: readyPullRequestTypes,
       "paths": [
         ".github/workflows/release-smalltalk.yml",
         ".github/workflows/release-smalltalk.yml.genie.ts",
@@ -44,7 +46,7 @@ export default githubWorkflow(auditCaches({
     "actions": "read"
   },
   "concurrency": {
-    "group": "smalltalk-release-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
+    "group": "smalltalk-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}",
     "cancel-in-progress": "${{ github.event_name == 'pull_request' }}"
   },
   "jobs": {
@@ -54,14 +56,12 @@ export default githubWorkflow(auditCaches({
         "fail-fast": false,
         "matrix": {
           "runner": [
-            linuxRunnerProfile,
-            macosRunnerProfile
+            'ubuntu-latest',
+            'macos-15'
           ]
         }
       },
-      "runs-on": [
-        "${{ matrix.runner }};github.run-id=${{ github.run_id }}"
-      ],
+      "runs-on": "${{ matrix.runner }}",
       "timeout-minutes": 5,
       "steps": [
         {
@@ -84,19 +84,17 @@ export default githubWorkflow(auditCaches({
         "matrix": {
           "include": [
             {
-              "runner": linuxRunnerProfile,
+              "runner": 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}',
               "target": "x86_64-unknown-linux-gnu"
             },
             {
-              "runner": macosRunnerProfile,
+              "runner": "macos-15",
               "target": "aarch64-apple-darwin"
             }
           ]
         }
       },
-      "runs-on": [
-        "${{ matrix.runner }};github.run-id=${{ github.run_id }}"
-      ],
+      "runs-on": "${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && 'ci1-priority' || matrix.runner }}",
       "timeout-minutes": 90,
       "env": {
         "MACOSX_DEPLOYMENT_TARGET": "15.0",
@@ -166,7 +164,7 @@ export default githubWorkflow(auditCaches({
         "build",
         "installer"
       ],
-      "runs-on": linuxRunner,
+      "runs-on": "ubuntu-latest",
       "steps": [
         {
           "uses": "actions/checkout@v4",
@@ -204,7 +202,7 @@ export default githubWorkflow(auditCaches({
       "name": "release-publish",
       "if": "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false",
       "needs": "assemble",
-      "runs-on": linuxRunner,
+      "runs-on": "ubuntu-latest",
       "permissions": {
         "contents": "write"
       },
@@ -235,4 +233,4 @@ export default githubWorkflow(auditCaches({
       ]
     }
   }
-}, {"installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."}))
+}, {"installer": "Runs isolated installer fixtures without downloads or compilation.", "assemble": "Downloads verified build artifacts; builds nothing.", "publish": "Publishes verified assembled artifacts; builds nothing."})))

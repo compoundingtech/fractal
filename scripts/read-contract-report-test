@@ -120,19 +120,29 @@ async fn real_production_handler() {}
                 peer_source,
             )
         # The private pinned ledger supplies full equality in the diagnostic invocation.
-        self.assertEqual(len(actual), 241)
+        self.assertEqual(len(actual), 252)
         self.assertIn("POST /v1/internal/client-read/forward", actual)
         self.assertEqual(handlers["GET /v1/events/page"], "events_page")
         self.assertEqual(handlers["POST /v1/internal/replication/worker-status"],
                          "replication_worker_status")
         self.assertEqual(handlers["POST /v1/work/delegation"], "set_delegation_policy")
-        specs = report.registered_claim_specs((ROOT / "crates/st3-schema/src/lib.rs").read_text())
+        specs = report.registered_claim_specs(
+            (ROOT / "crates/st3-schema/src/lib.rs").read_text(),
+            (ROOT / "crates/st3-schema/src/directive_notes.rs").read_text(),
+        )
         kinds = set(specs)
-        self.assertEqual(len(kinds), 139)
-        self.assertIn("custom.*.*", kinds)
+        self.assertEqual(len(kinds), 142)
+        self.assertIn("custom.*", kinds)
         self.assertEqual(specs["agent.account"]["subject_types"], ["agent"])
         self.assertEqual(specs["agent.account"]["declared_primary_projection"], "agents")
-        self.assertIsNone(specs["custom.*.*"]["declared_primary_projection"])
+        self.assertIsNone(specs["custom.*"]["declared_primary_projection"])
+        self.assertIn("person.directive-note-set", kinds)
+        schema = (ROOT / "crates/st3-schema/src/lib.rs").read_text()
+        directive = (ROOT / "crates/st3-schema/src/directive_notes.rs").read_text()
+        with self.assertRaisesRegex(report.InventoryError, "constant is unresolved"):
+            report.registered_claim_specs(schema, directive.replace("pub const KIND:", "pub const OTHER:"))
+        with self.assertRaisesRegex(report.InventoryError, "cannot be parsed"):
+            report.registered_claim_specs(schema.replace("directive_notes::KIND,", "other::KIND,", 1), directive)
         peer = (ROOT / "crates/st3/src/peer.rs").read_text()
         self.assertEqual(len(report.registered_client_read_variants(peer)), 10)
         self.assertEqual(report.registered_peer_protocol_routes(peer), {
@@ -203,6 +213,17 @@ async fn real_handler() {}
         with self.assertRaisesRegex(report.InventoryError, "unknown route path expression"):
             report.registered_routes(source, peer)
 
+    def test_router_setup_requires_the_known_slo_initializer(self):
+        source = (ROOT / "crates/st3/src/api.rs").read_text()
+        peer = (ROOT / "crates/st3/src/peer.rs").read_text()
+        self.assertIn("GET /v1/health", report.registered_routes(source, peer))
+        for changed in (
+            source.replace("crate::slo::install();", "crate::slo::skip();", 1),
+            source.replace("crate::slo::install();", "", 1),
+        ):
+            with self.assertRaisesRegex(report.InventoryError, "unknown router setup"):
+                report.registered_routes(changed, peer)
+
     def test_unknown_method_nest_and_helper_registrations_are_rejected(self):
         source = (ROOT / "crates/st3/src/api.rs").read_text()
         peer = (ROOT / "crates/st3/src/peer.rs").read_text()
@@ -211,6 +232,9 @@ async fn real_handler() {}
              "unknown route method chain"),
             (source.replace('        .route("/v1/health"',
                             '        .nest("/invented", helper())\n        .route("/v1/health"', 1),
+             "unknown router method, nest or helper"),
+            (source.replace('        .route("/v1/health"',
+                            '        // .route("/invented", get(hidden))\n        .route("/v1/health"', 1),
              "unknown router method, nest or helper"),
             (source.replace(".with_state(state)\n}\n\nasync fn schema()",
                             ".merge(helper()).with_state(state)\n}\n\nasync fn schema()", 1),
@@ -445,7 +469,10 @@ async fn real_handler() {}
         ledger_path = self.artifact.parent / "invented-ledger.json"
         ledger_path.write_text(json.dumps(ledger))
         cli = {row["command"] for row in ledger["cli"]}
-        kinds = report.registered_claim_kinds((ROOT / "crates/st3-schema/src/lib.rs").read_text())
+        kinds = report.registered_claim_kinds(
+            (ROOT / "crates/st3-schema/src/lib.rs").read_text(),
+            (ROOT / "crates/st3-schema/src/directive_notes.rs").read_text(),
+        )
         work_path = self.artifact.parent / "work-log.json"
         work_path.write_text(json.dumps({
             "source_head": HEAD, "result": "pass", "observations": [

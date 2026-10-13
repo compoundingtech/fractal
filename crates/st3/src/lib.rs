@@ -11,6 +11,8 @@ pub mod archive;
 pub mod backup;
 pub mod blobs;
 pub mod boot;
+/// Git-backed change metadata and exact-OID atomic state transitions.
+pub mod changes;
 pub(crate) mod checkout;
 pub mod claude_channel;
 pub mod client;
@@ -114,3 +116,5 @@ pub use model::{NormalizedIntent, St3Error};
 
 /// Shared authentication and transport for daemon GitHub callers.
 mod github_http;
+
+pub mod evidence_url;

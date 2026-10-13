@@ -12,6 +12,7 @@ autotests = false
 test-support = []
 # Opt in only in Performance; ordinary workspace checks need not build a second test binary.
 perf-load = []
+convergence-audit = []
 
 [dependencies]
 anyhow = "1"
@@ -55,6 +56,7 @@ st-runtime = { path = "../st-runtime" }
 st3-client = { path = "../st3-client", features = ["trace-propagation"] }
 st3-terminal-direct = { path = "../st3-terminal-direct" }
 st3-ui-model = { path = "../st3-ui-model" }
+stui = { path = "../stui" }
 st3-conversation-ui = { path = "../st3-conversation-ui", features = ["ratatui"] }
 st3-schema = { path = "../st3-schema" }
 st-drivers = { path = "../st-drivers" }
@@ -72,6 +74,7 @@ uuid = { version = "1", features = ["v4", "v7"] }
 walkdir = "2"
 
 [dev-dependencies]
+alacritty_terminal = { version = "0.26", default-features = false }
 st3 = { path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }
 tokio = { version = "1", features = ["test-util"] }
@@ -111,6 +114,11 @@ path = "tests/integration.rs"
 name = "perf_load"
 path = "tests/perf_load.rs"
 required-features = ["perf-load"]
+
+[[test]]
+name = "convergence_audit"
+path = "tests/convergence_audit.rs"
+required-features = ["convergence-audit"]
 
 [[test]]
 name = "api_accept"
