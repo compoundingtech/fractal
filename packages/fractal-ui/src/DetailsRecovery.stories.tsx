@@ -159,6 +159,7 @@ function record(canvas: HTMLElement, name: string, data: unknown) { canvas.setAt
 function assertPresentation(pane: HTMLElement) {
   const head = headFor(pane), state = pane.dataset.detailsPaneState, sync = pane.dataset.detailsSyncState
   requireContract(!/\bUnknown\b/.test(pane.innerText), 'Details renders Unknown instead of measured or pending evidence')
+  requireContract(pane.querySelectorAll('[title]').length === 0, 'Details paints a native title')
   const sectionsControl = head.querySelector('[aria-label="Visible sections"]')
   requireContract(Boolean(sectionsControl) === (sync === 'Live' && state !== 'loading' && state !== 'error'), 'Visible sections is not limited to populated live content')
   if (sync === 'Failed') for (const ink of pane.querySelectorAll('[data-details-skeleton] *')) {
@@ -228,6 +229,19 @@ async function anchorPlay({ canvasElement: canvas }: Play) {
   identity.textContent = 'Unknown'
   try { await rejectsControl('Details renders Unknown instead of measured or pending evidence', () => assertPresentation(error)) } finally { identity.textContent = title }
   assertPresentation(error)
+  // The clamped cause discloses its full text through the kit tooltip, never a native title.
+  const causeTrigger = element(error, '[data-details-error-cause]'), doc = canvas.ownerDocument
+  causeTrigger.setAttribute('title', cause)
+  try { await rejectsControl('Details paints a native title', () => assertPresentation(error)) } finally { causeTrigger.removeAttribute('title') }
+  assertPresentation(error)
+  causeTrigger.focus(); await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
+  const causeTip = await within(doc.body).findByRole('tooltip')
+  const assertCauseTip = () => requireContract(doc.activeElement === causeTrigger && causeTip.isConnected && causeTip.textContent === cause, 'Clamped host cause lacks its full keyboard tooltip')
+  assertCauseTip()
+  const tipText = causeTip.textContent
+  try { causeTip.textContent = cause.slice(0, 12); await rejectsControl('Clamped host cause lacks its full keyboard tooltip', assertCauseTip) } finally { causeTip.textContent = tipText }
+  assertCauseTip()
+  causeTrigger.blur()
 }
 
 interface PendingGeometry {
@@ -239,7 +253,7 @@ function pendingGeometry(pane: HTMLElement): PendingGeometry {
   return {
     bodies: [...pane.querySelectorAll('[data-details-chart]')].map(body => ({ kind: body.getAttribute('data-details-chart'), top: body.closest('section')!.getBoundingClientRect().top, height: body.closest('section')!.getBoundingClientRect().height, bodyHeight: body.getBoundingClientRect().height })),
     sections: [...pane.querySelectorAll('[data-details-state] > section')].map(section => ({ kind: section.getAttribute('aria-label'), top: section.getBoundingClientRect().top, height: section.getBoundingClientRect().height })),
-    rows: [...pane.querySelectorAll('[data-details-state] [data-details-resource-row]')].map(row => ({ label: row.getAttribute('aria-label'), top: row.getBoundingClientRect().top, height: row.getBoundingClientRect().height })),
+    rows: [...pane.querySelectorAll('[data-details-state] [data-details-resource-row]')].map(row => ({ label: [row.querySelector('[data-details-resource-title]')?.textContent, row.querySelector('[data-resource-meta-value]')?.textContent].filter(Boolean).join(' ') || null, top: row.getBoundingClientRect().top, height: row.getBoundingClientRect().height })),
   }
 }
 function assertPending(before: PendingGeometry, pane: HTMLElement) {
@@ -350,7 +364,7 @@ async function keyboardPlay({ canvasElement: canvas }: Play) {
     await userEvent.keyboard('{Escape}')
     await waitFor(() => requireContract(!doc.querySelector('[data-pane-sync-details]') && doc.activeElement === trigger, 'Escape did not restore the Details trigger'))
     if (retained) { await userEvent.keyboard('{Enter}'); await within(doc.body).findByRole('dialog', { name: 'Load failed' }) }
-    await tabUntil(doc, node => node?.getAttribute('data-command-id') === (retained ? 'sync.retry.details' : 'sync.retry.body'), 12)
+    await tabUntil(doc, node => node?.getAttribute('data-command-id') === (retained ? 'sync.retry.details' : 'sync.retry.body'), 13)
     assertRecovery(doc); await userEvent.keyboard('{Enter}')
     await waitFor(() => { expect(pane).toHaveAttribute('data-details-sync-state', 'Live'); assertRestored(pane, tab) })
     const focusThief = element(canvas, '[data-recovery-action="busy"]'); focusThief.focus()

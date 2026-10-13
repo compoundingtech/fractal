@@ -27,9 +27,11 @@ const header = {
 const agent: Agent = { ref: 'agent/fixture/readonly', terminal: '', name: 'Reported name', lifecycle: unknown, host: 'Reported host', connected: true, activity: 'idle', status: 'idle', usage: unknown, checkout: unknown, workspace: unknown, startedAt: unknown, endedAt: unknown, blockedOn: unknown, ask: unknown, lastActivityAt: unknown }
 
 describe('resource card seam', () => {
-  it('keeps unknown counts explicit instead of rendering zero', () => {
+  it('omits an unknown count instead of rendering zero', () => {
     const card = renderToStaticMarkup(createElement(ResourceCardV1, { resource }))
-    expect(card).toMatch(/Changed files · count unknown/)
+    // The kit names an uncounted diff by its painted label alone; a missing count is omitted, never invented.
+    expect(card).toMatch(/Changed files/)
+    expect(card).not.toMatch(/\d+ changed files?/)
     expect(card).not.toMatch(/\+0|−0|0 changed/)
     expect(renderToStaticMarkup(createElement(ResourceCardV1, { resource: { ...resource, files: [] } }))).not.toMatch(/\+0|−0/)
   })

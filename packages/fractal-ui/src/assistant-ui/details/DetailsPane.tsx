@@ -188,7 +188,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
       {overview.title!==undefined&&<strong>{overview.title}</strong>}
       {[overview.machine,overview.harness,overview.model].some(value=>value!==undefined)&&<p {...stylex.props(styles.errorText)}>{[overview.machine,overview.harness,overview.model].filter(Boolean).join(' · ')}</p>}
       <Heading level={2} data-details-error-reason {...stylex.props(styles.errorHeading)}>Couldn't load agent details</Heading>
-      {failureMessage&&<p data-details-error-cause title={failureMessage} {...stylex.props(styles.errorText,styles.errorCause)}>{failureMessage}</p>}
+      {failureMessage&&<TooltipTrigger delay={0}><Button data-details-error-cause {...stylex.props(styles.errorText,styles.errorCause)}><span {...stylex.props(styles.errorCauseLines)}>{failureMessage}</span></Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{failureMessage}</Tooltip></TooltipTrigger>}
       {retryable?<div aria-hidden={detailsOpen||undefined} inert={detailsOpen} {...stylex.props(styles.retrySlot,detailsOpen&&styles.hiddenPending)}><Button data-command-id="sync.retry.body" onPress={retry} {...stylex.props(styles.retryButton)}>Retry</Button></div>:<p data-details-error-recovery {...stylex.props(styles.errorText)}>{syncFailureRecovery(syncStatus.cause)}</p>}
     </div>}
     </div>
@@ -228,7 +228,9 @@ const styles=stylex.create({
   errorBlock:{position:'absolute',inset:s.zero,boxSizing:'border-box',display:'flex',flexDirection:'column',alignItems:'flex-start',gap:s.sm,padding:s.md,overflowY:'auto',overflowX:'hidden'},
   errorText:{margin:s.zero,color:tx.fgMuted,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
   errorHeading:{margin:s.zero,color:tx.fg,fontSize:t.metaSize,lineHeight:t.metaLeading,fontWeight:t.weightSemibold},
-  errorCause:{display:'-webkit-box',WebkitBoxOrient:'vertical',WebkitLineClamp:2,maxWidth:'100%',minWidth:0,overflow:'hidden'},
+  // The clamped cause is a focusable trigger; the kit tooltip discloses the full host cause to pointer and keyboard.
+  errorCause:{display:'block',maxWidth:'100%',minWidth:0,padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  errorCauseLines:{display:'-webkit-box',WebkitBoxOrient:'vertical',WebkitLineClamp:2,overflow:'hidden'},
   retrySlot:{minHeight:g.controlMd},
   retryButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',minHeight:g.controlMd,paddingInline:s.md,borderWidth:g.hairline,borderStyle:'solid',borderColor:ac.primary,borderRadius:r.control,backgroundColor:ac.primary,color:ac.onPrimary,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,cursor:'pointer',':focus-visible':{outline:`2px solid ${ac.primary}`,outlineOffset:g.focusOffset}},
   pendingText:{color:'transparent',backgroundImage:`linear-gradient(${bd.borderStrong}, ${bd.borderStrong})`,backgroundSize:`100% ${s.md}`,backgroundPosition:'center',backgroundRepeat:'no-repeat',boxDecorationBreak:'clone'},

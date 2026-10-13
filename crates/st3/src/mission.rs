@@ -1801,6 +1801,9 @@ fn take_agent_constraints(
     let Some(children) = node.children_mut() else {
         return Ok(node);
     };
+    if children.nodes().iter().any(|child| child.name().value() == "accountable") {
+        return Err(St3Error::new("invalid-accountable-root", "accountable is valid only on a top-level agent root"));
+    }
     let (constraint_nodes, other_nodes): (Vec<_>, Vec<_>) = children
         .nodes()
         .iter()

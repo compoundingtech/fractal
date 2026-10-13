@@ -1,3 +1,6 @@
+mod trace_principal;
+#[cfg(test)]
+mod accountable_tests;
 pub mod custom;
 pub mod declarations;
 pub mod directive_notes;
@@ -13,7 +16,6 @@ mod schedule_active_run_tests;
 mod glasses;
 pub(crate) mod mailbox_wakes;
 mod mailbox_changes;
-pub(crate) mod reconcile_changes;
 mod mailbox_lease;
 #[cfg(test)]
 mod message_send_tests;
@@ -24,6 +26,7 @@ mod owned_sets_tests;
 mod usage_fold_tests;
 mod resources;
 mod github_workflow_failures;
+pub mod git_changes;
 pub(crate) mod message_subscriptions;
 mod rollouts;
 mod seat_status;
@@ -180,6 +183,9 @@ mod conversation_reads;
 mod usage_period;
 mod runtime;
 pub(crate) mod published_views;
+pub(crate) mod published_list;
+pub(crate) mod mission_list;
+pub(crate) mod work_list;
 #[cfg(test)]
 mod tombstones_tests;
 #[cfg(test)]
@@ -6229,6 +6235,25 @@ impl Store {
         Ok(false)
     }
 
+    /// Linked runs with their effective current steps, without presentation or work history.
+    /// Read the parent link even when empty, so a new round invalidates its parent's evaluation.
+    pub(crate) fn mission_run_children_for_step(&self, step: &str) -> Result<Vec<MissionRunView>> {
+        let step = normalize_step_run(step);
+        smallclaims::touched::note_read(|| format!("children-of-step:{step}"));
+        let connection = self.readers.get();
+        let ids = connection
+            .prepare_cached("SELECT id FROM mission_runs WHERE parent_step_run=?1")?
+            .query_map([step], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|id| {
+                let view = mission_run_view_for_projection_tx(&connection, &id)?;
+                note_run_view_reads(&view);
+                Ok(view)
+            })
+            .collect()
+    }
+
     pub fn adopt_mission_revision(
         &self,
         run: &str,
@@ -8230,19 +8255,62 @@ impl Store {
         include_agentless: bool,
         open_only: bool,
     ) -> Result<Vec<StepRunView>> {
+        self.work_at_snapshot_selected(
+            actor,
+            include_terminal,
+            snapshot_unix_ms,
+            detailed,
+            include_agentless,
+            open_only,
+            None,
+        )
+    }
+
+    /// [`Self::work_at_snapshot_internal_with_agentless`], of only the `selected` step subjects
+    /// when given, as the published work list refolds the steps whose claims changed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn work_at_snapshot_selected(
+        &self,
+        actor: Option<&str>,
+        include_terminal: bool,
+        snapshot_unix_ms: u128,
+        detailed: bool,
+        include_agentless: bool,
+        open_only: bool,
+        selected: Option<&BTreeSet<String>>,
+    ) -> Result<Vec<StepRunView>> {
         let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
-        let query = if actor.is_some() {
-            seat_work_at_snapshot_query(open_only)
-        } else {
-            work_at_snapshot_query(open_only)
+        let views = match selected {
+            None => {
+                let query = if actor.is_some() {
+                    seat_work_at_snapshot_query(open_only)
+                } else {
+                    work_at_snapshot_query(open_only)
+                };
+                let mut statement = connection.prepare_cached(&query)?;
+                let rows = statement.query_map(
+                    params![actor.as_deref(), include_terminal, include_agentless],
+                    step_run_from_row,
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            }
+            Some(selected) => {
+                // The same filter, over the selected steps by their subject.
+                let query = selected_work_at_snapshot_query(open_only);
+                let mut statement = connection.prepare_cached(&query)?;
+                let rows = statement.query_map(
+                    params![
+                        actor.as_deref(),
+                        include_terminal,
+                        include_agentless,
+                        serde_json::to_string(selected)?
+                    ],
+                    step_run_from_row,
+                )?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            }
         };
-        let mut statement = connection.prepare_cached(&query)?;
-        let rows = statement.query_map(
-            params![actor.as_deref(), include_terminal, include_agentless],
-            step_run_from_row,
-        )?;
-        let views = rows.collect::<Result<Vec<_>, _>>()?;
         let carried_claimants = carried_claimants_tx(
             &connection,
             views
@@ -9693,7 +9761,15 @@ impl Store {
                 old_revision: current.as_ref().map(|row| row.revision.clone()),
                 new_revision: revision,
             });
-            if desired.kind == "stop" {
+            if let Some(action) = crate::suspension::publication_action(self, desired, false, || {
+                Ok(current.as_ref().and_then(|row| row.member.as_deref())
+                    .map(serde_json::from_str::<crate::model::MemberSpec>)
+                    .transpose()?)
+            })
+                .map_err(internal)?
+            {
+                actions.push(action);
+            } else if desired.kind == "stop" {
                 actions.push(PlannedAction {
                     subject: subject.clone(),
                     action: "stop".into(),
@@ -10008,6 +10084,9 @@ impl Store {
                 let expected = owned_plan.as_ref().map_or(expected, |p| &p.preview.expected_subjects);
                 for desired in intent.subjects.values() {
                     crate::terminal_binding::validate_declaration(desired, actor)?;
+                    st3_schema::accountable::validate_claim(&desired.subject, "intent.desired",
+                        &serde_json::to_value(desired).map_err(internal)?, actor)
+                        .map_err(|e| St3Error::new(e.code, e.message))?;
                     if let Some(binding) = desired.member.as_ref().and_then(|m| m.terminal_binding.as_ref()) {
                         let terminal = current_desired_row_tx(transaction, &binding.subject).map_err(internal)?
                             .filter(|row| row.kind == "pty")
@@ -14830,16 +14909,24 @@ impl Store {
     }
 
     /// The selected desired revision of `subject`, then each predecessor that differs from it
-    /// only in presentation. The last entry is the revision that still defines the launch, so
-    /// launch records, restart budgets, and crash-loop parking follow a rename.
+    /// only in presentation. Launch records, restart budgets and crash-loop parking follow
+    /// labels; environment edits still get a fresh launch token and restart budget.
     pub fn launch_lineage(&self, subject: &str) -> Result<Vec<String>> {
         let connection = self.readers.get();
         launch_lineage_tx(&connection, subject)
     }
 
-    /// Presentation-only lineage of a recorded launch, even when it is no longer desired.
-    pub(crate) fn launch_lineage_from(&self, token: &str) -> Result<Vec<String>> {
-        launch_lineage_from_tx(&self.readers.get(), token.to_owned())
+    /// Suspension follows all non-launch edits, independently of process retry budgets.
+    pub(crate) fn suspension_lineage(&self, subject: &str) -> Result<Vec<String>> {
+        let connection = self.readers.get();
+        let Some(row) = current_desired_row(&connection, subject)? else {
+            return Ok(Vec::new());
+        };
+        desired_lineage_from_tx(&connection, row.claim_id, same_declared_launch)
+    }
+
+    pub(crate) fn suspension_lineage_from(&self, token: &str) -> Result<Vec<String>> {
+        desired_lineage_from_tx(&self.readers.get(), token.to_owned(), same_declared_launch)
     }
 
     /// Only seats whose durable resume requests name this host need transfer reconciliation.
@@ -21477,7 +21564,15 @@ fn launch_lineage_tx(connection: &Connection, subject: &str) -> Result<Vec<Strin
     launch_lineage_from_tx(connection, row.claim_id)
 }
 
-fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Result<Vec<String>> {
+fn launch_lineage_from_tx(connection: &Connection, current: String) -> Result<Vec<String>> {
+    desired_lineage_from_tx(connection, current, presentation_only_change)
+}
+
+fn desired_lineage_from_tx(
+    connection: &Connection,
+    mut current: String,
+    equivalent: fn(&Value, &Value) -> bool,
+) -> Result<Vec<String>> {
     let mut lineage = vec![current.clone()];
     while let Some(claim) = claim_by_id_tx(connection, &current)? {
         // A claim that merges concurrent revisions has one predecessor per fork; follow the
@@ -21490,7 +21585,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
             if let Some(previous) = claim_by_id_tx(connection, predecessor)?
                 && previous.kind == "intent.desired"
                 && previous.subject == claim.subject
-                && presentation_only_change(&previous.body, &claim.body)
+                && equivalent(&previous.body, &claim.body)
             {
                 next = Some(previous.id);
                 break;
@@ -21505,7 +21600,7 @@ fn launch_lineage_from_tx(connection: &Connection, mut current: String) -> Resul
     Ok(lineage)
 }
 
-/// Two agent declarations that differ only in their human label share one launch.
+/// Preserve the existing launch-token boundary for restart budgets and crash-loop recovery.
 fn presentation_only_change(previous: &Value, next: &Value) -> bool {
     let parse = |body: &Value| {
         let mut desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
@@ -21514,6 +21609,18 @@ fn presentation_only_change(previous: &Value, next: &Value) -> bool {
         Some(desired)
     };
     matches!((parse(previous), parse(next)), (Some(previous), Some(next)) if previous == next)
+}
+
+/// Keep suspension under exactly the launch comparator used by preview and reconcile.
+/// Desired kind and subject are fences, even when their member launch happens to match.
+fn same_declared_launch(previous: &Value, next: &Value) -> bool {
+    let parse = |body: &Value| {
+        let desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
+        (desired.kind == "agent").then_some(())?;
+        Some((desired.subject, desired.member?))
+    };
+    matches!((parse(previous), parse(next)), (Some((previous_subject, previous)), Some((next_subject, next)))
+        if previous_subject == next_subject && next.launch_changes(&previous).is_empty())
 }
 
 /// The version of the rules that derive `operations` from claims. Every write and projection
@@ -22014,6 +22121,7 @@ pub(crate) fn append_claim_tx(
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
     crate::terminal_binding::validate_claim(kind, body, actor).map_err(anyhow::Error::new)?;
+    st3_schema::accountable::validate_claim(subject, kind, body, actor).map_err(anyhow::Error::new)?;
     st3_schema::owned_terminals::validate_declaration_owner(subject, kind, actor)
         .map_err(anyhow::Error::new)?;
     st3_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
@@ -22273,11 +22381,16 @@ fn schema_fields_for_body(kind: &str, body: &Value) -> Result<BTreeMap<String, V
     }
     if kind == "intent.desired" {
         let desired: DesiredSubject = serde_json::from_value(body.clone())?;
-        return Ok(BTreeMap::from([
+        let mut fields = BTreeMap::from([
             ("kind".into(), Value::String(desired.kind.clone())),
             ("revision".into(), Value::String(desired_revision(&desired))),
             ("desired".into(), desired.desired),
-        ]));
+        ]);
+        // Preserve explicit fields when classifying a raw declaration body.
+        if let Some(accountable) = body.get("accountable") {
+            fields.insert("accountable".into(), accountable.clone());
+        }
+        return Ok(fields);
     }
     if kind == "mission.published" {
         let mission: MissionSpec = serde_json::from_value(body.clone())?;
@@ -22870,6 +22983,7 @@ fn check_mailbox_incarnation(
     let describes_another = fields.get("incarnation_id").and_then(Value::as_str)
         != Some(fence.incarnation.as_str());
     if !live
+        && fence.epoch == 0
         && (describes_another
             || matches!(
                 fields.get("status").and_then(Value::as_str),
@@ -22888,13 +23002,16 @@ fn check_mailbox_incarnation(
         if let Some(harness) = harness {
             let harness: Value = serde_json::from_str(&harness).map_err(internal)?;
             let fields = harness.get("fields").unwrap_or(&harness);
-            if fields.get("state").and_then(Value::as_str) == Some("starting")
+            if matches!(
+                fields.get("state").and_then(Value::as_str),
+                Some("starting" | "ready" | "idle" | "working" | "blocked")
+            )
                 && fields.get("incarnation_id").and_then(Value::as_str) == Some(&fence.incarnation)
             {
                 // The new driver can start while the graph still describes its predecessor,
-                // before reconciliation publishes this incarnation's runtime.running.
+                // and its hooks can advance before reconciliation publishes runtime.running.
                 // Retry without allocating ownership or authorizing any mailbox reads/receipts.
-                // An exited observation for this same incarnation remains terminal.
+                // Ended and indeterminate observations remain terminal.
                 return Err(St3Error::new(
                     "mailbox-session-starting",
                     "waiting for the seat's running incarnation",
@@ -23865,11 +23982,17 @@ fn intent_leaves_at(
 
 fn desired_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DesiredSubject> {
     let desired = row.get::<_, String>(2)?;
+    let desired = serde_json::from_str(&desired).unwrap_or(Value::Null);
+    let accountable = st3_schema::accountable::from_desired(&desired)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(
+            2, rusqlite::types::Type::Text, Box::new(error)))?
+        .map(str::to_owned);
     let member = row.get::<_, Option<String>>(3)?;
     Ok(DesiredSubject {
+        accountable,
         subject: row.get(0)?,
         kind: row.get(1)?,
-        desired: serde_json::from_str(&desired).unwrap_or(Value::Null),
+        desired,
         member: member.and_then(|value| serde_json::from_str(&value).ok()),
         owner_run: row.get(4)?,
         owner_generation: row.get(5)?,
@@ -24398,18 +24521,74 @@ fn pending_attention_requests_tx(
         .collect()
 }
 
+const MESSAGE_CANONICAL_KEY_BATCH_SIZE: usize = 128;
+
 fn sort_messages_canonically(connection: &Connection, messages: &mut [MessageView]) -> Result<()> {
-    let mut keys = BTreeMap::new();
-    for message in messages.iter() {
-        keys.insert(
-            message.subject.clone(),
-            message_canonical_key_tx(connection, &message.subject)?,
-        );
+    let mut keys = BTreeMap::<String, canonical::ClaimKey>::new();
+    for chunk in messages.chunks(MESSAGE_CANONICAL_KEY_BATCH_SIZE) {
+        let subjects = serde_json::to_string(
+            &chunk.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
+        )?;
+        let mut statement = connection.prepare_cached(message_canonical_keys_query())?;
+        let mut rows = statement.query([subjects])?;
+        for (ordinal, message) in chunk.iter().enumerate() {
+            let row = rows.next()?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            // An absent earliest claim or its batch leaves a gap. A SQL step error
+            // can precede this check; with multiple faults, error precedence is
+            // unspecified. Every error still leaves the input vector unchanged.
+            if row.get::<_, usize>(6)? != ordinal {
+                return Err(rusqlite::Error::QueryReturnedNoRows.into());
+            }
+            let (time, writer, sequence, batch, position, id) = message_canonical_key_row(row)?;
+            keys.insert(
+                message.subject.clone(),
+                (time.parse()?, writer, sequence, batch, position, id),
+            );
+        }
+        anyhow::ensure!(rows.next()?.is_none(), "duplicate canonical message key row");
     }
+    // Gather every key successfully before changing the caller's message vector.
     messages.sort_by(|left, right| keys[&left.subject].cmp(&keys[&right.subject]));
     Ok(())
 }
 
+fn message_canonical_keys_query() -> &'static str {
+    // Drive only the supplied subjects. The same required kind index bounds each
+    // earliest-ID lookup, independently of unrelated claims on those subjects.
+    // Join the selected ID afterwards: a missing batch cannot select a younger ID.
+    // One stable statement/parameter for every group size; CROSS JOIN keeps the
+    // supplied JSON array as the outer loop, never a scan of the claims table.
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| canonical_sql(
+        &format!(
+            "SELECT chosen.accepted_at_unix_ms, batches.origin, batches.replica_sequence,
+                    chosen.batch_id, {}, chosen.id, requested.key
+             FROM json_each(?1) AS requested CROSS JOIN claims AS chosen CROSS JOIN batches
+             WHERE chosen.id=(
+                 SELECT id FROM claims INDEXED BY claims_subject_kind_index
+                 WHERE subject=requested.value AND kind IN ('message.sent','intent.desired')
+                 ORDER BY CANONICAL_ASC(claims) LIMIT 1
+             ) AND batches.id=chosen.batch_id
+             ORDER BY requested.key",
+            canonical::position_sql("chosen"),
+        )
+    ));
+    &QUERY
+}
+
+fn message_canonical_key_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(String, String, u64, String, u64, String)> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, u64>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, u64>(4)?,
+        row.get::<_, String>(5)?,
+    ))
+}
+
+#[cfg(test)]
 fn message_canonical_key_query() -> &'static str {
     // Requires the named index: create_schema installs it before reader-pool creation.
     // A dropped or renamed index makes preparation fail, rather than using a slower fallback.
@@ -24429,21 +24608,13 @@ fn message_canonical_key_query() -> &'static str {
     &QUERY
 }
 
+#[cfg(test)]
 fn message_canonical_key_tx(connection: &Connection, subject: &str) -> Result<canonical::ClaimKey> {
     // Select the earliest ID without a batch join. An absent batch for that ID is an error,
     // not permission to select a younger claim. Decode exactly the shared key's columns.
     let (time, writer, sequence, batch, position, id) = connection
         .prepare_cached(message_canonical_key_query())?
-        .query_row([subject], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, u64>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?;
+        .query_row([subject], message_canonical_key_row)?;
     Ok((time.parse()?, writer, sequence, batch, position, id))
 }
 
@@ -28325,6 +28496,8 @@ fn classify_replicated_claim_with_registry(
         ));
     }
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
+    st3_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
+        .map_err(|e| St3Error::new(e.code, e.message))?;
     if claim.kind == "owned-set.revised" { owned_sets::validate_receipt(&claim.subject, &claim.body)?; }
     st3_schema::owned_terminals::validate_declaration_owner(
         &claim.subject,
@@ -31177,7 +31350,22 @@ fn seat_run_orders_tx(
 /// When each seat `?1` (every seat when null) joined each open run it has a step in, and the
 /// run's status. It reads from the open runs to their steps, in that order: from the steps,
 /// SQLite reads every step any seat was ever assigned before it finds the open runs among them.
-fn seat_queue_joins_query() -> String {
+/// Every seat's queue moves (`?2` null), or one seat's, that no repair replaced, in graph order.
+pub(crate) fn seat_queue_moves_query() -> String {
+    canonical_sql(
+        "SELECT claims.id, claims.subject, claims.actor, claims.body, claims.accepted_at_unix_ms
+         FROM claims JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject=?2)
+           AND NOT EXISTS (
+               SELECT 1 FROM replica_records
+               WHERE replica_records.claim_id=claims.id
+                 AND replica_records.state='repaired'
+           )
+         ORDER BY CANONICAL_ASC(claims)",
+    )
+}
+
+pub(crate) fn seat_queue_joins_query() -> String {
     format!(
         "SELECT step_runs.assignee, step_runs.run_id,
                 MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
@@ -31198,6 +31386,15 @@ fn seat_queue_joins_query() -> String {
 /// the finished steps are left out in SQL, word for word the predicate of
 /// `step_runs_open_index`, so the read covers the fleet's open steps and not every step it ran.
 fn work_at_snapshot_query(open_only: bool) -> String {
+    work_at_snapshot_query_of(open_only, "")
+}
+
+/// [`work_at_snapshot_query`] of only the step subjects in the JSON array `?4`, by their key.
+fn selected_work_at_snapshot_query(open_only: bool) -> String {
+    work_at_snapshot_query_of(open_only, "subject IN (SELECT value FROM json_each(?4)) AND")
+}
+
+fn work_at_snapshot_query_of(open_only: bool, selected: &str) -> String {
     let open = if open_only {
         "AND status NOT IN ('completed','failed','cancelled')"
     } else {
@@ -31207,7 +31404,7 @@ fn work_at_snapshot_query(open_only: bool) -> String {
         "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                 lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
          FROM step_runs
-         WHERE (agentless=0 OR (?3 AND ?1 IS NULL))
+         WHERE {selected} (agentless=0 OR (?3 AND ?1 IS NULL))
            AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
            AND (?1 IS NULL
                 OR assignee=?1
@@ -31256,18 +31453,30 @@ fn seat_queue_inputs_tx(
     connection: &Connection,
     agent: Option<&str>,
 ) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    seat_queue_inputs_of_tx(connection, agent, None)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Named-run probes `seat_queue_inputs_of_tx` made on this thread, for tests.
+    static NAMED_RUN_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many named-run probes this thread's seat-queue reads have made, for tests.
+#[cfg(test)]
+pub(crate) fn named_run_probes() -> usize {
+    NAMED_RUN_PROBES.with(std::cell::Cell::get)
+}
+
+/// [`seat_queue_inputs_tx`], keeping only `seats` when given: every move and join is still read
+/// in one pass, but only those seats' named runs are probed, one query each.
+fn seat_queue_inputs_of_tx(
+    connection: &Connection,
+    agent: Option<&str>,
+    only: Option<&BTreeSet<String>>,
+) -> Result<BTreeMap<String, SeatQueueInputs>> {
     let mut seats = BTreeMap::<String, SeatQueueInputs>::new();
-    let mut statement = connection.prepare(&canonical_sql(
-        "SELECT claims.id, claims.subject, claims.actor, claims.body, claims.accepted_at_unix_ms
-         FROM claims JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.kind=?1 AND (?2 IS NULL OR claims.subject=?2)
-           AND NOT EXISTS (
-               SELECT 1 FROM replica_records
-               WHERE replica_records.claim_id=claims.id
-                 AND replica_records.state='repaired'
-           )
-         ORDER BY CANONICAL_ASC(claims)",
-    ))?;
+    let mut statement = connection.prepare(&seat_queue_moves_query())?;
     let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, agent], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -31341,6 +31550,9 @@ fn seat_queue_inputs_tx(
          FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
          WHERE step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0",
     )?;
+    if let Some(only) = only {
+        seats.retain(|seat, _| only.contains(seat));
+    }
     for (seat, inputs) in &mut seats {
         let named = inputs
             .moves
@@ -31355,6 +31567,8 @@ fn seat_queue_inputs_tx(
             let Some(run_id) = run.strip_prefix("mission-run/") else {
                 continue;
             };
+            #[cfg(test)]
+            NAMED_RUN_PROBES.with(|probes| probes.set(probes.get() + 1));
             let joined = statement
                 .query_row(params![seat, run_id], |row| {
                     Ok((
@@ -32733,6 +32947,33 @@ fn step_execution_timing_at(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> rusqlite::Result<(Option<u128>, u128)> {
+    Ok(fold_step_timing(
+        &step_timing_events(connection, subject)?,
+        attempt,
+        snapshot_unix_ms,
+        currently_active,
+    ))
+}
+
+/// The lease that bounds the open execution interval of `subject`'s `attempt` as of
+/// `snapshot_unix_ms`, as its claims last named it, when an interval is open under one. A
+/// quiet renewal moves the step's lease without a claim, never this one.
+pub(crate) fn step_timing_lease_at(
+    connection: &Connection,
+    subject: &str,
+    attempt: u32,
+    snapshot_unix_ms: u128,
+) -> rusqlite::Result<Option<u128>> {
+    let (started, _, lease) =
+        fold_step_timing_open(&step_timing_events(connection, subject)?, attempt, snapshot_unix_ms);
+    Ok(started.and(lease))
+}
+
+/// A step's step and work events in canonical order, as its execution timing folds them.
+fn step_timing_events(
+    connection: &Connection,
+    subject: &str,
+) -> rusqlite::Result<Vec<(String, Value, u128)>> {
     let mut statement = connection.prepare(&canonical_sql(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
@@ -32750,8 +32991,7 @@ fn step_execution_timing_at(
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let events = events
+    Ok(events
         .into_iter()
         .map(|(kind, body, accepted)| {
             (
@@ -32760,13 +33000,7 @@ fn step_execution_timing_at(
                 accepted.parse::<u128>().unwrap_or(0),
             )
         })
-        .collect::<Vec<_>>();
-    Ok(fold_step_timing(
-        &events,
-        attempt,
-        snapshot_unix_ms,
-        currently_active,
-    ))
+        .collect())
 }
 
 /// Fold a step's execution timing from its step and work events in canonical order: the active
@@ -32779,6 +33013,29 @@ pub(crate) fn fold_step_timing(
     snapshot_unix_ms: u128,
     currently_active: bool,
 ) -> (Option<u128>, u128) {
+    let (mut started, mut elapsed, lease_expires) =
+        fold_step_timing_open(events, attempt, snapshot_unix_ms);
+    if let Some(interval_start) = started {
+        let interval_end =
+            lease_expires.map_or(snapshot_unix_ms, |expiry| snapshot_unix_ms.min(expiry));
+        let expired = lease_expires.is_some_and(|expiry| expiry <= snapshot_unix_ms);
+        if expired || currently_active {
+            elapsed = elapsed.saturating_add(interval_end.saturating_sub(interval_start));
+        }
+        if expired || !currently_active {
+            started = None;
+        }
+    }
+    (started, elapsed)
+}
+
+/// [`fold_step_timing`]'s events folded up to `snapshot_unix_ms`: the open interval's start,
+/// if any, the time elapsed in closed intervals, and the lease the claims last named.
+fn fold_step_timing_open(
+    events: &[(String, Value, u128)],
+    attempt: u32,
+    snapshot_unix_ms: u128,
+) -> (Option<u128>, u128, Option<u128>) {
     let mut elapsed = 0_u128;
     let mut started = None;
     let mut lease_expires = None;
@@ -32876,19 +33133,7 @@ pub(crate) fn fold_step_timing(
             _ => {}
         }
     }
-
-    if let Some(interval_start) = started {
-        let interval_end =
-            lease_expires.map_or(snapshot_unix_ms, |expiry| snapshot_unix_ms.min(expiry));
-        let expired = lease_expires.is_some_and(|expiry| expiry <= snapshot_unix_ms);
-        if expired || currently_active {
-            elapsed = elapsed.saturating_add(interval_end.saturating_sub(interval_start));
-        }
-        if expired || !currently_active {
-            started = None;
-        }
-    }
-    (started, elapsed)
+    (started, elapsed, lease_expires)
 }
 
 fn apply_effective_step_state(
@@ -34775,6 +35020,49 @@ agent "test/worker" { workspace "."; command "true"; name "Initial" }
         let cleared = store.desired_subject_with_writer("agent/test/worker").unwrap().unwrap().0;
         assert_eq!(crate::model::effective_agent_name("agent/test/worker", Some(&cleared.desired)), "test/worker");
         assert_eq!(cleared.member.unwrap().display_name, None);
+    }
+
+    #[test]
+    fn declared_launch_lineage_fences_subject_kind_and_launch_changes() {
+        let original = parse_intent(
+            r#"version 2
+    agent "garden/orchard" { command "true" }
+    "#,
+            "amber",
+        )
+        .unwrap()
+        .subjects
+        .remove("agent/garden/orchard")
+        .unwrap();
+        let previous = serde_json::to_value(&original).unwrap();
+        for edit in [r#"env { COLOR "blue"; }"#, r#"name "New label";"#] {
+            let next = parse_intent(
+                &format!("version 2\nagent \"garden/orchard\" {{ command \"true\"; {edit} }}"),
+                "amber",
+            )
+            .unwrap();
+            assert!(same_declared_launch(
+                &previous,
+                &serde_json::to_value(&next.subjects["agent/garden/orchard"]).unwrap()
+            ));
+        }
+        for field in ["subject", "kind", "launch"] {
+            let mut next = original.clone();
+            match field {
+                "subject" => next.subject = "agent/garden/meadow".into(),
+                "kind" => next.kind = "stop".into(),
+                "launch" => {
+                    next.member.as_mut().unwrap().launch =
+                        crate::model::LaunchSpec::Shell("false".into())
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                !same_declared_launch(&previous, &serde_json::to_value(&next).unwrap()),
+                "{field}"
+            );
+        }
+        assert!(!same_declared_launch(&previous, &json!({"kind":"agent"})));
     }
 
     #[test]
@@ -37096,6 +37384,7 @@ agent "test/empty" { command "true" }
         right_value.insert("restart".into(), Value::String("always".into()));
         right_value.insert("workspace".into(), Value::String("/workspace".into()));
         let left = DesiredSubject {
+            accountable: None,
             subject: "agent/example".into(),
             kind: "agent".into(),
             desired: Value::Object(left_value),
@@ -37105,6 +37394,7 @@ agent "test/empty" { command "true" }
             owner_step: None,
         };
         let right = DesiredSubject {
+            accountable: None,
             desired: Value::Object(right_value),
             ..left.clone()
         };
@@ -46945,6 +47235,11 @@ version 2
         assert!(
             open_steps.contains("step_runs_open_index"),
             "a seat queue must read the open steps, not every step:\n{open_steps}"
+        );
+        let selected_steps = plan(&selected_work_at_snapshot_query(false));
+        assert!(
+            !selected_steps.contains("SCAN step_runs\n"),
+            "the published work list refolds its changed steps by subject, not every step:\n{selected_steps}"
         );
         for open_only in [false, true] {
             let seat_steps = plan(&seat_work_at_snapshot_query(open_only));

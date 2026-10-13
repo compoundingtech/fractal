@@ -1,8 +1,8 @@
 # st action coverage
 
-The inventory covers every offered CLI command, every typed client action, every stui daemon effect, and the palette and local controls. It distinguishes real CLI/Unix transport tests, the live stui adapter, local reducer tests, and shared implementations. A test reference describes its actual layer; a shared implementation test alone is not a claim that the entire interactive UI was driven.
+The inventory covers every offered CLI command, every typed client action, every terminal UI daemon effect, and the palette and local controls. It distinguishes real CLI/Unix transport tests, the live terminal UI adapter, local reducer tests, and shared implementations. A test reference describes its actual layer; a shared implementation test alone is not a claim that the entire interactive UI was driven.
 
-`action-coverage.json` is the machine-readable source. Tests compare its 228 CLI rows with Clap's offered command tree, its 55 typed actions with the generated client contract and real dispatch builders, and its 18 stui effects and 13 palette actions with their declarations. Every row must reference an existing test. Hidden driver/replication worker commands and help aliases are internal or alternate spellings, rather than additional person or agent actions.
+`action-coverage.json` is the machine-readable source. Tests compare its CLI rows with Clap's offered command tree, its 55 typed actions with the generated client contract and real dispatch builders, and its 18 terminal UI effects and 13 palette actions with their declarations. Every row must reference an existing test. Hidden driver/replication worker commands and help aliases are internal or alternate spellings, rather than additional person or agent actions.
 
 ## Restart and stale-state model
 
@@ -12,7 +12,7 @@ For the restart-matrix typed actions, the test first submits a stale applicable 
 
 The CLI drives real public command paths. Reads are compared before and after restart; writes are checked in the reopened graph. Messaging checks explicit idempotency keys, replies, attachments and lifecycle receipts. Review tests use current source cards and inspect the single attributed verdict. Launch tests ask and answer questions, submit/compare variants, preview, approve, request revision, cancel, start approved definitions, and propose a variant against one run generation. Terminal tests send real input, keys and signals to a private PTY, inspect its screen, and reject revoked attachments. Fleet tests cover creation/join/history, mode changes, revoke/remove/leave, migrations, checkpoints and repairs. The GitHub watch/unwatch/list/comment/own test drives real CLI and daemon processes against a private HTTP fixture, including restart, repeated unwatch, comment and review posting, foreign-author refusal and idempotent ownership registration.
 
-The live stui test drives send/attachment upload, discussion, retry, agent/shell/launch creation, launch revision, device revocation and mission cancellation through its real adapter across disk-store restarts. The gate fixture drives the real attention adapter after a changed card and a restart. Terminal key encoding, native attachment/reconnection, visibility/read receipts, palette/layout and local draft/navigation controls retain their own focused tests.
+The live terminal UI test drives send/attachment upload, discussion, retry, agent/shell/launch creation, launch revision, device revocation and mission cancellation through its real adapter across disk-store restarts. The gate fixture drives the real attention adapter after a changed card and a restart. Terminal key encoding, native attachment/reconnection, visibility/read receipts, palette/layout and local draft/navigation controls retain their own focused tests.
 
 Suspension and new-seat readiness tests supply explicit fixture owner acknowledgements. They verify the public request, wait, native identity and durable protocol phases; native process continuation belongs to the runtime canaries and restart suite. GitHub gates use real CLI commands with a private HTTP fixture for pass/wait/broken behavior, obsolete commit refs and malformed-input refusal across daemon restarts; they make no live GitHub API calls. GitHub comment posting offers no public snapshot fence or retry token: tests prove refusal of a foreign seat actor before HTTP posting and durable ownership across restarts; they do not claim exactly-once external posting. Local-only UI operations have no graph fence. Glass base revisions intentionally report last-writer-wins replacement and are not execution fences.
 
@@ -23,8 +23,8 @@ Three declared typed actions are unavailable: `attention.resolve` returns `atten
 - A ready step has no lease incarnation. Comparing a claim's live incarnation against the missing lease rejected every valid typed claim. Claim dispatch now validates the caller's current live harness before acquiring the lease; existing leases still compare their incarnation.
 - A stale mission revision preview reached a legacy handler and was classified as an internal error. Typed dispatch now reports `stale-fence` before approval writes.
 - Legacy CLI launch IDs can themselves start with `launch/`. Later actions stripped that prefix before looking up the stored ID. The lookup now resolves the exact ID first and then accepts the client resource namespace.
-- stui launch review cards identify their source as a planning session and also provide a public launch ID. Approval, cancellation and revision now use that public launch ID rather than constructing an invalid nested resource path.
-- With multiple launch variants, stui selected the last preview by ordinal even when its review card named the default candidate. Approval now filters to the card's variant before choosing a preview.
+- terminal UI launch review cards identify their source as a planning session and also provide a public launch ID. Approval, cancellation and revision now use that public launch ID rather than constructing an invalid nested resource path.
+- With multiple launch variants, terminal UI selected the last preview by ordinal even when its review card named the default candidate. Approval now filters to the card's variant before choosing a preview.
 
 ## Run the checks
 
@@ -308,13 +308,13 @@ edits and removes retired subjects without changing unfiltered reads.
 | `st work update` | real CLI over private Unix socket; disk store reopened between actions | [`cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `st work wake` | real CLI over private Unix socket; disk store reopened between actions | [`cli_mission_output_and_manual_wake_survive_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 
-## stui effects
+## Terminal UI effects
 
 | Effect | Verification | Test evidence |
 | --- | --- | --- |
 | `LoadContent` | content-control reducer and viewport queue; chunk assembly/identity checks; real owner HTTP chunk transport without durable writes | [`content_controls_emit_load_effects_once_and_release_on_collapse_or_hide`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/mod.rs); [`expand_all_loads_visible_clipped_blocks_sequentially_and_collapse_releases`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/mod.rs); [`automatic_images_use_visible_image_lines_graphics_and_one_read_at_a_time`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/mod.rs); [`chunks_assemble_the_entire_original_json_from_zero`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/content.rs); [`chunks_reject_changed_identity_and_non_progressing_offsets`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/content.rs); [`truncated_tool_output_http_chunks_return_complete_native_body_without_writes`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/api/client_v0/conversation_blocks.rs); [`http_owner_chunks_negotiate_bound_bytes_and_visibly_invalidate_without_writes`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/src/api/client_v0/conversation_blocks.rs) |
 | `OpenImage` | UI reducer and corresponding real daemon action; local effects have no graph fence | [`an_image_read_from_st_is_kept_once_by_its_hash`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/attach.rs); [`messages_survive_stale_fences_and_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
-| `Attention` | live UI adapter plus daemon restart | [`approving_a_gate_asked_again_acts_once_on_its_current_card`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/main.rs); [`human_review_actions_survive_stale_fences_and_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs); [`launch_review_uses_its_public_launch_and_selected_variant_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/main.rs) |
+| `Attention` | live UI adapter plus daemon restart | [`approving_a_gate_asked_again_acts_once_on_its_current_card`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/lib.rs); [`human_review_actions_survive_stale_fences_and_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs); [`launch_review_uses_its_public_launch_and_selected_variant_after_restart`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/lib.rs) |
 | `LaunchRevise` | live UI adapter across daemon restart | [`live_sends_retries_discussions_and_creation_survive_daemon_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/live.rs); [`launch_actions_survive_stale_fences_and_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `Reply` | live adapter refuses a changed/absent Home card without sending; daemon send covers thread replies | [`live_sends_retries_discussions_and_creation_survive_daemon_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/live.rs); [`messages_survive_stale_fences_and_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
 | `Send` | live UI adapter plus daemon restart; conversation thread replies preserve in_reply_to and retry receipts | [`live_sends_retries_discussions_and_creation_survive_daemon_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/stui/src/ui/live.rs); [`messages_survive_stale_fences_and_restarts`](https://github.com/compoundingtech/smalltalk/blob/main/crates/st3/tests/action_coverage.rs) |
@@ -393,3 +393,15 @@ periods, ordered updates, explicit refresh snapshots, reconnect, background and
 grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
 `collectionSocket.test.mjs` checks authentication and control-event delivery at
 the native bridge boundary; it does not claim an iOS simulator was driven.
+
+The stui consumer is covered by `st3-feed/src/inventory_tests.rs` over an isolated
+Unix daemon: all six windows, typed client/usage adaptation, period replacement,
+unsubscription and authoritative reconnect snapshots.
+`stui/tests/client_only.rs::inventory_screens_send_no_request_after_their_first_frames_for_more_than_a_minute`
+drives the actual binary with `scripts/stui-test-client` and `STUI_TIMING_LOG`.
+Fleet and Usage each remain idle for 72 seconds; their first snapshots must occur
+once, every inventory HTTP read is forbidden, and no request follows ready frames
+for longer than the old 60-second interval.
+
+The usage inventory empty-graph socket test verifies that an open period uses the same wall-clock end as the HTTP read, then reconnects without a graph write.
+`st ui` opens the terminal interface; plain `st` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/st3/tests` exercise this entry point. Pair with `st devices complete`.

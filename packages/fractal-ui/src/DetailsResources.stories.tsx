@@ -140,6 +140,7 @@ function contrast(element: Element) {
 function assertCraft(pane: HTMLElement, item: Case) {
   assertHuman(pane)
   for (const reason of pane.querySelectorAll<HTMLElement>('[data-details-unavailable]')) if (shown(reason)) requireContract(contrast(reason) >= 4.5, 'Unavailable explanation contrast below 4.5:1')
+  for (const quiet of pane.querySelectorAll<HTMLElement>('[data-details-section-count],[data-details-quiet-action]')) if (shown(quiet)) requireContract(contrast(quiet) >= 4.5, 'Section count or Open in split contrast below 4.5:1')
   for (const name of ['Workspace', 'Pull requests', 'CI runs']) {
     const section = pane.querySelector(`section[aria-label$="${name}"]`), heading = section?.querySelector('[data-details-heading]'), meta = section?.querySelector('[data-resource-meta]')
     if (heading && meta) requireContract(contrast(heading) > contrast(meta), 'Resource heading is no stronger than metadata')
@@ -152,7 +153,7 @@ function assertCraft(pane: HTMLElement, item: Case) {
   }
   if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-missing-value]`), 'Unknown source omits a field-specific explanation')
   const history = pane.querySelector('section[aria-label$="History"]')
-  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:name=>/^Open Incarnation|^Incarnation/.test(name)}).length>0, 'Known trace history is absent')
+  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:/^Incarnation/}).length>0, 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
   // Compactions paint context occupancy: 897,170 → 132,952 of a 1M window, excluding the straddling bucket.
   if (changes) requireContract(/90% → 13%/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')
@@ -168,6 +169,16 @@ async function humanControl(pane: HTMLElement) {
   const original = target.textContent
   try { target.textContent = 'Unknown'; await rejectsControl('Details exposes a tag or generic missing-data value', () => assertHuman(pane)) } finally { target.textContent = original }
   assertHuman(pane)
+}
+async function contrastControl(pane: HTMLElement, item: Case) {
+  const count = [...pane.querySelectorAll<HTMLElement>('[data-details-section-count]')].find(shown), split = [...pane.querySelectorAll<HTMLElement>('[data-details-quiet-action]')].find(shown)
+  requireContract(count, 'Contrast control lacks a shown section count')
+  // Ink equal to the pane surface is the exact low-contrast cause in either scheme.
+  for (const target of split ? [count, split] : [count]) {
+    const color = target.style.color
+    try { target.style.color = getComputedStyle(pane).backgroundColor; await rejectsControl('Section count or Open in split contrast below 4.5:1', () => assertCraft(pane, item)) } finally { target.style.color = color }
+  }
+  assertCraft(pane, item)
 }
 function intrinsic(element: HTMLElement, pane: HTMLElement) {
   const copy = element.cloneNode(true) as HTMLElement, css = getComputedStyle(element)
@@ -258,7 +269,7 @@ function assertBranch(pane: HTMLElement) {
   requireContract(titles.some(title => title.closest('[data-details-resource-row]')?.querySelector('[data-resource-meta]')?.textContent?.includes('Declared branch')), 'Declared branch row is missing')
   for (const title of titles) {
     const row=title.closest<HTMLElement>('[data-details-resource-row]'),label=title.textContent?.replace(/\s+/g,' ').trim();requireContract(row&&label, 'Wrapped identity lacks its full accessible name')
-    requireContract(within(pane).queryAllByRole('button',{name:name=>name.includes(label)}).includes(row), 'Wrapped identity lacks its full accessible name')
+    requireContract(within(pane).queryAllByRole('button',{name:name=>name.replace(/\s+/g,' ').includes(label)}).includes(row), 'Wrapped identity lacks its full accessible name')
     const lines = textLines(title)
     requireContract(lines.length < 2 || lines.at(-1)!.trim().split(/[\s/_-]+/).filter(Boolean).length >= 2, 'Wrapped identity leaves an orphaned final word')
   }
@@ -356,15 +367,19 @@ export const Interactions: Story = { play: async ({ canvasElement }) => {
   context.focus(); await userEvent.keyboard(' '); await waitFor(() => requireContract(context.checked && writes() === before + 2 && pane.querySelector('section[aria-label="Context"]'), 'Keyboard restore does not commit exactly one visibility intent'))
   await userEvent.keyboard('{Escape}')
   const events = () => JSON.parse(root.dataset.openEvents!) as { key: string; split: boolean }[]
-  const terminal = within(pane).getByRole('button', { name: 'Open Session terminal terminal' })
-  const assertTerminalName=()=>requireContract(terminal.getAttribute('aria-label')==='Open Session terminal terminal','Resource action name omits its visible metadata')
-  assertTerminalName()
-  const terminalName=terminal.getAttribute('aria-label')
-  try{terminal.setAttribute('aria-label','Open Session terminal');await rejectsControl('Resource action name omits its visible metadata',assertTerminalName)}finally{requireContract(terminalName,'Missing terminal name');terminal.setAttribute('aria-label',terminalName)}
-  assertTerminalName()
+  // Dense rows are named by their painted label and fitted meta; the meta and detail facts describe them.
+  const terminal = within(pane).getByRole('button', { name: /^Session terminal\b/, description: /Live output/ })
+  const painted = [terminal.querySelector('[data-details-resource-title]')?.textContent, terminal.querySelector('[data-resource-meta-fit="whole"] [data-resource-meta-value]')?.textContent].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+  const assertDenseName=()=>requireContract(within(pane).queryByRole('button',{name:painted,description:description=>description.includes('terminal')&&description.includes('Live output')})===terminal,'Dense resource name differs from its painted text or omits its facts')
+  assertDenseName()
+  try{terminal.setAttribute('aria-label',`Open ${painted}`);await rejectsControl('Dense resource name differs from its painted text or omits its facts',assertDenseName)}finally{terminal.removeAttribute('aria-label')}
+  assertDenseName()
+  const describedBy=terminal.getAttribute('aria-describedby');requireContract(describedBy,'Missing dense row description reference')
+  try{terminal.removeAttribute('aria-describedby');await rejectsControl('Dense resource name differs from its painted text or omits its facts',assertDenseName)}finally{terminal.setAttribute('aria-describedby',describedBy)}
+  assertDenseName()
   await userEvent.click(terminal); await waitFor(() => requireContract(events().at(-1)?.key === 'terminal:sample/1' && !events().at(-1)?.split, 'Details terminal callback loses exact session identity'))
   await userEvent.click(terminal); requireContract(events().length === 2 && writes() === before + 2, 'Repeated terminal request alters layout intent or fails to reattach')
-  const file = within(pane).getAllByRole('button', { name: /^Open src\// })[0]!
+  const file = within(pane).getAllByRole('button', { name: /^src\// })[0]!
   await userEvent.click(file); requireContract(events().at(-1)?.key.startsWith('diff:sample/') && !events().at(-1)?.split, 'Details resource open callback loses pane identity')
   // One user-event instance carries the held modifier into the click; direct APIs reset keyboard state per call.
   const user = userEvent.setup(); await user.keyboard('{Control>}'); try { await user.click(file) } finally { await user.keyboard('{/Control}') }
@@ -376,7 +391,7 @@ export const Interactions: Story = { play: async ({ canvasElement }) => {
   await humanControl(pane)
 } }
 export const PresentationMatrix: Story = { args: { cases: presentationCases }, play: async ({ canvasElement, args }) => {
-  await eachCase(canvasElement, args.cases, (pane, item) => assertCraft(pane, item)); await humanControl(paneFor(canvasElement))
+  await eachCase(canvasElement, args.cases, (pane, item) => assertCraft(pane, item)); await humanControl(paneFor(canvasElement)); await contrastControl(paneFor(canvasElement), args.cases.at(-1)!)
 } }
 export const TraceContracts: Story = { args: { cases: [...sourceCases, example('turn-only context', 400, 'busy', {}, { ...full, series: missing }), example('null-turn context', 400, 'busy', {}, full.turns._tag === 'Known' ? { ...full, turns: { ...full.turns, value: { ...full.turns.value, points: full.turns.value.points.map((point, index) => index === 0 ? { ...point, contextTokens: null, contextPercent: null } : point) } } } : full)] }, play: async ({ canvasElement, args }) => {
   assertFixtureFacts()
@@ -444,11 +459,11 @@ export const MissionTitleFit: Story = { args: { cases: [example('missions/320/R1
 } }
 export const BranchOrphan: Story = { args: { cases: widths.map(width => example(`branch/${width}`, width, 'partial')) }, play: async ({ canvasElement, args }) => {
   await eachCase(canvasElement, args.cases, assertBranch)
-  const pane = paneFor(canvasElement), title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, row = title.closest('[data-details-resource-row]')!, original = row.getAttribute('aria-label'), originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace
+  const pane = paneFor(canvasElement), title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace
   try {
-    title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'; row.setAttribute('aria-label', 'Open declared branch orphan')
+    title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'
     await rejectsControl('Wrapped identity leaves an orphaned final word', () => assertBranch(pane))
-  } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace; if(original===null)row.removeAttribute('aria-label');else row.setAttribute('aria-label', original) }
+  } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace }
   assertBranch(pane)
 } }
 export const IdentityClamp: Story = { args: { cases: resourceCases(['R1', 'R2'], ['busy', 'partial'], [240, 320, 400, 520]) }, play: async ({ canvasElement, args }) => {
@@ -462,7 +477,7 @@ export const AllStates: Story = { args: { cases: allStatesCases, comparison: tru
   const panes = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="details-pane"]')]
   requireContract(panes.length === args.cases.length, 'AllStates omits a production Details state')
   for (const [index, pane] of panes.entries()) { assertCraft(pane, args.cases[index]!); if (args.cases[index]!.state === 'busy') await containmentGate(pane) }
-  await humanControl(panes[0]!)
+  await humanControl(panes[0]!); await contrastControl(panes[0]!, args.cases[0]!)
 } }
 
 const e3Traces: readonly { name: string; trace: TraceSeries }[] = [
