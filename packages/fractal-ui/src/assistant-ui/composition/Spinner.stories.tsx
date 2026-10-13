@@ -149,9 +149,10 @@ export const Contexts: Story = { play: async ({ canvasElement, step }) => {
     expect(() => assertMotion(root)).toThrow()
     layoutMotion.cancel()
     // A spinner that grows its row moves the row's text.
-    glyph.style.marginBlockStart = g.icon
+    const box = glyph.parentElement!
+    box.style.marginBlockStart = g.icon
     expect(() => assertBaselines(root)).toThrow()
-    glyph.style.removeProperty('margin-block-start')
+    box.style.removeProperty('margin-block-start')
     // A spinning glyph without the guarded class keeps turning under reduced motion.
     const unguarded = glyph.cloneNode(true) as SVGSVGElement
     unguarded.removeAttribute('class')

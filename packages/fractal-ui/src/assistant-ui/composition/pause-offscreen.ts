@@ -1,18 +1,27 @@
 let observer: IntersectionObserver | undefined
+const targets = new WeakMap<Element, Set<HTMLElement | SVGElement>>()
 
 /**
- * React 19 ref callback for an element that runs an infinite CSS animation: one shared IntersectionObserver
- * pauses the element's animation while it is off screen, so only visible spinners tick.
+ * React 19 ref callback: one shared observer pauses animations while their fixed parent boxes are off screen.
+ * Observing the rotating glyph itself makes Chromium recompute intersections every frame.
  * Without IntersectionObserver (server render, jsdom) the animation simply keeps running.
  */
 export function pauseOffscreen(element: HTMLElement | SVGElement): (() => void) | undefined {
-  if (typeof IntersectionObserver === 'undefined') return undefined
+  const box = element.parentElement
+  if (typeof IntersectionObserver === 'undefined' || box === null) return undefined
   observer ??= new IntersectionObserver(entries => {
-    for (const entry of entries) (entry.target as HTMLElement | SVGElement).style.animationPlayState = entry.isIntersecting ? 'running' : 'paused'
+    for (const entry of entries) for (const target of targets.get(entry.target) ?? []) target.style.animationPlayState = entry.isIntersecting ? 'running' : 'paused'
   })
-  observer.observe(element)
+  let glyphs = targets.get(box)
+  if (glyphs === undefined) {
+    glyphs = new Set()
+    targets.set(box, glyphs)
+    observer.observe(box)
+  }
+  glyphs.add(element)
   return () => {
-    observer!.unobserve(element)
+    glyphs.delete(element)
+    if (glyphs.size === 0) { observer!.unobserve(box); targets.delete(box) }
     element.style.removeProperty('animation-play-state')
   }
 }
