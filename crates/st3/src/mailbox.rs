@@ -389,6 +389,7 @@ pub(crate) mod tests {
     #[test]
     fn seat_label_appends_launcher_persona_short_without_space_and_strips_controls() {
         let seat = DesiredSubject {
+            accountable: None,
             subject: "agent/eval.worker".into(),
             kind: "agent".into(),
             desired: json!({"display_name":"Qu\u{1b}]0;x\u{7}artz"}),
@@ -421,6 +422,77 @@ pub(crate) mod tests {
         ready(&store, "session-2");
         assert_eq!(store.bind_mailbox(&request).unwrap_err().code, "stale-mailbox-session");
         assert_eq!(store.check_mailbox(&bound).unwrap_err().code, "stale-mailbox-session");
+    }
+
+    #[test]
+    fn startup_hook_activity_waits_for_runtime_evidence_without_allocating_ownership() {
+        for (state, expected_error) in [
+            ("starting", "mailbox-session-starting"),
+            ("ready", "mailbox-session-starting"),
+            ("idle", "mailbox-session-starting"),
+            ("working", "mailbox-session-starting"),
+            ("blocked", "mailbox-session-starting"),
+            ("indeterminate", "stale-mailbox-session"),
+        ] {
+            let store = Store::open_memory("node").unwrap();
+            ready(&store, "previous");
+            let previous = store
+                .bind_mailbox(&Fence::new("agent/eval.worker", "previous", "delivery"))
+                .unwrap();
+            store
+                .append_claim(&claim(
+                    "agent/eval.worker",
+                    "harness.observed",
+                    json!({"state":state,"driver":"claude","incarnation_id":"replacement"}),
+                    "replacement-hook",
+                ))
+                .unwrap();
+            let replacement = Fence::new("agent/eval.worker", "replacement", "delivery");
+            assert_eq!(
+                store.bind_mailbox(&replacement).unwrap_err().code,
+                expected_error,
+                "{state}"
+            );
+            assert_eq!(
+                store
+                    .bind_mailbox(&Fence::new("agent/eval.worker", "foreign", "delivery"))
+                    .unwrap_err()
+                    .code,
+                "stale-mailbox-session"
+            );
+            let mut already_bound = replacement.clone();
+            already_bound.epoch = 1;
+            assert_eq!(
+                store.bind_mailbox(&already_bound).unwrap_err().code,
+                "stale-mailbox-session",
+                "a bound owner is never a pending startup"
+            );
+            store
+                .append_claim(&claim(
+                    "agent/eval.worker",
+                    "harness.observed",
+                    json!({"state":"ended","driver":"claude","incarnation_id":"replacement"}),
+                    "replacement-ended",
+                ))
+                .unwrap();
+            assert_eq!(
+                store.bind_mailbox(&replacement).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+            ready(&store, "replacement");
+            let bound = store.bind_mailbox(&replacement).unwrap();
+            assert_eq!(bound.epoch, 2, "hook activity never allocated an owner");
+            assert_eq!(
+                store.check_mailbox(&previous).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+            store.append_claim(&claim("agent/eval.worker", "runtime.observed",
+                    json!({"status":"exited","runtime_id":"eval.worker","incarnation_id":"replacement"}), "replacement-exited")).unwrap();
+            assert_eq!(
+                store.bind_mailbox(&bound).unwrap_err().code,
+                "stale-mailbox-session"
+            );
+        }
     }
 
     #[test]
