@@ -898,6 +898,8 @@ pub struct Reconciler<R = NativeRuntime> {
     delayed_restarts: Arc<Mutex<HashMap<String, u128>>>,
     #[cfg(test)]
     restart_timer_observer: Option<tokio::sync::mpsc::UnboundedSender<(u128, &'static str)>>,
+    #[cfg(test)]
+    readiness_before_append_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
     /// The kill deadline already logged for each active stop operation.
     reported_kill_survivors: Mutex<HashMap<String, String>>,
@@ -1059,6 +1061,8 @@ impl Reconciler<NativeRuntime> {
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             restart_timer_observer: None,
+            #[cfg(test)]
+            readiness_before_append_hook: Default::default(),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
@@ -1145,6 +1149,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             restart_timer_observer: None,
+            #[cfg(test)]
+            readiness_before_append_hook: Default::default(),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
@@ -3427,7 +3433,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .local_observation_for_key(&subject.subject, "runtime.action.succeeded", &key)?
                 .is_none()
             {
-                self.store.append_claim(&ClaimInput {
+                #[cfg(test)]
+                if let Some(hook) = self.readiness_before_append_hook.lock().unwrap().take() {
+                    hook();
+                }
+                let (_, appended) = self.store.append_claim_outcome(&ClaimInput {
                     subject: subject.subject.clone(),
                     kind: "runtime.action.succeeded".into(),
                     actor: None,
@@ -3441,7 +3451,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })?;
                 // SystemLocal receipts do not advance the durable claim index. Wake
                 // conditional launch readers after the newly committed milestone.
-                self.signal_changed();
+                if appended {
+                    self.signal_changed();
+                }
             }
             self.resolve_superseded_harness_auth_attention(&subject.subject, incarnation)?;
             self.resolve_recovered_seat_attention(&subject.subject, incarnation)?;

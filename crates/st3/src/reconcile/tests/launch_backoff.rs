@@ -189,6 +189,83 @@ fn quiet_ready_passes_do_not_enqueue_duplicate_local_receipts() {
     );
 }
 #[test]
+fn a_competing_readiness_insert_does_not_emit_a_duplicate_signal() {
+    let _clock = Clock;
+    let now = 1_800_000_000_000;
+    let (store, reconciler, desired) = fixture(now);
+    let mut member = desired.member.clone().unwrap();
+    member.driver = Some("pi".into());
+    let observed = RuntimeObservation {
+        runtime_id: member.runtime_id.clone(),
+        terminal: true,
+        status: "running".into(),
+        exit_code: None,
+        incarnation_id: Some("ready-race".into()),
+    };
+    reconciler
+        .record_member(&desired, &observed, false)
+        .unwrap();
+    store
+        .append_claim(&ClaimInput {
+            subject: desired.subject.clone(),
+            kind: "harness.observed".into(),
+            actor: Some(desired.subject.clone()),
+            fields: serde_json::from_value(serde_json::json!({
+                "state":"ready", "driver":"pi", "incarnation_id":"ready-race",
+            }))
+            .unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let key = format!("launch-ready:{}:ready-race", desired.subject);
+    let competing_store = store.clone();
+    let competing_key = key.clone();
+    let subject = desired.subject.clone();
+    *reconciler.readiness_before_append_hook.lock().unwrap() = Some(Box::new(move || {
+        let (_, inserted) = competing_store
+            .append_claim_outcome(&ClaimInput {
+                subject,
+                kind: "runtime.action.succeeded".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), Value::String("harness-ready".into())),
+                    ("incarnation_id".into(), Value::String("ready-race".into())),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(competing_key),
+            })
+            .unwrap();
+        assert!(
+            inserted,
+            "the competing writer must win the missing-receipt race"
+        );
+    }));
+    let updates = reconciler.event_notify.subscribe();
+    reconciler
+        .reconcile_driver_readiness(&desired, &member, &observed, now)
+        .unwrap();
+    assert!(
+        reconciler
+            .readiness_before_append_hook
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+    let receipt = store
+        .local_observation_for_key(&desired.subject, "runtime.action.succeeded", &key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.body["fields"]["incarnation_id"], "ready-race");
+    assert!(
+        !updates.has_changed().unwrap(),
+        "a duplicate append completion signalled a new receipt"
+    );
+}
+
+#[test]
 fn crash_backoff_caps_total_delay_and_keeps_absolute_due_across_accounting_windows() {
     let _clock = Clock;
     let mut now = 1_800_000_000_000;
