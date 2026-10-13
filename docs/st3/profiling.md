@@ -14,9 +14,11 @@ route totals, so do not add counts across scopes. The seven action buckets are i
 
 `GET /v1/client/agents` also gets `scope: "agents-read"` rows, `method: "GET"`, with `read` set to
 `first-page`, `fresh` or `continuation` (any page with a `cursor`). A `fresh=true` first page waits
-by design, up to two seconds, until the roster refresher publishes a roster at or after the
-read's own cut. The other two answer at once from a published roster. Count the fresh row against
-its own target rather than leaving it out: the route total still includes it.
+up to two seconds for a refresh to publish at or after the read's own cut, including when the
+refresher is idle. Only a failed latest attempt with no newer attempt in flight returns the
+newest publication at once. Its original snapshot cut and publication time show its age.
+The other two answer at once from a published roster. Count the fresh row against its own
+target: the route total includes it.
 
 `scope: "agents-roster"` rows (also under route `/v1/client/agents`) time where that wait goes,
 each in its own last-512 sample, `duration_scope: "roster-stage"`. Stage `refresh` is one refresher
@@ -27,6 +29,14 @@ its wait for roster admission (`population: "refresher-folds"`).
 Stage `fresh-wait` is a fresh read's wait for a publication at its cut (2 s at most), and
 `fresh-page` the page it then builds (`population: "fresh-reads"`). Stages are not requests: they
 add no route or path rows.
+
+`scope: "work-list"` rows (under route `/v1/client/work`) time a current-work read served from
+the published work list, `duration_scope: "work-stage"`. Stage `fresh-wait` is a fresh read's wait
+for a publication at its cut (2 s at most, `population: "fresh-reads"`); `page` a first page served
+from a publication, and `actor-build` one whose read built its actor's order in that publication
+(`population: "first-pages"`). They add no route or path rows. A fresh work read, which `st work ls`
+sends, still counts in full, wait included, under the `GET /v1/client/work` route and its
+`person-read` target: it has no `(fresh)` path or target of its own.
 
 Each row's `count` is its completed-response count since this process started, including error
 responses. Percentiles use its last at most 512 completions (`recent_count`), in whole milliseconds.

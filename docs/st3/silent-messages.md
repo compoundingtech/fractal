@@ -61,16 +61,11 @@ when complete; per-claim projections cannot multiply the historical budget. `com
 Reads never advance bootstrap. The factory SLO timer divides each count by merges in the
 rolling day and publishes informational values; zero merges gives no ratio.
 
-## Upgrades and recovery
+## Count bootstrap
 
-Old daemons silently ignore the typed `kind` field and do not hold `st3-silent` tags, so a
-silent message may wake its recipient. Old CLIs reject `--kind`. The CLI warns when an agent's
-requested silent delivery is not confirmed by the raw receipt's `kind: silent` (old daemons may
-retain the tag without honoring it); SDK callers must upgrade all owners before relying on silent delivery in a
-mixed fleet. Upgrade all senders and owner daemons before relying on silent delivery.
-Downgrading below this build is unsupported; use forward recovery. The startup writer migrates an earlier preview metadata column from `fyi` to `silent`; its covering index follows. Legacy held tags are read as silent without rewriting canonical claims, so preview-held mail stays unread and held. Earlier preview binaries remain incompatible with the new schema: recover forward, never downgrade.
-Pre-feature binaries lose no-wake guarantees. Rust struct literals must supply `kind: MessageKind`;
-deserialization and CLI defaults are wake. There is no seat declaration or restart change.
+A daemon that does not know the silent kind delivers a silent message as wake, and the CLI
+warns when the receipt does not confirm `kind: silent`. Upgrade every sender and owner
+daemon before relying on silent delivery.
 
 Bootstrap reports `cursor`, `ceiling`, `progress_ms` and `complete` from local metadata;
 doctor warns if unfinished bootstrap makes no progress for 15 minutes. On reopening after
@@ -81,8 +76,6 @@ cannot publish a plausible undercount. A failed startup bootstrap page rolls bac
 At eight subjects per job with a 100-millisecond pause, 100,000 historical sends need at
 least about 20.8 minutes and one million about 3.5 hours, plus writer contention. Until
 bootstrap completes, ratios are unavailable, held-mail diagnostics are partial, and the
-backlog banner is suppressed to avoid reporting held mail as late. Separating held-only
-bootstrap and displaying a pending-exclusion banner are deferred. Held counts use the canonical earliest send timestamp; a replicated duplicate's later unread
+backlog banner is suppressed to avoid reporting held mail as late. Held counts use the canonical earliest send timestamp; a replicated duplicate's later unread
 timestamp can make the cosmetic backlog count conservative. Cleanup revalidates each message
-and still preserves unoffered silent messages. Optimizing the existing metadata sort and refreshing
-remaining notices after on-demand reads are deferred.
+and still preserves unoffered silent messages.

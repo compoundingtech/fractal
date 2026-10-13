@@ -794,6 +794,7 @@ export type Agent = typeof Agent.Type
 export type AgentEncoded = typeof Agent.Encoded
 
 export const AgentDeclaration = /*#__PURE__*/ (() => Schema.Struct({
+  "accountable": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^person/[A-Za-z0-9_.-]+$", "u")))),
   "id": Id,
   "kdl": Schema.String,
   "revision": Schema.String,
