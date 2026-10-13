@@ -1222,6 +1222,7 @@ mod tests {
             checkpoint: crate::config::CheckpointConfig::default(),
             limits: crate::config::LimitsConfig::default(),
             reconcile: crate::config::ReconcileConfig::default(),
+            codex_work_without_asking: None,
             fleet: None,
         };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
