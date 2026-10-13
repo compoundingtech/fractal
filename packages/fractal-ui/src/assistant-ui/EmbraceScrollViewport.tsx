@@ -555,7 +555,11 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
 
 const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
-  virtualRow: { outlineStyle: 'none', display: 'flow-root', minWidth: 0 },
+  // RAC's ScrollView sets `pointer-events: none` on its content for 300 ms after
+  // every scroll event, including the controller's own follow and restore writes.
+  // A following lane scrolls on each streamed growth, so rows would refuse clicks
+  // for as long as a reply streams. Rows opt back in; the lane stays scrollable.
+  virtualRow: { outlineStyle: 'none', display: 'flow-root', minWidth: 0, pointerEvents: 'auto' },
   // A visible jump control gets its own dock, never covering a reader's current line.
   jump: { flexShrink: 0, marginInline: 'auto', marginBlock: spaceVars.md, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
 })
