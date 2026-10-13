@@ -305,3 +305,9 @@ The local `coordination_offer` trigger runs after lifecycle claims are inserted 
 for staged, delivered, read and closed receipts it clears `coordination_sends.held` with one
 guarded primary-key update in the existing writer transaction. It adds no reader write or
 conversation payload and is outside shared projection digests.
+
+The Git change reader uses `local_git_change_records` and
+`local_git_change_latest` as node-local verified-object receipts and latest indexed
+pointers. They start empty, rebuild from explicitly fetched Git objects, and do
+not participate in replicated projection order or digests. The table inventory
+audit classifies both as local storage.

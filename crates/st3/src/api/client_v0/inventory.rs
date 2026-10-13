@@ -93,9 +93,9 @@ pub(super) fn items(
             rows
         }
         "usage" => {
-            let until = request
-                .until_ms
-                .unwrap_or(client_snapshot_time(snapshot) as u64);
+            // The graph clock can predate this period on an idle or empty member.
+            // Open periods end at wall time, just as the authorized HTTP read does.
+            let until = request.until_ms.unwrap_or(client_now_ms() as u64);
             let since = request.since_ms.unwrap_or(until.saturating_sub(86_400_000));
             anyhow::ensure!(since <= until, "usage start must be before its end");
             let mut value = usage_value(&state.store, since, until)?;

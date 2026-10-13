@@ -64,7 +64,10 @@ path, title, first goal, and state, and the `subagents` its harness runs now.
 A work row names its `mission_id`.
 
 Each window is read inside one SQLite snapshot, and its fence names that
-snapshot's store index, so rows always match their fence. Commits that land
+snapshot's store index, so rows always match their fence. Agents, missions and
+work windows serve lists a background refresher keeps published: their fence
+names the published list's own cut and `published_at` (see the client README's
+freshness sections). Commits that land
 while a window is read neither tear it nor delay it; they arrive in the next
 `changes` frame.
 
@@ -180,6 +183,13 @@ is revalidated before counting, including private person selection. Read failure
 send the existing `resync`/`error` frames, never inferred zero counts. Clients keep compatibility
 behavior on older daemons. The source may move to the shared IVM reactor later
 without changing this contract.
+A daemon serves these counts from published rows. What no person changes (missions,
+working agents, machines) is computed once for every selection, at one cut, and again
+when the cut, the roster or the 30-second clock period changes. Each selection counts
+its alerts from the published attention rows, the same rows its
+attention window shows. The row carries the shared counts' cut. A window that opens a
+new selection is served at once. Before the first publication, the window gets a
+retryable `summary-not-ready` resync.
 Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
