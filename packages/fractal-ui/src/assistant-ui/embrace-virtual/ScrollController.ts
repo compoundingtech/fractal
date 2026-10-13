@@ -38,8 +38,9 @@ export class ScrollController {
   private restoring: boolean
   private userInputAt = 0
   private userScrolling = false
-  /** The latest reader input has already moved the viewport. */
+  /** The latest reader input has already moved the viewport away from `inputTop`. */
   private inputScrolled = false
+  private inputTop: number | undefined
   private olderNavigation = false
   private homeNavigation = false
   /** scrollTop when an older-navigation command began, until RAC moves the viewport. */
@@ -94,6 +95,7 @@ export class ScrollController {
     this.userInputAt = performance.now()
     this.userScrolling = true
     this.inputScrolled = false
+    this.inputTop = this.element?.scrollTop
     this.navigationTop = this.element?.scrollTop
     this.prependBottom = undefined
     if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
@@ -171,6 +173,7 @@ export class ScrollController {
       this.userInputAt = performance.now()
       this.userScrolling = true
       this.inputScrolled = false
+      this.inputTop = element.scrollTop
       this.pendingAnchor = undefined
       this.restoring = false
       if (this.restoreFrame !== undefined) cancelAnimationFrame(this.restoreFrame)
@@ -190,7 +193,8 @@ export class ScrollController {
       // A key command whose scroll has not arrived yet still owns the next move.
       if (!this.userScrolling && (resized && this.inputScrolled || performance.now() - this.userInputAt > USER_SCROLL_WINDOW_MS))
         return
-      this.inputScrolled = true
+      // An unmoved scroll event (RAC re-asserting the focused row) is not the input's scroll.
+      if (element.scrollTop !== this.inputTop) this.inputScrolled = true
       this.captureAnchor()
       if (this.homeNavigation && this.leadingKey !== undefined && this.anchor?.key === this.firstKey) {
         // RAC has reached the loaded head. Include its measured inline state
