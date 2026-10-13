@@ -30547,7 +30547,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].title, "st cannot reconcile daemon/node");
         assert!(first[0].detail.contains("the disk is full"));
-        assert!(first[0].detail.contains("`st subject daemon/node`"));
+        assert!(first[0].detail.contains("`st subject show daemon/node`"));
 
         // A new cause replaces the item.
         fail("the database is locked");

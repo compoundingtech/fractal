@@ -561,7 +561,7 @@ impl Store {
                 message_id: None, answers: Vec::new(), conversation: None,
                 title: format!("st cannot reconcile {source}"),
                 detail: format!(
-                    "{scope}: {}. Inspect with `st subject {source}`.",
+                    "{scope}: {}. Inspect with `st subject show {source}`.",
                     claim.body["fields"]["reason"].as_str().unwrap_or_default()
                 ),
                 mission: None,
