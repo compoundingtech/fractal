@@ -21,6 +21,28 @@ fn main() -> anyhow::Result<()> {
     let readers = Arc::new(ReadPool::new(&path, false)?);
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     sample("baseline", &readers);
+    // No reader barrier or SQL work: writer contention alone occupies N blocking workers.
+    let writer_hold = writer.write();
+    let writer_waiters = Arc::new(AtomicUsize::new(0));
+    let writer_jobs: Vec<_> = (0..n).map(|_| {
+        let writer = writer.clone(); let writer_waiters = writer_waiters.clone();
+        runtime.spawn_blocking(move || {
+            writer_waiters.fetch_add(1, Ordering::SeqCst);
+            drop(writer.write());
+        })
+    }).collect();
+    let wait_started = Instant::now();
+    while writer_waiters.load(Ordering::SeqCst) < n {
+        anyhow::ensure!(wait_started.elapsed() < Duration::from_secs(60), "writer workers did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    sample("writer-only-held", &readers);
+    drop(writer_hold);
+    runtime.block_on(async { for job in writer_jobs { job.await.unwrap(); } });
+    sample("writer-only-released", &readers);
+    std::thread::sleep(Duration::from_secs(12));
+    sample("writer-only-idle-12s", &readers);
     let hold = writer.write();
     let ready = Arc::new(AtomicUsize::new(0));
     let queued = Arc::new(AtomicUsize::new(0));
