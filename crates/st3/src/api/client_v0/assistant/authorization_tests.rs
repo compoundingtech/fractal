@@ -77,7 +77,8 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
 
 #[tokio::test]
 async fn assistant_approved_pages_decode_native_sync_through_typed_sdk() {
-    let fixture = fixture(SCOPES, true).await;
+    let mut fixture = fixture(SCOPES, true).await;
+    fixture.state.configured_peers = vec!["birch".into()];
     for diverged in [false, true] {
         let now = client_now_ms();
         let mut progress = smallclaims::store::PeerSyncProgress::default();
