@@ -212,9 +212,9 @@ function ImageTile({ image, placement, tile }: { readonly image: TranscriptImage
   const [maxW, maxH] = tile ? placement === 'input' ? [g.imageTileW, g.imageTileH] as const : [`calc((${g.imageOpenedW} - ${s.md}) / 2)`, `calc(${g.imageOpenedH} / 2)`] as const : singleBox[placement]
   const natural = image.width === undefined ? maxW : `${image.width}px`
   const box = tile ? styles.tileBox(maxW, maxH) : styles.fitBox(String(ratio), natural, maxW, `calc(${maxH} * ${ratio})`)
-  return <div ref={ref} data-testid="transcript-image" data-image-id={image.id} data-image-state={source._tag.toLowerCase()} {...stylex.props(styles.frame, box)}>
+  return <div ref={ref} data-testid="transcript-image" data-image-id={image.id} data-image-state={source._tag.toLowerCase()} aria-busy={source._tag === 'Loading' || undefined} {...stylex.props(styles.frame, box)}>
     {source._tag === 'Ready' || source._tag === 'Loading'
-      ? <Button aria-label={`View image: ${image.caption.title}`} aria-busy={source._tag === 'Loading' || undefined} onPress={() => thread?.open(image.id)} {...stylex.props(styles.imageButton)}>
+      ? <Button aria-label={`View image: ${image.caption.title}`} onPress={() => thread?.open(image.id)} {...stylex.props(styles.imageButton)}>
           {source._tag === 'Ready' ? <img src={source.url} alt="" draggable={false} onError={() => thread?.store.fail(image.id)} {...stylex.props(styles.image, tile && styles.cover)} /> : <span aria-hidden="true" data-testid="image-skeleton" {...stylex.props(styles.skeleton)} />}
         </Button>
       : <ImageStatus image={image} source={source} compact={tile} onRetry={() => thread?.store.retry(image)} />}

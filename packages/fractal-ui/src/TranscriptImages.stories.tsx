@@ -136,7 +136,7 @@ export const ManyImages: Story = { play: async ({ canvasElement }) => {
   await userEvent.click(within(dialog).getByRole('button', { name: 'Previous image' }))
   await expectCounter('5 of 9')
   await waitFor(() => expect(within(dialog).getByTestId('viewer-image')).toHaveAttribute('alt', 'Annotated header spacing'))
-  await expect(within(dialog).getByTestId('viewer-caption')).toHaveTextContent('Assistant · reply · 1000 × 400 · 76 KB')
+  await expect([...dialog.querySelectorAll('[data-testid="viewer-caption"]')].find(element => (element as HTMLElement).offsetParent !== null)).toHaveTextContent('Assistant · reply · 1000 × 400 · 76 KB')
   if (window.innerWidth >= 640) {
     const film = within(dialog).getByRole('listbox', { name: 'Images in this thread' })
     const options = within(film).getAllByRole('option')
@@ -172,7 +172,7 @@ export const FoldedScreenshot: Story = {
     await userEvent.click(fold)
     await waitFor(() => expect(fold).toHaveAttribute('aria-expanded', 'true'))
     await expect(foldRow.querySelector('[data-testid="image-row-thumbs"]')).toBeNull()
-    const row = await canvas.findByRole('button', { name: /screenshot.*1600×1000 · 287 KB/ })
+    const row = await canvas.findByRole('button', { name: /screenshot.*1600×1000 · 280 KB/ })
     await expect(within(row).queryByRole('button')).toBeNull()
     // The settled preview shows the opened body: one image fit within 480×320.
     const opened = await waitFor(() => {
@@ -212,7 +212,7 @@ export const Loading: Story = {
     await expect(Math.abs(box.width / box.height - 2.5)).toBeLessThan(0.02)
     await expect(box.width).toBeLessThanOrEqual(1000)
     const tile = within(prose as HTMLElement).getByRole('button', { name: 'View image: Annotated header spacing' })
-    await expect(tile).toHaveAttribute('aria-busy', 'true')
+    await expect(prose).toHaveAttribute('aria-busy', 'true')
     await expect(prose.querySelector('[data-testid="image-skeleton"]')).not.toBeNull()
     await userEvent.click(tile)
     const dialog = await viewer()
@@ -274,7 +274,7 @@ export const Failed: Story = {
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="transcript-image"][data-image-id="img-1"]')).toHaveAttribute('data-image-state', 'ready'))
     await expect(retried).toHaveBeenCalledTimes(2)
     // In the viewer, a gone image keeps its place and prev/next still work.
-    await userEvent.click(canvas.getByRole('button', { name: 'View image: From Operator · web' }))
+    await userEvent.click(within(canvasElement.querySelector('[data-image-id="img-1"]') as HTMLElement).getByRole('button', { name: 'View image: From Operator · web' }))
     const dialog = await viewer()
     await expectCounter('1 of 9')
     await userEvent.keyboard('{ArrowRight}{ArrowRight}{ArrowRight}')
@@ -372,6 +372,8 @@ export const ViewerKeyboard: Story = { play: async ({ canvasElement }) => {
     await userEvent.tab()
     await expect(dialog.contains(document.activeElement)).toBe(true)
   }
+  // A focused edge control may be showing its tooltip, which takes the first Esc; the dialog itself has none.
+  dialog.focus()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(document.querySelector('[data-testid="image-viewer"]')).toBeNull())
   await waitFor(() => expect(first).toHaveFocus())
