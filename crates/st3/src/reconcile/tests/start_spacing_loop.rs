@@ -196,10 +196,14 @@ async fn quiescence_pass_counts(unrelated_writes: bool) -> Vec<usize> {
                 let store = store.clone();
                 std::thread::spawn(move || {
                     store.append_claim(&ClaimInput {
-                        subject: format!("unrelated/{pass}"),
-                        kind: "test.unrelated".into(),
-                        actor: "test".into(),
-                        fields: BTreeMap::new(),
+                        subject: format!("message/unrelated-{pass}"),
+                        kind: "message.sent".into(),
+                        actor: Some("person/test".into()),
+                        fields: BTreeMap::from([
+                            ("from".into(), Value::String("person/test".into())),
+                            ("to".into(), Value::String("person/other".into())),
+                            ("content".into(), Value::String("unrelated".into())),
+                        ]),
                         evidence: vec![],
                         expected_subject: None,
                         idempotency_key: None,
