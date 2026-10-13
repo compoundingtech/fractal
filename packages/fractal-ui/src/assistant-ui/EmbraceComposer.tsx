@@ -123,6 +123,8 @@ const styles = stylex.create({
   warning: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: status.attention },
   context: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0, width: '100%' },
   refusal: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fg, overflowWrap: 'anywhere' },
+  // Context notes sit on the slab fill, where fgMuted at meta size falls below 4.5:1 in dark.
+  contextNote: { fontSize: t.metaSize, lineHeight: t.metaLeading, color: text.fgSoft, overflowWrap: 'anywhere' },
   button: {
     minHeight: g.controlMd, flexShrink: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.controlBorder,
     borderRadius: r.control, backgroundColor: surface.controlFill, color: text.fg,
@@ -342,12 +344,12 @@ function SendContext({ availability, recipient, reply, onClearReply, subject, on
   const focusField = () => formRef.current?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus()
   return <div data-testid="composer-send-context" {...stylex.props(styles.context)}>
     {unavailable !== undefined ? <ComposerAvailabilityNotice availability={unavailable} /> : null}
-    {recipient?.sessionChanged === true ? <div data-testid="composer-session-note" {...stylex.props(styles.help)}>{sessionChangeNote(recipient)}</div> : null}
+    {recipient?.sessionChanged === true ? <div data-testid="composer-session-note" {...stylex.props(styles.contextNote)}>{sessionChangeNote(recipient)}</div> : null}
     {reply !== undefined ? <ComposerReplyChip reply={reply} onClear={readOnly || onClearReply === undefined ? undefined : () => { onClearReply(); focusField() }} /> : null}
     {onSubjectChange !== undefined ? <ComposerSubjectField subject={subject ?? ''} onSubjectChange={onSubjectChange} isReadOnly={readOnly} onEnter={focusField} /> : null}
     {images !== undefined ? <ComposerImageTray images={images} maxCount={(imagePolicy ?? composerImagePolicy).maxCount} onRemoveImage={onRemoveImage === undefined ? undefined : id => { onRemoveImage(id); focusField() }} onRetryImage={onRetryImage} disabled={readOnly} /> : null}
     {intake?.refused !== undefined ? <div role="alert" data-testid="composer-image-refusal" {...stylex.props(styles.refusal)}>{intake.refused}</div> : null}
-    {imageBlock !== undefined ? <div data-testid="composer-image-wait" {...stylex.props(styles.help)}>{imageBlock}</div> : null}
+    {imageBlock !== undefined ? <div data-testid="composer-image-wait" {...stylex.props(styles.contextNote)}>{imageBlock}</div> : null}
   </div>
 }
 /** Availability and retained-image state hold submit; the draft stays editable. */

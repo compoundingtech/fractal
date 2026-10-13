@@ -98,7 +98,8 @@ export function ComposerRecipientControl({ recipient, recipients, onRecipientCha
   const others = recipients?.filter(choice => choice.ref !== recipient.ref) ?? []
   const picker = onRecipientChange !== undefined && recipients !== undefined && others.length > 0
   const detail = `${recipient.ref}${recipient.sessionId === undefined ? '' : ` · session ${recipient.sessionId}`}${onRecipientChange !== undefined && !picker ? ' · No other recipients available' : ''}`
-  const label = <><span aria-hidden="true" {...stylex.props(styles.to)}>To</span><span data-composer-readout {...stylex.props(styles.recipientLabel)}>{recipient.label}</span></>
+  // The space keeps the visible text "To <label>" a prefix of the accessible name (label in name).
+  const label = <><span aria-hidden="true" {...stylex.props(styles.to)}>To</span>{' '}<span data-composer-readout {...stylex.props(styles.recipientLabel)}>{recipient.label}</span></>
   return <>
     <span id={detailId} {...stylex.props(styles.visuallyHidden)}>Recipient {recipient.ref}{recipient.sessionId === undefined ? '' : `, session ${recipient.sessionId}`}.{onRecipientChange !== undefined && !picker ? ' No other recipients available.' : ''}</span>
     {picker ? <MenuTrigger>
@@ -205,7 +206,7 @@ const styles = stylex.create({
   },
   recipientButton: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.controlBorder, backgroundColor: surface.controlFill, paddingInline: s.sm, cursor: 'pointer' },
   recipientCompact: { fontSize: t.denseSize },
-  to: { color: text.fgMuted, flexShrink: 0 },
+  to: { color: text.fgSoft, flexShrink: 0 },
   recipientLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
   popup: { maxWidth: `min(${g.tooltipMax}, 90vw)`, maxHeight: g.commandMaxHeight, overflowY: 'auto', backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.xs, fontFamily: t.fontSans, fontSize: t.metaSize },
   option: { minHeight: g.controlLg, display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.sm, borderRadius: r.sm, cursor: 'pointer', outlineStyle: 'none', ':focus': { backgroundColor: surface.rowActive } },
@@ -214,7 +215,7 @@ const styles = stylex.create({
   notice: { display: 'flex', alignItems: 'center', gap: s.md, flexWrap: 'wrap', padding: s.sm, borderRadius: r.md, backgroundColor: surface.rowActive, fontFamily: t.fontSans },
   noticeText: { display: 'flex', flexDirection: 'column', gap: s.xs2, flex: '1 1 0', minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   noticeTitle: { color: text.fg, fontWeight: t.weightMedium },
-  muted: { color: text.fgMuted },
+  muted: { color: text.fgSoft },
   strong: { color: text.fg, fontWeight: t.weightMedium },
   textButton: {
     display: 'inline-flex', alignItems: 'center', flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm,
@@ -236,10 +237,10 @@ const styles = stylex.create({
   },
   tray: { display: 'flex', flexWrap: 'wrap', gap: s.sm, margin: 0, padding: 0, listStyle: 'none', minWidth: 0 },
   tile: { display: 'flex', alignItems: 'flex-start', gap: s.sm, flex: `1 1 ${g.crumbMax}`, maxWidth: g.fileMax, minWidth: 0, padding: s.xs, borderRadius: r.md, backgroundColor: surface.rowActive },
-  thumb: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.band, height: g.band, flexShrink: 0, overflow: 'hidden', borderRadius: r.sm, backgroundColor: surface.codeBg, color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize },
+  thumb: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.band, height: g.band, flexShrink: 0, overflow: 'hidden', borderRadius: r.sm, backgroundColor: surface.codeBg, color: text.fgSoft, fontFamily: t.fontSans, fontSize: t.denseSize },
   thumbImage: { width: '100%', height: '100%', objectFit: 'cover' },
   tileBody: { display: 'flex', flexDirection: 'column', gap: s.xs2, minWidth: 0, flex: '1 1 0' },
   tileName: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: text.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  tileState: { color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
+  tileState: { color: text.fgSoft, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   tileActions: { display: 'flex', gap: s.xs, flexWrap: 'wrap' },
 })
