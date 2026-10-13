@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Only a database with no user schema objects at opening entry batches core and initial runtime DDL. Populated stores retain per-statement installation, including completed upgrade indexes. Independent migrations and backfills retain their boundaries."
+    "detail": "Only a database with no user schema objects at opening entry batches core and initial runtime DDL, plus fleet, idempotency, inventory, principal and graph-generation installers that otherwise commit each statement. Populated stores retain per-statement installation, including completed upgrade indexes. Independent migrations and backfills retain their boundaries."
   },
   "downtime": {
     "status": "changed",

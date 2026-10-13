@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "A native rollout guard that rejects before launcher creation, or failure to create the first PTY launcher, carries exact-operation rejection evidence. This permits safe admission release for known rejection. Errors after producer creation, including failure to create a later attempt after an earlier launcher ran, retain Unknown; there is no new PTY option or producer cancellation protocol."
+    "detail": "Normal exec and PTY starts and PTY rollout starts recheck the selected declaration and retained original requests immediately before each physical launcher. Rejection before the first launcher, or failure to create it, carries exact-operation rejection evidence. Errors or guard rejection after an earlier producer was created retain Unknown; a guarded normal launch cannot adopt an unrelated existing PTY. There is no new PTY option or producer cancellation protocol."
   },
   "downtime": {
     "status": "none",

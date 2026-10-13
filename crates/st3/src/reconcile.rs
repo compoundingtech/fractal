@@ -795,16 +795,6 @@ impl NativeRuntime {
                     .get(crate::rollout::PREDECESSOR_ENV)
                     .context("rollout launch needs its predecessor fence")?;
                 if let Some(guard) = guard {
-                    // PtyRuntime invokes this guard before the current attempt creates
-                    // its launcher. Preserve that positive rejection evidence even though
-                    // the outer call has entered the PTY backend.
-                    let checked_guard = || {
-                        guard().map_err(|error| {
-                            error.context(st_runtime::StartRejected {
-                                operation: member.tags.get(start_jobs::OPERATION_TAG).cloned(),
-                            })
-                        })
-                    };
                     *producer_entered = true;
                     runtime.spawn_after_checked(
                         &member.runtime_id,
@@ -816,7 +806,7 @@ impl NativeRuntime {
                         member.terminal_size,
                         predecessor,
                         operation,
-                        &checked_guard,
+                        guard,
                     )
                 } else {
                     *producer_entered = true;
@@ -834,7 +824,17 @@ impl NativeRuntime {
                 }
             } else {
                 if let Some(guard) = guard {
-                    guard()?;
+                    *producer_entered = true;
+                    return runtime.spawn_checked(
+                        &member.runtime_id,
+                        &launch,
+                        &cwd,
+                        &environment,
+                        member.display_name.as_deref(),
+                        &member.tags,
+                        member.terminal_size,
+                        guard,
+                    );
                 }
                 *producer_entered = true;
                 runtime.spawn(
@@ -849,7 +849,11 @@ impl NativeRuntime {
             }
         } else {
             if let Some(guard) = guard {
-                guard()?;
+                *producer_entered = true;
+                return self
+                    .exec
+                    .spawn_checked(&member.runtime_id, &launch, &cwd, &environment, guard)
+                    .map(|_| ());
             }
             *producer_entered = true;
             self.exec

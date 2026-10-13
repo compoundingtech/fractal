@@ -1394,6 +1394,63 @@ fn native_rollout_guard_rejection_proves_no_producer_was_created() {
 }
 
 #[test]
+fn native_pty_publication_guard_after_a_launcher_does_not_prove_producer_closure() {
+    if crate::test_support::supervise_test() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    st_runtime::initialize_isolation(&BTreeMap::new());
+    let root = tempfile::tempdir().unwrap();
+    let pty = root.path().join("pty");
+    let called = root.path().join("called");
+    std::fs::write(
+        &pty,
+        format!("#!/bin/sh\nprintf called > {called:?}\nprintf 'already in use' >&2\nexit 1\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&pty, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let intent = parse_intent(&format!("version 2\nagent \"example/late-guard\" {{ workspace {:?}; argv \"/bin/sleep\" \"1000\"; }}", root.path().display().to_string()), "node").unwrap();
+    let mut member = intent
+        .subjects
+        .values()
+        .find_map(|subject| subject.member.clone())
+        .unwrap();
+    member.environment.insert(
+        "PATH".into(),
+        format!("{}:${{PATH}}", root.path().display()),
+    );
+    member.tags.insert(
+        start_jobs::OPERATION_TAG.into(),
+        "late-guard-operation".into(),
+    );
+    member.environment.insert(
+        start_jobs::OPERATION_ENV.into(),
+        "late-guard-operation".into(),
+    );
+    let state = root.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let runtime = NativeRuntime::new(&state, None, &pty);
+    let guards = std::sync::atomic::AtomicUsize::new(0);
+    let error = runtime
+        .start_guarded(&member, &|| {
+            guards.fetch_add(1, Ordering::Relaxed);
+            anyhow::ensure!(
+                !called.exists(),
+                "declaration changed after the first launcher"
+            );
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(called.exists());
+    assert_eq!(guards.load(Ordering::Relaxed), 2);
+    assert!(error.to_string().contains("declaration changed"));
+    assert!(
+        error.downcast_ref::<st_runtime::StartRejected>().is_none(),
+        "the earlier physical launcher remains potentially live: {error:#}"
+    );
+}
+
+#[test]
 fn native_pty_launcher_rejection_is_distinct_from_a_returned_producer_error() {
     if crate::test_support::supervise_test() {
         return;

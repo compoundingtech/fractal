@@ -81,8 +81,30 @@ impl ExecRuntime {
         cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<ExecGeneration> {
+        self.spawn_guarded(id, launch, cwd, env, None)
+    }
+
+    pub fn spawn_checked(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<ExecGeneration> {
+        self.spawn_guarded(id, launch, cwd, env, Some(guard))
+    }
+
+    fn spawn_guarded(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<ExecGeneration> {
         let mut child_created = false;
-        self.spawn_inner(id, launch, cwd, env, &mut child_created)
+        self.spawn_inner(id, launch, cwd, env, guard, &mut child_created)
             .map_err(|error| {
                 if child_created {
                     error
@@ -100,6 +122,7 @@ impl ExecRuntime {
         launch: &crate::Launch,
         cwd: &Path,
         env: &BTreeMap<String, String>,
+        guard: Option<&dyn Fn() -> Result<()>>,
         child_created: &mut bool,
     ) -> Result<ExecGeneration> {
         fs::create_dir_all(&self.state_dir)?;
@@ -169,6 +192,9 @@ impl ExecRuntime {
                     Ok(())
                 }
             });
+        }
+        if let Some(guard) = guard {
+            guard()?;
         }
         let child = command.spawn().context("spawn detached exec")?;
         *child_created = true;
