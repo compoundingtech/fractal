@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Discover Fractal web app stories in the kit Storybook by glob",
+  "replay": {"status": "none", "detail": "Graph admission and action replay are unchanged."},
+  "schema": {"status": "none", "detail": "Database, projections and wire contracts are unchanged."},
+  "rules": {"status": "none", "detail": "Graph rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "Development tooling only. The kit Storybook now indexes every apps/fractal-web/src story file, so adding an app story no longer edits the kit Storybook configuration."},
+  "downtime": {"status": "none", "detail": "No runtime component changes."},
+  "manual": {"status": "none", "detail": "No configuration or migration is needed."},
+  "recovery": {"status": "none", "detail": "Runtime recovery behavior is unchanged."}
+}
