@@ -38,6 +38,8 @@ export type ToolCallStatus = typeof ToolCallStatus.Type
 /** Tool output joined to its invocation, including media type and completion time. */
 export const ToolResult = Schema.Struct({
   content: Schema.Unknown,
+  metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  view: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
   mediaType: Schema.optional(Schema.String),
   isError: Schema.Boolean,
   at: Schema.String,
@@ -116,7 +118,9 @@ export const ConversationItem = Schema.TaggedUnion({
     name: Schema.String,
     server: Schema.optional(Schema.String),
     input: Schema.Unknown,
+    view: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
     status: ToolCallStatus,
+    skipped: Schema.optional(Schema.Boolean),
     result: Schema.optional(ToolResult),
     callSeen: Schema.Boolean,
     at: Schema.String,

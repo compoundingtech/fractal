@@ -71,14 +71,19 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // A non-success outcome stays visible as a word beside the pinned disclosure; running rows say so in the duration column until they end.
   const word = call.skipped ? 'Skipped' : call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : service?.readiness
+  // An ended call without readable or recorded output says so in meta ink; running and skipped calls have no output to miss.
+  const noOutput = !hasOutput && call.status !== 'running' && !call.skipped
   const row = <>
     <span aria-hidden="true" data-tool-kind={call.kind} {...stylex.props(styles.slot, failedInk && styles.failureInk)}>
       <Icon name={call.skipped ? 'stop-circle' : call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : workKindPresentation[call.kind].icon} spinning={!call.skipped && call.status === 'running'} size={14} />
     </span>
-    <span data-call-title title={label} {...stylex.props(styles.callLabel)}>
-      {service !== undefined ? <>Service {service.name}{service.state === undefined ? null : <> · {service.state}</>}</>
-        : intent !== undefined ? <><span data-tool-intent>{intent}</span><span data-tool-secondary {...stylex.props(styles.secondary)}>{' · '}{presentation.verb}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.kind === 'run' ? <HighlightedSource code={call.argsSummary} language="bash" /> : call.argsSummary}</code></>}</span></>
-        : call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}
+    <span {...stylex.props(styles.labelCell)}>
+      <span data-call-title {...stylex.props(styles.callLabel)}>
+        {service !== undefined ? <>Service {service.name}{service.state === undefined ? null : <> · {service.state}</>}</>
+          : intent !== undefined ? <><span data-tool-intent>{intent}</span><span data-tool-secondary {...stylex.props(styles.secondary)}>{' · '}{[presentation.verb, call.argsSummary].filter(value => value !== undefined).join(' ')}</span></>
+          : label}
+      </span>
+      {noOutput && <span data-tool-no-output {...stylex.props(styles.noOutput)}>{' · No output'}</span>}
     </span>
     <span data-call-word data-service-readiness={service === undefined ? undefined : ''} data-service-tone={service === undefined ? undefined : service.warning ? 'warning' : 'neutral'} {...stylex.props(styles.callWord, failedInk && styles.failureInk, service?.warning && styles.serviceWarning)}>{word}</span>
     <span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span>
@@ -112,13 +117,14 @@ const styles = stylex.create({
   // Tool rows and Thinking share this one scroller, so a classic scrollbar narrows every child row alike.
   list: { maxHeight: g.workExpandedMax, overflowY: 'auto', overscrollBehavior: 'contain' },
   call: { display: 'grid', gridTemplateColumns: g.workRowColumns, alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.toolRow, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.uiSize, textAlign: 'left', cursor: 'pointer', transitionProperty: 'background-color, color', transitionDuration: m.fast, transitionTimingFunction: m.ease, '@media (prefers-reduced-motion: reduce)': { transitionDuration: '0s' }, ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  labelCell: { display: 'flex', alignItems: 'baseline', minWidth: 0, overflow: 'hidden' },
   callLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', lineHeight: t.uiLeading },
+  noOutput: { flexShrink: 0, whiteSpace: 'pre', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   callWord: { maxWidth: g.statusWordMax, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading },
   duration: { overflow: 'hidden', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
   disclosure: { opacity: { default: 0.5, [stylex.when.ancestor(':hover')]: 1, [stylex.when.ancestor(':focus-visible')]: 1 }, transitionProperty: 'opacity', transitionDuration: m.fast, transitionTimingFunction: m.ease, '@media (prefers-reduced-motion: reduce)': { transitionDuration: '0s' } },
   expanded: { backgroundColor: surface.rowActive, color: ink.fg }, staticCall: { cursor: 'default' },
   rawTrigger: { display: 'flex', paddingInline: s.xs },
-  mono: { fontFamily: t.fontMono, fontSize: t.metaSize },
   secondary: { color: ink.fgMuted, fontSize: t.metaSize },
   output: { marginBlockStart: s.xs2, marginBlockEnd: 0, marginInlineStart: g.textColumn, paddingInline: s.lg, paddingBlock: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, color: ink.fgMuted, fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   time: { flexShrink: 0, color: ink.fgMuted, fontSize: t.metaSize, marginLeft: 'auto' },

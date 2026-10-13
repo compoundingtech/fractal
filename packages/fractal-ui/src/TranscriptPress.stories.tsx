@@ -68,7 +68,8 @@ async function settleFrames() {
 }
 async function ready(canvasElement: HTMLElement) {
   await document.fonts.ready
-  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < initialTurns.length) throw new Error('History not committed'); return found })
+  // The virtual lane mounts only its window; RAC's committed collection size is the history signal.
+  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || Number(found.getAttribute('aria-rowcount')) < initialTurns.length) throw new Error('History not committed'); return found })
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   const canvas = within(canvasElement)
   return { viewport, canvas, jump: canvas.getByText('New messages ↓'), retries: canvas.getByTestId('retry-count') }
@@ -78,7 +79,8 @@ async function pressAcross(target: HTMLElement, during: () => Promise<void>) {
   const rect = target.getBoundingClientRect()
   const init = { bubbles: true, cancelable: true, composed: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1 }
   target.dispatchEvent(new PointerEvent('pointerdown', { ...init, buttons: 1, pressure: 0.5 }))
-  target.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1, detail: 1 }))
+  // The browser's mousedown default focuses the pressed button; RAC then keeps its focused row mounted.
+  if (target.dispatchEvent(new MouseEvent('mousedown', { ...init, buttons: 1, detail: 1 }))) target.focus({ preventScroll: true })
   await during()
   const landed = document.elementFromPoint(init.clientX, init.clientY)!
   landed.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0, pressure: 0 }))
@@ -185,8 +187,9 @@ export const ToolResultArrivesLight: Story = { ...ToolResultArrives, args: { sch
 export const InsertAbovePressedRow: Story = { play: async ({ canvasElement }) => {
   const { viewport, canvas, jump, retries } = await ready(canvasElement)
   const retry = canvas.getByRole('button', { name: 'Retry' })
-  const row = retry.closest<HTMLElement>('[data-testid="user-message"]')!
-  const top = row.getBoundingClientRect().top
+  // RAC recycles row elements across keys; measure the failed send by its id.
+  const failedSend = () => viewport.querySelector<HTMLElement>('[data-embrace-entry-id="turn/40"]')!
+  const top = failedSend().getBoundingClientRect().top
   const height = viewport.scrollHeight
   await expect(viewport.scrollTop).toBeGreaterThan(viewport.clientHeight * 3)
   await pressAcross(retry, async () => {
@@ -195,16 +198,18 @@ export const InsertAbovePressedRow: Story = { play: async ({ canvasElement }) =>
     canvas.getByRole('button', { name: 'Insert reply above failed send' }).click()
     await waitFor(() => expect(viewport.scrollHeight - height).toBeGreaterThan(80))
     await settleFrames()
-    await expect(viewport.scrollHeight - height, 'reply should reproduce the roughly 107px insertion').toBeLessThan(140)
-    await expect(Math.abs(row.getBoundingClientRect().top - top), 'pressed row moved under the pointer').toBeLessThanOrEqual(1)
+    // The virtual lane's scrollHeight also re-measures estimated rows; the inserted row is the insertion.
+    const inserted = await waitFor(() => { const found = viewport.querySelector('[data-embrace-entry-id="turn/41"]')?.closest<HTMLElement>('[role="row"]'); if (found == null) throw new Error('Inserted row not mounted'); return found })
+    await expect(inserted.getBoundingClientRect().height, 'reply should reproduce the roughly 107px insertion').toBeLessThan(140)
+    await expect(Math.abs(failedSend().getBoundingClientRect().top - top), 'pressed row moved under the pointer').toBeLessThanOrEqual(1)
     await expect(jump).not.toBeVisible()
   })
   await waitFor(() => expect(retries).toHaveTextContent('1'))
-  await expect(Math.abs(row.getBoundingClientRect().top - top), 'pressed row snapped on release').toBeLessThanOrEqual(1)
+  await expect(Math.abs(failedSend().getBoundingClientRect().top - top), 'pressed row snapped on release').toBeLessThanOrEqual(1)
   await waitFor(() => expect(jump).toBeVisible())
   await settleFrames()
   await expect(retries).toHaveTextContent('1')
-  await expect(Math.abs(row.getBoundingClientRect().top - top), 'history anchor undid compensation after the dock settled').toBeLessThanOrEqual(1)
+  await expect(Math.abs(failedSend().getBoundingClientRect().top - top), 'history anchor undid compensation after the dock settled').toBeLessThanOrEqual(1)
 } }
 export const InsertAbovePressedRowLight: Story = { ...InsertAbovePressedRow, args: { scheme: 'light' } }
 
@@ -216,11 +221,14 @@ export const ScrollDuringPress: Story = { play: async ({ canvasElement }) => {
   viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
   viewport.scrollTop -= 100
   await settleFrames()
-  const row = retry.closest<HTMLElement>('[data-testid="user-message"]')!
-  const top = row.getBoundingClientRect().top
+  // RAC recycles row elements across keys; measure the failed send by its id.
+  const failedSend = () => viewport.querySelector<HTMLElement>('[data-embrace-entry-id="turn/40"]')
+  const top = failedSend()!.getBoundingClientRect().top
   canvas.getByRole('button', { name: 'Insert reply above failed send' }).click()
   await settleFrames()
-  await expect(row.getBoundingClientRect().top - top, 'press anchoring fought manual scrolling').toBeGreaterThan(80)
+  // Pushed below RAC's mounted window, the failed send starts where the inserted reply ends.
+  const shifted = failedSend()?.getBoundingClientRect().top ?? viewport.querySelector('[data-embrace-entry-id="turn/41"]')!.closest('[role="row"]')!.getBoundingClientRect().bottom
+  await expect(shifted - top, 'press anchoring fought manual scrolling').toBeGreaterThan(80)
   pointer(viewport, 'pointerup', 1, 'mouse')
 } }
 export const ScrollDuringPressLight: Story = { ...ScrollDuringPress, args: { scheme: 'light' } }
