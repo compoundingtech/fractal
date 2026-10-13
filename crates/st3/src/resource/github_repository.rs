@@ -587,14 +587,26 @@ const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after:
       nodes {
         id number title url isDraft headRefOid headRefName baseRefName createdAt
         author { login }
+        timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT]) { nodes {
+          __typename
+          ... on ReadyForReviewEvent { createdAt }
+          ... on ConvertToDraftEvent { createdAt }
+        } }
         reviewDecision
         mergeQueueEntry { state position }
         latestReviews(first: 20) { nodes { author { login } state submittedAt commit { oid } } }
         reviews(last: 20) { nodes { databaseId author { login } state submittedAt } }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state
-          contexts(first: 100) { nodes {
+        commits(last: 1) { nodes { commit {
+          checkSuites(last: 100) { pageInfo { hasPreviousPage } nodes { databaseId createdAt app { databaseId }
+            workflowRun { databaseId event runAttempt workflow { databaseId } }
+          } }
+          statusCheckRollup { state
+          contexts(first: 100) { pageInfo { hasNextPage } nodes {
             __typename
-            ... on CheckRun { name status conclusion checkSuite { app { databaseId } } }
+            ... on CheckRun { name status conclusion checkSuite {
+              databaseId createdAt app { databaseId }
+              workflowRun { databaseId event runAttempt workflow { databaseId } }
+            } }
             ... on StatusContext { context state }
           } }
         } } } }
@@ -691,6 +703,177 @@ fn check_outcome(context: &Value) -> (String, Option<u64>, CheckOutcome) {
             },
         ),
     }
+}
+
+// A workflow can have a fresh suite before any of its required jobs appears in
+// the rollup. Keep expected context names from its older suite pending until
+// their replacements arrive; a draft skip is not evidence of ready execution.
+#[derive(Clone)]
+struct WorkflowExecution {
+    app: Option<u64>,
+    workflow: u64,
+    suite: u64,
+    run: u64,
+    attempt: u64,
+    created_at: i64,
+    pull_request: bool,
+    facts: Value,
+}
+
+impl WorkflowExecution {
+    fn from_suite(suite: &Value) -> Option<Self> {
+        let run = suite.get("workflowRun")?;
+        Some(Self {
+            app: suite.pointer("/app/databaseId").and_then(Value::as_u64),
+            workflow: run.pointer("/workflow/databaseId")?.as_u64()?,
+            suite: suite.get("databaseId")?.as_u64()?,
+            run: run.get("databaseId")?.as_u64()?,
+            attempt: run.get("runAttempt")?.as_u64()?,
+            created_at: chrono::DateTime::parse_from_rfc3339(suite.get("createdAt")?.as_str()?)
+                .ok()?
+                .timestamp_millis(),
+            pull_request: run.get("event").and_then(Value::as_str) == Some("pull_request"),
+            facts: suite.clone(),
+        })
+    }
+
+    fn key(&self) -> (Option<u64>, u64) {
+        (self.app, self.workflow)
+    }
+    fn order(&self) -> (i64, u64, u64) {
+        (self.created_at, self.suite, self.attempt)
+    }
+}
+
+fn required_checks_for_pull_request(
+    node: &Value,
+    contexts: &[Value],
+    required: Option<&[RequiredCheck]>,
+) -> Value {
+    let ready_since = (node.get("isDraft").and_then(Value::as_bool) == Some(false))
+        .then(|| {
+            node.pointer("/timelineItems/nodes")
+                .and_then(Value::as_array)
+                .and_then(|events| events.last())
+                .filter(|event| event["__typename"] == "ReadyForReviewEvent")
+                .and_then(|event| event.get("createdAt"))
+                .or_else(|| node.get("createdAt"))
+                .and_then(Value::as_str)
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.timestamp_millis())
+        })
+        .flatten();
+    let mut latest = BTreeMap::<(Option<u64>, u64), WorkflowExecution>::new();
+    let suites = node
+        .pointer("/commits/nodes/0/commit/checkSuites/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            contexts
+                .iter()
+                .filter_map(|context| context.get("checkSuite")),
+        );
+    for suite in suites {
+        if let Some(execution) = WorkflowExecution::from_suite(suite) {
+            match latest.entry(execution.key()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(execution);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry)
+                    if execution.order() > entry.get().order() =>
+                {
+                    entry.insert(execution);
+                }
+                _ => {}
+            }
+        }
+    }
+    let current_names = contexts
+        .iter()
+        .filter_map(|context| {
+            let execution = WorkflowExecution::from_suite(context.get("checkSuite")?)?;
+            if latest.get(&execution.key())?.suite != execution.suite {
+                return None;
+            }
+            Some((context.get("name")?.as_str()?.to_owned(), execution.key()))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut selected = Vec::new();
+    for context in contexts {
+        let Some(execution) = context
+            .get("checkSuite")
+            .and_then(WorkflowExecution::from_suite)
+        else {
+            // Commit statuses and non-workflow checks keep their existing app/rule semantics.
+            selected.push(context.clone());
+            continue;
+        };
+        let newest = &latest[&execution.key()];
+        let name = context
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if newest.suite != execution.suite
+            && current_names.contains(&(name.to_owned(), execution.key()))
+        {
+            continue;
+        }
+        let stale_skip = execution.pull_request
+            && ready_since.is_some_and(|ready| execution.created_at < ready)
+            && context
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("skipped"));
+        let mut selected_context = context.clone();
+        if newest.suite != execution.suite || stale_skip {
+            selected_context["status"] = json!("PENDING");
+            selected_context["conclusion"] = Value::Null;
+            selected_context["checkSuite"] = newest.facts.clone();
+        }
+        selected.push(selected_context);
+    }
+    let mut result = required_checks(&selected, required);
+    let truncated = node
+        .pointer("/commits/nodes/0/commit/checkSuites/pageInfo/hasPreviousPage")
+        .and_then(Value::as_bool)
+        == Some(true)
+        || node
+            .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            == Some(true);
+    if truncated {
+        result["state"] = json!("pending");
+        result["incomplete"] = json!(true);
+    }
+    let executions = selected
+        .iter()
+        .filter_map(|context| {
+            let (name, app, _) = check_outcome(context);
+            if required
+                .filter(|rules| !rules.is_empty())
+                .is_some_and(|rules| {
+                    !rules
+                        .iter()
+                        .any(|rule| rule.context == name && (rule.app.is_none() || rule.app == app))
+                })
+            {
+                return None;
+            }
+            let execution = WorkflowExecution::from_suite(context.get("checkSuite")?)?;
+            Some((
+                execution.app,
+                execution.workflow,
+                execution.suite,
+                execution.run,
+                execution.attempt,
+            ))
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if !executions.is_empty() {
+        result["execution"] = json!({"ready_since": ready_since, "workflows": executions});
+    }
+    result
 }
 
 /// How the checks a head must pass stand together. With rules that require checks, only those
@@ -801,7 +984,7 @@ fn open_pull_request(
         .unwrap_or_default();
     facts.insert(
         "required_checks".into(),
-        required_checks(&contexts, required),
+        required_checks_for_pull_request(node, &contexts, required),
     );
     let mut checks = contexts
         .iter()
@@ -2803,6 +2986,137 @@ mod tests {
                 .get("recent_comments")
                 .is_none()
         );
+    }
+
+    fn workflow_suite(id: u64, at: &str) -> Value {
+        json!({"databaseId":id, "createdAt":at, "app":{"databaseId":15368},
+            "workflowRun":{"databaseId":id + 1000, "event":"pull_request", "runAttempt":1,
+                "workflow":{"databaseId":77}}})
+    }
+
+    fn workflow_check(name: &str, conclusion: Option<&str>, suite: &Value) -> Value {
+        json!({"__typename":"CheckRun", "name":name,
+            "status":if conclusion.is_some() { "COMPLETED" } else { "QUEUED" },
+            "conclusion":conclusion, "checkSuite":suite})
+    }
+
+    #[test]
+    fn required_checks_follow_ready_executions_without_rejecting_current_conditional_skips() {
+        let rules = [
+            RequiredCheck {
+                context: "build".into(),
+                app: Some(15368),
+            },
+            RequiredCheck {
+                context: "test".into(),
+                app: Some(15368),
+            },
+        ];
+        let old = workflow_suite(10, "2026-10-13T09:50:00Z");
+        let ready = workflow_suite(20, "2026-10-13T10:00:02Z");
+        let mut pull = json!({"isDraft":false, "createdAt":"2026-10-13T09:00:00Z",
+            "timelineItems":{"nodes":[{"__typename":"ReadyForReviewEvent", "createdAt":"2026-10-13T10:00:00Z"}]},
+            "commits":{"nodes":[{"commit":{"checkSuites":{"nodes":[]}}}]}});
+        let draft_checks = vec![
+            workflow_check("build", Some("SKIPPED"), &old),
+            workflow_check("test", Some("SKIPPED"), &old),
+        ];
+        let aggregate = |pull: &Value, checks: &[Value]| {
+            required_checks_for_pull_request(pull, checks, Some(&rules))
+        };
+        // Even before GitHub creates a fresh suite, the ready boundary invalidates
+        // draft skips. An external status is not silently substituted for the app.
+        assert_eq!(aggregate(&pull, &draft_checks)["state"], "pending");
+        pull["isDraft"] = json!(true);
+        assert_eq!(aggregate(&pull, &draft_checks)["state"], "pass");
+        pull["isDraft"] = json!(false);
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] = json!([old, ready]);
+        // A new workflow can have only its runner-selection job initially.
+        let mut checks = draft_checks.clone();
+        checks.push(workflow_check("pick-runner", Some("SUCCESS"), &ready));
+        assert_eq!(aggregate(&pull, &checks)["state"], "pending");
+        assert_eq!(
+            required_checks_for_pull_request(&pull, &checks, None)["state"],
+            "pending"
+        );
+        checks.push(workflow_check("test", Some("SKIPPED"), &ready));
+        checks.push(workflow_check("build", None, &ready));
+        assert_eq!(aggregate(&pull, &checks)["state"], "pending");
+        checks.pop();
+        checks.push(workflow_check("build", Some("SUCCESS"), &ready));
+        checks.push(workflow_check("optional", Some("FAILURE"), &ready));
+        let complete = aggregate(&pull, &checks);
+        assert_eq!(
+            complete["state"], "pass",
+            "current conditional skip satisfies the rule"
+        );
+        checks.reverse();
+        assert_eq!(
+            aggregate(&pull, &checks),
+            complete,
+            "API ordering is not execution identity"
+        );
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"] =
+            json!({"hasPreviousPage":true});
+        assert_eq!(
+            aggregate(&pull, &checks)["state"],
+            "pending",
+            "partial suite history cannot qualify currentness"
+        );
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["pageInfo"] =
+            json!({"hasPreviousPage":false});
+        pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo"] =
+            json!({"hasNextPage":true});
+        assert_eq!(
+            aggregate(&pull, &checks)["state"],
+            "pending",
+            "partial check pages cannot pass"
+        );
+        pull["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["pageInfo"] =
+            json!({"hasNextPage":false});
+        let mut failure = checks.clone();
+        failure
+            .iter_mut()
+            .find(|check| check["name"] == "build" && check["checkSuite"]["databaseId"] == 20)
+            .unwrap()["conclusion"] = json!("FAILURE");
+        assert_eq!(aggregate(&pull, &failure)["state"], "fail");
+        let mut wrong_app = checks;
+        for check in &mut wrong_app {
+            if check["checkSuite"]["databaseId"] == 20 {
+                check["checkSuite"]["app"]["databaseId"] = json!(99);
+            }
+        }
+        assert_eq!(aggregate(&pull, &wrong_app)["state"], "pending");
+    }
+
+    #[test]
+    fn required_check_success_identity_changes_for_a_new_execution_on_the_same_head() {
+        let rules = [RequiredCheck {
+            context: "build".into(),
+            app: Some(15368),
+        }];
+        let pull = json!({"isDraft":false, "createdAt":"2026-10-13T09:00:00Z"});
+        let first = required_checks_for_pull_request(
+            &pull,
+            &[workflow_check(
+                "build",
+                Some("SUCCESS"),
+                &workflow_suite(10, "2026-10-13T09:01:00Z"),
+            )],
+            Some(&rules),
+        );
+        let second = required_checks_for_pull_request(
+            &pull,
+            &[workflow_check(
+                "build",
+                Some("SUCCESS"),
+                &workflow_suite(20, "2026-10-13T09:02:00Z"),
+            )],
+            Some(&rules),
+        );
+        assert_eq!(first["state"], "pass");
+        assert_eq!(second["state"], "pass");
+        assert_ne!(first["execution"], second["execution"]);
     }
 
     #[tokio::test]
