@@ -1237,7 +1237,10 @@ mission "orchid/round-output" state="ready" {
         assert!(gates.iter().any(|gate| gate["gate"] == name), "{checked:#}");
     }
     assert_eq!(
-        gates.iter().filter(|gate| gate["gate"] == "round result").count(),
+        gates
+            .iter()
+            .filter(|gate| gate["gate"] == "round result")
+            .count(),
         1,
         "{checked:#}"
     );
