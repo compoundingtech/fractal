@@ -108,7 +108,7 @@ pub async fn start(config: &Config, harness: &str, rerun: bool) -> Result<Option
         .get(MISSION)
         .context("built-in onboarding mission is missing")?
         .revision;
-    let workspace = workspace()?;
+    let workspace = workspace(config)?;
     std::fs::create_dir_all(&workspace)?;
     let run_id = if rerun {
         format!("{MISSION}/{}", uuid::Uuid::now_v7())
@@ -241,16 +241,8 @@ async fn expert_status(client: &Client) -> Result<Option<crate::model::SubjectSt
         .find(|subject| subject.subject == EXPERT_SUBJECT))
 }
 
-pub(crate) fn workspace() -> Result<PathBuf> {
-    // An instance keeps its agents' workspaces below its own directory.
-    if let Some(instance) = crate::instance::current() {
-        return Ok(instance.agents_dir().join("st-expert"));
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .context("HOME is not an absolute directory")?;
-    Ok(home.join("st/agents/st-expert"))
+pub(crate) fn workspace(config: &Config) -> Result<PathBuf> {
+    Ok(config.work_root()?.join("agents/st-expert"))
 }
 
 fn declarations(
