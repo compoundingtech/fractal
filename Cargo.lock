@@ -4208,12 +4208,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "st-storage-version",
  "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tower",
  "uuid",
- "st-storage-version",
 ]
 
 [[package]]
@@ -4601,8 +4601,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "toml 0.9.12+spec-1.1.0",
  "st-storage-version",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]
