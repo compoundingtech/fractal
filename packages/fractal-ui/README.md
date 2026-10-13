@@ -7,6 +7,19 @@ It has two layers:
 - `.` (`kit.tsx`, `tokens.css`): token-driven component families. The workshop renders them in three switchable visual directions (**Folio**, **Relay**, **Orbit**), each with light and dark palettes and two densities.
 - `./assistant-ui` and its subpaths: the dark-first application surfaces the web app composes, built on assistant-ui 0.15.25. They cover the transcript, composer, tool calls and previews, the sidebar agent row and status glyph, the thread header, resizable splits, resource cards, the work log, the sync line and the workbench layout model, plus rich markdown with highlighted code, the thinking disclosure and the dismissible failure layer. Every surface is controlled: the host supplies data, clock and transport, and unknown values render as unknown.
 
+Sidebar rows accept a separate `context` Known/Unknown occupancy observation: used tokens,
+window tokens, percentage and observation time. A known reading renders `Context N%`;
+the row's accessible description preserves the full main-session numerator, window and as-of time.
+Unknown occupancy is omitted, never derived from cumulative tokens or descendant-inclusive
+spend. Hosts clear the current claim at an incarnation change and restore it only from a
+newer occupancy observation. Retained stale readings are labelled last observed.
+
+Rows also accept `spend.last24h` / `spend.last7d` windowed API-equivalent spend (root plus
+subagents, not billed spend). `metricLayout` selects Layout C: `compact` puts 24h spend and
+last activity in the time column of a one-line row; `expanded` replaces line two with 24h and
+7d spend, context and last activity. Both draw a decorative context ring behind the status
+glyph. Unreported windows and occupancy are omitted; the description carries every reported value.
+
 ## Run
 
 ```sh

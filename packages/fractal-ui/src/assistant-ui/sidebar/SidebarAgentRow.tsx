@@ -4,7 +4,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Icon } from '../composition/Icons'
 import { Button, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Popover, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import { matchPositions, type SidebarActions, type SidebarAgentRow as Row } from './model'
+import { matchPositions, type SidebarActions, type SidebarAgentRow as Row, type SidebarWindowSpend } from './model'
 import { SidebarStatus, type DiscRefinement, type GlyphVariant } from './SidebarStatus'
 import { SidebarTime, type SidebarClock } from './SidebarTime'
 import { SidebarDuration } from './SidebarDuration'
@@ -21,6 +21,8 @@ export type SidebarAgentRowProps = SidebarClock & {
   readonly item: Row
   readonly variant?: RowVariant
   readonly layout?: RowLayout
+  /** Layout C: compact one-line metrics in the time column, or expanded metrics on line two. */
+  readonly metricLayout?: 'compact' | 'expanded'
   readonly glyph?: GlyphVariant
   readonly extraSignals?: readonly ExtraSignal[]
   readonly discRefinement?: DiscRefinement
@@ -42,6 +44,14 @@ export function Highlight({ value, query = '' }: { readonly value: string; reado
 function usageText(usage: Extract<Row['usage'], { _tag: 'Known' }>): string {
   return `$${usage.usd} / ${usage.tokens} tokens; ${usage.scope === '24h-root-and-subagents' ? '24h root and subagents' : 'lifetime including subagents'}`
 }
+const contextTokens = Intl.NumberFormat('en')
+const contextText = (row: Row): string | undefined => {
+  const context = row.context
+  if (context?._tag !== 'Known') return undefined
+  const tokens = context.usedTokens === undefined ? 'used tokens unreported' : `${contextTokens.format(context.usedTokens)} used tokens`
+  const window = context.windowTokens === undefined ? 'window unreported' : `${contextTokens.format(context.windowTokens)} token window`
+  return `${row.freshness === 'live' ? 'Reported' : 'Last observed'} main-session context: ${Math.round(context.usedPercent)}%; ${tokens}; ${window}; as of ${new Date(context.observedAt).toISOString()}`
+}
 export const sidebarRowTitle = (row: Row): string => row.title
 /** Reported metadata stays accessible; fields the source never reported are omitted, never described as unknown. */
 export function sidebarRowDescription(row: Row): string {
@@ -49,6 +59,11 @@ export function sidebarRowDescription(row: Row): string {
   if (row.description !== undefined) parts.push(row.description)
   parts.push(`Host: ${row.host}. Status: ${row.statusLabel}; ${row.freshness} observation`)
   if (row.usage._tag === 'Known') parts.push(usageText(row.usage))
+  const context = contextText(row)
+  if (context !== undefined) parts.push(context)
+  for (const [label, spend] of [['24h', row.spend?.last24h], ['7d', row.spend?.last7d]] as const) {
+    if (spend?._tag === 'Known') parts.push(`${label} API-equivalent spend including subagents: $${spend.usd}; ${new Date(spend.since).toISOString()} to ${new Date(spend.until).toISOString()}`)
+  }
   if (row.duration._tag === 'Known') parts.push(`${row.duration.scope === '24h-activity-span' ? '24h activity span' : 'Lifetime duration'}: ${row.duration.ms} milliseconds`)
   if (row.lastTurn._tag === 'Known') parts.push(`${row.lastTurn.kind === 'activity' ? 'Since activity' : 'Last completed turn'}: ${new Date(row.lastTurn.at).toISOString()}`)
   if (row.harness !== undefined) parts.push(`Harness: ${row.harness}`)
@@ -80,6 +95,7 @@ export function AgentRowDetails({ row, ...clock }: { readonly row: Row } & Sideb
     {row.harness !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Harness</dt><dd {...stylex.props(styles.detailValue)}>{row.harness}</dd></>}
     {row.model !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Model</dt><dd {...stylex.props(styles.detailValue)}>{row.model}</dd></>}
     {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Usage</dt><dd {...stylex.props(styles.detailValue)}>{usageText(row.usage)}</dd></>}
+    {row.context?._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Context occupancy</dt><dd {...stylex.props(styles.detailValue)}>{contextText(row)}</dd></>}
     {row.duration._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Duration</dt><dd {...stylex.props(styles.detailValue)}><SidebarDuration duration={row.duration} /></dd></>}
     {row.lastTurn._tag === 'Known' && <><dt {...stylex.props(styles.detailLabel)}>Last turn or activity</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastTurn.at} {...clock} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} showKind /></dd></>}
     {row.branch !== undefined && <><dt {...stylex.props(styles.detailLabel)}>Branch</dt><dd {...stylex.props(styles.detailValue)}>{row.branch}</dd></>}
@@ -105,6 +121,7 @@ export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & Sideba
     <dl {...stylex.props(styles.details)}>
       {row.usage._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="dot" size={12} />Spend</dt><dd {...stylex.props(styles.detailValue)}>{spendCount.format(row.usage.usd)} · {tokenCount.format(row.usage.tokens)} tokens<div {...stylex.props(styles.cardScope)}>{row.usage.scope === '24h-root-and-subagents' ? '24h · includes subagents' : 'Lifetime · includes subagents'}</div></dd></>}
       {row.duration._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="clock" size={12} />Duration</dt><dd {...stylex.props(styles.detailValue)}><SidebarDuration duration={row.duration} /></dd></>}
+      {row.context?._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}>Context</dt><dd {...stylex.props(styles.detailValue)}>{Math.round(row.context.usedPercent)}%<div {...stylex.props(styles.cardScope)}>{row.freshness === 'live' ? 'Reported main session' : 'Last observed main session'}</div></dd></>}
       {row.lastTurn._tag === 'Known' && <><dt {...stylex.props(styles.cardLabel)}><Icon name="clock" size={12} />{row.lastTurn.kind === 'turn-completed' ? 'Last turn' : 'Last activity'}</dt><dd {...stylex.props(styles.detailValue)}><SidebarTime at={row.lastTurn.at} {...clock} kind={row.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} /></dd></>}
       {row.model !== undefined && <><dt {...stylex.props(styles.cardLabel)}><Icon name="gear" size={12} />Model</dt><dd {...stylex.props(styles.detailValue)}>{row.model}</dd></>}
       {row.pullRequest !== undefined && <><dt {...stylex.props(styles.cardLabel)}><Icon name="swap" size={12} />PR</dt><dd {...stylex.props(styles.detailValue)}>#{row.pullRequest.number} · {row.pullRequest.title}</dd></>}
@@ -113,7 +130,7 @@ export function AgentHoverCard({ row, ...clock }: { readonly row: Row } & Sideba
     </dl>
   </div>
 }
-export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', active = false, query = '', now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded }: SidebarAgentRowProps) {
+export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, variant = 'SR-2', layout = 'SR2-A', metricLayout, glyph = 'SG-1', extraSignals = defaultExtraSignals, discRefinement = 'G1', active = false, query = '', now, actions, onOpen, onMarkRead, onToggleChildren, inTree = false, treeExpanded }: SidebarAgentRowProps) {
   const title = sidebarRowTitle(item)
   const host = item.host
   const metadata = React.useMemo(() => sidebarRowDescription(item), [item])
@@ -125,7 +142,7 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const usageScope = item.usage._tag === 'Known' && item.usage.scope === '24h-root-and-subagents' ? '24h root and subagents' : 'Lifetime including subagents'
   const expanded = treeExpanded ?? false
   const canOpen = callbacks?.select !== undefined || onOpen !== undefined
-  const rowLayout = variant === 'SR-2' ? layout : 'SR2-A'
+  const rowLayout = variant === 'SR-2' || metricLayout !== undefined ? layout : 'SR2-A'
   const rowGlyph = variant === 'SR-2' ? 'SG-1' : glyph
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const detailsTrigger = React.useRef<HTMLButtonElement>(null)
@@ -146,12 +163,19 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const spendFields = item.usage._tag === 'Unknown' ? null : <span {...stylex.props(styles.metric)}><span data-row-field="total-usd" title={`${usageScope}: $${usd}`} aria-label={`${usageScope}: $${usd}`}>{spendCount.format(item.usage.usd)}</span><span data-row-field="total-tokens" data-line1-drop="tokens" title={`${usageScope}: ${tokens} tokens`} aria-label={`${usageScope}: ${tokens} tokens`}>{tokenCount.format(item.usage.tokens)}</span></span>
   const durationField = item.duration._tag === 'Unknown' ? null : <span data-row-field="total-duration"><SidebarDuration duration={item.duration} /></span>
   const lastTurnField = item.lastTurn._tag === 'Unknown' ? null : <span data-row-field="last-turn"><SidebarTime at={item.lastTurn.at} {...clock} kind={item.lastTurn.kind === 'turn-completed' ? 'turn' : 'activity'} compact /></span>
+  const activityField = item.lastActivityAt === undefined ? null : <span data-row-field="last-activity"><SidebarTime at={item.lastActivityAt} {...clock} kind="activity" compact /></span>
   const content = <>
     <span data-row-column="title" {...stylex.props(styles.title, variant === 'SR-2' && item.children.length > 0 && styles.hasChildren)} title={metadata}>{rowGlyph === 'SG-2' && <span {...stylex.props(styles.statusWord)}>{item.statusLabel}</span>}<span data-row-column="title-text" {...stylex.props(styles.name)}><Highlight value={title} query={query} /></span></span>
-    {variant !== 'SR-1' && <SidebarRowSignals>
+    {metricLayout === 'expanded' ? <span data-row-column="metrics" {...stylex.props(styles.metricsLine)}>
+      <PeriodSpend label="24h" field="last-24h-usd" value={item.spend?.last24h} />
+      <PeriodSpend label="7d" field="last-7d-usd" value={item.spend?.last7d} />
+      {item.context?._tag === 'Known' && <span data-row-field="context-percent">Context {Math.round(item.context.usedPercent)}%</span>}
+      {activityField}
+    </span> : variant !== 'SR-1' && <SidebarRowSignals>
       {rowLayout === 'SR2-C' && <span data-row-field="status-label" data-row-retention="7" title={item.statusLabel}>{item.statusLabel}</span>}
       {extraSignals.includes('X-work') && item.description !== undefined && <span data-row-field="current-work" data-row-signal="X-work" data-row-retention="2" title={item.description}>{item.description}</span>}
       <span data-row-field="host" data-row-retention="3" title={`Host: ${host}`} aria-label={`Host ${host}`} aria-description={metadata}>{host}</span>
+      {item.context?._tag === 'Known' && <span data-row-field="context-percent" data-row-signal="context" data-row-retention="4">Context {Math.round(item.context.usedPercent)}%</span>}
       {rowLayout === 'SR2-A' && <span data-row-retention="5">{spendFields}</span>}
       {rowLayout !== 'SR2-B' && <span data-row-retention="4">{durationField}</span>}
       {rowLayout !== 'SR2-A' && <span data-row-retention="6">{lastTurnField}</span>}
@@ -163,12 +187,12 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
   const rowStyle = stylex.props(styles.row)
   return <div ref={hoverLifetime} data-observation-freshness={item.freshness} data-wf-agent-ref={inTree ? undefined : item.ref} {...stylex.props(styles.wrapper)} onMouseEnter={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onMouseLeave={() => { setRowHovered(false); hoverIntent(false) } } onFocusCapture={() => { setRowHovered(true); prefetch(); hoverIntent(true) }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) { setRowHovered(false); hoverIntent(false) } }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() }} onKeyDown={event => { if (event.key === 'Escape') { clearTimeout(hoverTimer.current); setHoverOpen(false) }; if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); event.stopPropagation(); clearTimeout(hoverTimer.current); setHoverOpen(false); menuTrigger.current?.click() } }}>
     <div ref={rowAnchor} data-testid="taste-agent-row" data-density={variant} data-layout={rowLayout} data-glyph={rowGlyph} data-disc-refinement={discRefinement} data-extra-signals={extraSignals.join(' ')} data-needs-me={item.needsMe} data-unknown-row-fields={[...(item.usage._tag === 'Unknown' ? ['total-usd', 'total-tokens'] : []), ...(item.duration._tag === 'Unknown' ? ['total-duration'] : []), ...(item.lastTurn._tag === 'Unknown' ? ['last-turn'] : []), ...(item.description === undefined ? ['current-work'] : [])].join(' ')} data-required-row-fields={variant === 'SR-2' ? 'true' : undefined} aria-description={metadata} {...stylex.props(styles.rowWrap, variant === 'SR-2' ? item.children.length === 0 ? styles.rowWrapLeaf : styles.rowWrapParent : undefined, styles[variant], active && styles.active)}>
-      <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly /></span>
+      <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}>{metricLayout !== undefined && <ContextRing context={item.context} />}<SidebarStatus status={item.status} statusLabel={item.statusLabel} statusSince={item.statusSince} now={clock.now} variant={rowGlyph} discRefinement={discRefinement} freshness={item.freshness} iconOnly /></span>
       <span data-row-trailing-signals {...stylex.props(styles.trailingSignals)}>{extraSignals.includes('X-unread') && (item.unread ?? 0) > 0 && <span data-row-signal="X-unread" aria-label={`${item.unread} unread`} {...stylex.props(styles.unread)}>{item.unread}</span>}{extraSignals.includes('X-needs') && item.needsMe && <span data-row-signal="X-needs" data-row-column="attention" title="Needs your attention" aria-label="Needs your attention" {...stylex.props(styles.needsYou)}>!</span>}</span>
-      <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>
+      {metricLayout !== 'expanded' && <span data-row-column="time" data-quick-open={quickOpen ? 'true' : undefined} {...stylex.props(styles.statusTime, quickOpen && styles.timeCovered)}>{metricLayout === 'compact' ? <><PeriodSpend field="last-24h-usd" value={item.spend?.last24h} />{activityField}</> : rowLayout === 'SR2-A' ? lastTurnField : rowLayout === 'SR2-C' ? spendFields : durationField}{quickOpen && <Button data-row-action="open" aria-label={`Open ${title}`} onPress={open} {...stylex.props(styles.quickOpen)}><Icon name="message" size={12} /></Button>}</span>}
       {inTree ? <div aria-current={active ? 'page' : undefined} aria-description={metadata} {...rowStyle}>{content}</div> : <Button aria-label={`${title}, ${item.statusLabel}${item.needsMe ? ', needs your attention' : ''}, ${item.unread === undefined ? 'unread unknown' : item.unread + ' unread'}`} aria-description={metadata} aria-current={active ? 'page' : undefined} isDisabled={!canOpen} onPress={open} {...rowStyle}>{content}</Button>}
       <div {...stylex.props(styles.actions)}>
-        <DialogTrigger><TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}><VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={() => setHoverOpen(false)} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden><Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger><Popover triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={item} {...clock} /></Dialog></Popover></DialogTrigger>
+        <DialogTrigger><TooltipTrigger delay={150} closeDelay={300} isOpen={hoverOpen} onOpenChange={setHoverOpen}><VisuallyHidden isFocusable><Button ref={detailsTrigger} aria-label={`Reported details for ${title}`} onPress={() => setHoverOpen(false)} {...stylex.props(styles.iconButton)}><Icon name="message" /></Button></VisuallyHidden><Tooltip triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard, styles.passiveHovercard)}><AgentHoverCard row={item} {...clock} /></Tooltip></TooltipTrigger><Popover triggerRef={tooltipAnchor} placement="right" {...stylex.props(styles.hovercard)}><Dialog aria-label={`Reported details for ${title}`}><AgentRowDetails row={item} {...clock} /></Dialog></Popover></DialogTrigger>
         <MenuTrigger><Button ref={menuTrigger} data-agent-menu="true" aria-label={`Actions for ${title}`} className={({ isHovered, isPressed, isFocusVisible }) => stylex.props(styles.iconButton, styles.menuButton, (hoverOpen || isHovered || isPressed || isFocusVisible) && styles.menuVisible, variant === 'SR-1' && styles.menuSingle).className ?? ''}><Icon name="gear" /></Button><Popover placement="bottom end" {...stylex.props(styles.popover)}><Menu aria-label={`Actions for ${title}`} {...stylex.props(styles.menu)}>
           <MenuItem id="open" isDisabled={!canOpen} onAction={open} {...stylex.props(styles.menuItem)}>Open conversation</MenuItem>
           {callbacks?.split !== undefined && <MenuItem id="split-right" onAction={() => callbacks.split?.(item.ref, 'right')} {...stylex.props(styles.menuItem)}>Open in split right</MenuItem>}
@@ -187,6 +211,17 @@ export const SidebarAgentRow = React.memo(function SidebarAgentRow({ item, varia
     {!inTree && expanded && item.children.length > 0 && <div {...stylex.props(styles.children)}>{item.children.map(child => <SidebarAgentRow key={child.ref} item={child} variant={variant} layout={layout} glyph={glyph} extraSignals={extraSignals} discRefinement={discRefinement} query={query} {...clock} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} onToggleChildren={onToggleChildren} />)}</div>}
   </div>
 })
+/** Unreported windows are omitted; the row description carries each reported window's bounds. */
+const PeriodSpend = ({ value, label, field }: { readonly value?: SidebarWindowSpend; readonly label?: string; readonly field: string }) =>
+  value?._tag === 'Known' ? <span data-row-field={field}>{label === undefined ? '' : `${label} `}{spendCount.format(value.usd)}</span> : null
+/** Decorative occupancy ring behind the status glyph; the percentage lives in the row description. */
+const ContextRing = ({ context }: { readonly context: Row['context'] }) => {
+  const percent = context?._tag === 'Known' ? context.usedPercent : undefined
+  return <svg data-row-context-ring aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" {...stylex.props(styles.contextRing)}>
+    <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="1.5" opacity=".25" />
+    {percent === undefined ? null : <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="1.5" pathLength="100" strokeDasharray={`${Math.min(100, Math.max(0, percent))} 100`} transform="rotate(-90 10 10)" />}
+  </svg>
+}
 const styles = stylex.create({
   wrapper: { minWidth: 0, width: '100%', containerType: 'inline-size' },
   rowWrapLeaf: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) 0px var(--sidebar-metric-track, ${g.sidebarMetric}) max-content` },
@@ -197,7 +232,7 @@ const styles = stylex.create({
   row: { display: 'grid', gridColumn: '2 / -1', gridRow: '1 / -1', gridTemplateColumns: 'subgrid', gridTemplateRows: 'subgrid', alignItems: 'center', minWidth: 0, width: '100%', height: '100%', padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
   'SR-1': { height: g.controlLg, gridTemplateRows: '1fr' }, 'SR-2': { height: g.sidebarRow, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, rowGap: s.zero }, 'SR-3': { height: g.sidebarThree, gridTemplateRows: `${t.uiLeading} ${g.controlSm} ${t.metaLeading}` },
   active: { backgroundColor: surface.rowActive },
-  glyph: { gridColumn: '1', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+  glyph: { position: 'relative', gridColumn: '1', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' },
   title: { gridColumn: '1 / 3', gridRow: '1', display: 'flex', alignItems: 'center', gap: s.xs2, whiteSpace: 'nowrap', fontWeight: t.weightMedium, minWidth: 0 },
   name: { flex: '1 1 0', minWidth: g.icon, overflow: 'hidden', textOverflow: 'ellipsis' },
   statusWord: { flexShrink: 0, color: ink.sidebarFgMuted, fontSize: t.denseSize, fontWeight: t.weightRegular },
@@ -205,6 +240,8 @@ const styles = stylex.create({
   timeCovered: { position: 'relative', visibility: 'hidden' },
   quickOpen: { position: 'absolute', insetInlineEnd: 0, insetBlock: 0, zIndex: 2, visibility: 'visible', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, boxSizing: 'border-box', padding: s.zero, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, cursor: 'pointer', ':hover': { backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   metric: { display: 'inline-flex', alignItems: 'baseline', gap: s.sm, flexShrink: 0 }, scope: { fontSize: t.microSize, color: ink.sidebarFgMuted },
+  metricsLine: { gridColumn: '1 / -1', gridRow: '2', display: 'flex', alignItems: 'baseline', gap: s.sm, minWidth: 0, overflow: 'hidden', color: ink.fgSoft, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  contextRing: { position: 'absolute', insetInlineStart: '50%', insetBlockStart: '50%', transform: 'translate(-50%, -50%)', color: ink.fgSoft, pointerEvents: 'none' },
   metadata: { gridColumn: '1 / -1', gridRow: '3', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.sidebarFgMuted, fontSize: t.denseSize },
   actions: { display: 'contents' }, iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, minHeight: g.controlSm, borderWidth: 0, padding: s.zero, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.sidebarFgMuted, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   menuButton: { gridColumn: '1', gridRow: '2', width: g.icon, opacity: 0 }, menuVisible: { opacity: 1 }, menuSingle: { gridColumn: '3', gridRow: '1' },
@@ -215,6 +252,8 @@ const styles = stylex.create({
   hasChildren: { paddingInlineEnd: g.icon },
   trailingSignals: { gridColumn: '5', gridRow: '1', display: 'inline-flex', alignItems: 'center', justifyContent: 'end', gap: s.xs, width: `var(--sidebar-signal-track, ${g.status})`, marginInlineStart: s.xs, minWidth: g.status },
   hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, width: g.specimenAside, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', maxHeight: g.commandMaxHeight, overflowY: 'auto', boxShadow: elevation.popover, zIndex: 30 },
+  // The informational tooltip never owns the divider underneath; explicit details popovers remain interactive.
+  passiveHovercard: { pointerEvents: 'none' },
   details: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)', columnGap: s.md, rowGap: s.sm, margin: s.zero, overflowWrap: 'anywhere' },
   card: { display: 'flex', flexDirection: 'column', gap: s.md, width: g.specimenAside, maxWidth: '100%', boxSizing: 'border-box', overflowWrap: 'anywhere' },
   cardTitle: { fontSize: t.uiSize, lineHeight: t.uiLeading },
