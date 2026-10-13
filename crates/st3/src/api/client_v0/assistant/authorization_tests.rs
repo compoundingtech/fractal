@@ -318,11 +318,8 @@ async fn assistant_signed_content_binds_exact_unicode_range_revision_and_no_priv
     let text=format!("{prefix}{undisclosed} {}","padding ".repeat(1_100));
     let (session_id,reference,revision)=content_source(&mut fixture,&text);
     let query=|start:usize,end:usize,revision:&str| {
-        let mut serializer=url::form_urlencoded::Serializer::new(String::new());
-        serializer.extend_pairs([("agent_id","agent/reads-codex"),("session_id",session_id.as_str()),
-            ("reference",reference.as_str()),("revision",revision),("start",&start.to_string()),
-            ("end",&end.to_string()),("max_response_bytes","16384")]);
-        format!("?{}",serializer.finish())
+        format!("?agent_id=agent%2Freads-codex&session_id={}&reference={}&revision={}&start={start}&end={end}&max_response_bytes=16384",
+            urlencoding::encode(&session_id),urlencoding::encode(&reference),urlencoding::encode(revision))
     };
     let exact=query(0,prefix.len(),&revision);
     let payload=fixture.payload("conversation-content",&exact);
@@ -375,11 +372,8 @@ async fn assistant_signed_terminal_binds_live_screen_revision_and_refuses_replay
     let revision=screen.revision().to_owned();
     let expected=screen.line_texts().collect::<Vec<_>>().join("\n");
     let query=|incarnation:&str,revision:&str| {
-        let mut serializer=url::form_urlencoded::Serializer::new(String::new());
-        serializer.extend_pairs([("agent_id","agent/reads-fixture.worker"),
-            ("terminal_id","terminal/agent/reads-fixture.worker"),
-            ("incarnation_id",incarnation),("screen_revision",revision)]);
-        format!("?{}",serializer.finish())
+        format!("?agent_id=agent%2Freads-fixture.worker&terminal_id=terminal%2Fagent%2Freads-fixture.worker&incarnation_id={}&screen_revision={}",
+            urlencoding::encode(incarnation),urlencoding::encode(revision))
     };
     let exact=query(&incarnation,&revision);
     let payload=fixture.payload("terminal-content",&exact);

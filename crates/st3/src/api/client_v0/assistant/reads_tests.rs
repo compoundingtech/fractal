@@ -283,12 +283,17 @@ async fn conversation_content_returns_one_exact_unicode_range_and_refuses_wrong_
     // Past the 8 KiB reference threshold, inside the 16 KiB read ceiling.
     let text = format!("{prefix}{SECRET} {INJECTION} {}", "padding ".repeat(1_100));
     let (state, session_id, reference, revision) = managed_conversation(root.path(), &text);
-    let query = |start: &str, end: &str, revision: &str| vec![
-        ("agent_id", "agent/reads-codex"), ("session_id", session_id.as_str()),
-        ("reference", reference.as_str()), ("revision", revision), ("start", start), ("end", end),
-    ];
+    macro_rules! query {
+        ($start:expr, $end:expr, $revision:expr) => {
+            [
+                ("agent_id", "agent/reads-codex"), ("session_id", session_id.as_str()),
+                ("reference", reference.as_str()), ("revision", $revision),
+                ("start", $start), ("end", $end),
+            ]
+        };
+    }
     let end = prefix.len().to_string();
-    let content = read(&state, "conversation-content", &query("0", &end, &revision), MAX_RESPONSE_BYTES)
+    let content = read(&state, "conversation-content", &query!("0", &end, &revision), MAX_RESPONSE_BYTES)
         .await
         .unwrap();
     assert_eq!(keys(&content), BTreeSet::from([
@@ -309,7 +314,7 @@ async fn conversation_content_returns_one_exact_unicode_range_and_refuses_wrong_
     assert!(!content.to_string().contains(SECRET));
     let tail_start = (text.len() - 8).to_string();
     let tail_end = text.len().to_string();
-    let tail = read(&state, "conversation-content", &query(&tail_start, &tail_end, &revision), MAX_RESPONSE_BYTES)
+    let tail = read(&state, "conversation-content", &query!(&tail_start, &tail_end, &revision), MAX_RESPONSE_BYTES)
         .await.unwrap();
     assert_eq!(tail["text"], &text[text.len() - 8..]);
     assert_eq!(tail["returned_bytes"], 8);
@@ -324,26 +329,26 @@ async fn conversation_content_returns_one_exact_unicode_range_and_refuses_wrong_
         ("5", "5", "validation-failed"),
         ("0", "16385", "response-budget-exceeded"),
     ] {
-        let error = read(&state, "conversation-content", &query(start, end, &revision), MAX_RESPONSE_BYTES)
+        let error = read(&state, "conversation-content", &query!(start, end, &revision), MAX_RESPONSE_BYTES)
             .await.unwrap_err();
         assert_eq!(error.code, expected, "{start}..{end}");
     }
     // A small range of a record larger than the budget is refused: the source is never read
     // past the budget.
-    let error = read(&state, "conversation-content", &query("0", &end, &revision), DEFAULT_RESPONSE_BYTES)
+    let error = read(&state, "conversation-content", &query!("0", &end, &revision), DEFAULT_RESPONSE_BYTES)
         .await.unwrap_err();
     assert_eq!((error.status, error.code.as_str()), (StatusCode::PAYLOAD_TOO_LARGE, "response-budget-exceeded"));
     assert!(!error.message.contains(SECRET));
     let past = (text.len() + 1).to_string();
     let start = (text.len() - 10).to_string();
-    assert_eq!(read(&state, "conversation-content", &query(&start, &past, &revision), MAX_RESPONSE_BYTES)
+    assert_eq!(read(&state, "conversation-content", &query!(&start, &past, &revision), MAX_RESPONSE_BYTES)
         .await.unwrap_err().code, "validation-failed");
-    assert_eq!(read(&state, "conversation-content", &query("0", &end, "2"), MAX_RESPONSE_BYTES)
+    assert_eq!(read(&state, "conversation-content", &query!("0", &end, "2"), MAX_RESPONSE_BYTES)
         .await.unwrap_err().code, "stale-fence");
-    let mut foreign = query("0", &end, &revision);
+    let mut foreign = query!("0", &end, &revision);
     foreign[0] = ("agent_id", AGENT);
     assert!(read(&state, "conversation-content", &foreign, MAX_RESPONSE_BYTES).await.is_err());
-    let mut forged = query("0", &end, &revision);
+    let mut forged = query!("0", &end, &revision);
     let replacement = if reference.ends_with('A') { 'B' } else { 'A' };
     let tampered = format!("{}{replacement}", &reference[..reference.len() - 1]);
     forged[2] = ("reference", tampered.as_str());
