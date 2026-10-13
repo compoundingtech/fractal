@@ -82,6 +82,10 @@ mod mail_backlog;
 pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
 mod owned_sets;
+mod published_attention;
+pub use published_attention::start_attention_list;
+#[cfg(test)]
+pub(crate) use published_attention::{published_attention_rows, refresh_attention_list};
 mod directive_notes;
 mod request_latency;
 mod client_observations;
@@ -502,6 +506,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/harnesses", get(available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route("/v1/client/notes", get(directive_notes::read))
         .route("/v1/notes", axum::routing::put(directive_notes::write))
@@ -7173,6 +7178,15 @@ pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
+    let harnesses = read_deadline::spawn_blocking(crate::environment::available_harnesses)
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(harnesses))
+}
+
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({

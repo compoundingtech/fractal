@@ -4,6 +4,8 @@
 //! command is an `st gate` subcommand, so they run, check again, break and are checked like any
 //! exec gate. A mission stores them as the exec gates they expand to, which every st build reads.
 
+use crate::{cli_print as print, cli_println as println};
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

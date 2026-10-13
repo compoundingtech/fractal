@@ -1,4 +1,4 @@
-import { linuxActionlintConfig, linuxRunner } from './workspace-ci.ts'
+import { linuxActionlintConfig, releaseLinuxRunner } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
@@ -29,7 +29,7 @@ export default githubWorkflow(auditCaches({
   },
   "jobs": {
     "linux-x86_64": {
-      "runs-on": linuxRunner,
+      "runs-on": releaseLinuxRunner,
       "timeout-minutes": 30,
       "env": {
         "SOURCE_SHA": "${{ inputs.source_sha }}",
