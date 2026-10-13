@@ -1,1 +1,0 @@
-Pending questions now appear expanded above the composer without taking focus from your draft. The agent sidebar and header identify a pending question, while read-only questions hide the Note field and explain that answers must currently be given in the terminal.

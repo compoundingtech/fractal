@@ -1,6 +1,7 @@
 import type * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { QuestionForm, type QuestionFormKitProps } from '@smalltalk/fractal-ui/assistant-ui'
+import type { QuestionFormKitProps } from '@smalltalk/fractal-ui/assistant-ui'
+import { QuestionForm } from '../../../../../packages/fractal-ui/src/assistant-ui/questions/QuestionForm.tsx'
 import { geometryVars, spaceVars } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** The kit owns expansion and settlement; the containing group owns scrolling. */
