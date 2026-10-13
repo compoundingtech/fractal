@@ -162,6 +162,14 @@ account "ada/api-key" {
   the UTC calendar month of the period's end, at API-equivalent list prices, with a `+` when some
   tokens had no price.
 
+These readings are made when the report is read, from today's declarations, so they are a view of
+spend and not an invoice. Declaring a second account for a harness on a host (or removing one)
+changes which account the past unlabelled rows there are read as, because "exactly one" no longer
+holds or now does. An `omp` row is read as the one `api-key` account that names `omp` on its host,
+whichever key that seat really used; credits used is therefore the spend of those seats at API list
+prices, not what the provider billed. A report reads its rows, limits and the month's rows in
+separate snapshots, which is harmless for a display.
+
 `st --json usage` and the client's `usage.period` return these as `accounts`, and each row carries
 `account_ref` when a declaration claims it.
 
