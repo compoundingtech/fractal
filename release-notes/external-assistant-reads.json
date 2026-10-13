@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Existing person and resource page shapes are unchanged. Generated Rust, Swift and TypeScript clients add assistant_* read methods that send a caller-supplied proof exactly once without signing, retrying or widening the budget, and a read-trust grant operation."
+    "detail": "Existing person and resource page shapes are unchanged. Assistant attention, mission and agent page codecs accept the optional native sync notice during replication catch-up or divergence. Generated Rust, Swift and TypeScript clients add assistant_* read methods that send a caller-supplied proof exactly once without signing, retrying or widening the budget, and a read-trust grant operation."
   },
   "downtime": {
     "status": "none",
