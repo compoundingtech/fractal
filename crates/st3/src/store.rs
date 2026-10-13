@@ -42990,7 +42990,7 @@ version 2
         // here. Retain the real v5 rule identity when constructing its historical certificate.
         plan.rules_digest = legacy_digest;
         for node in [&controller, &worker] {
-            node.publish_verification(&checkpoint, &terms, &plan, &proof)
+            node.publish_verification(&checkpoint, &terms, &smallclaims::store::checkpoint_staging::StagedPlan::of(&plan), &proof)
                 .unwrap();
         }
         assert!(!projection_replayed(&controller, "worker", &worker));
