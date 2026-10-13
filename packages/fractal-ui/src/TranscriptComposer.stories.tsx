@@ -122,7 +122,8 @@ async function settleFrames() {
 /** An agent reply keeps a scrolled-up reader's line and offers the jump; the reader's own send brings it into view. */
 export const OwnSendFollows: Story = { render: args => <OwnSendStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < historyTurns.length) throw new Error('History not committed'); return found })
+  // The virtual lane mounts only its window; RAC's committed collection size is the history signal.
+  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || Number(found.getAttribute('aria-rowcount')) < historyTurns.length) throw new Error('History not committed'); return found })
   const jump = canvas.getByText('New messages ↓')
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   // The reader scrolls up into history.

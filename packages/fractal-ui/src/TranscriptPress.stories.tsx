@@ -68,7 +68,8 @@ async function settleFrames() {
 }
 async function ready(canvasElement: HTMLElement) {
   await document.fonts.ready
-  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || found.querySelectorAll('[data-testid="transcript-turn"]').length < initialTurns.length) throw new Error('History not committed'); return found })
+  // The virtual lane mounts only its window; RAC's committed collection size is the history signal.
+  const viewport = await waitFor(() => { const found = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]'); if (found === null || Number(found.getAttribute('aria-rowcount')) < initialTurns.length) throw new Error('History not committed'); return found })
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   const canvas = within(canvasElement)
   return { viewport, canvas, jump: canvas.getByText('New messages ↓'), retries: canvas.getByTestId('retry-count') }

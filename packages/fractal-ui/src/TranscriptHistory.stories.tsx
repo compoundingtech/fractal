@@ -302,10 +302,12 @@ async function exerciseIsolated(canvasElement: HTMLElement, target: Failure | 'p
         await expect(root.getAttribute('data-page'), detector).toBe('Failed')
         await expect(Number(root.getAttribute('data-requests')), detector).toBe(requests)
       } else {
-        await waitFor(() => expect([...lane.querySelectorAll<HTMLElement>('[data-testid="history-retry"]')].some(candidate => historyElementIsActionable(candidate, lane)), 'History setup: actionable Retry control').toBe(true))
-        const retry = [...lane.querySelectorAll<HTMLElement>('[data-testid="history-retry"]')].find(candidate => historyElementIsActionable(candidate, lane))
-        await expect(retry !== undefined, 'History setup: current Retry control').toBe(true)
-        if (retry === undefined) return
+        // Use the element the wait observed: a second query races RAC replacing the boundary row.
+        const retry = await waitFor(() => {
+          const found = [...lane.querySelectorAll<HTMLElement>('[data-testid="history-retry"]')].find(candidate => historyElementIsActionable(candidate, lane))
+          if (found === undefined) throw new Error('History setup: actionable Retry control')
+          return found
+        })
         if (target === 'pointer-retry') await userEvent.click(retry)
         else {
           await focusHistoryKeyboardRow(lane)
