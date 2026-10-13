@@ -26180,6 +26180,7 @@ mod tests {
         let runtime: Runtime = serde_json::from_value(json!({
             "type":"agent-trace-runtime/v1",
             "who":{"agent":subject,"principal":"person/avery"},
+            "why":{"_tag":"idle"},
             "how":{"harness":{"tool":"omp"}},
             "where":{},
         })).unwrap();
