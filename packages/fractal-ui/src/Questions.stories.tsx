@@ -9,42 +9,48 @@ import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { Transcript } from './assistant-ui/composition/Transcript'
 import { baselineTheme } from './assistant-ui/neutral-theme'
-import { TerminalDrawer } from './assistant-ui/composition/Shell'
+import { TerminalDrawer, ThreadHeader } from './assistant-ui/composition/Shell'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars, textVars, typeVars } from './assistant-ui/composition-tokens.stylex'
 
 type Phase = 'pending' | 'arrival' | 'readonly' | 'answered'
-interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean }
+interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean; longPrompt: boolean }
 const requestFor = (phase: Phase): QuestionRequestView => ({
   ...questionScenarios.multi,
   ...(phase === 'readonly' ? { answerable: false, readOnlyReason: 'Answer in the agent terminal. Web answering is not available on this connection.' } : {}),
   ...(phase === 'answered' ? { state: { _tag: 'answered', by: 'You', at: submittedAt, answers: { checks: { selected: ['typecheck'], note: 'Run the narrow checks first.' } } } } : {}),
 })
 /** Real dock, transcript, runtime and composer. Settlement is explicitly story-only, not a live transport. */
-function QuestionsStory({ scheme, phase, multiple, drawer }: Args) {
-  const [request, setRequest] = React.useState(() => requestFor(phase))
+function QuestionsStory({ scheme, phase, multiple, drawer, longPrompt }: Args) {
+  const [request, setRequest] = React.useState(() => {
+    const request = requestFor(phase)
+    return longPrompt ? { ...request, questions: request.questions.map(question => ({ ...question, prompt: 'The orchestration plan spans several worktrees and independent agents. Before continuing, choose the verification coverage that should run across the touched packages, explain how the full application suite relates to narrow checks, and account for the existing terminal session and pending release-note validation. '.repeat(4) })) } : request
+  })
   const [arrived, setArrived] = React.useState(phase !== 'arrival')
+  const [terminalOpen, setTerminalOpen] = React.useState(drawer)
   const options = React.useMemo(() => ({ messages: [], isRunning: false, onNew: async () => {} }), [])
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+    <ThreadHeader title="Sample agent" status="waiting" needsMe={arrived && request.state._tag === 'pending'} panelOpen={false} drawerOpen={terminalOpen} onTogglePanel={() => {}} onToggleDrawer={() => setTerminalOpen(open => !open)} />
     <div data-testid="question-conversation-pane" style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
     <EmbraceRuntimeProvider options={options}>
       <div {...stylex.props(styles.history)}><Transcript title="Sample agent" turns={[]} sync={{ _tag: 'Live', since: viewedAt - 1000 }} now={viewedAt} observedAt={viewedAt} /></div>
       {arrived && <QuestionDockGroup>
-        <QuestionDock request={request} now={viewedAt} onSubmit={answers => setRequest(current => ({ ...current, state: { _tag: 'answered', by: 'You', at: submittedAt, answers } }))} />
-        {multiple && <QuestionDock request={{ ...requestFor('readonly'), id: 'second-ask' }} now={viewedAt} />}
+        <QuestionDock request={request} now={viewedAt} onOpenTerminal={() => setTerminalOpen(true)} onSubmit={answers => setRequest(current => ({ ...current, state: { _tag: 'answered', by: 'You', at: submittedAt, answers } }))} />
+        {multiple && <QuestionDock request={{ ...requestFor('readonly'), id: 'second-ask', title: 'Follow-up checks' }} now={viewedAt} />}
       </QuestionDockGroup>}
       <div data-testid="conversation-composer-dock" onInputCapture={() => setArrived(true)} {...stylex.props(styles.composer)}><EmbraceComposer variant="C1" readingColumn /></div>
     </EmbraceRuntimeProvider>
     </div>
-    <TerminalDrawer open={drawer} height={440} onHeight={() => {}} lines={['$ pnpm typecheck', 'Typecheck completed. The agent is waiting for your answer.']} />
+    <TerminalDrawer open={terminalOpen} height={440} onHeight={() => {}} lines={['$ pnpm typecheck', 'Typecheck completed. The agent is waiting for your answer.']} />
   </main>
 }
-const meta = { title: 'Fractal/Plugins/Questions', component: QuestionsStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', phase: 'pending', multiple: false, drawer: false }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phase: { options: ['pending', 'arrival', 'readonly', 'answered'], control: 'radio' } } } satisfies Meta<typeof QuestionsStory>
+const meta = { title: 'Fractal/Plugins/Questions', component: QuestionsStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', phase: 'pending', multiple: false, drawer: false, longPrompt: false }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phase: { options: ['pending', 'arrival', 'readonly', 'answered'], control: 'radio' } } } satisfies Meta<typeof QuestionsStory>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Pending: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByRole('checkbox', { name: /Typecheck/ })).toBeVisible()
+  await expect(canvas.getByLabelText('Needs your attention')).toBeVisible()
   await expect(canvas.queryByText('Open question')).toBeNull()
   const dock = canvas.getByTestId('question-dock').getBoundingClientRect()
   await expect(dock.top).toBeGreaterThanOrEqual(0)
@@ -71,6 +77,10 @@ export const ReadOnly: Story = { args: { phase: 'readonly' }, play: async ({ can
   await expect(canvas.queryByRole('textbox', { name: 'Note' })).toBeNull()
   await expect(canvas.queryByRole('button', { name: /^Submit$/ })).toBeNull()
   await expect(canvas.getByRole('checkbox', { name: /Typecheck/ })).toBeVisible()
+  await expect(canvas.getByLabelText('Needs your attention')).toBeVisible()
+  await expect(canvasElement.querySelector('[data-question-attention="true"]')).not.toBeNull()
+  await userEvent.click(canvas.getByRole('button', { name: "Open the agent's terminal" }))
+  await expect(canvas.getByTestId('terminal-drawer')).toBeVisible()
 } }
 export const Answered: Story = { args: { phase: 'answered' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
@@ -87,6 +97,20 @@ export const MultipleWithTerminalDrawer: Story = { args: { multiple: true, drawe
   await expect(group.height).toBeLessThanOrEqual(pane.height * 0.45 + 1)
   await expect(composer.bottom).toBeLessThanOrEqual(pane.bottom + 1)
   await expect(canvas.getByRole('textbox', { name: 'Message' })).toBeVisible()
+} }
+export const LongPrompt: Story = { args: { longPrompt: true, phase: 'readonly' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const group = canvas.getByTestId('question-dock-group').getBoundingClientRect()
+  const first = canvas.getByRole('checkbox', { name: /Typecheck/ }).closest('label')!.getBoundingClientRect()
+  await expect(first.bottom).toBeLessThanOrEqual(group.bottom)
+  const disclosure = canvas.getByRole('button', { name: 'Show full question' })
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+  disclosure.focus()
+  await expect(disclosure).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await expect(canvas.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true')
+  await userEvent.click(canvas.getByRole('button', { name: 'Show less' }))
+  await expect(canvas.getByRole('button', { name: 'Show full question' })).toHaveAttribute('aria-expanded', 'false')
 } }
 export const AllStates: Story = { render: args => <div>{(['pending', 'readonly', 'answered'] as const).map(phase => <section key={phase} aria-label={phase}><QuestionsStory {...args} phase={phase} /></section>)}</div> }
 const styles = stylex.create({

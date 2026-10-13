@@ -119,8 +119,8 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
   const interactive = state._tag === 'pending' || state._tag === 'submitting' || state._tag === 'failed'
   const busy = state._tag === 'submitting'
   const canAct = request.answerable && (state._tag === 'pending' || state._tag === 'failed')
-  // Attention marks a question waiting on this user; settled and read-only requests stay neutral.
-  const attention = interactive && request.answerable
+  // Pending attention is independent of whether this connection can submit an answer.
+  const attention = interactive
   // An unparseable ask time renders no age rather than a guess.
   const askedAt = Date.parse(request.askedAt)
   const askedAge = Number.isFinite(askedAt) ? `${compactTime({ at: askedAt, now })} ago` : undefined
@@ -250,6 +250,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     showHeader={questions.length === 1}
     showKeys={canAct}
     stacked={stacked}
+    pinned={variant === 'pinned'}
     isDisabled={busy}
     isReadOnly={!request.answerable}
     previewIndex={previewIndex[question.id]}
@@ -273,7 +274,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     {...stylex.props(styles.form, variant === 'pinned' ? styles.pinned : styles.card, variant !== 'pinned' && attention && styles.cardAttention)}
   >
     <div {...stylex.props(styles.header)}>
-      <span data-question-glyph="" {...stylex.props(styles.glyph, attention && styles.glyphAttention)}><Icon name="message" /></span>
+      <span data-question-glyph="" data-question-attention={attention} {...stylex.props(styles.glyph, attention && styles.glyphAttention)}><Icon name="message" /></span>
       <span id={titleId} {...stylex.props(styles.title)}>{title}</span>
       <span data-question-asked="" {...stylex.props(styles.meta)}>{request.agentLabel}{askedAge !== undefined && <> · asked <time dateTime={request.askedAt}>{askedAge}</time></>}</span>
       <div {...stylex.props(styles.headerEnd)}>
@@ -365,6 +366,7 @@ interface QuestionPanelProps {
   /** Digit keycaps show only while 1–9 can act. */
   readonly showKeys: boolean
   readonly stacked: boolean
+  readonly pinned: boolean
   readonly isDisabled: boolean
   readonly isReadOnly: boolean
   readonly previewIndex: number | undefined
@@ -375,8 +377,9 @@ interface QuestionPanelProps {
   readonly onNote: (value: string) => void
 }
 
-function QuestionPanel({ question, draft, showHeader, showKeys, stacked, isDisabled, isReadOnly, previewIndex, promptId, onPreview, onChoose, onOther, onNote }: QuestionPanelProps) {
+function QuestionPanel({ question, draft, showHeader, showKeys, stacked, pinned, isDisabled, isReadOnly, previewIndex, promptId, onPreview, onChoose, onOther, onNote }: QuestionPanelProps) {
   const hasPreview = question.options.some(option => option.preview !== undefined)
+  const [promptExpanded, setPromptExpanded] = React.useState(false)
   const selectedIndexes = draft.selected.map(id => question.options.findIndex(option => option.id === id)).filter(index => index >= 0)
   const fallbackIndex = selectedIndexes[0] ?? Math.max(0, question.options.findIndex(option => option.recommended === true))
   const preview = question.options[previewIndex ?? fallbackIndex]
@@ -411,7 +414,8 @@ function QuestionPanel({ question, draft, showHeader, showKeys, stacked, isDisab
   return <div data-question-panel={question.id} {...stylex.props(styles.question)}>
     <div {...stylex.props(styles.promptRow)}>
       {showHeader && question.header !== undefined && <span {...stylex.props(styles.chip)}>{question.header}</span>}
-      <span id={promptId} {...stylex.props(styles.prompt)}>{question.prompt}</span>
+      <span id={promptId} {...stylex.props(styles.prompt, pinned && !promptExpanded && styles.promptClamped)}>{question.prompt}</span>
+      {pinned && <Button data-question-prompt-disclosure="" variant="ghost" size="sm" aria-expanded={promptExpanded} aria-controls={promptId} onPress={() => setPromptExpanded(expanded => !expanded)}>{promptExpanded ? 'Show less' : 'Show full question'}</Button>}
     </div>
     {question.subject !== undefined && <div {...stylex.props(styles.subject)}><PreviewBody preview={question.subject} /></div>}
     <div {...stylex.props(styles.body, hasPreview && !stacked && styles.bodyBeside)}>
@@ -501,6 +505,7 @@ const styles = stylex.create({
   question: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   promptRow: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', minWidth: 0 },
   prompt: { fontWeight: t.weightMedium, color: text.fg, overflowWrap: 'anywhere' },
+  promptClamped: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 2, overflow: 'hidden' },
   subject: { minWidth: 0, color: text.fgSoft },
   body: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   bodyBeside: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', alignItems: 'start', gap: s.lg },
