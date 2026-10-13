@@ -635,6 +635,7 @@ fn rollout_new_work_is_held_while_current_work_renews_and_completes() {
     let seat = Seat::new();
     let run = seat.work();
     let request = |key: &str| crate::model::WorkRequest {
+        wait_ms: None,
         actor: Some(SUBJECT.into()),
         incarnation: Some("original-1".into()),
         summary: Some("tending".into()),
@@ -933,6 +934,7 @@ fn rollout_pending_person_work_can_resume_and_finish_while_new_work_waits() {
         let seat = Seat::new();
         let run = seat.work();
         let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some(SUBJECT.into()),
             incarnation: Some("original-1".into()),
             summary: Some("tending".into()),
@@ -1073,6 +1075,7 @@ fn manual_rollout_without_set_policy_survives_receipts_reopens_and_idle_passes()
     // A manual pending publication does not hold ordinary work intake.
     let run = seat.work();
     let request = |key: &str| crate::model::WorkRequest {
+        wait_ms: None,
         actor: Some(SUBJECT.into()),
         incarnation: Some("original-1".into()),
         summary: Some("Finished".into()),

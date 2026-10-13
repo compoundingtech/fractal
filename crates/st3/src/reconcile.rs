@@ -11385,6 +11385,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         claim_expires_at_unix_ms: None,
                         carried_claimant: None,
                         execution_started_at_unix_ms: None,
+                        execution_paused_until_unix_ms: None,
+                        execution_waited_ms: 0,
                         execution_elapsed_ms: 0,
                         timeout_ms: None,
                         timeout_extension_ms: 0,
@@ -12352,9 +12354,18 @@ impl<R: RuntimeControl> Reconciler<R> {
         if elapsed >= timeout as u128 {
             return Ok(true);
         }
-        if !matches!(view.status.as_str(), "claimed" | "working")
-            || view.execution_started_at_unix_ms.is_none()
-        {
+        if !matches!(view.status.as_str(), "claimed" | "working") {
+            return Ok(false);
+        }
+        if view.execution_started_at_unix_ms.is_none() {
+            // A declared wait has stopped the clock; look again when it ends on its own.
+            if let (Some(paused_until), Ok(handle)) = (
+                view.execution_paused_until_unix_ms,
+                tokio::runtime::Handle::try_current(),
+            ) {
+                let remaining = paused_until.saturating_sub(now_ms()).max(1) as u64;
+                self.arm_step_deadline(&handle, &view.subject, remaining);
+            }
             return Ok(false);
         }
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -18830,6 +18841,7 @@ mission "nested-wake" state="ready" {
             .find(|step| step.step == "outer/work/second")
             .unwrap();
         let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -19548,6 +19560,7 @@ version 2
                     &step.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/node.worker".into()),
                         incarnation: Some("test".into()),
                         summary: Some("published the change".into()),
@@ -19685,6 +19698,7 @@ version 2
                 &compile.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.planner".into()),
                     incarnation: Some("test".into()),
                     summary: None,
@@ -19709,6 +19723,7 @@ version 2
                 &compile.subject,
                 "complete",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.planner".into()),
                     incarnation: Some("test".into()),
                     summary: Some("published the complete mission".into()),
@@ -19747,6 +19762,7 @@ version 2
                     &execute.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/node.planner".into()),
                         incarnation: Some("test".into()),
                         summary: None,
@@ -19802,6 +19818,7 @@ version 2
                         &step.subject,
                         action,
                         &crate::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some("agent/node.planner".into()),
                             incarnation: Some("test".into()),
                             summary: None,
@@ -20246,6 +20263,7 @@ mission "feedback-review" state="ready" {
         let claimant = step.assigned_to.clone().unwrap();
         store.set_step_state(&step.subject, "ready", None).unwrap();
         let work = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some(claimant.clone()),
             incarnation: Some("test-incarnation".into()),
             summary: Some("Draft submitted".into()),
@@ -22509,6 +22527,7 @@ mission "proof" state="ready" {{
             .subject
             .clone();
         let request = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: Some("Merged the change.".into()),
@@ -23209,6 +23228,7 @@ mission "asks" state="ready" {
                 &step,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.asker".into()),
                     incarnation: Some("asker-one".into()),
                     summary: None,
@@ -25787,6 +25807,7 @@ schedule "{name}" {{
                 &result.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: result.assigned_to.clone(),
                     incarnation: Some("worker-one".into()),
                     summary: None,
@@ -25830,6 +25851,7 @@ schedule "{name}" {{
                     &stuck.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: stuck.assigned_to.clone(),
                         incarnation: Some("worker-one".into()),
                         summary: None,
@@ -25931,6 +25953,7 @@ schedule "{name}" {{
             .find(|step| step.step == "slow")
             .unwrap();
         let request = |key: &str, reason: Option<&str>| crate::model::WorkRequest {
+            wait_ms: None,
             actor: step.assigned_to.clone(),
             incarnation: Some("worker-one".into()),
             summary: None,
@@ -28421,6 +28444,7 @@ mission "waiting" state="ready" {
             reconciler.reconcile_once().unwrap();
         }
         let work = |key: &str| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.builder".into()),
             incarnation: Some("builder-one".into()),
             summary: Some("Draft built".into()),
@@ -28618,6 +28642,122 @@ mission "waiting" state="ready" {
                 .is_empty()
         );
         assert!(store.attention_items(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unstarted_cancelled_loop_has_no_fault_but_started_and_failed_loops_do() {
+        for case in ["queued-cancel", "started-cancel", "unstarted-fail"] {
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(
+                &store,
+                r#"
+    version 2
+    resource "never" { kind "custom.test.loop-result" }
+    mission "hold" state="ready" {
+      goal "Hold the successor outside admission."
+      step "hold" {
+    agentless
+    gate "released" { field "state" "resource/never" is "ready" }
+      }
+    }
+    mission "looping" state="ready" {
+      goal "Wait in a bounded loop."
+      loop "review" {
+    max-rounds 3
+    until { gate "done" { field "state" "resource/never" is "done" } }
+    round {
+      completion { when "all-steps-exhausted" }
+      step "wait" {
+        agentless
+        gate "released" { field "state" "resource/never" is "ready" }
+      }
+    }
+      }
+    }
+    "#,
+                "cancel-loop-missions",
+            );
+            let start = |id: &str, mission: &str, after: Option<&str>| {
+                let revision = store.mission_spec(mission, None).unwrap().unwrap().revision;
+                let after = after.map_or(String::new(), |id| format!("  after {id:?}\n"));
+                let source = format!(
+                    "version 2\nmission-run {id:?} {{\n  mission \"mission/{mission}@{revision}\"\n  workspace \"/tmp\"\n  requester \"person/operator\"\n{after}}}\n",
+                );
+                apply_source(&store, &source, &format!("start-{id}"));
+            };
+            start("predecessor", "hold", None);
+            start(
+                "successor",
+                "looping",
+                (case == "queued-cancel").then_some("predecessor"),
+            );
+            let reconciler = Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            );
+            if case != "unstarted-fail" {
+                for _ in 0..10 {
+                    reconciler.reconcile_once().unwrap();
+                }
+            }
+            let run = store.mission_run("successor").unwrap().unwrap();
+            let step = run.steps.iter().find(|step| step.step == "review").unwrap();
+            let child = store.mission_run_for_parent_step(&step.subject).unwrap();
+            assert_eq!(child.is_some(), case == "started-cancel", "{case}");
+            if case == "queued-cancel" {
+                assert_eq!(step.status, "pending");
+                assert_eq!(
+                    run.steps
+                        .iter()
+                        .find(|step| step.step == "after-run")
+                        .unwrap()
+                        .status,
+                    "working"
+                );
+            }
+            if case == "unstarted-fail" {
+                store
+                    .set_step_state(&step.subject, "failed", Some("invalid loop input"))
+                    .unwrap();
+            } else {
+                store
+                    .request_mission_run_cancellation(&run.id, "no longer needed")
+                    .unwrap();
+            }
+            // Read during cancellation, before terminal cleanup closes the run's items.
+            // Checking only after cleanup would miss the spurious fault's lifetime.
+            let items = store.fault_items(Some("person/operator")).unwrap();
+            if case == "queued-cancel" {
+                assert!(
+                    items.is_empty(),
+                    "An unstarted queued loop raised a fault: {items:?}"
+                );
+                for _ in 0..5 {
+                    reconciler.reconcile_once().unwrap();
+                    assert!(
+                        store
+                            .fault_items(Some("person/operator"))
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+                assert_eq!(
+                    store.mission_run("successor").unwrap().unwrap().status,
+                    "cancelled"
+                );
+                assert!(
+                    store
+                        .mission_run_for_parent_step(&step.subject)
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                assert_eq!(items.len(), 1, "{case}: {items:?}");
+                assert_eq!(items[0].title, "Loop `review` stopped");
+            }
+        }
     }
 
     fn stopping_loop_run(
@@ -28993,6 +29133,7 @@ mission "queue-nested" state="ready" {
                 &first.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(first_work.assigned_to.clone().unwrap()),
                     incarnation: Some("current".into()),
                     summary: None,
@@ -29006,6 +29147,7 @@ mission "queue-nested" state="ready" {
         assert!(store.step_run(&first.subject).unwrap().is_some());
 
         let work = |key: &str, actor: String| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some(actor),
             incarnation: Some("current".into()),
             summary: None,
@@ -30225,6 +30367,7 @@ version 2
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.one".into()),
                     incarnation: Some("incarnation-one".into()),
                     summary: None,
@@ -30250,6 +30393,7 @@ version 2
                 &work[0].subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.missing".into()),
                     incarnation: Some("other".into()),
                     summary: None,
@@ -34705,6 +34849,7 @@ version 2
                 &old.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(worker.clone()),
                     incarnation: Some("keep-incarnation".into()),
                     summary: None,
@@ -37888,6 +38033,7 @@ mission "work-alert" state="ready" {
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.worker".into()),
                     incarnation: Some("worker-two".into()),
                     summary: None,
@@ -37984,6 +38130,7 @@ mission "ios-proof-blocked" state="ready" {
         reconciler.reconcile_once().unwrap();
         let subject = run.steps[0].subject.clone();
         let work = |key: &str, reason: Option<&str>| crate::model::WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.ios-owner".into()),
             incarnation: Some("ios-owner-one".into()),
             summary: None,
@@ -38096,6 +38243,8 @@ mission "ios-proof-blocked" state="ready" {
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -38249,6 +38398,8 @@ mission "ios-proof-blocked" state="ready" {
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -38650,6 +38801,8 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
             claim_expires_at_unix_ms: None,
             carried_claimant: None,
             execution_started_at_unix_ms: None,
+            execution_paused_until_unix_ms: None,
+            execution_waited_ms: 0,
             execution_elapsed_ms: 0,
             timeout_ms: None,
             timeout_extension_ms: 0,
@@ -38788,6 +38941,7 @@ mission "context" state="ready" {
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(SEAT.into()),
                     incarnation: Some(incarnation.into()),
                     summary: None,
@@ -39177,6 +39331,7 @@ mission "gated" state="ready" {
                     step,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(SEAT.into()),
                         incarnation: Some("seat-one".into()),
                         summary: None,
@@ -39800,6 +39955,7 @@ mission "draining" state="ready" revision-cutover="when-idle" {
                 &helper_step,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some("agent/node.helper".into()),
                     incarnation: Some("helper-one".into()),
                     summary: None,

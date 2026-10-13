@@ -15617,6 +15617,7 @@ async fn handoff_work(
         &mut input.incarnation,
     )?;
     let request = WorkRequest {
+        wait_ms: None,
         actor: Some(input.actor.clone()),
         incarnation: input.incarnation.clone(),
         summary: Some(input.note.clone()),
@@ -15668,6 +15669,7 @@ async fn extend_work(
     )?;
     let extend_ms = request.by_ms;
     let request = WorkRequest {
+        wait_ms: None,
         actor: request.actor,
         incarnation: request.incarnation,
         summary: None,
@@ -17978,6 +17980,7 @@ mission "refs-work" state="ready" {{
         let refs = read(true);
         assert_eq!(refs[0]["next_work_id"], second.steps[0].subject);
         let action = |name: &str| store.work_action(&second.steps[0].subject, name, &WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.amber".into()), incarnation: Some("refs-runtime".into()),
             summary: Some("Complete fixture work.".into()), reason: None, evidence: Vec::new(),
             idempotency_key: format!("refs-{name}"),
@@ -18025,6 +18028,7 @@ mission "expiring-work" state="ready" {
         let step = &run.steps[0].subject;
         store.set_step_state(step, "ready", None).unwrap();
         store.work_action(step, "claim", &WorkRequest {
+            wait_ms: None,
             actor: Some("agent/node.zeta".into()), incarnation: Some("fixture-runtime".into()),
             summary: None, reason: None, evidence: Vec::new(), idempotency_key: "lease-fence-claim".into(),
         }).unwrap();
@@ -19766,6 +19770,7 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             router(state),
             "/v1/work/complete/step-run/run/work",
             serde_json::to_value(WorkRequest {
+                wait_ms: None,
                 actor: Some("agent/node.worker".into()),
                 incarnation: Some("ended-incarnation".into()),
                 summary: Some("complete".into()),
@@ -22978,6 +22983,7 @@ mission "paged" state="ready" {
                 &builds[0],
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: None,
@@ -24350,6 +24356,7 @@ mission "wake" state="ready" {
     fn roster_fixture_work(fixture: &RosterClaimsFixture, agent: usize, action: &str, key: &str) {
         fixture.store.work_action(&fixture.runs[agent / 10].steps[agent % 10].subject,
             action, &WorkRequest {
+                wait_ms: None,
                 actor: Some(fixture.subjects[agent].clone()),
                 incarnation: Some(format!("roster-session-{agent}")),
                 summary: Some(format!("Fixture {action}.")), reason: None,
@@ -27043,6 +27050,7 @@ version 2
                 &step.subject,
                 "claim",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(actor.clone()),
                     incarnation: Some("test".into()),
                     summary: None,
@@ -27437,6 +27445,7 @@ version 2
                 &step.subject,
                 "claim",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(claimant.clone()),
                     incarnation: Some("test-incarnation".into()),
                     summary: None,
@@ -27452,6 +27461,7 @@ version 2
                 &step.subject,
                 "complete",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(claimant.clone()),
                     incarnation: Some("test-incarnation".into()),
                     summary: Some("Candidate submitted for review".into()),
@@ -27721,6 +27731,7 @@ version 2
                     &feedback_step.subject,
                     action,
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(feedback_claimant.clone()),
                         incarnation: Some("test-incarnation".into()),
                         summary: Some("Candidate submitted".into()),
