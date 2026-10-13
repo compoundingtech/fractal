@@ -539,13 +539,15 @@ fs.rmSync(outboxPath, { force: true });
 // An earlier asynchronous native handoff can delay a release beyond its boundary.
 // That release must not take mail held for a newer tool batch or a newly opened modal.
 for (const newerBoundary of ["batch", "ask"]) {
-  await handlers.get("session_start")({}, bareCtx);
+  holdIdle = true;
+  await handlers.get("session_start")({}, holdCtx);
   let finishHandoff;
   handoffWait = new Promise(resolve => { finishHandoff = resolve; });
   const beforeDeferred = handedOver.length;
   sendMail("pending native handoff");
   await pause(150);
   assert.strictEqual(handedOver.length, beforeDeferred + 1);
+  holdIdle = false;
   await handlers.get("agent_start")({}, holdCtx);
   sendMail("eligible at old boundary");
   await pause(150);
