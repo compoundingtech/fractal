@@ -36,6 +36,15 @@ test('day machine values follow the formatting zone rather than UTC', async () =
   assert.match(html, /dateTime="2026-10-12"/)
   assert.doesNotMatch(html, /dateTime="[^"]*T/)
 })
+test('disabled and unreported tooltips render inline without a portal host', async () => {
+  const { HumanTime, HumanClockProvider, fixedClock } = await server.ssrLoadModule('/src/time/HumanTime.tsx')
+  for (const props of [{ at: now - 180_000, tooltip: false }, { at: NaN }, { at: Infinity }]) {
+    const html = renderToStaticMarkup(React.createElement(HumanClockProvider, { clock: fixedClock(now), zone }, React.createElement('p', null, 'Updated ', React.createElement(HumanTime, props))))
+    assert.match(html, /^<p>Updated <time\b[^>]*>[^<]*<\/time><\/p>$/)
+    assert.doesNotMatch(html, /<div\b|role="tooltip"/)
+    if (!Number.isFinite(props.at)) assert.doesNotMatch(html, /dateTime=|aria-description=/)
+  }
+})
 test('civil days across Berlin DST and the New York day boundary', () => {
   assert.equal(formatDay(at('2026-03-28T23:00:00Z'), at('2026-03-29T21:30:00Z'), zone), 'today')
   assert.equal(formatDay(at('2026-03-28T23:00:00Z'), at('2026-03-29T22:30:00Z'), zone), 'yesterday')

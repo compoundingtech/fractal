@@ -43,9 +43,9 @@ export const HumanTime = React.memo(function HumanTime({ at, kind = 'relative', 
   const exactText = exact === undefined ? undefined : kind === 'elapsed' ? `Since ${exact}` : exact
   const visibleLabel = `${prefix}${label}${suffix}`
   const ref = React.useRef<HTMLTimeElement>(null)
-  const tip = useHoverTooltip(tooltip && exactText !== undefined)
-  return <ThemePortal>
-    <time
+  const tooltipEnabled = tooltip && exactText !== undefined
+  const tip = useHoverTooltip(tooltipEnabled)
+  const time = <time
       ref={ref}
       dateTime={exact === undefined ? undefined : kind === 'day' ? formatDayValue(at, zone) : new Date(at).toISOString()}
       aria-label={aria['aria-label'] === undefined ? undefined : `${aria['aria-label']} ${visibleLabel}`}
@@ -55,6 +55,9 @@ export const HumanTime = React.memo(function HumanTime({ at, kind = 'relative', 
       {...tip.hoverProps}
       {...stylex.props(styles.time, style)}
     >{visibleLabel}</time>
+  if (!tooltipEnabled) return time
+  return <ThemePortal>
+    {time}
     {tip.state.isOpen && <TooltipTriggerStateContext.Provider value={tip.state}>
       <Tooltip triggerRef={ref} placement="top" offset={geometryNumbers.tooltipOffset} {...stylex.props(tooltipStyles.tooltip, styles.tooltip)}>{exactText}</Tooltip>
     </TooltipTriggerStateContext.Provider>}

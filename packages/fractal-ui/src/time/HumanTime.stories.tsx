@@ -14,7 +14,7 @@ const at = now - 180_000
 const exact = 'Mon, 12 Oct 2026, 11:57:00 GMT-4'
 const day = civilDate('2026-10-12', zone)!
 const hostText = stylex.createTheme(text, { fg: '#123456' })
-const hostSurface = stylex.createTheme(surface, { raised: '#f1eadb' })
+const hostSurface = stylex.createTheme(surface, { canvas: '#f1eadb', raised: '#f1eadb' })
 
 function HumanTimeStory({ scheme = 'dark', width = 440, host = false, live = false, browserClock = false }: { scheme?: Scheme; width?: number; host?: boolean; live?: boolean; browserClock?: boolean }) {
   // A fake one-second timer clock keeps the live story deterministic without changing global timers.
