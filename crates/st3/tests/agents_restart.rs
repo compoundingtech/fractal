@@ -2045,6 +2045,71 @@ async fn a_failed_explicit_retry_is_completed_parked_and_visible_until_a_new_req
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn distinct_failed_agent_restarts_each_spend_one_attempt_and_stay_parked() {
+    for driver in ["codex", "omp"] {
+        for actor in ["agent/example/operator", "agent/example/worker"] {
+            let (fixture, subject) = Fixture::launching(
+                Shape::TopLevel,
+                &format!("harness {driver:?} {{ model \"example-model\"; }}"),
+                "always",
+            )
+            .await;
+            hang_up(&fixture);
+            park(&fixture, &subject, driver);
+            *fixture.runtime.refuse_start.lock().unwrap() = true;
+            for attempt in 1..=3 {
+                let key = format!("agent-refused-{attempt}");
+                let request = fixture.request_as(&subject, &key, actor).await;
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                let failed = restart_result(&fixture, &request);
+                assert_eq!(failed.kind, "runtime.action.failed");
+                assert_eq!(failed.actor.as_deref(), Some(actor));
+                assert_eq!(failed.body["evidence"][0], request.id);
+                assert!(
+                    failed.body["fields"]["reason"]
+                        .as_str()
+                        .unwrap()
+                        .contains("parked again")
+                );
+                assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempt + 1);
+                assert!(
+                    fixture
+                        .store
+                        .member_reconcile_fault(&subject, None)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    fixture
+                        .store
+                        .fault_snapshot(smallclaims::store::now_ms())
+                        .unwrap()
+                        .iter()
+                        .any(|fault| fault.item.subject == subject),
+                    "a failed retry must retain its actionable parked-seat fault"
+                );
+                // Quiet passes and replay have no new operation identity to spend.
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                assert_eq!(
+                    fixture.request_as(&subject, &key, actor).await.id,
+                    request.id
+                );
+                reconcile_ready(&fixture, &fixture.reconciler, &subject);
+                let daemon = restarted_daemon(&fixture);
+                reconcile_ready(&fixture, &daemon, &subject);
+                assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempt + 1);
+                assert_eq!(restart_result(&fixture, &request).id, failed.id);
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_agent_can_explicitly_retry_itself_once() {
+    parked_retry_succeeds("codex", "agent/example/worker").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_explicit_agent_restart_retries_a_parked_omp_seat_once() {
     parked_retry_succeeds("omp", "agent/example/operator").await;
 }
