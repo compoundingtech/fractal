@@ -475,6 +475,58 @@ fn corrupt_document_metadata_stays_an_error_without_a_partial_page() {
     // Cursor values retain rusqlite's checked u64 binding, not a wrapping cast.
     parity(&store, None, None, true, Some(("doc/a", u64::MAX)), 10);
 
+    // rusqlite includes the SQLite column name in wrong-storage-class errors. Preserve
+    // the former joined columns' names when scalar metadata expressions replace them.
+    let typed = node();
+    bind(&typed, "doc/typed", "typed", 1500, "typed", None);
+    for (table, column, key, value) in [
+        (
+            "blobs",
+            "size",
+            "hash",
+            rusqlite::types::Value::Text("bad-size".into()),
+        ),
+        (
+            "claims",
+            "accepted_at_unix_ms",
+            "binding_claim_id",
+            rusqlite::types::Value::Blob(vec![1, 2]),
+        ),
+        (
+            "claims",
+            "actor",
+            "binding_claim_id",
+            rusqlite::types::Value::Blob(vec![3, 4]),
+        ),
+        (
+            "claims",
+            "origin",
+            "binding_claim_id",
+            rusqlite::types::Value::Blob(vec![5, 6]),
+        ),
+    ] {
+        let predicate = format!(
+            "{}=(SELECT {key} FROM documents WHERE name='doc/typed')",
+            if table == "blobs" { "hash" } else { "id" }
+        );
+        let saved: rusqlite::types::Value = typed
+            .readers
+            .get()
+            .query_row(
+                &format!("SELECT {column} FROM {table} WHERE {predicate}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let sql = format!("UPDATE {table} SET {column}=?1 WHERE {predicate}");
+        typed.connection.write().execute(&sql, [&value]).unwrap();
+        for history in [false, true] {
+            parity(&typed, Some("doc/typed"), None, history, None, 10);
+            assert!(read(&typed, Some("doc/typed"), None, history, None, 10).is_err());
+        }
+        typed.connection.write().execute(&sql, [&saved]).unwrap();
+    }
+
     // The former inner joins excluded missing metadata before applying LIMIT. Keep
     // that eligibility even when indexed scalar lookups supply the returned fields.
     let missing = node();

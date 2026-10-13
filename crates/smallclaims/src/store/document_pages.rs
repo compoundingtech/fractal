@@ -51,11 +51,11 @@ fn query(
     // predicates preserve the old inner joins' row eligibility before the page limit.
     let mut sql = format!(
         "SELECT d.name,d.hash,
-        (SELECT b.size FROM blobs b INDEXED BY sqlite_autoindex_blobs_1 WHERE b.hash=d.hash),
+        (SELECT b.size FROM blobs b INDEXED BY sqlite_autoindex_blobs_1 WHERE b.hash=d.hash) AS size,
         d.created_index,{latest},d.binding_claim_id,
-        (SELECT c.accepted_at_unix_ms FROM claims c WHERE c.id=d.binding_claim_id),
-        (SELECT c.actor FROM claims c WHERE c.id=d.binding_claim_id),
-        (SELECT c.origin FROM claims c WHERE c.id=d.binding_claim_id)
+        (SELECT c.accepted_at_unix_ms FROM claims c WHERE c.id=d.binding_claim_id) AS accepted_at_unix_ms,
+        (SELECT c.actor FROM claims c WHERE c.id=d.binding_claim_id) AS actor,
+        (SELECT c.origin FROM claims c WHERE c.id=d.binding_claim_id) AS origin
         FROM documents d INDEXED BY document_canonical_latest
         WHERE EXISTS (SELECT 1 FROM blobs b INDEXED BY sqlite_autoindex_blobs_1 WHERE b.hash=d.hash)
         AND EXISTS (SELECT 1 FROM claims c WHERE c.id=d.binding_claim_id)"
