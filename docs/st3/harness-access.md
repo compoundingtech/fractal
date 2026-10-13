@@ -8,7 +8,7 @@ for a new installation. Restart the daemon after changing the mode; `st doctor`
 shows the mode that daemon actually started with.
 
 Auto is not a security boundary. It reduces accidents; it does not isolate seats.
-Real sandboxing is separate later work. Codex hook trust is bypassed in both modes.
+Codex hook trust is bypassed in both modes.
 
 ## Choosing and changing the mode
 
@@ -85,8 +85,6 @@ not narrowed to git, gh and registries.
 A resumed thread keeps the same access. Codex 0.160.1 refuses any permission config on a remote
 resume ("Permission overrides are not supported when resuming a remote task"), so the resume argv
 omits the profile's `-c` entries (and an authored `-c` entry for the same keys): the app server holds them and `thread/resume` selects the profile and carries the approval policy, reviewer, sandbox, model and effort; `sandbox_workspace_write.*` stays on the app server only.
-Before this, a plain-declaration Codex seat that restarted on an auto install had its TUI exit and the
-driver started a new thread instead of resuming (the old rollout stayed on disk, unreferenced).
 
 The live eval `evals/st3/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
 restart between two turns, checking the thread id, the daemon socket, the network and the refused
@@ -126,7 +124,7 @@ records a `harness.diagnostic` with code `provider-update-available`, status
 to the retained startup-prompt diagnostic. It remains after the prompt is resolved
 and can be read through the seat's trace. Operations owns provider upgrades.
 
-The Codex Skip behavior from #2332 still requires the complete recognized menu,
+Skipping a Codex update requires the complete recognized menu,
 a fresh screen and the same incarnation. Failed input, changed screens and a menu
 that does not clear retain the attention path; a partial notice receives no key.
 
