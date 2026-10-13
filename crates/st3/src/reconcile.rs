@@ -265,7 +265,6 @@ fn calendar_occurrence(
     Ok((key, calendar_instant(zone, calendar.at_minute, next)?))
 }
 
-
 /// Keep the existing Claude regression cases exercising the shared driver classifier.
 #[cfg(test)]
 fn claude_login_expired(screen: &str) -> Option<&str> {
@@ -288,6 +287,32 @@ fn claude_trust_prompt(screen: &str) -> bool {
     ]
     .iter()
     .all(|phrase| screen.contains(phrase))
+}
+
+fn claude_development_channel_prompt(screen: &str) -> bool {
+    let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    const OPTION: &str = "❯ 1. I am using this for local development";
+    let fixed = [
+        "WARNING: Loading development channels",
+        "--dangerously-load-development-channels",
+        OPTION,
+        "2. Exit",
+        "Enter to confirm",
+        "Esc to cancel",
+    ];
+    if !fixed.iter().all(|text| screen.contains(text)) {
+        return false;
+    }
+    // Approve the dialog only when it lists exactly the one st channel: any other development
+    // channel in the same dialog is the person's to accept.
+    let Some((_, listed)) = screen.split_once("Channels:") else {
+        return false;
+    };
+    let listed = listed.split_once(OPTION).map_or(listed, |(before, _)| before);
+    matches!(
+        listed.split_whitespace().collect::<Vec<_>>().as_slice(),
+        ["plugin:st-channel@st"] | ["server:st3"]
+    )
 }
 
 /// How long a resume that ended without a reason waits for its driver's typed refusal.
@@ -2767,6 +2792,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     &observation,
                                     now_ms(),
                                 )?;
+                                self.reconcile_claude_channel_consent(
+                                    subject,
+                                    member,
+                                    &observation,
+                                    screen.as_deref(),
+                                )?;
                                 self.reconcile_driver_readiness(
                                     subject,
                                     member,
@@ -3978,6 +4009,74 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<(Option<String>, String)> {
         let (claim, key) = self.store.harness_login_episode_key(subject, incarnation)?;
         Ok((claim.map(|claim| claim.id), key))
+    }
+
+    /// Admit the measured st development-channel startup dialog once per incarnation.
+    fn reconcile_claude_channel_consent(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+    ) -> Result<()> {
+        if subject.kind != "agent" || member.driver.as_deref() != Some("claude") || !member.terminal
+        {
+            return Ok(());
+        }
+        let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            return Ok(());
+        };
+        if !screen.is_some_and(claude_development_channel_prompt)
+            || self
+                .store
+                .harness_was_ready(&subject.subject, incarnation)?
+        {
+            return Ok(());
+        }
+        let Some(runtime_claim) = self.running_runtime_claim(&subject.subject, incarnation)? else {
+            return Ok(());
+        };
+        if now_ms().saturating_sub(runtime_claim.accepted_at_unix_ms)
+            > HARNESS_READINESS_DEADLINE_MS
+            || self
+                .store
+                .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?
+                .iter()
+                .any(|claim| {
+                    claim
+                        .body
+                        .pointer("/fields/decision")
+                        .and_then(Value::as_str)
+                        == Some("channel-consent")
+                        && claim.body.pointer("/fields/key").and_then(Value::as_str)
+                            == Some(incarnation)
+                })
+        {
+            return Ok(());
+        }
+        // Record the bounded attempt before input; replay must never press Return twice.
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("key".into(), Value::String(incarnation.into())),
+                ("decision".into(), Value::String("channel-consent".into())),
+                (
+                    "reason".into(),
+                    Value::String("attempt the st development-channel startup consent once".into()),
+                ),
+            ]),
+            evidence: vec![runtime_claim.id],
+            expected_subject: None,
+            idempotency_key: Some(format!(
+                "claude-channel-consent:{}:{incarnation}",
+                subject.subject
+            )),
+        })?;
+        self.signal_changed();
+        self.runtime
+            .send_key_if(&member.runtime_id, "return", incarnation)
     }
 
     /// Claude's workspace trust prompt appears before any hook or channel can report the session,
@@ -8384,6 +8483,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .into_iter()
                 .filter(|runner| owner_runs.contains(&runner.owner_run))
                 .map(|runner| DesiredSubject {
+                    accountable: None,
                     subject: runner.subject,
                     kind: "stop".into(),
                     desired: Value::Null,
@@ -9330,6 +9430,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         self.perform_start(
             &DesiredSubject {
+                accountable: None,
                 subject: subject.clone(),
                 kind: "gate".into(),
                 desired: Value::Null,
@@ -14034,6 +14135,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             terminal_size: None,
         };
         let desired = DesiredSubject {
+            accountable: None,
             subject: operation.clone(),
             kind: "gate".into(),
             desired: Value::Null,
@@ -14562,6 +14664,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             terminal_size: None,
         };
         let desired = DesiredSubject {
+            accountable: None,
             subject: result_subject,
             kind: "gate".into(),
             desired: Value::Null,
@@ -15507,6 +15610,9 @@ pub(crate) fn append_work_wake_message(
             format!("st3-wake-source:{source}"),
             format!("st3-wake-requested-by:{requested_by}"),
         ],
+        body_ref: None,
+        body_bytes: None,
+        body_origin: None,
         created_index: store
             .latest_claim(&format!("message/{message_id}"), Some("message.sent"))?
             .map(|claim| claim.store_index)
@@ -16306,6 +16412,7 @@ fn now_ms() -> u128 {
 mod tests {
     mod channel_recovery;
     mod differential;
+    mod doctor_eligibility_tests;
     mod first_readiness_tests;
     mod github_watch_selection;
     mod incremental_deadlines;
@@ -20157,11 +20264,22 @@ mission "feedback-review" state="ready" {
             .unwrap();
         fs::create_dir(workspace.path().join(".claude")).unwrap();
         fs::write(workspace.path().join(".claude/settings.local.json"), "{}\n").unwrap();
-        crate::test_support::git()
-            .args(["add", ".claude/settings.local.json"])
-            .current_dir(workspace.path())
-            .status()
-            .unwrap();
+        // A person's global gitignore commonly ignores this file; the fixture ignores it too
+        // and tracks it anyway, as a repository that commits it does.
+        fs::create_dir_all(workspace.path().join(".git/info")).unwrap();
+        fs::write(
+            workspace.path().join(".git/info/exclude"),
+            "settings.local.json\n",
+        )
+        .unwrap();
+        assert!(
+            crate::test_support::git()
+                .args(["add", "-f", ".claude/settings.local.json"])
+                .current_dir(workspace.path())
+                .status()
+                .unwrap()
+                .success()
+        );
         let source = format!(
             r#"version 2
 agent "bad" {{ workspace {:?}; command "true"; render {{ file ".claude/settings.local.json" "changed" }} }}
@@ -20238,11 +20356,20 @@ agent "bad" {{ workspace {:?}; command "true" }}
             .unwrap();
         fs::create_dir(workspace.path().join(".claude")).unwrap();
         fs::write(workspace.path().join(".claude/settings.local.json"), "{}\n").unwrap();
-        crate::test_support::git()
-            .args(["add", ".claude/settings.local.json"])
-            .current_dir(workspace.path())
-            .status()
-            .unwrap();
+        fs::create_dir_all(workspace.path().join(".git/info")).unwrap();
+        fs::write(
+            workspace.path().join(".git/info/exclude"),
+            "settings.local.json\n",
+        )
+        .unwrap();
+        assert!(
+            crate::test_support::git()
+                .args(["add", "-f", ".claude/settings.local.json"])
+                .current_dir(workspace.path())
+                .status()
+                .unwrap()
+                .success()
+        );
         let workspace_path = workspace.path().display().to_string();
         apply_source(
             &store,
@@ -23749,7 +23876,6 @@ schedule "orchard" {{
         );
     }
 
-
     #[tokio::test]
     async fn daily_calendar_reaches_once_and_preserves_durable_claim_key() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -23825,7 +23951,6 @@ schedule "daily" {{
         assert_eq!(reached[0].body["fields"]["occurrence"], key);
         assert_eq!(reached[0].body["fields"]["scheduled_at_unix_ms"], recorded);
     }
-
 
 
     #[test]
@@ -28436,6 +28561,7 @@ mission "eval/demo" state="ready" timeout="1m" {
             })
             .unwrap();
         let stop = DesiredSubject {
+            accountable: None,
             subject: subject.into(),
             kind: "stop".into(),
             desired: Value::Null,
@@ -36027,6 +36153,104 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         );
     }
 
+    const DEVELOPMENT_CHANNEL_SCREEN: &str = "WARNING: Loading development channels\n--dangerously-load-development-channels is for local channel development only.\nPlease use --channels to run a list of approved channels.\nChannels: plugin:st-channel@st\n❯ 1. I am using this for local development\n  2. Exit\nEnter to confirm · Esc to cancel";
+
+    #[test]
+    fn development_channel_consent_is_once_before_readiness_and_checks_incarnation() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"seat\" { workspace \"/tmp\"; harness \"claude\" {} }",
+            "consent",
+        );
+        let desired = store.desired_subjects().unwrap().remove(0);
+        let member = desired.member.as_ref().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let observation = running_observation(member, "one");
+        runtime.ptys.lock().unwrap().push(observation.clone());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: member_fields(member, "running", Some("one"), true),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("consent-one-running".into()),
+            })
+            .unwrap();
+        assert!(super::claude_development_channel_prompt(
+            DEVELOPMENT_CHANNEL_SCREEN
+        ));
+        assert!(!super::claude_development_channel_prompt(
+            &DEVELOPMENT_CHANNEL_SCREEN.replace("❯ 1.", "1.")
+        ));
+        assert!(!super::claude_development_channel_prompt(
+            "I am using this for local development"
+        ));
+        for listed in [
+            "plugin:st-channel@st plugin:other@market",
+            "server:other plugin:st-channel@st",
+            "plugin:st-channel@st, server:st3",
+            "plugin:other@market",
+            "",
+        ] {
+            assert!(
+                !super::claude_development_channel_prompt(
+                    &DEVELOPMENT_CHANNEL_SCREEN
+                        .replace("Channels: plugin:st-channel@st", &format!("Channels: {listed}"))
+                ),
+                "approved a dialog that lists {listed:?}"
+            );
+        }
+        assert!(super::claude_development_channel_prompt(
+            &DEVELOPMENT_CHANNEL_SCREEN.replace("plugin:st-channel@st", "server:st3")
+        ));
+        for _ in 0..2 {
+            reconciler
+                .reconcile_claude_channel_consent(
+                    &desired,
+                    member,
+                    &observation,
+                    Some(DEVELOPMENT_CHANNEL_SCREEN),
+                )
+                .unwrap();
+        }
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+        assert_eq!(
+            store
+                .claims_for(&desired.subject, Some("runtime.reconcile-decision"))
+                .unwrap()
+                .len(),
+            1
+        );
+        mark_harness_ready(&store, &desired.subject, member, "claude", "ready");
+        let ready = running_observation(member, "ready");
+        runtime.ptys.lock().unwrap().clear();
+        runtime.ptys.lock().unwrap().push(ready.clone());
+        reconciler
+            .reconcile_claude_channel_consent(
+                &desired,
+                member,
+                &ready,
+                Some(DEVELOPMENT_CHANNEL_SCREEN),
+            )
+            .unwrap();
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+        assert!(
+            runtime
+                .send_key_if(&member.runtime_id, "return", "stale")
+                .is_err()
+        );
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+    }
+
     fn mark_harness_ready(
         store: &Store,
         subject: &str,
@@ -37304,6 +37528,9 @@ mission "ios-proof-blocked" state="ready" {
             title: None,
             in_reply_to: None,
             tags: vec![],
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
             attachments: Vec::new(),
         };
@@ -37327,6 +37554,9 @@ mission "ios-proof-blocked" state="ready" {
             title: None,
             in_reply_to: None,
             tags: vec![],
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
             attachments: Vec::new(),
         };
@@ -37359,6 +37589,9 @@ mission "ios-proof-blocked" state="ready" {
             title: None,
             in_reply_to: None,
             tags: vec![],
+            body_ref: None,
+            body_bytes: None,
+            body_origin: None,
             created_index: 1,
             attachments: Vec::new(),
         };

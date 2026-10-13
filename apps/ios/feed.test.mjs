@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { Feed, shouldProbe } from './feed.ts';
+import { Feed } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
 import { fakeClient } from './fakeFeed.mjs';
 
@@ -235,12 +235,13 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   const { handlers } = watch();
   const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
   await settle();
-  const issues = [];
-  feed.followConversation('agent/example/worker', { onEntries: () => {}, onIssue: issue => issues.push(issue) });
+  const issues = [], stops = [];
+  feed.followConversation('agent/example/worker', { onEntries: () => {}, onIssue: (issue, stopped) => { issues.push(issue); stops.push(stopped); } });
   const before = sockets[0].sent.length;
   const reason = 'the retained transcript starts after its first entries; st cannot show it from the start';
   sockets[0].frame({ kind: 'error', id: 'conversation', collection: 'conversation', code: 'timeline-history-incomplete', message: reason });
   assert.equal(issues.at(-1), reason, 'st\'s own words, without "trying again"');
+  assert.equal(stops.at(-1), true, 'the screen offers a retry instead of loading forever');
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(sockets[0].sent.length, before, 'not asked for again');
   feed.close();
@@ -272,10 +273,6 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
 }
 
 
-// st is asked nothing while the stream speaks; only a quiet stream is probed (Nathan, 2026-10-06).
-assert.equal(shouldProbe(1_000, 5_000), false);
-assert.equal(shouldProbe(1_000, 10_999), false);
-assert.equal(shouldProbe(1_000, 11_000), true);
 
 {
   // The missions window is followed only when asked: not subscribed at the start, subscribed when a

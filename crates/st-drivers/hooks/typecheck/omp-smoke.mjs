@@ -251,10 +251,10 @@ await handlers.get("agent_end")(
 );
 settleIdle = true;
 await new Promise((resolve) => setTimeout(resolve, 250));
-assert.strictEqual(
-  readFrames().filter((frame) => frame.type === "state").length,
-  beforeSettleCase,
-  "willContinue must cancel the older poll and start no new settle",
+assert.deepStrictEqual(
+  readFrames().filter((frame) => frame.type === "state").slice(beforeSettleCase),
+  process.argv[2]?.includes("st-omp-channel") ? [expectedState("idle")] : [],
+  "willContinue cancels the older poll; managed delivery observes fresh positive idle",
 );
 // A retried turn has not ended, so it claims neither credential edge: only the ordinary end
 // before it may emit a turn result.
@@ -810,6 +810,8 @@ if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo
   await handlers.get("session_tree")({}, todoCtx);
   await pause(50);
   assert.deepStrictEqual(todos().at(-1).phases, [], "no branch snapshot clears another branch's work");
+  const branchIsIdle = todoCtx.isIdle;
+  todoCtx.isIdle = () => false;
   await handlers.get("agent_start")({}, todoCtx);
   const beforeBranchMail = handedOver.length;
   fs.appendFileSync(outboxPath, JSON.stringify({
@@ -832,6 +834,7 @@ if (process.argv[2]?.includes("st-omp-channel") || process.argv.includes("--todo
   assert.strictEqual(fs.readFileSync(pidPath, "utf8"), pidsBeforeBranch, "branch hydration does not reopen delivery");
   assert.ok(!newSessionFrames.some((frame) => frame.type === "ready"), "branch hydration does not rerun delivery readiness");
   assert.strictEqual(handedOver.length, beforeBranchMail, "branch hydration preserves held mail");
+  todoCtx.isIdle = branchIsIdle;
   await handlers.get("agent_end")(successfulEnd, todoCtx);
   await pause(100);
   assert.deepStrictEqual(handedOver.at(-1), {
@@ -923,6 +926,119 @@ if (process.argv[2]?.includes("st-omp")) {
   await new Promise(resolve => setTimeout(resolve, 250));
   assert.strictEqual(readFrames().filter(frame => frame.type === "state").at(-1).backgroundJobs, null);
   await handlers.get("session_shutdown")({}, unknownCtx);
+}
+
+if (process.argv[2]?.includes("st-omp-channel")) {
+  // A pending background job ends foreground work with willContinue=true, then ctx proves
+  // idle. No further tool result or terminal agent_end need arrive to release managed mail.
+  let backgroundIdle = false;
+  const backgroundCtx = { ...fullCtx, isIdle: () => backgroundIdle };
+  await handlers.get("session_start")({}, backgroundCtx);
+  await handlers.get("agent_start")({}, backgroundCtx);
+  const beforeBackgroundMail = handedOver.length;
+  const beforeBackgroundTurns = readFrames().filter(frame => frame.type === "turn").length;
+  sendMail("held while background continues");
+  await pause(100);
+  await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, backgroundCtx);
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeBackgroundMail, "not released without positive idle");
+  backgroundIdle = true;
+  await pause(250);
+  assert.deepStrictEqual(handedOver.slice(beforeBackgroundMail), [
+    { content: "held while background continues" },
+  ], "positive idle releases background continuation mail without another tool boundary");
+  assert.strictEqual(readFrames().filter(frame => frame.type === "turn").length,
+    beforeBackgroundTurns, "background continuation does not invent a terminal result");
+  const backgroundId = `message/hold-${mailSequence}`;
+  assert.strictEqual(acknowledged().filter(id => id === backgroundId).length, 1);
+  await pause(200);
+  assert.strictEqual(handedOver.length, beforeBackgroundMail + 1, "idle poll delivers once");
+
+  // Mail can arrive after the continuation's poll was fenced. Its own fresh idle proof
+  // overrides the stale running flag without waiting for a tool event.
+  backgroundIdle = false;
+  await handlers.get("agent_start")({}, backgroundCtx);
+  const beforeDirectIdle = handedOver.length;
+  backgroundIdle = true;
+  sendMail("arriving after positive idle");
+  await pause(200);
+  assert.deepStrictEqual(handedOver.slice(beforeDirectIdle), [
+    { content: "arriving after positive idle" },
+  ], "receive uses fresh positive idle despite stale running flag");
+  assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
+
+  const backgroundIdleProof = backgroundCtx.isIdle;
+  for (const proof of ["active", "throws"]) {
+    let throwing = proof === "throws";
+    const inFlightCtx = { ...fullCtx, isIdle: () => {
+      if (throwing) throw new Error("idle proof unavailable");
+      return false;
+    } };
+    backgroundCtx.isIdle = inFlightCtx.isIdle;
+    await handlers.get("agent_start")({}, inFlightCtx);
+    await handlers.get("tool_call")({ toolName: "bash", toolCallId: `foreground-${proof}`, input: {} }, inFlightCtx);
+    await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, inFlightCtx);
+    const beforeInFlight = handedOver.length;
+    sendMail(`held behind real tool ${proof}`);
+    await pause(250);
+    assert.strictEqual(handedOver.length, beforeInFlight, `${proof} proof retains in-flight hold`);
+    throwing = false;
+    await handlers.get("tool_result")({ toolName: "bash", toolCallId: `foreground-${proof}` }, inFlightCtx);
+    await pause(100);
+    assert.strictEqual(handedOver.length, beforeInFlight + 1, "matching real tool result releases once");
+    assert.strictEqual(acknowledged().filter(id => id === `message/hold-${mailSequence}`).length, 1);
+    await handlers.get("agent_end")(successfulEnd, inFlightCtx);
+  }
+  backgroundCtx.isIdle = backgroundIdleProof;
+
+  // A new foreground turn fences the background settle poll, even if its retired context
+  // subsequently claims idle. Only the new turn's real boundary can release this mail.
+  backgroundIdle = false;
+  await handlers.get("agent_start")({}, backgroundCtx);
+  sendMail("held across newer foreground activity");
+  await pause(100);
+  await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, backgroundCtx);
+  await handlers.get("agent_start")({}, activeCtx);
+  const beforeNewTurn = handedOver.length;
+  backgroundIdle = true;
+  await pause(250);
+  assert.strictEqual(handedOver.length, beforeNewTurn, "new activity fences retired idle proof");
+  await handlers.get("agent_end")(successfulEnd, activeCtx);
+  await pause(100);
+  assert.strictEqual(handedOver.length, beforeNewTurn + 1);
+
+  // Positive idle cannot override a structured human-blocking guard, either in the poll or
+  // when mail arrives after the foreground continuation ended.
+  for (const guard of ["ask", "approval"]) {
+    backgroundIdle = false;
+    await handlers.get("agent_start")({}, backgroundCtx);
+    if (guard === "ask") {
+      await handlers.get("tool_call")({ toolName: "ask", toolCallId: "background-ask",
+        input: { questions: [{ question: "Preserve the pending question?" }] } }, backgroundCtx);
+    } else {
+      await handlers.get("tool_approval_requested")({ toolName: "bash" }, backgroundCtx);
+    }
+    await handlers.get("agent_end")({ ...successfulEnd, willContinue: true }, backgroundCtx);
+    backgroundIdle = true;
+    const guardedMailCount = handedOver.length;
+    const guardedFrameCount = readFrames().length;
+    sendMail(`held behind ${guard}`);
+    await pause(250);
+    assert.strictEqual(handedOver.length, guardedMailCount, `${guard} prevents idle handoff`);
+    assert.ok(!readFrames().slice(guardedFrameCount).some(frame =>
+      frame.type === "state" && frame.state === "idle"), `${guard} prevents idle publication`);
+    backgroundIdle = false;
+    if (guard === "ask") {
+      await handlers.get("tool_result")({ toolName: "ask", toolCallId: "background-ask" }, backgroundCtx);
+    } else {
+      await handlers.get("tool_approval_resolved")({}, backgroundCtx);
+    }
+    await handlers.get("agent_end")(successfulEnd, backgroundCtx);
+    await pause(100);
+    assert.strictEqual(handedOver.length, guardedMailCount + 1, `${guard} mail released once after answer`);
+    const guardedId = `message/hold-${mailSequence}`;
+    assert.strictEqual(acknowledged().filter(id => id === guardedId).length, 1);
+    }
 }
 
 // `session_shutdown` has no reason field upstream and always denotes process exit. Closing must

@@ -27,6 +27,7 @@ use tower::ServiceExt as _;
 
 use crate::archive::hydrate_eval;
 use crate::graph::{parse_intent, resolve_document_references};
+use crate::message_body;
 #[cfg(test)]
 use crate::model::AttentionRequest;
 use crate::model::ClientReplicated;
@@ -62,6 +63,7 @@ use crate::store::Store;
 mod client_blobs;
 #[cfg(test)]
 mod terminal_gate_evidence;
+mod message_bodies;
 mod client_adapters;
 mod client_presence;
 mod client_v0;
@@ -77,12 +79,16 @@ mod github_watch;
 mod harness_events;
 mod mailbox;
 mod mail_backlog;
+pub(crate) mod mission_eligibility_doctor;
 mod read_deadline;
 mod owned_sets;
+mod directive_notes;
 mod request_latency;
 mod client_observations;
 mod terminal_view;
 mod work_response;
+mod published_lists;
+pub use published_lists::start_published_lists;
 
 pub(crate) use client_v0::raw_terminal::splice as raw_terminal_splice;
 pub(crate) use client_v0::raw_terminal::{
@@ -182,8 +188,8 @@ struct ClientListQuery {
     state: Option<String>,
     #[serde(default)]
     native_only: bool,
-    /// Agents only: wait briefly for a roster at least as new as this request, rather than
-    /// answering at once from the newest published one.
+    /// Agents and current work: wait briefly for a roster, or a work list, at least as new as this
+    /// request, rather than answering at once from the newest published one.
     #[serde(default)]
     fresh: bool,
 }
@@ -496,7 +502,10 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/harnesses", get(available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
+        .route("/v1/client/notes", get(directive_notes::read))
+        .route("/v1/notes", axum::routing::put(directive_notes::write))
         .route("/v1/client/sets", get(owned_sets::list))
         .route("/v1/client/sets/{*id}", get(owned_sets::get))
         .route("/v1/client/arrangements", get(client_v0::arrangements::list))
@@ -537,6 +546,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/client/alerts/{*id}", get(client_attention_detail))
         .route("/v1/client/messages", get(client_messages))
         .route("/v1/client/messages/{*id}", get(client_messages_detail))
+        .route("/v1/client/message-bodies/{*id}", get(message_bodies::client_body))
         .route("/v1/client/launches", get(client_launches))
         .route(
             "/v1/client/launches/{id}/variants",
@@ -759,6 +769,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/mailbox/receipts", post(mailbox::receipt))
         .route("/v1/messages/{message_id}/claims", post(post_message_claim))
         .route("/v1/messages/read/{*subject}", get(read_message))
+        .route("/v1/messages/body/{*subject}", get(message_bodies::body))
         .route("/v1/messages/delivery/{*subject}", get(message_delivery))
         .route("/v1/messages/by-key", get(message_by_key))
         .route("/v1/status", get(status))
@@ -1439,6 +1450,11 @@ fn request_latency() -> &'static Mutex<request_latency::Meter> {
     REQUEST_LATENCY.get_or_init(|| Mutex::new(request_latency::Meter::default()))
 }
 
+/// Count one published current-work stage's duration beside the request rows.
+fn record_work_stage(stage: request_latency::WorkStage, elapsed: Duration) {
+    request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_work_stage(stage, elapsed);
+}
+
 /// Count one agents roster stage's duration beside the request rows.
 fn record_roster_stage(stage: request_latency::RosterStage, elapsed: Duration) {
     // A poisoned diagnostic lock must not stop the refresher that records into it.
@@ -1659,6 +1675,10 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
+    // The work list's refresher ended: nothing publishes it until the daemon restarts.
+    if code == Some(published_lists::WORK_LIST_ENDED) {
+        return false;
+    }
     if matches!(code, Some(
         "arrangement-exists" | "arrangement-folder-exists" | "arrangement-retired"
         | "arrangement-limit" | "arrangement-folder-deleted" | "arrangement-cycle"
@@ -1728,6 +1748,9 @@ fn client_error_code(code: Option<&str>) -> String {
         | "transcript-unavailable"
         | "terminal-ended"
         | "blob-too-large"
+        | "message-too-large"
+        | "message-store-full"
+        | "long-message-signature-unsupported"
         | "unsupported-media-type"
         | "blob-content-mismatch"
         | "blob-quota-exceeded"
@@ -2152,6 +2175,8 @@ async fn client_capabilities(
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
     let capabilities = client_v0::capabilities(&session);
+    // The longest message body this daemon takes, so a composer shows a limit only when told.
+    let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
         "kind": "capabilities",
         "machine_version": st_drivers::version::machine_version(),
@@ -2163,6 +2188,7 @@ async fn client_capabilities(
             "max_event_items": 500,
             "max_response_bytes": CLIENT_MAX_RESPONSE_BYTES,
             "max_wait_ms": 30_000,
+            "max_message_bytes": max_message_bytes,
             "max_glass_body_bytes": st3_schema::glasses::MAX_BODY_BYTES,
             "max_glasses": st3_schema::glasses::MAX_GLASSES,
             "max_glass_depth": st3_schema::glasses::MAX_DEPTH,
@@ -2192,6 +2218,9 @@ fn client_work_resources(
     snapshot_unix_ms: u128,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
+    if !history {
+        store.count_direct_work_read();
+    }
     let mut work = if history {
         store.client_work_history_at_snapshot(actor, snapshot_unix_ms)?
     } else {
@@ -3360,7 +3389,7 @@ fn managed_session_owner_for_subject_at(
     })
 }
 
-/// How many of a subject's claims, oldest first, date its session in the session list.
+/// Bound the legacy runtime-only scan; incarnation dating uses two index seeks instead.
 const SESSION_CLAIMS: usize = 10_000;
 
 fn client_session_resources(
@@ -3529,12 +3558,12 @@ fn managed_session_resources(
             "stopped" | "exited" | "absent" => "completed",
             _ => "waiting",
         };
-        // A session is dated by the subject's first SESSION_CLAIMS claims, the page this list
-        // once read whole and filtered, so a subject with more keeps the dates it had.
+        // Keep the old page bound only for runtime-only identities, which scan subject history.
+        // Incarnation spans are index-bounded and must include incarnations after that page.
         let through_claim = subject
             .claims
             .get(SESSION_CLAIMS - 1)
-            .filter(|_| subject.claims.len() > SESSION_CLAIMS);
+            .filter(|_| incarnation.is_none() && subject.claims.len() > SESSION_CLAIMS);
         let mut accepted_times = store
             .runtime_claim_span_at(
                 &subject.subject,
@@ -3554,9 +3583,23 @@ fn managed_session_resources(
         let started = fields
             .and_then(|fields| fields.get("started_at_unix_ms"))
             .and_then(|value| value.as_u64().map(u128::from))
-            .map(client_timestamp)
-            .or_else(|| accepted_times.iter().min().copied().map(client_timestamp))
-            .unwrap_or_else(|| at.to_owned());
+            .or_else(|| accepted_times.iter().min().copied());
+        // Client v0 requires a timestamp. Without session evidence, the actual observation's
+        // acceptance time is the closest durable date, not the time someone reads the session.
+        let started = match started {
+            Some(started) => client_timestamp(started),
+            None => subject
+                .actual_claim
+                .as_deref()
+                .or_else(|| subject.claims.first().map(String::as_str))
+                .map(|id| store.claim_by_id(id))
+                .transpose()?
+                .flatten()
+                .map_or_else(
+                    || client_timestamp(0),
+                    |claim| client_timestamp(claim.accepted_at_unix_ms),
+                ),
+        };
         let updated = accepted_times
             .iter()
             .max()
@@ -3890,7 +3933,7 @@ fn client_message_resources(
             reasons.push("superseded");
         }
         let current = reasons.is_empty();
-        resources.push(json!({
+        let mut resource = json!({
             "id": message.subject,
             "kind": "message",
             "revision": last.map(|claim| claim.id.as_str()).unwrap_or("message/unknown"),
@@ -3907,7 +3950,13 @@ fn client_message_resources(
             "tags": message.tags,
             "attachments": message.attachments.iter().map(client_attachment).collect::<Vec<_>>(),
             "operational": { "layer": if current { "current" } else { "history" }, "actionable": current, "reasons": reasons }
-        }));
+        });
+        // Only a long message names its body, so every other resource reads as it always has.
+        if let (Some(reference), Some(bytes)) = (&message.body_ref, message.body_bytes) {
+            resource["body_ref"] = json!(reference);
+            resource["body_bytes"] = json!(bytes);
+        }
+        resources.push(resource);
     }
     resources.sort_by(|left, right| {
         right["sent_at"]
@@ -4644,6 +4693,16 @@ async fn client_work(
     if query.history {
         return client_work_history(&state, snapshot, &query).await;
     }
+    // While a refresher governs the work list (from when it holds the list's view, before it
+    // starts), pages come from its publications and never fold the list on read. With none,
+    // as with ST3_PUBLISHED_LISTS=off, they read directly, as before.
+    if !matches!(
+        state.store.published_work_list().current(),
+        crate::store::published_list::ListRead::NeverStarted
+    ) || state.store.collection_view_published("work")
+    {
+        return client_work_published(state, snapshot, query).await;
+    }
     let actor = query.actor.clone();
     client_snapshot_page(&state, snapshot, "work", &query, move |state, snapshot| {
         client_work_resources(
@@ -4655,6 +4714,377 @@ async fn client_work(
         )
     })
     .await
+}
+
+/// How long a fresh current-work read waits for a publication at least as new as itself.
+const WORK_LIST_FRESH_WAIT: Duration = Duration::from_secs(2);
+
+/// Where a published current-work page's cursor continues: the publication its first page
+/// served and the actor's rows in it, kept as the page cache keeps a first page's items.
+struct PublishedWorkPage {
+    digest: String,
+    /// The publication's identity: its list, generation and number. A continuation is served
+    /// only while that list is still the store's and in that generation.
+    id: crate::store::published_list::PublicationId,
+    /// What the first page issued, which a cursor, being the client's to edit, must repeat.
+    contract: PublishedWorkContract,
+    /// Only the rows the page lists, in order: the actor's, or every row for a fleet page,
+    /// sharing the publication's rendered values. Not the publication, its memo or its seats.
+    rows: Arc<Vec<Arc<Value>>>,
+    expires_at_unix_ms: u128,
+}
+
+/// Drop the entries that expired, and this list's entries of a generation a forget replaced.
+/// Another store's entries are left to their own list. Lazy: run at each cache access.
+fn purge_published_work_pages(
+    pages: &mut VecDeque<PublishedWorkPage>,
+    list: &crate::store::published_list::PublishedList<crate::store::work_list::WorkRows>,
+) {
+    let now = client_now_ms();
+    let (instance, generation) = (list.instance(), list.generation());
+    pages.retain(|page| {
+        page.expires_at_unix_ms > now && (page.id.list != instance || page.id.generation == generation)
+    });
+}
+
+/// A published work page's issued limit, snapshot and filters.
+#[derive(PartialEq, Eq)]
+struct PublishedWorkContract {
+    limit: usize,
+    /// The whole issued snapshot, each field of it, as the cursor carries it.
+    snapshot: String,
+    person: Option<String>,
+    actor: Option<String>,
+    owner_run: Option<String>,
+    status: Option<String>,
+    native_only: bool,
+}
+
+impl PublishedWorkContract {
+    fn of(cursor: &ClientPageCursor) -> Self {
+        Self {
+            limit: cursor.limit,
+            snapshot: serde_json::to_string(&cursor.snapshot).expect("a client snapshot serializes"),
+            person: cursor.person.clone(),
+            actor: cursor.actor.clone(),
+            owner_run: cursor.owner_run.clone(),
+            status: cursor.status.clone(),
+            native_only: cursor.native_only,
+        }
+    }
+}
+
+static PUBLISHED_WORK_PAGES: OnceLock<Mutex<VecDeque<PublishedWorkPage>>> = OnceLock::new();
+
+fn published_work_pages() -> &'static Mutex<VecDeque<PublishedWorkPage>> {
+    PUBLISHED_WORK_PAGES.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+/// How many published work page entries a list's publications hold, for tests: the cache is
+/// shared by every store in the process.
+#[cfg(test)]
+fn published_work_pages_of(list: u64) -> usize {
+    published_work_pages()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|page| page.id.list == list)
+        .count()
+}
+
+/// The first `items_digest` segment of a cursor that continues a published work page.
+const PUBLISHED_WORK_DIGEST: &str = "published-work:";
+
+/// A published work page's identity: the host, the publication (its list, generation and
+/// number, unique within the process) and the actor, hex-encoded so no actor can spell
+/// another's.
+fn published_work_digest(
+    state: &AppState,
+    id: crate::store::published_list::PublicationId,
+    actor: Option<&str>,
+) -> String {
+    let actor = actor.map_or_else(|| "-".to_owned(), |actor| hex::encode(actor.as_bytes()));
+    format!(
+        "{PUBLISHED_WORK_DIGEST}{}:{}:{}:{}:{actor}",
+        hex::encode(state.node.as_bytes()),
+        id.list,
+        id.generation,
+        id.sequence
+    )
+}
+
+/// A current work page from the work list's publications. A first page serves the newest
+/// current publication, or with `fresh=true` one at least as new as the request; a continuation
+/// serves the publication its first page did. Neither folds the list: with nothing current to
+/// serve it is not ready, and once the refresher has ended, unavailable.
+async fn client_work_published(
+    state: AppState,
+    snapshot: ClientSnapshot,
+    query: ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    use crate::store::published_list::ListRead;
+    if let Some(encoded) = &query.cursor {
+        let cursor = decode_client_cursor(encoded)?;
+        // A first page read before the refresher started continues from the page cache.
+        if !cursor.items_digest.starts_with(PUBLISHED_WORK_DIGEST) {
+            let page = client_page(&state, &snapshot, "work", Vec::new(), &query)?;
+            return Ok((Extension(snapshot), Json(page)));
+        }
+        let page = client_work_published_continuation(&state, &snapshot, &query, cursor)?;
+        return Ok((Extension(snapshot), Json(page)));
+    }
+    let list = state.store.published_work_list();
+    let (publication, id) = if query.fresh {
+        let waited = Instant::now();
+        let fresh = wait_for_work_list(&state.store).await;
+        record_work_stage(request_latency::WorkStage::FreshWait, waited.elapsed());
+        fresh?
+    } else {
+        match list.current() {
+            ListRead::Served(publication, id) => (publication, id),
+            ListRead::NotReady | ListRead::NeverStarted => {
+                list.request_refresh();
+                return Err(published_lists::work_list_not_ready());
+            }
+            ListRead::Ended => return Err(published_lists::work_list_ended()),
+        }
+    };
+    let reader = state.clone();
+    blocking_store(move || Ok(client_work_published_page(&reader, &publication, id, &query))).await?
+}
+
+/// Wait up to [`WORK_LIST_FRESH_WAIT`] for a current publication at or after the store's index
+/// when the request arrived. Each way it can end answers differently: such a publication; not
+/// fresh, once the wait is over; not ready, if the list is withdrawn or forgotten meanwhile or
+/// its change channel closes; unavailable, if the refresher ends. Never stale rows as fresh.
+async fn wait_for_work_list(
+    store: &Arc<Store>,
+) -> Result<
+    (
+        Arc<crate::store::published_list::Publication<crate::store::work_list::WorkRows>>,
+        crate::store::published_list::PublicationId,
+    ),
+    ApiError,
+> {
+    use crate::store::published_list::ListRead;
+    let list = store.published_work_list();
+    let wanted = store.index().map_err(ApiError::internal)?;
+    let mut changes = list.subscribe();
+    let deadline = tokio::time::Instant::now() + WORK_LIST_FRESH_WAIT;
+    let mut asked = false;
+    loop {
+        drop(changes.borrow_and_update());
+        let newest = match list.current() {
+            ListRead::Served(publication, id) if publication.cut >= wanted => return Ok((publication, id)),
+            // Behind the request: ask once for a fold now, without the rest of the pause.
+            ListRead::Served(publication, _) => {
+                if !asked {
+                    list.request_fresh();
+                    asked = true;
+                }
+                publication.cut
+            }
+            ListRead::Ended => return Err(published_lists::work_list_ended()),
+            ListRead::NotReady | ListRead::NeverStarted => return Err(published_lists::work_list_not_ready()),
+        };
+        match tokio::time::timeout_at(deadline, changes.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => return Err(published_lists::work_list_not_ready()),
+            Err(_) => return Err(published_lists::work_list_not_fresh(wanted, Some(newest))),
+        }
+    }
+}
+
+/// A first page of `publication`, under the snapshot of its own cut. An actor's rows come from
+/// its order in the publication, built on its first read. The page is emitted only if no
+/// forget replaced the projections since `id` was acquired.
+fn client_work_published_page(
+    state: &AppState,
+    publication: &Arc<crate::store::published_list::Publication<crate::store::work_list::WorkRows>>,
+    id: crate::store::published_list::PublicationId,
+    query: &ClientListQuery,
+) -> Result<ClientPageResponse, ApiError> {
+    let started = Instant::now();
+    let limit = query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS).clamp(1, CLIENT_MAX_PAGE_ITEMS);
+    let mut built = false;
+    let indexes = query.actor.as_deref().map(|actor| {
+        let (indexes, fresh) = publication.rows.actor_rows(actor);
+        built = fresh;
+        indexes
+    });
+    let (items, has_more) = publication.rows.page_of(indexes.as_deref().map(Vec::as_slice), 0, limit);
+    // The final fence: emit nothing a forget replaced since `id` was acquired.
+    let list = state.store.published_work_list();
+    if list.instance() != id.list || list.generation() != id.generation {
+        return Err(published_lists::work_list_not_ready());
+    }
+    let snapshot = roster_snapshot(state, publication.cut, publication.published_at_unix_ms);
+    let digest = published_work_digest(state, id, query.actor.as_deref());
+    let mut expires_at_unix_ms = 0;
+    let next_cursor = if has_more {
+        let mut cursor = published_work_cursor(&snapshot, query, items.len(), limit, digest, 0);
+        let contract = PublishedWorkContract::of(&cursor);
+        let mut pages = published_work_pages().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        purge_published_work_pages(&mut pages, list);
+        // The same page asked again reuses its entry and its original expiry: polling the same
+        // first page neither adds an entry nor evicts another's.
+        expires_at_unix_ms = match pages
+            .iter()
+            .find(|page| page.digest == cursor.items_digest && page.contract == contract)
+        {
+            Some(page) => page.expires_at_unix_ms,
+            None => {
+                while pages.len() >= CLIENT_PAGE_CACHE_CAPACITY {
+                    pages.pop_front();
+                }
+                let expires_at_unix_ms = client_now_ms().saturating_add(CLIENT_PAGE_TTL_MS);
+                pages.push_back(PublishedWorkPage {
+                    digest: cursor.items_digest.clone(),
+                    id,
+                    contract,
+                    rows: Arc::new(publication.rows.selected_rows(indexes.as_deref().map(Vec::as_slice))),
+                    expires_at_unix_ms,
+                });
+                expires_at_unix_ms
+            }
+        };
+        cursor.expires_at_unix_ms = expires_at_unix_ms;
+        Some(encode_client_cursor(&cursor)?)
+    } else {
+        None
+    };
+    let page = ClientResourcePage {
+        kind: "page".into(),
+        collection: "work".into(),
+        filters: client_page_filters("work", query),
+        items,
+        page: ClientPageInfo {
+            limit,
+            has_more,
+            next_cursor,
+            cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+        },
+        sync: client_sync_notice(state),
+        replicated: None,
+    };
+    let stage = if built { request_latency::WorkStage::ActorBuild } else { request_latency::WorkStage::Page };
+    record_work_stage(stage, started.elapsed());
+    Ok((Extension(snapshot), Json(page)))
+}
+
+fn published_work_cursor(
+    snapshot: &ClientSnapshot,
+    query: &ClientListQuery,
+    offset: usize,
+    limit: usize,
+    items_digest: String,
+    expires_at_unix_ms: u128,
+) -> ClientPageCursor {
+    ClientPageCursor {
+        snapshot: snapshot.clone(),
+        collection: "work".into(),
+        offset,
+        limit,
+        history: false,
+        person: query.person.clone(),
+        actor: query.actor.clone(),
+        owner_run: query.owner_run.clone(),
+        status: query.status.clone(),
+        owner: None,
+        state: None,
+        native_only: query.native_only,
+        items_digest,
+        before_index: None,
+        after_key: None,
+        expires_at_unix_ms,
+    }
+}
+
+/// The next page of a published work page: the same publication and actor rows, sliced at the
+/// cursor. It expires as a cached page does, and also once a forget replaced the projections
+/// its rows were folded from. A later publication of the same generation leaves it valid.
+fn client_work_published_continuation(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    query: &ClientListQuery,
+    cursor: ClientPageCursor,
+) -> Result<ClientResourcePage, ApiError> {
+    if cursor.collection != "work"
+        || cursor.history != query.history
+        || cursor.person != query.person
+        || cursor.actor != query.actor
+        || cursor.owner_run != query.owner_run
+        || cursor.owner.is_some()
+        || cursor.state.is_some()
+        || cursor.status != query.status
+        || cursor.native_only != query.native_only
+        || query.limit.is_some_and(|limit| limit.clamp(1, CLIENT_MAX_PAGE_ITEMS) != cursor.limit)
+        || cursor.snapshot.id != snapshot.id
+        || cursor.snapshot.store_index != snapshot.store_index
+    {
+        return Err(client_page_expired(
+            "the page cursor does not match this collection, snapshot, or filter",
+        ));
+    }
+    if client_now_ms() > cursor.expires_at_unix_ms {
+        return Err(client_page_expired("the page cursor expired"));
+    }
+    // Served only from the store's own list, in the generation its rows were folded in.
+    let list = state.store.published_work_list();
+    let (rows, id) = {
+        let mut pages = published_work_pages().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        purge_published_work_pages(&mut pages, list);
+        // The cursor is the client's to edit: it must repeat the limit, snapshot and filters
+        // its first page issued, so it can never ask for more than one bounded page, and two
+        // pages with one digest and expiry but different contracts never answer for each other.
+        let contract = PublishedWorkContract::of(&cursor);
+        if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&cursor.limit) {
+            return Err(client_page_expired("the page cursor does not match the page it continues"));
+        }
+        let page = pages
+            .iter()
+            .find(|page| {
+                page.digest == cursor.items_digest
+                    && page.expires_at_unix_ms == cursor.expires_at_unix_ms
+                    && page.contract == contract
+            })
+            .ok_or_else(|| client_page_expired("the page snapshot is no longer available; restart pagination"))?;
+        (Arc::clone(&page.rows), page.id)
+    };
+    let current = |list: &crate::store::published_list::PublishedList<crate::store::work_list::WorkRows>| {
+        list.instance() == id.list && list.generation() == id.generation
+    };
+    if !current(list) {
+        return Err(client_page_expired("the work list was refolded since this page was read; restart pagination"));
+    }
+    let end = cursor.offset.saturating_add(cursor.limit).min(rows.len());
+    let items = rows[cursor.offset.min(end)..end].iter().map(|row| (**row).clone()).collect::<Vec<_>>();
+    let has_more = end < rows.len();
+    // The final fence: a forget while the page was sliced replaced the rows it holds.
+    if !current(list) {
+        return Err(client_page_expired("the work list was refolded since this page was read; restart pagination"));
+    }
+    let next_cursor = if has_more {
+        let mut next = cursor.clone();
+        next.offset = cursor.offset.saturating_add(items.len());
+        Some(encode_client_cursor(&next)?)
+    } else {
+        None
+    };
+    Ok(ClientResourcePage {
+        kind: "page".into(),
+        collection: "work".into(),
+        filters: client_page_filters("work", query),
+        items,
+        page: ClientPageInfo {
+            limit: cursor.limit,
+            has_more,
+            next_cursor,
+            cursor_expires_at: has_more.then(|| client_timestamp(cursor.expires_at_unix_ms)),
+        },
+        sync: client_sync_notice(state),
+        replicated: None,
+    })
 }
 
 /// The work history, read a page at a time in the order it shows, each page inside one SQLite
@@ -6747,6 +7177,15 @@ pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
+    let harnesses = read_deadline::spawn_blocking(crate::environment::available_harnesses)
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(harnesses))
+}
+
+
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({
         "status": "ready",
@@ -6756,7 +7195,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(st_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
     })))
 }
 
@@ -8262,10 +8701,13 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    checks.push(stale_attention_check(
-        &doctor_attention_items(&state.store, client_now_ms()).map_err(ApiError::internal)?,
-        client_now_ms(),
-    ));
+    let attention_now = client_now_ms();
+    let attention = doctor_attention_items(&state.store, attention_now).map_err(ApiError::internal)?;
+    checks.push(
+        mission_eligibility_doctor::check(&state.store, &attention, attention_now)
+            .map_err(ApiError::internal)?,
+    );
+    checks.push(stale_attention_check(&attention, attention_now));
     let report_status = if checks.iter().any(|check| check.status == "fail") {
         "fail"
     } else if checks.iter().any(|check| check.status == "warn") {
@@ -8428,9 +8870,10 @@ async fn repair_replication_record(
 /// Spool one snapshot on a read worker; a slow downloader never holds the SQLite snapshot.
 async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiError> {
     let store = state.store.clone();
+    let bodies = message_body::bodies(&state.state_dir);
     let file = blocking_store(move || {
         let mut file = tempfile::tempfile()?;
-        store.write_backup(&mut file)?;
+        store.write_backup_with_bodies(&mut file, Some(&bodies))?;
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
@@ -12727,6 +13170,22 @@ pub const SIGNED_MESSAGE_FIELDS: &[&str] = &[
     "to",
 ];
 
+/// The fields a device signs on a message past 8 KiB. The claim holds a preview, so it signs
+/// that: `content` is the preview, cut as [`message_body::preview`] cuts it, and `body_sha256`
+/// and `body_bytes` are the hash and length of the whole text, which every member reads from the
+/// claim's `text/plain` `attachments` entry. Sorted, as the check compares them.
+pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
+    "body_bytes",
+    "body_sha256",
+    "content",
+    "from",
+    "in_reply_to",
+    "session_id",
+    "tags",
+    "title",
+    "to",
+];
+
 /// How far a device's signing time may be from this daemon's clock when it first accepts the
 /// message. Members that receive it later check the signature, never the time.
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
@@ -12743,16 +13202,17 @@ fn check_device_signature(
     subject: &str,
     from: &str,
     fields: &BTreeMap<String, Value>,
+    expected: &[&str],
 ) -> Result<(), ApiError> {
     use smallclaims::principal::{FIELDS_FORMAT, Judged, KeyGrant};
     let mut signed = signature.signed_fields.clone();
     signed.sort();
-    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != SIGNED_MESSAGE_FIELDS {
+    if signature.format.as_deref() != Some(FIELDS_FORMAT) || signed != expected {
         return Err(device_signature_error(
             "device-signature-format",
             format!(
                 "a device signs a message in {FIELDS_FORMAT} over {}",
-                SIGNED_MESSAGE_FIELDS.join(", ")
+                expected.join(", ")
             ),
         ));
     }
@@ -12870,10 +13330,16 @@ fn accept_message_receipt_with_upload_owner(
             "a message needs nonempty content",
         )));
     }
-    if request.content.len() > 4096 && !request.content.starts_with("doc/") {
+    let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
+        && !request.content.starts_with("doc/");
+    if long_body && request.content.len() > message_body::MAX_BYTES {
         return Err(ApiError::bad(St3Error::new(
             "message-too-large",
-            "an inline message cannot exceed 4 KiB; post a document first",
+            format!(
+                "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
+                message_body::MAX_BYTES / 1024,
+                request.content.len().div_ceil(1024)
+            ),
         )));
     }
     if request.content.starts_with("doc/") {
@@ -12978,7 +13444,14 @@ fn accept_message_receipt_with_upload_owner(
     let mut fields = BTreeMap::from([
         ("from".into(), Value::String(from.clone())),
         ("to".into(), Value::String(to.clone())),
-        ("content".into(), Value::String(request.content.clone())),
+        (
+            "content".into(),
+            Value::String(if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content.clone()
+            }),
+        ),
         ("status".into(), Value::String("sent".into())),
         (
             "title".into(),
@@ -13004,15 +13477,65 @@ fn accept_message_receipt_with_upload_owner(
     if let Some(session_id) = session_id {
         fields.insert("session_id".into(), Value::String(session_id));
     }
-    if !attachments.is_empty() {
+    // A long body is a file on this member, named in the claim like an image: nothing of it but
+    // the preview and this reference enters the database or replication. The file is staged
+    // under a temporary name before the claim, so a failed write never leaves a claim without
+    // its text, and renamed into place once the claim has landed, so a refusal or a failed
+    // append leaves no stray file. A repeat of the same send finishes a rename that did not
+    // happen, which heals a crash between the two.
+    let mut body = None;
+    let mut claim_attachments = attachments.clone();
+    if long_body {
+        message_body::bodies(&state.state_dir)
+            .ensure_room(&from, &subject, request.content.len())
+            .map_err(ApiError::bad)?;
+        let entry = crate::model::MessageAttachment {
+            sha256: hex::encode(Sha256::digest(request.content.as_bytes())),
+            media_type: message_body::MEDIA_TYPE.into(),
+            name: None,
+            size: request.content.len() as u64,
+            origin: client_host_id(&state.node),
+        };
+        claim_attachments.push(entry.clone());
+        body = Some(entry);
+    }
+    if !claim_attachments.is_empty() {
         fields.insert(
             "attachments".into(),
-            serde_json::to_value(&attachments).map_err(ApiError::internal)?,
+            serde_json::to_value(&claim_attachments).map_err(ApiError::internal)?,
         );
     }
     if let Some(signature) = &device_signature {
-        check_device_signature(state, signature, &request, &subject, &from, &fields)?;
+        let mut signed = fields.clone();
+        let mut expected = SIGNED_MESSAGE_FIELDS;
+        if let Some(body) = &body {
+            // The claim holds a preview, so the signature must cover the preview, the hash and
+            // the length, which every member can read from the claim. A device that signs the
+            // whole text, as it does under 8 KiB, signs something no other member can check.
+            let mut names = signature.signed_fields.clone();
+            names.sort();
+            if names == SIGNED_MESSAGE_FIELDS {
+                return Err(ApiError::bad(St3Error::new(
+                    "long-message-signature-unsupported",
+                    format!(
+                        "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
+                        message_body::INLINE_MAX_BYTES / 1024
+                    ),
+                )));
+            }
+            signed.insert("body_sha256".into(), Value::String(body.sha256.clone()));
+            signed.insert("body_bytes".into(), json!(body.size));
+            expected = SIGNED_LONG_MESSAGE_FIELDS;
+        }
+        check_device_signature(state, signature, &request, &subject, &from, &signed, expected)?;
     }
+    let staged = if body.is_some() {
+        message_body::bodies(&state.state_dir)
+            .stage(&from, &subject, request.content.as_bytes())
+            .map_err(ApiError::internal)?
+    } else {
+        None
+    };
     let input = ClaimInput {
         subject: subject.clone(),
         kind: "message.sent".into(),
@@ -13027,7 +13550,21 @@ fn accept_message_receipt_with_upload_owner(
         Some(signature) => state.store.append_signed_message(&input, signature),
         None => state.store.append_claim_outcome(&input),
     }
-    .map_err(ApiError::bad)?;
+    .map_err(|error| {
+        if let Some(staged) = staged.as_ref() {
+            staged.discard();
+        }
+        ApiError::bad(error)
+    })?;
+    if let Some(staged) = staged {
+        // The claim is in. If the text cannot be put in place, the message exists with its
+        // preview: say so as an unconfirmed send, which a repeat of the same send finishes.
+        staged.commit().map_err(|error| {
+            ApiError::internal(anyhow::anyhow!(
+                "the message was recorded but its full text could not be put in place on this machine ({error}); send it again to finish"
+            ))
+        })?;
+    }
     // A concurrent sender may have accepted this key first with the same canonical input.
     // Return its accepted classification, rather than this attempt's speculative tags.
     let tags = record.body["fields"]["tags"]
@@ -13060,13 +13597,20 @@ fn accept_message_receipt_with_upload_owner(
             subject,
             from,
             to,
-            content: request.content,
+            content: if long_body {
+                message_body::preview(&request.content)
+            } else {
+                request.content
+            },
             status: "sent".into(),
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
             created_index: record.store_index,
             attachments,
+            body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
+            body_bytes: body.as_ref().map(|body| body.size),
+            body_origin: body.map(|body| body.origin),
         },
         idempotency_key: request.idempotency_key,
         already_sent: !appended,
@@ -18866,6 +19410,91 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
             .unwrap();
             assert_eq!(sessions.len(), 1);
             assert_eq!(sessions[0]["revision"], incarnation);
+        }
+    }
+
+    #[test]
+    fn managed_session_dates_incarnation_after_claim_cap_without_local_timeline() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let subject = "agent/ada";
+        // Build both subjects' old history in one transaction, without projection rebuilds.
+        {
+            let mut connection = state.store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            for _ in 0..=SESSION_CLAIMS {
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    subject,
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle", "incarnation_id": "first"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+                crate::store::append_claim_tx(
+                    &transaction,
+                    &state.store.origin,
+                    "agent/reviewer",
+                    "harness.observed",
+                    None,
+                    &json!({"fields": {"state": "idle"}}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let first = state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-ada")),
+                ("incarnation_id".into(), json!("second")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        assert_eq!(
+            state.store.latest_local_timeline_at(subject, "second", first.store_index).unwrap(),
+            None
+        );
+        for at in ["2026-10-11T10:00:00.000Z", "2026-10-11T10:01:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, first.store_index,
+            ).unwrap().0;
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0]["started_at"], client_timestamp(first.accepted_at_unix_ms));
+            assert_eq!(sessions[0]["updated_at"], client_timestamp(first.accepted_at_unix_ms));
+        }
+        // The unindexed legacy path stays capped, but its required start date is durable too.
+        let legacy = state.store.append_claim(&ClaimInput {
+            subject: "agent/reviewer".into(),
+            kind: "runtime.observed".into(),
+            actor: Some("agent/reviewer".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("runtime-reviewer")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        for at in ["2026-10-11T10:02:00.000Z", "2026-10-11T10:03:00.000Z"] {
+            let sessions = managed_session_resources(
+                &state.store, false, at, legacy.store_index,
+            ).unwrap().0;
+            let legacy_session = sessions.iter().find(|session| {
+                session["owner_id"] == "agent/reviewer"
+            }).unwrap();
+            assert!(legacy_session["runtime_incarnation"].is_null());
+            assert_eq!(legacy_session["started_at"], client_timestamp(legacy.accepted_at_unix_ms));
         }
     }
 
@@ -27692,3 +28321,5 @@ agent "seat" { workspace "/tmp"; command "true" }
 
 #[cfg(test)]
 mod work_incarnation_tests;
+#[cfg(test)]
+mod message_bodies_tests;

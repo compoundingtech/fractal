@@ -28,6 +28,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -167,6 +168,7 @@ pub(crate) struct NativeTerminal {
     size: Mutex<Size>,
     /// The incarnation attached to; attaching again after a drop is only ever to this one.
     pub(crate) incarnation: String,
+    presented: AtomicBool,
     cell: Mutex<pty_terminal::CellSize>,
     painter: Mutex<graphics::Painter>,
 }
@@ -193,6 +195,7 @@ impl NativeTerminal {
             input: Mutex::new(input),
             size: Mutex::new(size),
             incarnation,
+            presented: AtomicBool::new(false),
             cell: Mutex::new(pty_terminal::CellSize::default()),
             painter: Mutex::new(graphics::Painter::default()),
         }
@@ -201,6 +204,7 @@ impl NativeTerminal {
     /// Attach again over a new stream after the last one dropped, into the same screen, so
     /// what scrolled back stays.
     pub(crate) fn reconnect(&self, stream: UnixStream, name: &str) {
+        self.presented.store(false, Ordering::Relaxed);
         let size = *self.size.lock().unwrap_or_else(|error| error.into_inner());
         {
             let mut screen = self.lock();
@@ -474,6 +478,11 @@ impl NativeTerminal {
         self.lock().ended.clone()
     }
 
+    /// Read by quality accounting after drawing, without another screen lock.
+    pub(crate) fn presented(&self) -> bool {
+        self.presented.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn attached(&self) -> bool {
         self.lock().attached
     }
@@ -495,6 +504,8 @@ impl NativeTerminal {
     /// is not drawn but returned, for the person's own terminal cursor to show it.
     pub(crate) fn draw(&self, buf: &mut Buffer, area: Rect, real_cursor: bool) -> Option<Cursor> {
         let screen = self.lock();
+        self.presented
+            .store(screen.attached && screen.ended.is_none(), Ordering::Relaxed);
         let grid = screen.term.grid();
         let offset = grid.display_offset() as i32;
         let rows = grid.screen_lines().min(usize::from(area.height));
@@ -620,6 +631,9 @@ fn start(
 
 /// The stream is gone but the program may still run: say so, and let stui attach again.
 fn dropped(screen: &mut Screen, reason: String) {
+    if screen.dropped_at.is_none() {
+        super::slo::METRICS.add("dead_terminal_tabs", 1);
+    }
     screen.ended = Some(format!("{reason}; attaching again…"));
     screen.dropped_at = Some(Instant::now());
 }
@@ -739,6 +753,7 @@ fn run(
                 });
             }
             Ok(Some(SessionEvent::Exit(code))) => {
+                super::slo::METRICS.add("dead_terminal_tabs", 1);
                 lock().ended = Some(format!("the program exited ({code})"));
                 return;
             }
