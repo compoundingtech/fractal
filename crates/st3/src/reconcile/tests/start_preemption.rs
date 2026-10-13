@@ -72,7 +72,7 @@ impl RuntimeControl for BarrierRuntime {
         }
         Ok(self.operations.lock().unwrap().get(id).cloned())
     }
-    fn failed_start_closed(&self, member: &MemberSpec) -> Result<bool> {
+    fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
         // Held backends may have published early or may still have a detached producer.
         Ok(self.reject_gates.load(Ordering::Acquire)
             && member
@@ -594,7 +594,7 @@ async fn operator_stop_reaches_its_incarnation_fenced_kill_while_start_is_blocke
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, true);
     apply_source(
         &store,
-        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; shutdown-timeout \"0ms\" }",
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; shutdown-timeout \"1ms\" }",
         "kill-start",
     );
     assert!(launch(&reconciler, "agent/example/worker"));
@@ -608,6 +608,8 @@ async fn operator_stop_reaches_its_incarnation_fenced_kill_while_start_is_blocke
         "kill-stop",
     );
     reconciler.reconcile_once().unwrap();
+    // Let the authored shutdown grace elapse without releasing the launch barrier.
+    tokio::time::sleep(Duration::from_millis(2)).await;
     reconciler.reconcile_once().unwrap();
     assert_eq!(*runtime.inner.kills.lock().unwrap(), ["example.worker"]);
     assert_eq!(store.runtime_start_counts().unwrap(), (1, 1));

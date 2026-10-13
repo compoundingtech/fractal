@@ -347,9 +347,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
         guard()?;
         self.start(member)
     }
-    /// Proof for this operation-bound failed launch: it created no runtime and no
-    /// producer remains able to launch. Returning an error from start is insufficient.
-    fn failed_start_closed(&self, _member: &MemberSpec) -> Result<bool> {
+    /// Proof for the operation in this prepared launch: no operation-owned runtime
+    /// remains and no producer can launch later. A returned error or absence alone
+    /// is insufficient. Controls do not wait for launch admission to obtain this proof.
+    fn start_operation_closed(&self, _member: &MemberSpec) -> Result<bool> {
         Ok(false)
     }
     /// Physical launch provenance, if the runtime persists it independently of daemon receipts.
@@ -16981,8 +16982,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     impl RuntimeControl for FakeRuntime {
-        fn failed_start_closed(&self, _member: &MemberSpec) -> Result<bool> {
-            // This fixture's rejected start cannot spawn a process or detached producer.
+        fn start_operation_closed(&self, _member: &MemberSpec) -> Result<bool> {
+            // This fixture spawns no process or detached producer. Observable mocked
+            // runtimes are still retired through the normal incarnation-fenced path.
             Ok(true)
         }
         fn snapshot_ptys(&self) -> Result<Vec<RuntimeObservation>> {

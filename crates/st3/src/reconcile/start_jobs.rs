@@ -165,7 +165,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Ok((incarnation, verified, error)) => serde_json::json!({"incarnation": incarnation, "verification": if verified {"operation-incarnation"} else {"launch-accepted-unverified"}, "verification_error": error}),
                 Err(error) => {
                     let (closed, verification_error) = if !backend_entered { (true, None) }
-                        else { match runtime.failed_start_closed(&prepared.launch_member) {
+                        else { match runtime.start_operation_closed(&prepared.launch_member) {
                             Ok(closed) => (closed, None),
                             Err(error) => (false, Some(format!("{error:#}"))),
                         }};
@@ -395,10 +395,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(observation) = observation else {
             // An error from an entered backend does not prove its detached producer closed.
             if operation.finished
-                && operation
+                && (operation
                     .result
                     .as_ref()
                     .is_some_and(|r| r["producer_closed"] == true)
+                    || self
+                        .runtime
+                        .start_operation_closed(&prepared.launch_member)?)
             {
                 self.store.runtime_start_cleanup_verified(&operation.id)?;
                 self.start_changed(&operation.subject);
