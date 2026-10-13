@@ -348,6 +348,7 @@ fn work(store: &Store, action: &str, at: u128) {
         };
         for action in actions {
             let request = crate::model::WorkRequest {
+                wait_ms: None,
                 actor: Some("agent/node.worker".into()),
                 incarnation: Some("current".into()),
                 // A bare renewal writes no claim, only the lease: a change the feed never shows.
