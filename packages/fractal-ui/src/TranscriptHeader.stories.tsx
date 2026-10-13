@@ -19,19 +19,20 @@ function HeaderVariant({ width, scheme }: { width: number; scheme: Scheme }) {
   const [showHeader, setShowHeader] = React.useState(true)
   return <section aria-label={`${width}px ${scheme}`} data-scheme={scheme} {...stylex.props(styles.variant(width), ...baselineTheme, scheme === 'light' && lightTheme)}>
     <h2>{width}px · {scheme}</h2>
-    <section aria-label="Host-owned header" {...stylex.props(styles.frame)}>
+    {/* Every region label carries its variant: axe requires each landmark on the page to be distinguishable. */}
+    <section aria-label={`Host-owned header, ${width}px ${scheme}`} {...stylex.props(styles.frame)}>
       {/* Like the live workspace, the host header is a labelled group inside the page, not a top-level banner. */}
       <div role="group" aria-label="Workspace header">Row projection</div>
       <EmbraceRuntimeProvider options={{ messages: [], isRunning: false, onNew: async () => {} }}>
         <Transcript {...transcriptProps} showHeader={false} />
       </EmbraceRuntimeProvider>
     </section>
-    <section aria-label="Standalone control" {...stylex.props(styles.frame)}>
+    <section aria-label={`Standalone control, ${width}px ${scheme}`} {...stylex.props(styles.frame)}>
       <EmbraceRuntimeProvider options={{ messages: [], isRunning: false, onNew: async () => {} }}>
         <Transcript {...transcriptProps} />
       </EmbraceRuntimeProvider>
     </section>
-    <section aria-label="Interactive header" {...stylex.props(styles.frame)}>
+    <section aria-label={`Interactive header, ${width}px ${scheme}`} {...stylex.props(styles.frame)}>
       <Button onPress={() => setShowHeader(value => !value)}>{showHeader ? 'Hide kit header' : 'Show kit header'}</Button>
       <EmbraceRuntimeProvider options={{ messages: [], isRunning: false, onNew: async () => {} }}>
         <Transcript {...transcriptProps} showHeader={showHeader} />
@@ -47,14 +48,14 @@ export const AllStates: Story = { play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   for (const { width, scheme } of variants) {
     const variant = within(canvas.getByRole('region', { name: `${width}px ${scheme}` }))
-    const hosted = within(variant.getByRole('region', { name: 'Host-owned header' }))
+    const hosted = within(variant.getByRole('region', { name: `Host-owned header, ${width}px ${scheme}` }))
     await expect(hosted.queryByTestId('transcript-header')).toBeNull()
     await expect(hosted.getByRole('group', { name: 'Workspace header' })).toBeVisible()
     await expect(await hosted.findByTestId('transcript-scroll')).toBeVisible()
     // Failing control: omitting showHeader must retain the default header.
-    const standalone = within(variant.getByRole('region', { name: 'Standalone control' }))
+    const standalone = within(variant.getByRole('region', { name: `Standalone control, ${width}px ${scheme}` }))
     await expect(await standalone.findByTestId('transcript-header')).toBeVisible()
-    const interactive = within(variant.getByRole('region', { name: 'Interactive header' }))
+    const interactive = within(variant.getByRole('region', { name: `Interactive header, ${width}px ${scheme}` }))
     await expect(await interactive.findByTestId('transcript-header')).toBeVisible()
     await userEvent.click(interactive.getByRole('button', { name: 'Hide kit header' }))
     await waitFor(() => expect(interactive.queryByTestId('transcript-header')).toBeNull())
