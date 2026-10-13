@@ -88,6 +88,14 @@ managed permission checks, which reduce accidents but are not a security boundar
 without an access mode keeps reading as `bypass`, which runs agents without permission
 prompts. Choose the projects and tasks you give your agents accordingly.
 
+You can change the mode later by asking one of your agents: "switch my agents to bypass" or
+"switch them back to auto". Agents started by st read the `st` skill, which tells them where
+the setting lives and how to change it; they say back the change and wait for your yes before
+editing. Auto asks the provider to check permissions; bypass removes the checks, so nothing
+waits for you. The setting is `access_mode` in `~/.config/st3/config.toml`. An existing install
+without the key stays on `bypass` until you ask for a change. See
+[Managed harness access](st3/harness-access.md) for what each mode does.
+
 ## 3. Work with the expert
 
 When a usable harness is available, the first run, the one that creates your configuration,
