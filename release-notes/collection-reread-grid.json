@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Collection sockets on one daemon reread their paced windows on shared steps, so a changed window is computed once instead of once per socket",
+  "replay": {"status": "none", "detail": "Collection refresh timing changes only; claim admission and replay are unchanged."},
+  "schema": {"status": "none", "detail": "The reread grid's start is kept in memory per store. No database schema or persistent state changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged; no coordinated member upgrade is required."},
+  "compatibility": {"status": "none", "detail": "The collection protocol, authorization checks, snapshot fences, current-row diffs, reconnect behavior and which windows reread are unchanged. A window that already delivered its snapshot now waits for the next shared reread step, so a change can reach it up to two reread intervals (about 3 s) after the last reread instead of one (1.5 s). A first snapshot, including one waiting for a view to publish, is still read at once."},
+  "downtime": {"status": "none", "detail": "No additional startup work or interruption beyond a normal daemon restart."},
+  "manual": {"status": "none", "detail": "No operator action or client configuration change is needed."},
+  "recovery": {"status": "none", "detail": "No persistent changes or new binary swap-back restrictions."}
+}

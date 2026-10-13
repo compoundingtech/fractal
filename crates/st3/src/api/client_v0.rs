@@ -219,7 +219,7 @@ fn publication_rereads<'a>(
     stale: impl Iterator<Item = (&'a String, &'a CollectionSubscription)>,
     reread_due: &mut BTreeSet<String>,
     refresh: &mut Vec<String>,
-    last_reread: tokio::time::Instant,
+    next_reread: tokio::time::Instant,
 ) -> bool {
     for (id, subscription) in stale {
         if subscription.delivered {
@@ -228,7 +228,9 @@ fn publication_rereads<'a>(
             refresh.push(id.clone());
         }
     }
-    if !reread_due.is_empty() && last_reread.elapsed() >= COLLECTION_REREAD_INTERVAL {
+    // A delivered window waits for the next paced step like any other, on the store's shared
+    // grid, so a publication does not pull one socket's rereads off the steps the others share.
+    if !reread_due.is_empty() && tokio::time::Instant::now() >= next_reread {
         refresh.extend(reread_due.iter().cloned());
     }
     refresh.is_empty()
@@ -2031,7 +2033,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 let published = *roster.borrow_and_update();
                 let stale = subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
                     && s.request.collection == "agents" && s.roster_revision < published);
-                if publication_rereads(stale, &mut reread_due, &mut refresh, last_reread) { continue; }
+                if publication_rereads(stale, &mut reread_due, &mut refresh, next_reread(last_reread)) { continue; }
             }
             result = views.changed(), if !command_waiting => {
                 if result.is_err() { return; }
@@ -2039,7 +2041,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 let published = *views.borrow_and_update();
                 let stale = subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
                     && s.view_revision < crate::store::published_views::revision(&published, &s.request.collection));
-                if publication_rereads(stale, &mut reread_due, &mut refresh, last_reread) { continue; }
+                if publication_rereads(stale, &mut reread_due, &mut refresh, next_reread(last_reread)) { continue; }
             }
             () = tokio::time::sleep_until(next_reread(last_reread)), if !command_waiting && (!reread_due.is_empty() || roster_wanted || subscriptions.values().any(|s| s.ivm.is_some() && s.dirty && s.reading.is_none())) => {
                 if std::mem::take(&mut roster_wanted) { state.store.request_agent_roster_refresh(); }
