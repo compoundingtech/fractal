@@ -260,6 +260,13 @@ fn seat_command(root: &Path, socket: &Path) -> Command {
     command
 }
 
+/// Protocol-only probes bypass the native launcher that creates the trace directory.
+fn channel_command(root: &Path, socket: &Path) -> Command {
+    let mut command = seat_command(root, socket);
+    command.env("AGENT_TRACE_FILE", root.join("channel-agent-trace.json"));
+    command
+}
+
 fn driver_log(root: &Path) -> String {
     std::fs::read_to_string(root.join("state/st3/driver-api-warnings.log")).unwrap_or_default()
 }
@@ -944,10 +951,16 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     );
 
     let terminal = stop(driver);
-    assert!(
-        terminal.is_empty(),
-        "the driver wrote into the seat's terminal: {terminal}"
-    );
+    // Starting while the daemon is down may omit advisory trace metadata, not mail.
+    for line in terminal.lines() {
+        let diagnostic: Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("unexpected terminal output: {line}: {error}"));
+        assert_eq!(diagnostic["event"], "agent_trace_omitted", "{line}");
+        assert_eq!(diagnostic["subject"], seat, "{line}");
+        assert!(diagnostic["cleanup_error"].is_null(), "{line}");
+        assert!(diagnostic["error"].as_str().unwrap().contains(
+            "not reachable (connection refused); it may be restarting"), "{line}");
+    }
     let log = driver_log(root);
     assert!(log.contains("is not reachable"), "{log}");
     assert!(log.contains("may be restarting"), "{log}");
@@ -975,7 +988,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     daemon.observe_running(seat, incarnation);
     daemon.start().await;
 
-    let mut channel = seat_command(root, &daemon.socket)
+    let mut channel = channel_command(root, &daemon.socket)
         .arg("--catalog")
         .arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "restart-omp"])
@@ -1100,7 +1113,7 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
     };
     st_drivers::harness_events::prepare_publication(&dir, event.sequence,
         "harness.todo.observed:", &serde_json::to_value(rejected).unwrap()).unwrap();
-    let mut channel = seat_command(root, &daemon.socket)
+    let mut channel = channel_command(root, &daemon.socket)
         .env("PTY_ROOT", &registry)
         .env("ST_AGENT", seat)
         .env("ST3_ACCOUNT", std::env::var("ST3_ACCOUNT").unwrap_or_default())
@@ -1179,7 +1192,7 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
     daemon.store = Arc::new(Store::open(&root.join("graph.sqlite"), "restart-node").unwrap());
     daemon.observe_running(seat, incarnation);
     daemon.start_with_binding(true).await;
-    let mut channel = seat_command(root, &daemon.socket)
+    let mut channel = channel_command(root, &daemon.socket)
         .env("ST_AGENT", seat).env("ST3_ACCOUNT", "successor/different-account")
         .arg("--catalog").arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "drain-accounts"])
@@ -1257,7 +1270,7 @@ agent "human-omp" { workspace "/tmp"; harness "omp" {} }
     daemon.observe_running(seat, incarnation);
     daemon.start().await;
     let client = st3::client::Client::unix(&daemon.socket);
-    let mut channel = seat_command(root, &daemon.socket)
+    let mut channel = channel_command(root, &daemon.socket)
         .arg("--catalog").arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "human-omp"])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -1529,7 +1542,7 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
                 }).unwrap();
             }
             let open_channel = || async {
-                let mut channel = seat_command(root, &socket)
+                let mut channel = channel_command(root, &socket)
                     .env("ST_AGENT", seat)
                     .env("ST3_MAILBOX_TRANSPORT", transport)
                     .arg("--catalog")
@@ -1703,7 +1716,7 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
             }));
             daemon.observe_running(seat, "replacement");
             daemon.start_admitted_protocol().await;
-            let mut channel = seat_command(root, &daemon.socket)
+            let mut channel = channel_command(root, &daemon.socket)
                 .env("ST_AGENT", seat)
                 .env("ST3_MAILBOX_TRANSPORT", transport)
                 .env(st_drivers::omp_session::CHANNEL_SESSION, "same-native-parent")

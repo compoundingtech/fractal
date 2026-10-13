@@ -656,6 +656,7 @@ mod tests {
             window_tokens: Some(258400),
             used_percent: Some(33.0),
             model: None,
+            provider: None,
             cost_usd: None,
             session_total_tokens: Some(2235329),
             rate_limits: harness_context::RateLimits {
@@ -713,6 +714,7 @@ mod tests {
             window_tokens: Some(4000),
             used_percent: Some(585.6),
             model: Some("pi-model".to_string()),
+            provider: None,
             cost_usd: Some(0.42),
             session_total_tokens: None,
             rate_limits: harness_context::RateLimits::default(),
@@ -765,6 +767,7 @@ mod tests {
             window_tokens: Some(1_000_000),
             used_percent: Some(19.0),
             model: Some("claude-opus-5".to_string()),
+            provider: None,
             cost_usd: Some(4.7312),
             session_total_tokens: None,
             rate_limits: harness_context::RateLimits {
