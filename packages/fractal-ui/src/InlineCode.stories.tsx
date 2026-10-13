@@ -16,16 +16,16 @@ import { geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surf
 const at = '2026-01-15T12:00:00Z'
 const clock = Date.parse(at) + 24000
 const reviewer = { kind: 'st-agent', label: 'Synthetic reviewer' } as const
-const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: 'inline/prompt', role: 'user', text: 'Run `pnpm typecheck` in the package.\nThen compare `c0ffee12` with main.', attachments: [], streaming: false, at }
+const prompt: TextItem & { role: 'user' } = { _tag: 'Text', id: 'inline/prompt', role: 'user', text: 'Run `pnpm typecheck` in the package.\nThen compare `c0ffee12` with main.\nMake <Composer> keyboard-accessible.', attachments: [], streaming: false, at }
 const longSpan = 'packages/fractal-ui/src/assistant-ui/composition/InlineCode.tsx#synthetic-anchor-0001-wraps-inside-the-reading-lane'
 // The span starts just before the 600-character preview cut: collapsed it is a literal backtick, expanded it is code.
 const cutPrompt: TextItem & { role: 'user' } = { _tag: 'Text', id: 'inline/cut-prompt', role: 'user', text: `${'Synthetic filler for the collapsed preview. '.repeat(14).slice(0, 592)} \`cut-span-value\` stays literal until expanded.`, attachments: [], streaming: false, at }
 const transcriptItems = (revision: number): readonly ConversationItem[] => [
   { _tag: 'Reasoning', id: 'inline/reasoning', text: 'Checked the `remark` tree before answering.', streaming: false, at },
   { _tag: 'ToolCall', id: 'inline/read', callId: 'inline/read', name: 'read', input: { path: 'src/synthetic.ts' }, status: 'success', result: { content: 'export const synthetic = true', mediaType: 'text/plain', isError: false, at }, callSeen: true, at },
-  { _tag: 'Text', id: 'inline/answer', role: 'assistant', text: `The \`Markdown\` seam renders spans like \`--frozen-lockfile\` and \`revision-${revision}\`.\n\nA long span stays inside the lane: \`${longSpan}\`.`, attachments: [], streaming: false, at },
+  { _tag: 'Text', id: 'inline/answer', role: 'assistant', text: `The \`Markdown\` seam renders spans like \`--frozen-lockfile\` and \`revision-${revision}\`.\n\nA long span stays inside the lane: \`${longSpan}\`.\n\nAgent prose keeps its raw-HTML policy: <Composer> is skipped.`, attachments: [], streaming: false, at },
   { _tag: 'Message', id: 'inline/mail', messageId: 'synthetic-mail-0001', title: 'Review the `fractal-ui` diff', sender: reviewer, at },
-  { _tag: 'Text', id: 'inline/system', role: 'system', text: 'Rerun `pnpm build-storybook` after the merge.', attachments: [], streaming: false, at, sender: reviewer },
+  { _tag: 'Text', id: 'inline/system', role: 'system', text: 'Rerun `pnpm build-storybook` after the merge.\n\n<details> stays literal in delivered mail.', attachments: [], streaming: false, at, sender: reviewer },
   { _tag: 'Event', id: 'inline/event', kind: 'harness-message', title: 'Harness message', text: 'Peer asked for `git status`.', sender: { kind: 'harness', label: 'Host' }, data: {}, at },
   { _tag: 'Notice', id: 'inline/notice', kind: 'event', text: 'Literal `notice-span` stays plain here.', at },
   { _tag: 'Status', id: 'inline/status', status: 'completed', detail: 'exit `status-span` recorded', at },
@@ -120,6 +120,12 @@ async function expectPlain(row: Element | null, literal: string) {
   await expect(row!.querySelector('code')).toBeNull()
   await expect(row!.textContent).toContain(`\`${literal}\``)
 }
+/** Typed tag-like text is visible as written, not dropped as raw HTML. */
+function showsLiteral(row: Element | null, literal: string): boolean {
+  if (row === null || !(row.textContent ?? '').includes(literal)) return false
+  const holder = [...row.querySelectorAll<HTMLElement>('p, span, div')].find(element => [...element.childNodes].some(node => node.nodeType === Node.TEXT_NODE && (node.textContent ?? '').includes(literal)))
+  return holder !== undefined && holder.getBoundingClientRect().height > 0 && getComputedStyle(holder).visibility === 'visible'
+}
 
 async function verify(canvasElement: HTMLElement, revision: number, fresh: boolean) {
   const canvas = within(canvasElement)
@@ -144,6 +150,13 @@ async function verify(canvasElement: HTMLElement, revision: number, fresh: boole
   // Negative controls: host-composed rows keep their backticks as text.
   await expectPlain(transcript.querySelector('[data-item-id="inline/notice"]'), 'notice-span')
   await expectPlain(transcript.querySelector('[data-item-id="inline/status"]'), 'status-span')
+  // Typed tag-like text in prompts and delivered mail stays literal (inline and block position).
+  await expect(showsLiteral(user, '<Composer>')).toBe(true)
+  await expect(showsLiteral(transcript.querySelector('[data-item-id="inline/system"]'), '<details> stays literal')).toBe(true)
+  // Negative control: agent prose keeps skipping raw HTML, and the literal check fails there.
+  const answer = transcript.querySelector('[data-item-id="inline/answer"]')
+  await expect(answer!.textContent).toContain('raw-HTML policy:')
+  await expect(showsLiteral(answer, '<Composer>')).toBe(false)
   const fake = user.ownerDocument.createElement('code')
   fake.setAttribute('data-inline-code', '')
   fake.textContent = 'unstyled'

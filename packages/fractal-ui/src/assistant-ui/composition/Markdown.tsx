@@ -35,15 +35,26 @@ export type MarkdownVariant = 'prose' | 'compact'
 export interface MarkdownProps { text: string; streaming?: boolean; variant?: MarkdownVariant; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
 const REMARK_PLUGINS = [remarkGfm]
-const COMPACT_REMARK_PLUGINS = [remarkGfm, keepTypedLineBreaks]
+const COMPACT_REMARK_PLUGINS = [remarkGfm, keepTypedSource]
 const STREAMING_PLUGINS = [markStreamingTail]
 const Compact = React.createContext(false)
 type MarkdownNode = { type: string; value?: string; children?: MarkdownNode[] }
-/** Typed text keeps its line breaks: a soft break inside prose becomes a hard break. Code spans and fences are other node types, so they are untouched. */
-function keepTypedLineBreaks() {
+const FLOW_PARENTS: Record<string, true> = { root: true, blockquote: true, listItem: true, footnoteDefinition: true }
+/**
+ * Typed host text stays what was typed: tag-like text (`<Composer>`, `<details>`) is literal text, not raw HTML
+ * that `skipHtml` would drop, and a soft break inside prose becomes a hard break. Code spans and fences are other
+ * node types, so they are untouched.
+ */
+function keepTypedSource() {
+  const literal = (node: MarkdownNode, parent: MarkdownNode): MarkdownNode => {
+    if (node.type !== 'html') return node
+    const text = { type: 'text', value: node.value ?? '' }
+    return FLOW_PARENTS[parent.type] === true ? { type: 'paragraph', children: [text] } : text
+  }
   const visit = (node: MarkdownNode) => {
     if (node.children === undefined) return
-    node.children = node.children.flatMap((child): MarkdownNode[] => {
+    node.children = node.children.flatMap((original): MarkdownNode[] => {
+      const child = literal(original, node)
       const value = child.type === 'text' ? child.value ?? '' : ''
       if (!value.includes('\n')) {
         visit(child)
