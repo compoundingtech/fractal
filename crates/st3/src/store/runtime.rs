@@ -404,6 +404,13 @@ impl Runtime for SmalltalkRuntime {
         reapply_local_work_lease_renewals_tx(transaction)
     }
 
+    fn empty_projection_has_only_row_effects(&self) -> bool {
+        // With no claims or replay, incremental owned-set selection and every
+        // after-projection flush above publish their changes through this writer.
+        // Profiling/read recording is not a projection or authority effect.
+        true
+    }
+
     fn forget_views(&self) {
         let mut cache = self
             .subject_cache
