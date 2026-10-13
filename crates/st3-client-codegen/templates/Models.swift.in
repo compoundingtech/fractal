@@ -733,9 +733,9 @@ public struct AssistantAgentItem: Codable, Sendable, Equatable {
     public let id, runtimeState: String; public let lifecycle, currentMissionID, currentRunID, updatedAt: String?
     enum CodingKeys: String, CodingKey { case id, runtimeState = "runtime_state", lifecycle, currentMissionID = "current_mission_id", currentRunID = "current_run_id", updatedAt = "updated_at" }
 }
-public struct AssistantAttentionPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [AssistantAttentionItem]; public let page: PageInfo }
-public struct AssistantMissionPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [AssistantMissionItem]; public let page: PageInfo }
-public struct AssistantAgentPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [AssistantAgentItem]; public let page: PageInfo }
+public struct AssistantAttentionPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [AssistantAttentionItem]; public let page: PageInfo; public let sync: SyncNotice? }
+public struct AssistantMissionPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [AssistantMissionItem]; public let page: PageInfo; public let sync: SyncNotice? }
+public struct AssistantAgentPage: Codable, Sendable { public let kind, collection: String; public let filters: [String: String]; public let items: [AssistantAgentItem]; public let page: PageInfo; public let sync: SyncNotice? }
 public struct AssistantContentRange: Codable, Sendable, Equatable { public let start, end: UInt64 }
 public struct AssistantConversationContent: Codable, Sendable, Equatable {
     public let kind, agentID, sessionID, reference, revision, text: String; public let start, end, returnedBytes: UInt64; public let truncated: Bool; public let nextRange: AssistantContentRange?
