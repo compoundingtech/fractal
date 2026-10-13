@@ -40,6 +40,7 @@ const KEYWORDS: &[&str] = &[
     "x-st-ref",
     "x-st-brand",
     "x-st-codec",
+    "x-st-conditions",
 ];
 const DATE_TIME: &str =
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$";
@@ -153,6 +154,7 @@ fn literal_values(test: &Value) -> Option<Vec<Value>> {
 /// Inline `allOf`, distribute an `allOf` base over a sibling `oneOf`, and expand `if`/`then` on one
 /// enum property into a `oneOf` of complete branches. An open discriminator adds one fallback
 /// branch whose tag is `{ type: string, not: { enum: known } }`.
+/// Predicates on independent properties stay as object relationship assertions instead.
 fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
     let Some(object) = value.as_object() else {
         return Ok(value.clone());
@@ -225,7 +227,21 @@ fn normalize(value: &Value, defs: &Defs) -> Result<Value> {
         );
     }
     if discriminators.len() != 1 {
-        bail!("conditionals must all test one property");
+        // Independent properties constrain one object, not a shared tagged union.
+        if !is_object(&base)
+            || base.get("const").is_some()
+            || base.get("enum").is_some()
+            || base.get("type").is_some_and(|kind| kind != "object")
+        {
+            bail!("independent conditions require an object field schema");
+        }
+        base.as_object_mut()
+            .context("conditional object base")?
+            .insert(
+                "x-st-conditions".into(),
+                Value::Array(conditionals.into_iter().cloned().collect()),
+            );
+        return Ok(base);
     }
     let key = discriminators.into_iter().next().unwrap();
     if !base["required"]
@@ -732,6 +748,91 @@ impl Object {
     }
 }
 
+/// Relationship assertions operate on decoded fields without replacing their base schemas.
+/// Unsupported assertions fail closed rather than disappearing during normalization.
+fn condition_predicate(value: &Value, target: &str, cx: &mut Cx) -> Result<String> {
+    if let Some(value) = value.as_bool() {
+        return Ok(value.to_string());
+    }
+    let object = value.as_object().context("conditional assertion")?;
+    let mut checks = Vec::new();
+    for (key, value) in object {
+        match key.as_str() {
+            "$comment" | "description" | "title" | "examples" => {}
+            "$ref" => {
+                let schema = emit(&json!({ "$ref": value }), cx)?;
+                checks.push(format!("Schema.is(Schema.toType({schema}))({target})"));
+            }
+            "const" if !value.is_object() && !value.is_array() => {
+                checks.push(format!("{target} === {}", js(value)));
+            }
+            "enum" => {
+                let values = value.as_array().context("conditional enum")?;
+                if values.iter().any(|value| value.is_object() || value.is_array()) {
+                    bail!("object/array conditional literals are not translated");
+                }
+                checks.push(format!(
+                    "({} as ReadonlyArray<unknown>).includes({target})",
+                    js(value)
+                ));
+            }
+            "required" => {
+                for name in value.as_array().context("conditional required")? {
+                    let name = name.as_str().context("conditional required name")?;
+                    checks.push(format!(
+                        "(typeof {target} !== \"object\" || {target} === null || Array.isArray({target}) || Object.prototype.hasOwnProperty.call({target}, {}))",
+                        js(&json!(name))
+                    ));
+                }
+            }
+            "properties" => {
+                for (name, schema) in value.as_object().context("conditional properties")? {
+                    let name = js(&json!(name));
+                    let field = format!("({target} as Record<string, unknown>)[{name}]");
+                    let predicate = condition_predicate(schema, &field, cx)?;
+                    checks.push(format!(
+                        "(typeof {target} !== \"object\" || {target} === null || Array.isArray({target}) || !Object.prototype.hasOwnProperty.call({target}, {name}) || ({predicate}))"
+                    ));
+                }
+            }
+            "not" => checks.push(format!("!({})", condition_predicate(value, target, cx)?)),
+            "maxItems" | "minItems" => {
+                let limit = value.as_u64().context("conditional item limit")?;
+                checks.push(format!(
+                    "(!Array.isArray({target}) || ({target} as ReadonlyArray<unknown>).length {} {limit})",
+                    if key == "maxItems" { "<=" } else { ">=" }
+                ));
+            }
+            "allOf" | "anyOf" | "oneOf" => {
+                let parts = value
+                    .as_array()
+                    .context("conditional alternatives")?
+                    .iter()
+                    .map(|part| condition_predicate(part, target, cx))
+                    .collect::<Result<Vec<_>>>()?;
+                if parts.is_empty() {
+                    bail!("conditional alternatives must not be empty");
+                }
+                checks.push(if key == "oneOf" {
+                    format!("[{}].filter(Boolean).length === 1", parts.join(", "))
+                } else {
+                    parts
+                        .iter()
+                        .map(|part| format!("({part})"))
+                        .collect::<Vec<_>>()
+                        .join(if key == "allOf" { " && " } else { " || " })
+                });
+            }
+            _ => bail!("unsupported conditional assertion `{key}`"),
+        }
+    }
+    Ok(if checks.is_empty() {
+        "true".into()
+    } else {
+        checks.iter().map(|check| format!("({check})")).collect::<Vec<_>>().join(" && ")
+    })
+}
+
 /// Open objects (no `additionalProperties`) with declared fields decode as plain structs: excess
 /// keys are ignored, not preserved, so typos stay type errors. Bags without fields stay records.
 fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result<Object> {
@@ -780,6 +881,19 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
         Some(schema) => Some(emit(schema, cx)?),
     };
     let mut checks = vec![];
+    if let Some(conditions) = object.get("x-st-conditions") {
+        for condition in conditions.as_array().context("object conditions")? {
+            let condition = condition.as_object().context("object condition")?;
+            if condition.keys().any(|key| !matches!(key.as_str(), "if" | "then")) {
+                bail!("unsupported object conditional keyword");
+            }
+            let test = condition_predicate(&condition["if"], "o", cx)?;
+            let assertion = condition_predicate(condition.get("then").unwrap_or(&Value::Bool(true)), "o", cx)?;
+            checks.push(format!(
+                "Schema.makeFilter((o: object) => !({test}) || ({assertion}), {{ expected: \"conditional object relationship\" }})"
+            ));
+        }
+    }
     if let Some(names) = object.get("propertyNames") {
         let mut key = names.as_object().context("propertyNames")?.clone();
         // Property names are always strings; references already name a string schema.
@@ -1338,6 +1452,69 @@ mod tests {
                 "then": { "required": ["payload"] }
             }]
         })
+    }
+
+    #[test]
+    fn independent_object_conditions_preserve_fields_and_each_assertion() {
+        let input = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["enabled", "phase", "tags"],
+            "properties": {
+                "phase": { "enum": ["ready", "done"] },
+                "enabled": { "type": "boolean" },
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "payload": { "type": "string" }
+            },
+            "allOf": [
+                {
+                    "if": { "properties": { "phase": { "const": "ready" } } },
+                    "then": { "required": ["payload"] }
+                },
+                {
+                    "if": { "properties": { "enabled": { "const": false } } },
+                    "then": { "properties": { "tags": { "maxItems": 0 } } }
+                }
+            ]
+        });
+        let normalized = normalize(&input, &Map::new()).unwrap();
+        assert_eq!(normalized["properties"], input["properties"]);
+        assert_eq!(normalized["required"], input["required"]);
+        assert_eq!(normalized["x-st-conditions"], input["allOf"]);
+        assert!(normalized.get("oneOf").is_none());
+        let schema = json!({
+            "x-st-integers": "json-safe",
+            "$defs": { "Entry": input }
+        });
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("export const Entry ="));
+        assert_eq!(generated.matches("conditional object relationship").count(), 2);
+        assert!(generated.contains("hasOwnProperty.call(o, \"payload\")"));
+        assert!(generated.contains("[\"phase\"] === \"ready\""));
+        assert!(generated.contains("[\"enabled\"] === false"));
+        assert!(generated.contains(".length <= 0"));
+
+        // Fail closed for assertions the predicate emitter cannot preserve.
+        let mut unsupported = schema;
+        unsupported["$defs"]["Entry"]["allOf"][1]["then"]["properties"]["tags"] =
+            json!({ "uniqueItems": true });
+        assert!(models(&unsupported).is_err());
+    }
+
+    #[test]
+    fn same_property_conditions_still_expand_complete_branches() {
+        let mut input = conditional_schema();
+        input["allOf"].as_array_mut().unwrap().push(json!({
+            "if": { "properties": { "type": { "const": "status" } } },
+            "then": { "properties": { "payload": { "const": "complete" } } }
+        }));
+        let defs = json!({ "Kind": { "enum": ["message", "status"] } });
+        let normalized = normalize(&input, defs.as_object().unwrap()).unwrap();
+        assert!(normalized.get("x-st-conditions").is_none());
+        let branches = normalized["oneOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0]["required"], json!(["id", "payload", "type"]));
+        assert_eq!(branches[1]["properties"]["payload"], json!({ "const": "complete" }));
     }
 
     #[test]
