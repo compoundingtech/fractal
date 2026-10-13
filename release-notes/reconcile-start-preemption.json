@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Local SQLite storage advances from 18 to 19, adding runtime-start operation and evidence tables plus admission indexes. Both stores use one shared storage-version constant. Unresolved local request/result evidence is pinned against trimming. Existing version-18 stores migrate additively on open; older binaries reject version 19. Resolved ledger rows are retained, including their prepared launch body; disk usage currently grows with launch count and requires capacity planning until a separate reviewed retention policy is added.",
+    "detail": "Local SQLite storage advances from 18 to 19, adding runtime-start operation and evidence tables plus admission indexes. Both stores use one shared storage-version constant. Unresolved local request/result evidence is pinned against trimming. Existing version-18 stores migrate additively on open; older binaries reject version 19. Resolved ledger rows are retained, including their prepared launch body; disk usage currently grows with launch count and requires capacity planning until a separate reviewed retention policy is added. Installation atomically captures immutable shared/local publication format cuts with two indexed maxima before any operation-bound request; reopening, replay and forgetting preserve them. Resolved evidence pins are released, so original local observation bodies may later trim while ledger bindings and result proof remain retained.",
     "transitions": [
       [
         18,
@@ -33,7 +33,7 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Roll forward with the version-19 store preserved. Swap-back requires verified closure of pending producers and operation-owned runtimes, preservation of the upgraded ledger for investigation, and restoration of a consistent pre-upgrade database with its compatible binary. Reinstalling an older binary or downgrading the storage header does not undo the migration. Operations must review this procedure before rollout."
+    "detail": "Roll forward with the version-19 store preserved. Swap-back requires verified closure of pending producers and operation-owned runtimes, preservation of the upgraded ledger for investigation, and restoration of a consistent pre-upgrade database with its compatible binary. Reinstalling an older binary or downgrading the storage header does not undo the migration. Operations must review this procedure before rollout. A used ledger missing either immutable format cut is refused; preserve its store and original boundary evidence for forward recovery instead of capturing a later cut. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary."
   },
   "commits": [
     "a8a49480a2360e2ab8e1f6bea5f1620e727c7442",

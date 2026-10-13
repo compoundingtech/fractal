@@ -35,6 +35,31 @@ CREATE TABLE IF NOT EXISTS local_runtime_start_evidence (
 );
 CREATE INDEX IF NOT EXISTS local_runtime_start_evidence_observation ON local_runtime_start_evidence(observation_id);
 "#)?;
+    // Capture the format boundary before admission can write any operation-bound
+    // request. Never infer a later boundary from an already-used ledger.
+    let has_cuts: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='publication-operation-format-shared-cut')
+         AND EXISTS(SELECT 1 FROM meta WHERE key='publication-operation-format-local-cut')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_cuts {
+        let has_operations: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_runtime_starts)",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(
+            !has_operations,
+            "runtime-start ledger has operations but lacks immutable publication format cuts; preserve this store and roll forward with its original format-boundary evidence"
+        );
+        transaction.execute_batch(
+            "INSERT OR IGNORE INTO meta(key,value)
+             SELECT 'publication-operation-format-shared-cut', CAST(COALESCE(MAX(store_index),0) AS TEXT) FROM claims;
+             INSERT OR IGNORE INTO meta(key,value)
+             SELECT 'publication-operation-format-local-cut', CAST(COALESCE(MAX(id),0) AS TEXT) FROM local_observations;",
+        )?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -1091,6 +1116,150 @@ mod tests {
             .observations_for(subject, "runtime.action.requested")
             .unwrap();
         assert!(!retained.iter().any(|r| r.id == start || r.id == revoke.id));
+        let resolved = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT * FROM local_runtime_starts WHERE id='one'",
+                [],
+                read,
+            )
+            .unwrap();
+        assert!(resolved.finished && resolved.applied && resolved.cleanup_verified);
+        assert_eq!(resolved.body["start_request"], start);
+        assert_eq!(resolved.revoked_by.as_deref(), Some(revoke.id.as_str()));
+        assert_eq!(resolved.result.unwrap()["error"], "producer unverified");
+    }
+
+    fn format_cuts(connection: &Connection) -> (i64, i64) {
+        let read_cut = |key| {
+            connection
+                .query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        (
+            read_cut("publication-operation-format-shared-cut"),
+            read_cut("publication-operation-format-local-cut"),
+        )
+    }
+
+    #[test]
+    fn format_cuts_precede_bound_requests_and_survive_replay_forget_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.db");
+        let store = Store::open(&path, "node").unwrap();
+        assert_eq!(format_cuts(&store.readers.get()), (0, 0));
+        publish(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+            "legacy",
+        );
+        store
+            .append_claim(&receipt("agent/example/worker"))
+            .unwrap();
+        drop(store);
+        let legacy = Connection::open(&path).unwrap();
+        let shared: i64 = legacy
+            .query_row("SELECT MAX(store_index) FROM claims", [], |row| row.get(0))
+            .unwrap();
+        let local: i64 = legacy
+            .query_row("SELECT MAX(id) FROM local_observations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(shared > 0 && local > 0);
+        legacy.execute_batch(
+            "DROP TABLE local_runtime_start_evidence; DROP TABLE local_runtime_starts;
+             DELETE FROM meta WHERE key IN ('publication-operation-format-shared-cut','publication-operation-format-local-cut');
+             PRAGMA user_version=18;",
+        ).unwrap();
+        drop(legacy);
+        let store = Store::open(&path, "node").unwrap();
+        assert_eq!(format_cuts(&store.readers.get()), (shared, local));
+        let subject = "agent/example/worker";
+        let token = store.selected_desired_token(subject).unwrap();
+        let mut start = operation("modern-operation", subject, token);
+        assert_eq!(
+            store.admit_runtime_start(&mut start, 2).unwrap(),
+            RuntimeStartAdmission::Admitted
+        );
+        let request_position: i64 = store
+            .readers
+            .get()
+            .query_row("SELECT MAX(id) FROM local_observations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(request_position > local);
+        publish(
+            &store,
+            "version 2\nstop \"agent/example/worker\"",
+            "modern-stop",
+        );
+        {
+            let mut writer = store.connection.write();
+            let transaction = writer.transaction().unwrap();
+            replay_graph_from_nothing_tx(&transaction).unwrap();
+            assert_eq!(format_cuts(&transaction), (shared, local));
+            transaction.commit().unwrap();
+        }
+        store.forget_current_views();
+        assert_eq!(format_cuts(&store.readers.get()), (shared, local));
+        drop(store);
+        let reopened = Store::open(&path, "node").unwrap();
+        assert_eq!(format_cuts(&reopened.readers.get()), (shared, local));
+        assert_eq!(
+            reopened.runtime_start_for(subject).unwrap().unwrap().body["start_request"],
+            start.body["start_request"]
+        );
+    }
+
+    #[test]
+    fn missing_format_cut_with_existing_operations_refuses_a_later_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.db");
+        let store = Store::open(&path, "node").unwrap();
+        store
+            .admit_runtime_start(&mut operation("one", "agent/example/worker", None), 2)
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "DELETE FROM meta WHERE key='publication-operation-format-local-cut'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let error = match Store::open(&path, "node") {
+            Ok(_) => panic!("must not capture a boundary after bound requests exist"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("lacks immutable publication format cuts"));
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM meta WHERE key='publication-operation-format-local-cut'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM local_runtime_starts", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
