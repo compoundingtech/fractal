@@ -265,7 +265,6 @@ fn calendar_occurrence(
     Ok((key, calendar_instant(zone, calendar.at_minute, next)?))
 }
 
-
 /// Keep the existing Claude regression cases exercising the shared driver classifier.
 #[cfg(test)]
 fn claude_login_expired(screen: &str) -> Option<&str> {
@@ -288,6 +287,32 @@ fn claude_trust_prompt(screen: &str) -> bool {
     ]
     .iter()
     .all(|phrase| screen.contains(phrase))
+}
+
+fn claude_development_channel_prompt(screen: &str) -> bool {
+    let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    const OPTION: &str = "❯ 1. I am using this for local development";
+    let fixed = [
+        "WARNING: Loading development channels",
+        "--dangerously-load-development-channels",
+        OPTION,
+        "2. Exit",
+        "Enter to confirm",
+        "Esc to cancel",
+    ];
+    if !fixed.iter().all(|text| screen.contains(text)) {
+        return false;
+    }
+    // Approve the dialog only when it lists exactly the one st channel: any other development
+    // channel in the same dialog is the person's to accept.
+    let Some((_, listed)) = screen.split_once("Channels:") else {
+        return false;
+    };
+    let listed = listed.split_once(OPTION).map_or(listed, |(before, _)| before);
+    matches!(
+        listed.split_whitespace().collect::<Vec<_>>().as_slice(),
+        ["plugin:st-channel@st"] | ["server:st3"]
+    )
 }
 
 /// How long a resume that ended without a reason waits for its driver's typed refusal.
@@ -2767,6 +2792,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     &observation,
                                     now_ms(),
                                 )?;
+                                self.reconcile_claude_channel_consent(
+                                    subject,
+                                    member,
+                                    &observation,
+                                    screen.as_deref(),
+                                )?;
                                 self.reconcile_driver_readiness(
                                     subject,
                                     member,
@@ -3978,6 +4009,74 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<(Option<String>, String)> {
         let (claim, key) = self.store.harness_login_episode_key(subject, incarnation)?;
         Ok((claim.map(|claim| claim.id), key))
+    }
+
+    /// Admit the measured st development-channel startup dialog once per incarnation.
+    fn reconcile_claude_channel_consent(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+    ) -> Result<()> {
+        if subject.kind != "agent" || member.driver.as_deref() != Some("claude") || !member.terminal
+        {
+            return Ok(());
+        }
+        let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            return Ok(());
+        };
+        if !screen.is_some_and(claude_development_channel_prompt)
+            || self
+                .store
+                .harness_was_ready(&subject.subject, incarnation)?
+        {
+            return Ok(());
+        }
+        let Some(runtime_claim) = self.running_runtime_claim(&subject.subject, incarnation)? else {
+            return Ok(());
+        };
+        if now_ms().saturating_sub(runtime_claim.accepted_at_unix_ms)
+            > HARNESS_READINESS_DEADLINE_MS
+            || self
+                .store
+                .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?
+                .iter()
+                .any(|claim| {
+                    claim
+                        .body
+                        .pointer("/fields/decision")
+                        .and_then(Value::as_str)
+                        == Some("channel-consent")
+                        && claim.body.pointer("/fields/key").and_then(Value::as_str)
+                            == Some(incarnation)
+                })
+        {
+            return Ok(());
+        }
+        // Record the bounded attempt before input; replay must never press Return twice.
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("key".into(), Value::String(incarnation.into())),
+                ("decision".into(), Value::String("channel-consent".into())),
+                (
+                    "reason".into(),
+                    Value::String("attempt the st development-channel startup consent once".into()),
+                ),
+            ]),
+            evidence: vec![runtime_claim.id],
+            expected_subject: None,
+            idempotency_key: Some(format!(
+                "claude-channel-consent:{}:{incarnation}",
+                subject.subject
+            )),
+        })?;
+        self.signal_changed();
+        self.runtime
+            .send_key_if(&member.runtime_id, "return", incarnation)
     }
 
     /// Claude's workspace trust prompt appears before any hook or channel can report the session,
@@ -8384,6 +8483,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .into_iter()
                 .filter(|runner| owner_runs.contains(&runner.owner_run))
                 .map(|runner| DesiredSubject {
+                    accountable: None,
                     subject: runner.subject,
                     kind: "stop".into(),
                     desired: Value::Null,
@@ -9330,6 +9430,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         self.perform_start(
             &DesiredSubject {
+                accountable: None,
                 subject: subject.clone(),
                 kind: "gate".into(),
                 desired: Value::Null,
@@ -11996,67 +12097,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_schedules(&self, desired: &[DesiredSubject]) -> Result<()> {
-        if self.skip_unneeded {
-            self.incremental.observe(&self.store)?;
-        }
-        let full = !self.skip_unneeded || self.incremental.take_full_pass("schedule", now_ms());
-        let mut active = BTreeSet::new();
         for schedule in desired.iter().filter(|item| item.kind == "schedule") {
-            let item = format!("schedule:{}", schedule.subject);
-            active.insert(item.clone());
-            let context = self.incremental.observe_context(&item, schedule);
-            self.reconcile_selected_intake(
-                "schedule",
-                &item,
-                &schedule.subject,
-                !full && context,
-                || self.reconcile_schedule(schedule),
-            );
+            self.isolate("schedule", &schedule.subject, || {
+                self.reconcile_schedule(schedule)
+            });
         }
-        self.incremental.retain("schedule:", &active);
         Ok(())
-    }
-
-    /// Skip before fault/recovery reporting and before any evaluation SQL. A selected item
-    /// retains the existing effect checks. Failed full evaluations must retry even when the
-    /// preceding cached evaluation was clean; clean skips never clear a retained fault.
-    fn reconcile_selected_intake(
-        &self,
-        section: &'static str,
-        item: &str,
-        subject: &str,
-        skip: bool,
-        work: impl FnOnce() -> Result<()>,
-    ) {
-        if skip && !self.incremental.needs(item, now_ms()) {
-            return;
-        }
-        // Register from the selected active consumer, never from an async callback. This
-        // retains a first/failed evaluation's completion without invalidating unrelated work.
-        self.incremental.register_intake_completion(item);
-        let completion = self.incremental.intake_completion_token(item);
-        if self
-            .isolate(section, subject, || {
-                self.reconcile_item(section, item, skip, || {
-                    smallclaims::touched::note_read(|| item.to_owned());
-                    smallclaims::touched::note_read(|| subject.to_owned());
-                    // Repair and owned-set receipts may change a previously selected declaration or
-                    // an absent dependency. Until full old/new closure exists these stay broad.
-                    smallclaims::touched::note_read(|| "kind:record.repaired".into());
-                    smallclaims::touched::note_read(|| "kind:owned-set.revised".into());
-                    if section.starts_with("schedule") {
-                        // The active-started-run join has negative as well as positive run deps.
-                        smallclaims::touched::note_read(|| "kind:mission-run.state".into());
-                        smallclaims::touched::note_read(|| "kind:mission-run.created".into());
-                    }
-                    work()
-                })
-            })
-            .is_none()
-        {
-            self.incremental.touch(item);
-        }
-        self.incremental.retain_intake_completion(item, completion);
     }
 
     fn schedules_caught_up(&self) -> Result<bool> {
@@ -12181,22 +12227,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             scheduled_at
         };
         let operation = format!("{}:{revision}:{occurrence}", schedule.subject);
-        let timer_due = scheduled_at.max(0) as u128;
         if !self
             .armed_schedules
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(operation.clone())
         {
-            // A sleeping arm still needs deadline discovery. Once its instant is reached,
-            // that arm owns progress and signals completion/rejection; do not keep selecting
-            // no-op evaluations while it waits to run or finish its existing work.
-            if timer_due > now_ms() {
-                smallclaims::touched::note_due(timer_due);
-            }
             return Ok(());
         }
-        smallclaims::touched::note_due(timer_due);
         let request = self.store.append_claim(&ClaimInput {
             subject: schedule.subject.clone(),
             kind: "schedule.occurrence-scheduled".into(),
@@ -12226,7 +12264,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         let store = self.store.clone();
         let notify = self.notify.clone();
         let event_notify = self.event_notify.clone();
-        let incremental = self.incremental.clone();
         let armed = self.armed_schedules.clone();
         let schedule_subject = schedule.subject.clone();
         let schedule_declaration = schedule.clone();
@@ -12264,8 +12301,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
-                    incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                    incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -12292,8 +12327,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
-                    incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                    incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -12357,8 +12390,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
                             .remove(&operation);
-                        incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                        incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                         signal_changed(&notify, &event_notify);
                         return;
                     };
@@ -12389,8 +12420,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&operation);
-                incremental.intake_completed(&format!("schedule:{schedule_subject}"));
-                incremental.intake_completed(&format!("schedule-work:{schedule_subject}"));
                 signal_changed(&notify, &event_notify);
             });
         } else {
@@ -12411,11 +12440,6 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn reconcile_scheduled_work(&self, desired: &[DesiredSubject]) -> Result<()> {
-        if self.skip_unneeded {
-            self.incremental.observe(&self.store)?;
-        }
-        let full =
-            !self.skip_unneeded || self.incremental.take_full_pass("schedule-work", now_ms());
         let schedules = desired
             .iter()
             .filter(|item| item.kind == "schedule")
@@ -12425,30 +12449,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|subject, _| schedules.contains(subject.as_str()));
-        let mut active = BTreeSet::new();
         for schedule in desired.iter().filter(|item| item.kind == "schedule") {
-            let item = format!("schedule-work:{}", schedule.subject);
-            active.insert(item.clone());
-            let context = {
-                // Retry state can change without an append record. Fingerprint its current
-                // request/deadline alongside the declaration, releasing this lock before
-                // evaluation. Unchanged retries still rely on their recorded due time.
-                let retries = self
-                    .schedule_workspace_retries
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                self.incremental
-                    .observe_context(&item, &(schedule, retries.get(&schedule.subject)))
-            };
-            self.reconcile_selected_intake(
-                "schedule-work",
-                &item,
-                &schedule.subject,
-                !full && context,
-                || self.reconcile_schedule_work(schedule),
-            );
+            self.isolate("schedule-work", &schedule.subject, || {
+                self.reconcile_schedule_work(schedule)
+            });
         }
-        self.incremental.retain("schedule-work:", &active);
         Ok(())
     }
 
@@ -12631,12 +12636,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             };
             let run = match created {
                 Ok(run) => run,
-                Err(error) if error.code == "mission-run-capacity" => {
-                    // Capacity policy can reload without an append-feed record. Keep the
-                    // existing run-state dependency and a clock retry for that case too.
-                    smallclaims::touched::note_due(now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
-                    continue;
-                }
+                Err(error) if error.code == "mission-run-capacity" => continue,
                 Err(error) if start_waits_for_replication(&error) => {
                     waiting.push(format!("request {}: {error}", request.id));
                     continue;
@@ -13233,10 +13233,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         desired: &[DesiredSubject],
         agents: &[DesiredSubject],
     ) -> Result<()> {
-        if self.skip_unneeded {
-            self.incremental.observe(&self.store)?;
-        }
-        let full = !self.skip_unneeded || self.incremental.take_full_pass("observer", now_ms());
         let observer_resources = desired
             .iter()
             .filter(|item| item.kind == "observer")
@@ -13282,36 +13278,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
                 .collect::<Vec<_>>(),
         );
-        let workspaces_known = self
-            .incremental
-            .observe_context("observer-workspaces", agent_workspaces.as_ref());
-        let mut active = BTreeSet::new();
         for observer in desired.iter().filter(|item| item.kind == "observer") {
-            let item = format!("observer:{}", observer.subject);
-            active.insert(item.clone());
-            let resource = crate::graph::observer_spec(&observer.desired).map(|spec| spec.resource);
-            let selected = resource
-                .as_ref()
-                .and_then(|resource| subscriptions_by_resource.get(resource));
-            let context = self
-                .incremental
-                .observe_context(&item, &(observer, selected));
-            self.reconcile_selected_intake(
-                "observer",
-                &item,
-                &observer.subject,
-                !full && context && workspaces_known,
-                || {
-                    smallclaims::touched::note_read(|| "observer-workspaces".into());
-                    self.reconcile_resource_observer(
-                        observer,
-                        &subscriptions_by_resource,
-                        &agent_workspaces,
-                    )
-                },
-            );
+            self.isolate("observer", &observer.subject, || {
+                self.reconcile_resource_observer(
+                    observer,
+                    &subscriptions_by_resource,
+                    &agent_workspaces,
+                )
+            });
         }
-        self.incremental.retain("observer:", &active);
         Ok(())
     }
 
@@ -13433,23 +13408,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             let mut armed = self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner);
             armed.retain(|key| !key.starts_with(&operation_prefix) || key.starts_with(&cadence_prefix));
-            if armed.iter().any(|key| key.starts_with(&cadence_prefix)) {
-                // Preserve future timer discovery, but consume an elapsed deadline while the
-                // existing arm/provider owns progress. Its completion signals a fresh pass
-                // and records the next cadence or retry deadline.
-                if next_check > now_ms() {
-                    smallclaims::touched::note_due(next_check);
-                }
-                return Ok(());
-            }
+            if armed.iter().any(|key| key.starts_with(&cadence_prefix)) { return Ok(()); }
             armed.insert(operation.clone());
         }
-        smallclaims::touched::note_due(next_check);
         let store = self.store.clone();
         let provider = self.resource_provider.clone();
         let notify = self.notify.clone();
         let event_notify = self.event_notify.clone();
-        let incremental = self.incremental.clone();
         let armed = self.armed_observers.clone();
         #[cfg(test)]
         let completion_fault = self.fault_injection.clone();
@@ -13498,7 +13463,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
                         .remove(&operation);
-                    incremental.intake_completed(&format!("observer:{observer_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -13527,7 +13491,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if !current()
                     || store.selected_desired_revision(&observer_subject).ok().flatten().as_deref() != Some(revision.as_str()) {
                     armed.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
-                    incremental.intake_completed(&format!("observer:{observer_subject}"));
                     signal_changed(&notify, &event_notify);
                     return;
                 }
@@ -13689,7 +13652,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if let Some(injection) = &completion_fault {
                     injection.fault("observer-completion-finished", &observer_subject);
                 }
-                incremental.intake_completed(&format!("observer:{observer_subject}"));
                 signal_changed(&notify, &event_notify);
             });
         } else {
@@ -14173,6 +14135,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             terminal_size: None,
         };
         let desired = DesiredSubject {
+            accountable: None,
             subject: operation.clone(),
             kind: "gate".into(),
             desired: Value::Null,
@@ -14701,6 +14664,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             terminal_size: None,
         };
         let desired = DesiredSubject {
+            accountable: None,
             subject: result_subject,
             kind: "gate".into(),
             desired: Value::Null,
@@ -16447,8 +16411,8 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     mod channel_recovery;
-    mod changed_intake;
     mod differential;
+    mod doctor_eligibility_tests;
     mod first_readiness_tests;
     mod github_watch_selection;
     mod incremental_deadlines;
@@ -23912,7 +23876,6 @@ schedule "orchard" {{
         );
     }
 
-
     #[tokio::test]
     async fn daily_calendar_reaches_once_and_preserves_durable_claim_key() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -23988,7 +23951,6 @@ schedule "daily" {{
         assert_eq!(reached[0].body["fields"]["occurrence"], key);
         assert_eq!(reached[0].body["fields"]["scheduled_at_unix_ms"], recorded);
     }
-
 
 
     #[test]
@@ -24723,15 +24685,6 @@ schedule "{name}" {{
 
     #[tokio::test]
     async fn scheduled_work_waits_for_an_available_workspace() {
-        scheduled_work_workspace_recovery(false).await;
-    }
-
-    #[tokio::test]
-    async fn scheduled_work_workspace_retry_changes_select_skipped_items() {
-        scheduled_work_workspace_recovery(true).await;
-    }
-
-    async fn scheduled_work_workspace_recovery(skip_unneeded: bool) {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let revision = scheduled_mission_revision(&store);
         let root = tempfile::tempdir().unwrap();
@@ -24752,8 +24705,7 @@ schedule "{name}" {{
             Arc::new(FakeRuntime::default()),
             "node".into(),
             Arc::new(Notify::new()),
-        )
-        .skipping_unneeded(skip_unneeded);
+        );
         reconciler.reconcile_once().unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         reconciler.reconcile_once().unwrap();
@@ -28609,6 +28561,7 @@ mission "eval/demo" state="ready" timeout="1m" {
             })
             .unwrap();
         let stop = DesiredSubject {
+            accountable: None,
             subject: subject.into(),
             kind: "stop".into(),
             desired: Value::Null,
@@ -36198,6 +36151,104 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .as_deref(),
             Some("daemon/runtime")
         );
+    }
+
+    const DEVELOPMENT_CHANNEL_SCREEN: &str = "WARNING: Loading development channels\n--dangerously-load-development-channels is for local channel development only.\nPlease use --channels to run a list of approved channels.\nChannels: plugin:st-channel@st\n❯ 1. I am using this for local development\n  2. Exit\nEnter to confirm · Esc to cancel";
+
+    #[test]
+    fn development_channel_consent_is_once_before_readiness_and_checks_incarnation() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"seat\" { workspace \"/tmp\"; harness \"claude\" {} }",
+            "consent",
+        );
+        let desired = store.desired_subjects().unwrap().remove(0);
+        let member = desired.member.as_ref().unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let observation = running_observation(member, "one");
+        runtime.ptys.lock().unwrap().push(observation.clone());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        store
+            .append_claim(&ClaimInput {
+                subject: desired.subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: member_fields(member, "running", Some("one"), true),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("consent-one-running".into()),
+            })
+            .unwrap();
+        assert!(super::claude_development_channel_prompt(
+            DEVELOPMENT_CHANNEL_SCREEN
+        ));
+        assert!(!super::claude_development_channel_prompt(
+            &DEVELOPMENT_CHANNEL_SCREEN.replace("❯ 1.", "1.")
+        ));
+        assert!(!super::claude_development_channel_prompt(
+            "I am using this for local development"
+        ));
+        for listed in [
+            "plugin:st-channel@st plugin:other@market",
+            "server:other plugin:st-channel@st",
+            "plugin:st-channel@st, server:st3",
+            "plugin:other@market",
+            "",
+        ] {
+            assert!(
+                !super::claude_development_channel_prompt(
+                    &DEVELOPMENT_CHANNEL_SCREEN
+                        .replace("Channels: plugin:st-channel@st", &format!("Channels: {listed}"))
+                ),
+                "approved a dialog that lists {listed:?}"
+            );
+        }
+        assert!(super::claude_development_channel_prompt(
+            &DEVELOPMENT_CHANNEL_SCREEN.replace("plugin:st-channel@st", "server:st3")
+        ));
+        for _ in 0..2 {
+            reconciler
+                .reconcile_claude_channel_consent(
+                    &desired,
+                    member,
+                    &observation,
+                    Some(DEVELOPMENT_CHANNEL_SCREEN),
+                )
+                .unwrap();
+        }
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+        assert_eq!(
+            store
+                .claims_for(&desired.subject, Some("runtime.reconcile-decision"))
+                .unwrap()
+                .len(),
+            1
+        );
+        mark_harness_ready(&store, &desired.subject, member, "claude", "ready");
+        let ready = running_observation(member, "ready");
+        runtime.ptys.lock().unwrap().clear();
+        runtime.ptys.lock().unwrap().push(ready.clone());
+        reconciler
+            .reconcile_claude_channel_consent(
+                &desired,
+                member,
+                &ready,
+                Some(DEVELOPMENT_CHANNEL_SCREEN),
+            )
+            .unwrap();
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
+        assert!(
+            runtime
+                .send_key_if(&member.runtime_id, "return", "stale")
+                .is_err()
+        );
+        assert_eq!(*runtime.keys.lock().unwrap(), ["return"]);
     }
 
     fn mark_harness_ready(

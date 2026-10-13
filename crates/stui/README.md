@@ -1,30 +1,30 @@
 # Smalltalk terminal client
 
-`stui` opens spaces on the live graph: splits with their own tabs, each showing a conversation,
-a mission, a terminal, Home or usage. `stui --space NAME` opens a named space. `stui --demo`
-shows them on invented data and sends nothing. `stui --classic` keeps the layout from before
+`st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
+a mission, a terminal, Home or usage. `st ui --space NAME` opens a named space. `st ui --demo`
+shows them on invented data and sends nothing. `st ui --classic` keeps the layout from before
 spaces for now; it is going away ([#1166](https://github.com/compoundingtech/smalltalk/issues/1166)).
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
 
-`stui` connects through the generated Rust `st3.client.v0` client, the same typed data boundary
+The TUI library connects through the generated Rust `st3.client.v0` client, the same typed data boundary
 used by the CLI. Its subscriptions, reconnects, snapshot model and cache come from
 [`st3-feed`](../st3-feed/README.md). It paints immediately, hydrates attention/agents/sessions first, then fills in
 mission and fleet details without blocking keys. A private, actor-and-endpoint-scoped read-only
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#st3` Nix package and run `ST3_PERSON=person/<your-id> stui` in a terminal
+Install the repo's `.#st3` Nix package and run `ST3_PERSON=person/<your-id> st` in a terminal
 with a running st3 daemon. For source development, use
-`ST3_PERSON=person/<your-id> cargo run -p stui --locked`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
-`stui` uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
+`ST3_PERSON=person/<your-id> cargo run -p st3 --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
+the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Now and devices show the right data.
 
-For a laptop without a daemon, run `stui pair MEMBER_URL PAIRING_ID` and enter the member's
-single-use code, then run `stui`. The paired member supplies the person identity. See
+For a laptop without a daemon, run `st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
+single-use code, then run `st`. The paired member supplies the person identity. See
 [client-only setup](../../docs/st3/client-only.md) for gateway setup, multiple members, private
 credentials, offline cache, and automatic reconnect. `--client` requires a saved pairing;
-`--local` selects the local daemon even when a pairing exists. While offline, stui keeps its last
+`--local` selects the local daemon even when a pairing exists. While offline, the terminal UI keeps its last
 display, shows the last connection time, queues no mutations, and offers `r` to retry now.
 
 Keys (`?` shows them all): `Ctrl+K` opens anything (agents, missions, machines, spaces, and what
@@ -45,11 +45,11 @@ input modes, query replies, and remaining gaps, including the headless PTY probe
 Verification:
 
 ```sh
-cargo test -p stui --locked
-cargo build -p stui --locked
-ST3_PERSON=person/<your-id> python3 crates/stui/tests/pty_smoke.py
-ST3_PERSON=person/<your-id> python3 crates/stui/tests/interaction_qa.py target/debug/stui AGENT_NAME
-ST3_PERSON=person/<your-id> python3 crates/stui/tests/attachment_qa.py target/debug/stui AGENT_NAME
+cargo test -p stui --locked --lib
+cargo test -p st3 --locked --test integration typed_keys
+cargo test -p st3 --locked --test integration client_only
+cargo build -p st3 --locked
+ST3_PERSON=person/<your-id> python3 crates/stui/tests/pty_smoke.py target/debug/st3
 ```
 
 The PTY smoke test runs with or without a local daemon. It checks first-frame and key-to-redraw
@@ -140,3 +140,20 @@ subjects stay marked, and spaces keep their resource tabs.
 
 Opening a resource tab also reads that exact subject with the existing prefix filter so
 a catalog limit does not make an available detail vanish. Session and PTY IDs only navigate.
+
+On a member granting `inventory-collections` version 1, stui follows clients,
+the selected usage period, machines, devices, native sessions and terminal lists
+through the existing collections socket. Fleet, visible panes, sidebar and
+palette demand select the windows. Leaving keeps them for the same thirty-second
+grace as missions; switching usage periods immediately replaces the old usage
+slot. All sixteen slots remain bounded, including the three live conversations
+and selected terminal. Client/usage timers, summary-driven machine rereads and
+inventory focus reads are removed. Existing protocol heartbeats and offline
+wording remain, and the sixty-second cache save is still a local write.
+
+Older members read inventories when their relevant view opens or its period
+changes; Fleet says these inventories are read, not followed. Read errors and
+partial windows stay visible. Connection generations fence legacy results, so a
+late read cannot replace a newer member's streamed rows. The actual-binary idle
+transport test runs `scripts/stui-test-client --classic` with `STUI_TIMING_LOG`
+on a private daemon, holding Fleet and Usage idle beyond every old read interval.

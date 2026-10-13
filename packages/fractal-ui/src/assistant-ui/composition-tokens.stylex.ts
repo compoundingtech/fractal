@@ -119,6 +119,7 @@ export const geometryVars = stylex.defineVars({
   sidebarThree: '68px', workExpandedMax: 'min(18rem, 50dvh)', timelineStub: '16px',
   transcriptFrameHeight: '640px',
   threadViewportMin: '96px',
+  polishNarrow: '440px', polishWide: '1440px',
   estimatedMessageHeight: '160px',
 
 })

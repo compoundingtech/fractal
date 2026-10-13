@@ -10,6 +10,9 @@ use super::view::*;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// What Home says when nothing needs the person; setup's first-run test waits for it.
+pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
+
 /// The tabs everyone sees. Worktrees stays hidden until the graph models worktrees: its screens
 /// only have invented data to show (Nathan, 2026-09-28).
 pub const TABS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
@@ -707,7 +710,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 doc.blank();
                 doc.line(Line::from(vec![
                     span("✓ ", theme::strong(theme::GREEN)),
-                    span("No alerts right now.", theme::bold()),
+                    span(HOME_IDLE_TEXT, theme::bold()),
                 ]));
                 doc.blank();
                 doc.wrap(
@@ -1520,6 +1523,9 @@ fn subagent_lines(agent: &Agent, indent: &str, width: usize) -> Vec<Line<'static
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_partial.iter().any(|name| name == "sessions") {
+        items.push(Item::Note(Line::from(span(" More native sessions exist beyond this inventory window.", theme::dim()))));
+    }
     let agents = agent_order(world);
     let mut current = "";
     for agent in &agents {
@@ -2294,6 +2300,12 @@ fn screens_word(state: AgentState) -> &'static str {
 pub fn fleet_list(world: &World) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
+    if world.inventory_supported == Some(false) {
+        items.push(Item::Note(Line::from(span(" This member’s inventories are read, not followed.", theme::dim()))));
+    }
+    if world.inventory_partial.iter().any(|name| ["clients", "machines", "devices", "sessions"].contains(&name.as_str())) {
+        items.push(Item::Note(Line::from(span(" This view is partial; more inventory rows exist beyond its window.", theme::dim()))));
+    }
     for machine in world.machines.items() {
         let (glyph, color) = reach_style(machine.reach);
         let agents = world
