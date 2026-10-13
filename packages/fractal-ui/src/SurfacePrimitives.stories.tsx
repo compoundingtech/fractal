@@ -66,6 +66,26 @@ async function assertMotion(element: HTMLElement) {
     element.removeAttribute('data-entering')
   }
 }
+type Rgba = readonly [number, number, number, number]
+const parseColor = (value: string): Rgba => {
+  const [r = 0, g = 0, b = 0, a = 1] = value.match(/[\d.]+/g)!.map(Number)
+  return [r, g, b, a]
+}
+const composite = ([r, g, b, a]: Rgba, [br, bg, bb]: Rgba): Rgba => [r * a + br * (1 - a), g * a + bg * (1 - a), b * a + bb * (1 - a), 1]
+const luminance = (color: Rgba) => {
+  const [r = 0, g = 0, b = 0] = color.slice(0, 3).map(channel => { const value = channel / 255; return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4 })
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+/** WCAG contrast of `ink` over computed layers listed bottom-up; translucent layers blend onto the opaque surface below. */
+function contrast(ink: string, ...layers: [string, ...string[]]) {
+  const background = layers.map(parseColor).reduce((below, layer) => composite(layer, below))
+  const [high, low] = [luminance(composite(parseColor(ink), background)), luminance(background)].sort((a, b) => b - a) as [number, number]
+  return (high + 0.05) / (low + 0.05)
+}
+/** A label is one line when its box is exactly one line box tall. */
+async function assertOneLine(label: HTMLElement) {
+  await expect(label.offsetHeight).toBe(parseFloat(getComputedStyle(label).lineHeight))
+}
 const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
   const root = canvas.getByTestId('surface-primitives')
@@ -89,6 +109,7 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(checkbox).toBeChecked()
   await expect(mark.querySelector('svg')).not.toBeNull()
   await expect(getComputedStyle(mark).backgroundColor).toBe(reference.color)
+  await expect(checkbox.closest('label')!.offsetHeight).toBe(24)
   await expect(canvas.getByRole('checkbox', { name: 'Archived thread' })).toBeDisabled()
 
   // An action menu without selection or glyphs reserves no leading slot.
@@ -133,13 +154,28 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(parseFloat(getComputedStyle(first).outlineWidth)).toBe(2)
   await expect(parseFloat(getComputedStyle(first).outlineOffset)).toBe(-2)
   await assertMotion(canvas.getByTestId('menu-surface'))
-  await userEvent.keyboard('{ArrowDown}')
   const second = canvas.getByRole(role, { name: /Show details/ })
+  const shortcut = second.querySelector('kbd')!
+  await expect(second).not.toHaveAttribute('data-hovered')
+  const restInk = getComputedStyle(shortcut).color
+  await userEvent.keyboard('{ArrowDown}')
   await expect(second).toHaveFocus()
+  // Contrast is read after the focus re-render lifts the shortcut ink on the wash.
+  await waitFor(() => expect(getComputedStyle(shortcut).color).not.toBe(restInk))
+  const surfaceFill = getComputedStyle(canvas.getByTestId('menu-surface')).backgroundColor
+  const washFill = getComputedStyle(second).backgroundColor
+  await expect(washFill).toBe(reference.backgroundColor)
+  const activeInk = getComputedStyle(shortcut).color
+  await expect(contrast(activeInk, surfaceFill, washFill)).toBeGreaterThanOrEqual(4.5)
+  await expect(contrast(restInk, surfaceFill)).toBeGreaterThanOrEqual(4.5)
+  // Negative controls: identical ink reads 1:1, and the resting muted ink on the dark wash is below AA, so the ratio check can fail.
+  await expect(contrast(surfaceFill, surfaceFill)).toBe(1)
+  if (args.scheme === 'dark') await expect(contrast(restInk, surfaceFill, washFill)).toBeLessThan(4.5)
   await userEvent.keyboard(' ')
   await expect(second).toHaveAttribute('aria-checked', 'true')
   await expect(first).toHaveAttribute('aria-checked', args.selectionMode === 'single' ? 'false' : 'true')
   await userEvent.keyboard('{ArrowUp}')
+  await waitFor(() => expect(getComputedStyle(shortcut).color).toBe(restInk))
   // Restore the first selection in radio mode so the same rerender assertion covers both modes.
   if (args.selectionMode === 'single') await userEvent.keyboard(' ')
   await userEvent.keyboard('{Escape}')
@@ -156,6 +192,29 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(updated.querySelector('svg')).not.toBeNull()
   await expect(canvas.getByTestId('menu-surface').closest('[data-scheme]')).toBe(root)
   await assertMotion(canvas.getByTestId('menu-surface'))
+  // The revised label is wider than the menu minimum; the surface grows to its rows instead of wrapping them.
+  const menuSurface = canvas.getByTestId('menu-surface')
+  const updatedLabel = [...updated.querySelectorAll('span')].find(span => span.textContent === 'Show event timestamps')!
+  await expect(menuSurface.offsetWidth).toBeLessThanOrEqual(320)
+  await assertOneLine(updatedLabel)
+  await expect(updatedLabel.scrollWidth).toBeLessThanOrEqual(updatedLabel.clientWidth)
+  for (const item of within(canvas.getByRole('menu')).getAllByRole(role)) {
+    await expect(item.offsetHeight).toBe(28)
+    await expect(item.scrollHeight).toBeLessThanOrEqual(item.clientHeight)
+  }
+  // Negative control: a squeezed menu truncates the label on one line and keeps the 28px row.
+  const menuList = canvas.getByRole('menu')
+  menuList.style.minWidth = '0px'
+  menuList.style.width = '160px'
+  try {
+    await expect(updatedLabel.scrollWidth).toBeGreaterThan(updatedLabel.clientWidth)
+    await assertOneLine(updatedLabel)
+    await expect(updated.offsetHeight).toBe(28)
+  } finally {
+    menuList.style.minWidth = ''
+    menuList.style.width = ''
+  }
+  await expect(updatedLabel.scrollWidth).toBeLessThanOrEqual(updatedLabel.clientWidth)
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
   await waitFor(() => expect(trigger).toHaveFocus())
@@ -173,6 +232,16 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(plain).toHaveTextContent('Copy thread link')
   await expect(plain.querySelector('kbd')).toBeNull()
   await assertMotion(plain)
+  const plainLabel = plain.querySelector('span')!
+  await assertOneLine(plainLabel)
+  // Negative control: a bound narrower than the label wraps it, so the one-line check can fail.
+  plain.style.maxWidth = '48px'
+  try {
+    await expect(plainLabel.offsetHeight).toBeGreaterThan(parseFloat(getComputedStyle(plainLabel).lineHeight))
+  } finally {
+    plain.style.maxWidth = ''
+  }
+  await assertOneLine(plainLabel)
   await userEvent.unhover(copy)
   await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())
 
@@ -188,6 +257,9 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await waitFor(() => expect(within(tooltip).getByText(args.shortcut!)).toBeVisible())
   await expect(tooltip.closest('[data-scheme]')).toBe(root)
   await assertMotion(tooltip)
+  await assertOneLine(tooltip.querySelector('span')!)
+  await expect(tooltip.offsetHeight).toBe(26)
+  await expect(tooltip.offsetWidth).toBeLessThanOrEqual(320)
   const tooltipStyle = getComputedStyle(tooltip)
   await expect(parseFloat(tooltipStyle.fontSize)).toBe(12)
   await expect(parseFloat(tooltipStyle.lineHeight)).toBe(16)
@@ -203,6 +275,11 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   const finalSelection = await canvas.findByRole(role, { name: /Show event timestamps/ })
   await expect(finalSelection).toHaveAttribute('aria-checked', 'true')
   await expect(finalSelection.querySelector('svg')).not.toBeNull()
+  // Pointer hover lifts the shortcut ink exactly as keyboard focus does.
+  const hovered = canvas.getByRole(role, { name: /Show details/ })
+  await userEvent.hover(hovered)
+  await waitFor(() => expect(hovered).toHaveAttribute('data-hovered'))
+  await waitFor(() => expect(getComputedStyle(hovered.querySelector('kbd')!).color).toBe(activeInk))
 }
 export const Dark440: Story = { play: exercise }
 export const Light440: Story = { args: { scheme: 'light' }, play: exercise }

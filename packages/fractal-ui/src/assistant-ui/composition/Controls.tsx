@@ -23,7 +23,8 @@ export function MenuItem<T extends object>({ children, leading, shortcut, style,
   return <AriaMenuItem {...props} {...stylex.props(styles.menuItem, style)}>{state => <>
     {(state.selectionMode !== 'none' || leading !== undefined) && <span aria-hidden="true" {...stylex.props(styles.leading)}>{state.isSelected ? <CheckMark /> : leading}</span>}
     <span {...stylex.props(styles.label)}>{typeof children === 'function' ? children(state) : children}</span>
-    {shortcut && <kbd {...stylex.props(styles.shortcut)}>{shortcut}</kbd>}
+    {/* Muted ink drops below AA on the dark wash, so an active row lifts its shortcut to soft ink. */}
+    {shortcut && <kbd {...stylex.props(styles.shortcut, (state.isHovered || state.isFocused) && styles.shortcutActive)}>{shortcut}</kbd>}
   </>}</AriaMenuItem>
 }
 export type PopoverProps = Omit<AriaPopoverProps, 'className' | 'style'> & { style?: stylex.StyleXStyles }
@@ -59,16 +60,19 @@ const styles = stylex.create({
   button: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: s.xs, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', flexShrink: 0, ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline }, ':disabled': { opacity: 0.64, cursor: 'default' } },
   sm: { minWidth: g.controlSm, height: g.controlSm }, md: { minWidth: g.controlMd, height: g.controlMd }, lg: { minWidth: g.controlLg, height: g.controlLg },
   outline: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.controlFill, color: text.fg },
-  popover: { zIndex: 50, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, backgroundColor: surface.raised, color: text.fg, padding: s.xs, boxShadow: elevation.popover },
+  // The portal host is a 0×0 fixed box, so shrink-to-fit would collapse the surface to its min-content width; size it to its rows up to menuMax.
+  popover: { zIndex: 50, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, backgroundColor: surface.raised, color: text.fg, padding: s.xs, boxShadow: elevation.popover, width: 'max-content', maxWidth: g.menuMax },
   menu: { minWidth: g.menuMin, outline: 'none', fontFamily: t.fontSans },
-  menuItem: { display: 'flex', alignItems: 'center', gap: s.md, height: g.menuRow, boxSizing: 'border-box', paddingInline: s.md, borderRadius: r.sm, color: text.fg, fontSize: t.uiSize, lineHeight: t.uiLeading, cursor: 'default', outline: 'none', ':is([data-hovered], [data-focused])': { backgroundColor: interaction.wash }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(${g.focusRing} * -1)` }, ':is([data-disabled])': { color: text.fgMuted, opacity: 0.64 } },
+  menuItem: { display: 'flex', alignItems: 'center', gap: s.md, minHeight: g.menuRow, boxSizing: 'border-box', paddingInline: s.md, borderRadius: r.sm, color: text.fg, fontSize: t.uiSize, lineHeight: t.uiLeading, cursor: 'default', outline: 'none', ':is([data-hovered], [data-focused])': { backgroundColor: interaction.wash }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(${g.focusRing} * -1)` }, ':is([data-disabled])': { color: text.fgMuted, opacity: 0.64 } },
   leading: { width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  label: { flexGrow: 1 },
+  label: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   check: { width: g.checkbox, height: g.checkbox, flexShrink: 0 },
-  checkbox: { display: 'inline-flex', alignItems: 'center', gap: s.md, color: text.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, cursor: 'pointer', borderRadius: r.keyboard, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset }, ':is([data-disabled])': { opacity: 0.64, cursor: 'default' } },
+  checkbox: { display: 'inline-flex', alignItems: 'center', gap: s.md, minHeight: g.controlSm, color: text.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, cursor: 'pointer', borderRadius: r.keyboard, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset }, ':is([data-disabled])': { opacity: 0.64, cursor: 'default' } },
   checkboxMark: { width: g.checkbox, height: g.checkbox, boxSizing: 'border-box', flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.keyboard, backgroundColor: surface.raised },
   checkboxOn: { backgroundColor: accent.primary, borderColor: accent.primary, color: accent.onPrimary },
-  tooltip: { zIndex: 50, display: 'flex', alignItems: 'center', gap: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.raised, paddingInline: s.md, paddingBlock: s.xs, fontSize: t.metaSize, lineHeight: t.metaLeading, fontFamily: t.fontSans, color: text.fg, boxShadow: elevation.popover, maxWidth: g.tooltipMax },
-  shortcut: { color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  // The portal host is a 0×0 fixed box, so shrink-to-fit would collapse the card to its min-content width; size it to its text up to tooltipMax.
+  tooltip: { zIndex: 50, display: 'flex', alignItems: 'center', gap: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.raised, paddingInline: s.md, paddingBlock: s.xs, fontSize: t.metaSize, lineHeight: t.metaLeading, fontFamily: t.fontSans, color: text.fg, boxShadow: elevation.popover, width: 'max-content', maxWidth: g.tooltipMax, whiteSpace: 'normal', overflowWrap: 'break-word', textAlign: 'start' },
+  shortcut: { flexShrink: 0, color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  shortcutActive: { color: text.fgSoft },
   surfaceMotion: { transformOrigin: 'center', animationDuration: motion.fast, animationTimingFunction: motion.ease, ':is([data-entering])': { animationName: enterSurface }, ':is([data-exiting])': { animationName: exitSurface }, '@media (prefers-reduced-motion: reduce)': { animationName: 'none', animationDuration: '0s', transform: 'none', ':is([data-entering])': { animationName: 'none' }, ':is([data-exiting])': { animationName: 'none' } } },
 })
