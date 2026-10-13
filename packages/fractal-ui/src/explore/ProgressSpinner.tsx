@@ -32,7 +32,7 @@ export function ProgressSpinner({ variant, size, reduced = false }: { readonly v
         </svg>
         : variant === 'S3'
           ? <span {...stylex.props(styles.dots)}>{[styles.lead, styles.mid, styles.tail].map((phase, index) => <svg key={index} viewBox="0 0 2 2" {...stylex.props(styles.dot, styles.pulse, phase, still)}><circle cx={1} cy={1} r={1} fill="currentColor" /></svg>)}</span>
-          : <span {...stylex.props(styles.strip, styles.frames, still)}>{brailleFrames.map(frame => <span key={frame} {...stylex.props(styles.frame)}>{frame}</span>)}</span>}
+          : <span {...stylex.props(styles.strip, styles.frames, still)}>{brailleFrames.map(frame => <span key={frame} {...stylex.props(styles.frame)}><span {...stylex.props(styles.braille)}>{frame}</span></span>)}</span>}
   </span>
 }
 
@@ -53,6 +53,9 @@ const styles = stylex.create({
   lead: { animationDelay: sg.dotLead }, mid: { animationDelay: sg.dotMid }, tail: { animationDelay: sg.dotTail },
   strip: { position: 'absolute', insetInlineStart: 0, insetBlockStart: 0, display: 'flex', flexDirection: 'column', width: '100%' },
   frames: { animationName: { default: frameStep, '@media (prefers-reduced-motion: reduce)': 'none' }, animationDuration: sg.brailleCycle, animationTimingFunction: 'steps(10)', animationIterationCount: 'infinite' },
-  frame: { display: 'block', height: '1em', lineHeight: '1em', textAlign: 'center' },
+  // Each frame is exactly one box tall, so translateY(-100%) in ten steps lands on whole frames.
+  frame: { display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, height: '1em', overflow: 'hidden' },
+  // Braille dots sit small inside the em box; a larger glyph inside the fixed frame keeps them legible at 12px.
+  braille: { fontSize: '125%', lineHeight: 1 },
   still: { animationName: 'none' },
 })
