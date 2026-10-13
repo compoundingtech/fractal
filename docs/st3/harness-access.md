@@ -72,6 +72,21 @@ filesystem, and a socket connection failing with EPERM when networking is disabl
 The fixture also retains an invalid initial probe invocation and the successful
 outside-workspace `/tmp` write, so neither is mistaken for sandbox enforcement proof.
 
+A Claude seat's workspace is admitted before launch (the trust dialog is accepted in the seat's Claude
+config). That step also approves the servers named in the workspace's `.mcp.json`, because Claude asks
+for each of them with a dialog that `--dangerously-skip-permissions` skips and `--permission-mode auto`
+does not; left alone, the dialog stops startup before any MCP server connects, so the st channel never
+attaches and the seat shows `claude-channel-unattached`. A server listed in the project's
+`disabledMcpjsonServers` stays disabled.
+
+Claude approves a project server by name, not by definition. Once a name is enabled, a later edit to
+that server's command in `.mcp.json` runs without another dialog, so the approval covers whatever the
+workspace file says at launch; that is code execution from repository content, the same trust the
+workspace's project hooks already have. A workspace that holds untrusted content, such as a fork's
+branch checked out for review, must not be a seat workspace; the same goes for any workspace that holds someone else's branch or fork. Each approval is logged by the driver
+(`st: approved project MCP server NAME in DIR (definition sha256 HASH)`), so a changed definition is
+visible after the fact.
+
 Codex update checks remain disabled with `check_for_update_on_startup=false`.
 Managed Claude runs with `DISABLE_AUTOUPDATER=1`; pi and omp already disable their
 startup update checks. When a recognized update menu still appears, the daemon
