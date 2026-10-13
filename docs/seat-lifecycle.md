@@ -2,7 +2,7 @@
 
 A seat's declaration, work, messages, and decisions live in the graph. A running harness also has its own native session. Restarting a process does not erase the plan; preserving the **exact native conversation** is what suspend/resume is for.
 
-Use the worker from [getting started](getting-started.md). Check it before changing anything:
+Use the worker declared in [missions in practice](missions-in-practice.md#declare-a-worker-seat). Check it before changing anything:
 
 ```sh
 st agents show agent/garden/worker
@@ -257,10 +257,11 @@ Fabric when that host runs `st terminals expose-fabric` and grants your machine 
 prints; the owner's st daemon routes each tunnel straight to the PTY session. While that daemon is
 stopped or restarting, as during every deploy, it refuses new tunnels and its live remote attaches
 drop; `st terminals attach` reconnects once it is back. A host that needs attaches to work without
-its daemon runs `st terminals expose-fabric --exec`, which has Fabric start a process per attach. Otherwise it goes through the client gateway as your
-person, the same path the apps use. `stui` on a machine with its own st daemon attaches a terminal on this host to its PTY session, and one
+its daemon runs `st terminals expose-fabric --exec`, which has Fabric start a process per attach.
+Otherwise it goes through the client gateway as your person, the same path the apps use. `st ui`
+on a machine with its own st daemon attaches a terminal on this host to its PTY session, and one
 on another fleet host over Fabric when Fabric reaches the owner; the daemon only says where it lives.
-When Fabric cannot reach the owner, stui goes through the client gateway and the terminal header
+When Fabric cannot reach the owner, `st ui` goes through the client gateway and the terminal header
 says so with Fabric's reason. An owner that refuses the incarnation is never worked around. A paired
 device with no daemon of its own, such as the phone, uses the gateway.
 

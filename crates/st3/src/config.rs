@@ -27,6 +27,11 @@ pub struct Config {
     pub socket: PathBuf,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
+    /// The one folder agents work in when nothing names another: new agents get a subfolder of
+    /// it. Absent, it is `~/st` (`~/.st-instance/NAME/work` for an instance). Must be absolute
+    /// and may not be the home folder or inside Documents, Desktop or Downloads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_root: Option<PathBuf>,
     /// Lets `peer_listen` bind an address other than loopback or Tailscale, such as
     /// `0.0.0.0` or a LAN IP. st cannot tell whether such a path is encrypted, and the
     /// listener carries plain HTTP: replication, terminal input and attach grants.
@@ -353,6 +358,7 @@ impl Default for Config {
             socket,
             client_gateway_socket,
             peer_listen: None,
+            work_root: None,
             peer_listen_allow_plain_http: false,
             peers: Vec::new(),
             planner: PlannerSpec::default(),
@@ -492,6 +498,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.reconcile.validate()?;
         self.github.validate()?;
+        if self.work_root.is_some() {
+            self.work_root()?;
+        }
         anyhow::ensure!(
             matches!(
                 self.planner.provider.as_str(),
@@ -643,9 +652,74 @@ pub fn validate_unix_socket_path(socket: &Path, flag: &str) -> Result<()> {
     Ok(())
 }
 
+/// Folders that make macOS ask for permission the first time something lists them.
+const PROTECTED_HOME_FOLDERS: [&str; 3] = ["Documents", "Desktop", "Downloads"];
+
+/// The work root when nothing configures one: `~/st`, which is also where st has always put
+/// the workspaces of new agents, or the instance's own `work` folder.
+pub fn default_work_root() -> Result<PathBuf> {
+    if let Some(instance) = crate::instance::current() {
+        return Ok(instance.work_dir());
+    }
+    Ok(home_dir()?.join("st"))
+}
+
+fn home_dir() -> Result<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .context("HOME is not set to an absolute directory")
+}
+
+/// Refuse a work root that would make agents start in the home folder itself or in a folder
+/// macOS guards with a permission prompt.
+fn check_work_root(root: &Path) -> Result<()> {
+    anyhow::ensure!(
+        root.is_absolute(),
+        "work_root must be an absolute path, not {}",
+        root.display()
+    );
+    let Ok(home) = home_dir() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        root != home,
+        "work_root cannot be the home folder; name a folder inside it"
+    );
+    for protected in PROTECTED_HOME_FOLDERS {
+        anyhow::ensure!(
+            !root.starts_with(home.join(protected)),
+            "work_root cannot be inside {protected}: macOS asks permission before a program lists it"
+        );
+    }
+    Ok(())
+}
+
+impl Config {
+    /// The folder agents work in: the configured one, else the default.
+    pub fn work_root(&self) -> Result<PathBuf> {
+        match &self.work_root {
+            Some(root) => {
+                check_work_root(root)?;
+                Ok(root.clone())
+            }
+            None => default_work_root(),
+        }
+    }
+}
+
+/// The work root of the running daemon, read from its config file again each time so an edit
+/// applies to the next agent without a restart. Outside a daemon it is the default.
+pub fn work_root() -> Result<PathBuf> {
+    match DAEMON_CONFIG.get() {
+        Some(path) => Config::load_unvalidated(path.as_deref())?.work_root(),
+        None => default_work_root(),
+    }
+}
+
 /// Where `st agents new` puts an agent that names no workspace: a new directory for the agent
-/// below this account's home, `~/st/agents/IDENTITY`. The host that runs the agent answers, so
-/// the path is right for that host's home.
+/// inside the work root, `~/st/agents/IDENTITY` by default. The host that runs the agent
+/// answers, so the path is right for that host's home.
 pub fn default_agent_workspace(identity: &str) -> Result<PathBuf> {
     let identity = identity.strip_prefix("agent/").unwrap_or(identity);
     anyhow::ensure!(
@@ -655,14 +729,7 @@ pub fn default_agent_workspace(identity: &str) -> Result<PathBuf> {
                 .all(|part| !part.is_empty() && part != "." && part != ".."),
         "agent identity `{identity}` cannot name a workspace directory"
     );
-    if let Some(instance) = crate::instance::current() {
-        return Ok(instance.agents_dir().join(identity));
-    }
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
-        .context("HOME is not set to an absolute directory")?;
-    Ok(home.join("st/agents").join(identity))
+    Ok(work_root()?.join("agents").join(identity))
 }
 
 fn xdg_dir(variable: &str, home_suffix: &str) -> PathBuf {
@@ -694,6 +761,50 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_work_root_defaults_to_a_folder_inside_home_that_macos_does_not_guard() {
+        let Ok(home) = super::home_dir() else { return };
+        if crate::instance::current().is_some() {
+            return;
+        }
+        let root = Config::default().work_root().unwrap();
+        assert_eq!(root, home.join("st"));
+        assert_eq!(
+            super::default_agent_workspace("agent/site").unwrap(),
+            root.join("agents/site")
+        );
+        for guarded in ["Documents", "Desktop", "Downloads"] {
+            assert!(!root.starts_with(home.join(guarded)));
+        }
+    }
+
+    #[test]
+    fn a_configured_work_root_must_be_absolute_and_not_a_guarded_folder() {
+        let config = |root: &str| -> Config {
+            toml::from_str(&format!("work_root=\"{root}\"\n")).unwrap()
+        };
+        assert_eq!(
+            config("/var/work").work_root().unwrap(),
+            PathBuf::from("/var/work")
+        );
+        assert!(config("work").work_root().unwrap_err().to_string().contains("absolute"));
+        let Ok(home) = super::home_dir() else { return };
+        let home = home.display();
+        assert!(config(&home.to_string()).work_root().is_err());
+        for guarded in ["Documents", "Desktop", "Downloads"] {
+            let error = config(&format!("{home}/{guarded}/projects")).validate().unwrap_err();
+            assert!(error.to_string().contains(guarded), "{error}");
+        }
+        assert!(config(&format!("{home}/Smalltalk")).validate().is_ok());
+    }
+
+    #[test]
+    fn a_config_without_a_work_root_stays_without_one() {
+        let config: Config = toml::from_str("node=\"example\"\n").unwrap();
+        assert!(config.work_root.is_none());
+        assert!(!toml::to_string(&config).unwrap().contains("work_root"));
+    }
+
     #[test]
     fn install_access_mode_preserves_legacy_config_and_writes_auto_once() {
         use st_drivers::access::AccessMode;
