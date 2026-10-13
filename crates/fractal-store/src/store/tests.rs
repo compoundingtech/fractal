@@ -3935,7 +3935,7 @@ fn a_run_started_with_a_reporter_records_it_and_an_unset_run_records_nothing() {
         "  report-to \"agent/ops/starter\"\n  report-completed \"true\"\n",
     );
     assert_eq!(named["report_to"], "agent/ops/starter");
-    assert_eq!(named["stalled_after_ms"], 30 * 60_000);
+    assert_eq!(named["stalled_after_ms"], 3 * 60 * 60_000);
     assert_eq!(named["report_completed"], true);
     // The mission's own reporter and limit apply when the start names none.
     let inherited = start("watched/1", &watched, "");
