@@ -1038,7 +1038,7 @@
     },
     {
       "command": "st fleet wait",
-      "description": "Wait for this node's first sync to end, then check that it projects the same graph as the peer it synced from. Fails when the graphs differ after a heal",
+      "description": "Wait for this node's first sync to end: until it holds the same claims as the peer it synced from and has admitted them all",
       "tests": [
         "crates/st3/tests/fleet.rs::fleet_wait_after_a_restart_waits_until_the_member_has_caught_up"
       ],
