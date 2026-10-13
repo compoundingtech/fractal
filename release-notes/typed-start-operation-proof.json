@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Publish writer-bound lifecycle proof statuses",
+  "replay": {
+    "status": "none",
+    "detail": "No projection replay or launch replay is introduced."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No additional database or runtime-record layout change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No replicated claim or checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Start receipts carry writer-set operation_status verified only after exact operation/incarnation verification, and producer-closed only after positive exact producer closure. Ordinary failure cannot forge a closure label or success. Request/result runtime kind, ID, operation, original desired token and evidence are bound in the completion transaction; conflicting inputs are refused. Native retirement uses the separately classified retired status. Existing fields and claim kinds are used; UUID shape alone is never proof, and capability advertisement remains unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No interruption beyond the normal deployment restart already classified for the start-operation upgrade."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Consumers must verify the exact operation/request/runtime/incarnation bindings as well as the explicit proof status. Existing unbound legacy records remain Unknown. The old never-published PTY operator escalation and producer-contract decision still apply."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback follows the previously classified storage and runtime-state restoration procedure; rejection evidence adds no separate migration."
+  }
+}

@@ -364,7 +364,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// Stop the exact incarnation, returning true only after verifying its complete
     /// retirement. A successful asynchronous signal is not retirement proof.
     fn stop_with_retirement_proof(
-        &self, runtime_id: &str, terminal: bool, incarnation: &str,
+        &self,
+        runtime_id: &str,
+        terminal: bool,
+        incarnation: &str,
     ) -> Result<bool> {
         self.stop(runtime_id, terminal, Some(incarnation))?;
         Ok(false)
@@ -653,7 +656,10 @@ impl RuntimeControl for NativeRuntime {
     }
 
     fn stop_with_retirement_proof(
-        &self, runtime_id: &str, terminal: bool, incarnation: &str,
+        &self,
+        runtime_id: &str,
+        terminal: bool,
+        incarnation: &str,
     ) -> Result<bool> {
         self.stop(runtime_id, terminal, Some(incarnation))?;
         // Native PTY stop verifies the generation-fenced daemon/tree and ends
@@ -5527,26 +5533,55 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && member["runtime_id"] == runtime_id
                 && member["terminal"] == terminal
                 && observation.is_some_and(|o| o.status == "running")
-                && match self.runtime.start_operation(runtime_id, terminal, incarnation) {
+                && match self
+                    .runtime
+                    .start_operation(runtime_id, terminal, incarnation)
+                {
                     Ok(provenance) => provenance.as_deref() == Some(operation.id.as_str()),
                     Err(error) => {
-                        self.record_once(subject, "harness.diagnostic", BTreeMap::from([
-                            ("severity".into(), Value::from("error")),
-                            ("code".into(), Value::from("start-revocation-unverified")),
-                            ("reason".into(), Value::from(format!("retirement provenance is unreadable: {error:#}"))),
-                        ]))?;
+                        self.record_once(
+                            subject,
+                            "harness.diagnostic",
+                            BTreeMap::from([
+                                ("severity".into(), Value::from("error")),
+                                ("code".into(), Value::from("start-revocation-unverified")),
+                                (
+                                    "reason".into(),
+                                    Value::from(format!(
+                                        "retirement provenance is unreadable: {error:#}"
+                                    )),
+                                ),
+                            ]),
+                        )?;
                         false
                     }
                 }
-        } else { false };
-        self.reconcile_runtime_stop_inner(subject, runtime_id, terminal, incarnation,
-            timeout_ms, observation, operation.as_ref().filter(|_| retirement).map(|o| o.id.as_str()))
+        } else {
+            false
+        };
+        self.reconcile_runtime_stop_inner(
+            subject,
+            runtime_id,
+            terminal,
+            incarnation,
+            timeout_ms,
+            observation,
+            operation
+                .as_ref()
+                .filter(|_| retirement)
+                .map(|o| o.id.as_str()),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn reconcile_runtime_stop_inner(
-        &self, subject: &str, runtime_id: &str, terminal: bool,
-        incarnation: Option<&str>, timeout_ms: u64, observation: Option<&RuntimeObservation>,
+        &self,
+        subject: &str,
+        runtime_id: &str,
+        terminal: bool,
+        incarnation: Option<&str>,
+        timeout_ms: u64,
+        observation: Option<&RuntimeObservation>,
         retirement_operation: Option<&str>,
     ) -> Result<bool> {
         self.revoke_start(subject)?;
@@ -5668,32 +5703,42 @@ impl<R: RuntimeControl> Reconciler<R> {
                 deadline.min(now_ms().saturating_add(100)),
             );
             let stopped = if retirement_operation.is_some() {
-                self.runtime.stop_with_retirement_proof(runtime_id, terminal, incarnation)
+                self.runtime
+                    .stop_with_retirement_proof(runtime_id, terminal, incarnation)
             } else {
-                self.runtime.stop(runtime_id, terminal, Some(incarnation)).map(|()| false)
+                self.runtime
+                    .stop(runtime_id, terminal, Some(incarnation))
+                    .map(|()| false)
             };
             let verified = match stopped {
                 Ok(verified) => verified,
                 Err(error) => {
-                self.store.append_claim(&ClaimInput {
-                    subject: subject.into(),
-                    kind: "runtime.action.failed".into(),
-                    actor: None,
-                    fields: BTreeMap::from([
-                        ("action".into(), Value::String("terminate".into())),
-                        ("reason".into(), Value::String(error.to_string())),
-                    ]),
-                    evidence: vec![request.id],
-                    expected_subject: None,
-                    idempotency_key: Some(format!("terminate-failed:{subject}:{incarnation}")),
-                })?;
-                return Err(error);
+                    self.store.append_claim(&ClaimInput {
+                        subject: subject.into(),
+                        kind: "runtime.action.failed".into(),
+                        actor: None,
+                        fields: BTreeMap::from([
+                            ("action".into(), Value::String("terminate".into())),
+                            ("reason".into(), Value::String(error.to_string())),
+                        ]),
+                        evidence: vec![request.id],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("terminate-failed:{subject}:{incarnation}")),
+                    })?;
+                    return Err(error);
                 }
             };
             if verified {
-                let operation = retirement_operation.context("retirement proof has no operation")?;
-                anyhow::ensure!(self.store.apply_runtime_start_retirement(operation, incarnation, &request.id)?,
-                    "native retirement proof did not match its operation/request");
+                let operation =
+                    retirement_operation.context("retirement proof has no operation")?;
+                anyhow::ensure!(
+                    self.store.apply_runtime_start_retirement(
+                        operation,
+                        incarnation,
+                        &request.id
+                    )?,
+                    "native retirement proof did not match its operation/request"
+                );
                 self.start_changed(subject);
                 return Ok(true);
             }

@@ -880,9 +880,25 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
                 |row| row.get(0),
             )
             .unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["producer_closed"], true);
+        let failed = store
+            .observations_for(&desired.subject, "runtime.action.failed")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(failed.body["fields"]["operation_status"], "producer-closed");
+        assert_eq!(failed.body["fields"]["operation"], result["operation_id"]);
         assert_eq!(
-            serde_json::from_str::<Value>(&result).unwrap()["producer_closed"],
-            true
+            failed.body["fields"]["runtime_id"],
+            desired.member.as_ref().unwrap().runtime_id
+        );
+        assert_eq!(failed.body["fields"]["terminal"], false);
+        assert!(
+            failed.body["evidence"]
+                .as_array()
+                .unwrap()
+                .contains(&result["start_request"])
         );
         apply_source(
             &store,
@@ -902,6 +918,17 @@ fn native_rejected_starts_prove_closure_and_allow_a_later_start_for_the_same_sea
             .observe_exec(&desired.member.as_ref().unwrap().runtime_id)
             .unwrap()
             .unwrap();
+        let completed = store
+            .observations_for(&desired.subject, "runtime.action.succeeded")
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(completed.body["fields"]["operation_status"], "verified");
+        assert_eq!(
+            completed.body["fields"]["incarnation_id"].as_str(),
+            observation.incarnation_id.as_deref()
+        );
+        assert_eq!(completed.body["fields"]["terminal"], false);
         runtime
             .kill(
                 &observation.runtime_id,
@@ -1240,6 +1267,14 @@ async fn native_returned_pty_error_retains_unknown_and_visible_open_count() {
     assert_eq!(card["value"]["runtime_start"]["revoked_unresolved_jobs"], 1);
     assert_eq!(card["value"]["runtime_start"]["worker_running"], false);
     assert_eq!(card["value"]["runtime_start"]["cleanup_verified"], false);
+    let failed = fixture
+        .store
+        .observations_for(&fixture.desired.subject, "runtime.action.failed")
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(failed.body["fields"]["operation_status"].is_null());
+    assert_eq!(failed.body["fields"]["operation"], operation.id);
 }
 
 #[tokio::test]

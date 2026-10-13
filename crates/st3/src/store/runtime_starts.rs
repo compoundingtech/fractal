@@ -162,12 +162,109 @@ impl Store {
                 if selected != expected {
                     return Ok(false);
                 }
+                let result = operation
+                    .result
+                    .as_ref()
+                    .context("finished start has no result")?;
+                for input in inputs {
+                    if input.subject != operation.subject {
+                        return Ok(false);
+                    }
+                    if input
+                        .fields
+                        .get("action")
+                        .is_some_and(|action| action == "start")
+                    {
+                        if input
+                            .fields
+                            .get("operation")
+                            .is_some_and(|bound| bound != id)
+                            || input.fields.get("runtime_id").is_some_and(|bound| {
+                                bound != &operation.body["member"]["runtime_id"]
+                            })
+                            || input
+                                .fields
+                                .get("terminal")
+                                .is_some_and(|bound| bound != &operation.body["member"]["terminal"])
+                            || input
+                                .fields
+                                .get("desired_token")
+                                .is_some_and(|bound| bound != &operation.body["desired_token"])
+                        {
+                            return Ok(false);
+                        }
+                        if input.kind == "runtime.action.succeeded"
+                            && (result["error"].is_string()
+                                || result["verification"] != "operation-incarnation"
+                                || !result["incarnation"].is_string()
+                                || !operation.body["member"]["runtime_id"].is_string()
+                                || !operation.body["member"]["terminal"].is_boolean()
+                                || !operation.body["desired_token"].is_string()
+                                || input
+                                    .fields
+                                    .get("incarnation_id")
+                                    .is_some_and(|bound| bound != &result["incarnation"]))
+                        {
+                            return Ok(false);
+                        }
+                        if input.kind == "runtime.action.failed" && !result["error"].is_string() {
+                            return Ok(false);
+                        }
+                    }
+                }
                 if operation.receipted {
                     return Ok(true);
                 }
                 let receipts = inputs
                     .iter()
                     .map(|input| -> Result<String> {
+                        let mut input = input.clone();
+                        if input
+                            .fields
+                            .get("action")
+                            .is_some_and(|action| action == "start")
+                        {
+                            input.fields.insert("operation".into(), Value::from(id));
+                            if let Some(runtime) = operation.body["member"]["runtime_id"].as_str() {
+                                input
+                                    .fields
+                                    .insert("runtime_id".into(), Value::from(runtime));
+                            }
+                            if let Some(terminal) = operation.body["member"]["terminal"].as_bool() {
+                                input
+                                    .fields
+                                    .insert("terminal".into(), Value::from(terminal));
+                            }
+                            if let Some(token) = operation.body["desired_token"].as_str() {
+                                input
+                                    .fields
+                                    .insert("desired_token".into(), Value::from(token));
+                            }
+                            input.fields.remove("operation_status");
+                            if input.kind == "runtime.action.succeeded" {
+                                input
+                                    .fields
+                                    .insert("operation_status".into(), Value::from("verified"));
+                                input
+                                    .fields
+                                    .insert("incarnation_id".into(), result["incarnation"].clone());
+                            } else if input.kind == "runtime.action.failed"
+                                && result["verification"] == "producer-closed"
+                                && result["producer_closed"] == true
+                            {
+                                input.fields.insert(
+                                    "operation_status".into(),
+                                    Value::from("producer-closed"),
+                                );
+                            }
+                            let request = operation.body["start_request"]
+                                .as_str()
+                                .context("start result has no original request")?;
+                            if !input.evidence.iter().any(|evidence| evidence == request) {
+                                input.evidence.push(request.into());
+                            }
+                            validate_local_observation(&input)?;
+                        }
                         let claim = if input.kind == "runtime.observed" {
                             let mut predecessors = latest_claim_id_tx(tx, &input.subject)?
                                 .into_iter()
@@ -196,7 +293,7 @@ impl Store {
                                     .context("runtime start observation needs its operation key")?,
                             )?
                         } else {
-                            insert_local_observation_tx(tx, self.origin(), input, now_ms())?.0
+                            insert_local_observation_tx(tx, self.origin(), &input, now_ms())?.0
                         };
                         pin_evidence(tx, id, self.origin(), &claim.id)?;
                         Ok(claim.id)
@@ -278,6 +375,12 @@ impl Store {
             ]);
             if let Some(runtime) = operation.body.pointer("/member/runtime_id").and_then(Value::as_str) {
                 fields.insert("runtime_id".into(), Value::from(runtime));
+            }
+            if let Some(terminal) = operation.body.pointer("/member/terminal").and_then(Value::as_bool) {
+                fields.insert("terminal".into(), Value::from(terminal));
+            }
+            if let Some(incarnation) = operation.body["expected_incarnation"].as_str() {
+                fields.insert("incarnation_id".into(), Value::from(incarnation));
             }
             let request = ClaimInput { subject: operation.subject.clone(), kind: "runtime.action.requested".into(), actor: None,
                 fields, evidence: selected.into_iter().collect(), expected_subject: None,
@@ -507,7 +610,7 @@ mod tests {
             id: id.into(),
             subject: subject.into(),
             owner: "owner".into(),
-            body: serde_json::json!({"selected_token": token}),
+            body: serde_json::json!({"selected_token": token, "desired_token":"desired-test", "member":{"runtime_id":subject,"terminal":true}}),
             revoked_by: None,
             finished: false,
             result: None,
@@ -644,6 +747,120 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn verified_start_receipts_bind_writer_proof_and_refuse_conflicting_inputs() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/worker";
+        let mut start = operation("operation-a", subject, None);
+        start.body["expected_incarnation"] = Value::from("prior-incarnation");
+        store.admit_runtime_start(&mut start, 2).unwrap();
+        store.finish_runtime_start(&start.id, &json!({"incarnation":"actual-incarnation", "verification":"operation-incarnation"})).unwrap();
+        for (field, value) in [
+            ("operation", "another-operation"),
+            ("incarnation_id", "another-incarnation"),
+            ("runtime_id", "another-runtime"),
+            ("desired_token", "another-declaration"),
+        ] {
+            let mut wrong = receipt(subject);
+            wrong.fields.insert(field.into(), Value::from(value));
+            assert!(
+                !store
+                    .apply_runtime_start_result(&start.id, &[wrong])
+                    .unwrap()
+            );
+        }
+        assert!(
+            !store
+                .apply_runtime_start_result(&start.id, &[receipt("agent/example/other")])
+                .unwrap()
+        );
+        assert!(
+            store
+                .observations_for(subject, "runtime.action.succeeded")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .apply_runtime_start_result(&start.id, &[receipt(subject)])
+                .unwrap()
+        );
+        let completed = store
+            .observations_for(subject, "runtime.action.succeeded")
+            .unwrap()
+            .remove(0);
+        assert_eq!(completed.body["fields"]["operation_status"], "verified");
+        assert_eq!(completed.body["fields"]["operation"], start.id);
+        assert_eq!(completed.body["fields"]["runtime_id"], subject);
+        assert_eq!(completed.body["fields"]["terminal"], true);
+        assert_eq!(
+            completed.body["fields"]["incarnation_id"],
+            "actual-incarnation"
+        );
+        assert_eq!(completed.body["fields"]["desired_token"], "desired-test");
+        let requested = store
+            .observations_for(subject, "runtime.action.requested")
+            .unwrap()
+            .remove(0);
+        assert_eq!(requested.body["fields"]["terminal"], true);
+        assert_eq!(
+            requested.body["fields"]["incarnation_id"],
+            "prior-incarnation"
+        );
+        assert!(
+            completed.body["evidence"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from(requested.id))
+        );
+    }
+
+    #[test]
+    fn ordinary_failed_starts_cannot_publish_success_or_forge_closure_status() {
+        for closed in [false, true] {
+            let store = Store::open_memory("node").unwrap();
+            let subject = "agent/example/worker";
+            let mut start = operation("operation-a", subject, None);
+            store.admit_runtime_start(&mut start, 2).unwrap();
+            store.finish_runtime_start(&start.id, &json!({"error":"producer returned", "producer_closed":closed, "verification":if closed {"producer-closed"} else {"producer-open-unverified"}})).unwrap();
+            assert!(
+                !store
+                    .apply_runtime_start_result(&start.id, &[receipt(subject)])
+                    .unwrap()
+            );
+            let mut failed = receipt(subject);
+            failed.kind = "runtime.action.failed".into();
+            failed
+                .fields
+                .insert("operation_status".into(), Value::from("producer-closed"));
+            assert!(
+                store
+                    .apply_runtime_start_result(&start.id, &[failed])
+                    .unwrap()
+            );
+            let completed = store
+                .observations_for(subject, "runtime.action.failed")
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                completed.body["fields"]["operation_status"],
+                if closed {
+                    Value::from("producer-closed")
+                } else {
+                    Value::Null
+                }
+            );
+            assert_eq!(completed.body["fields"]["operation"], start.id);
+            assert_eq!(completed.body["fields"]["runtime_id"], subject);
+            assert!(
+                store
+                    .observations_for(subject, "runtime.action.succeeded")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
