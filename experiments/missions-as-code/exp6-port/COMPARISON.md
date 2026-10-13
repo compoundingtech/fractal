@@ -1,4 +1,4 @@
-# Experiment 6: real missions ported to the Effect SDK
+# Experiment 6: real missions ported to the Effect SDK, and a demo script
 
 Three ports of real fleet missions. The names, commands and goal text are invented because this
 repository is public. Each KDL file keeps its source's exact structure: steps, `depends-on`,
@@ -150,6 +150,73 @@ Some of this is still weak:
 - Every hop is a separate op, and an intake or curator seat has to treat each as ordinary work.
   Today the intake GO and the curator queue are messages between seats. The port turns them into
   steps assigned to those seats, which changes how those seats work.
+
+## 4. Demo scripts: the plain file wins, and the program is a good way to write one
+
+Nathan asked whether missions as code would make demo scripts easier. The demo-scripts mission
+(`st demo play`) has a plain format: a seed of declarations, then beats, each after a delay or a
+key press. Its two example demos are snapshotted in [demo/](demo) (`release-day.kdl`,
+`an-alert-needs-an-answer.kdl`) and written as Effect programs beside them
+(`release-day.ts`, `an-alert-needs-an-answer.ts`).
+
+How it works:
+
+- **A beat is one more op kind on the same engine** ([demo/demo.ts](demo/demo.ts), 60 lines).
+- **`after("1.5s")` is `Effect.sleep` on the SDK's durable clock**, so a whole demo plays out
+  in virtual time at once.
+- **[demo/compile.ts](demo/compile.ts) uses that to write the beats block the program means.**
+  Both programs compile to their demo files **line for line**: comments and whitespace aside,
+  the generated beats equal the originals (`demo/demo.test.ts`).
+
+```kdl
+// release-day.kdl (23 beat lines)
+tool "agent/copperwren/builder" after="0.5s" "Bash" input="cargo test --workspace" takes="3s" output="test result: ok. 412 passed; 0 failed; 0 ignored"
+progress "agent/copperwren/builder" after="0.5s" run="copperwren/release/2-3" step="build" "412 tests pass; packaging the release build."
+...
+tool "agent/copperwren/builder" after="0.3s" "Bash" input="cargo test --workspace" takes="2.5s" output="test result: ok. 412 passed; 0 failed; 0 ignored"
+```
+
+```ts
+// release-day.ts (30 lines)
+const suite = (takes: string) =>
+  tool(builder, "Bash", { input: "cargo test --workspace", takes, output: "test result: ok. 412 passed; 0 failed; 0 ignored" })
+...
+yield* suite("3s").pipe(after("0.5s"))
+yield* progress(builder, run, "build", "412 tests pass; packaging the release build.").pipe(after("0.5s"))
+...
+yield* suite("2.5s").pipe(after("0.3s"))
+```
+
+| | Beats file | Effect program |
+|---|---|---|
+| release-day | 23 lines | 30 lines, plus the shared 60-line `demo.ts` |
+| an alert needs an answer | 22 lines, one path | 41 lines, both paths |
+| Reuse | Copy the line | Functions (`suite` above) |
+| Robin's answer | The beats must assume one answer ("nothing follows from it unless a later beat shows it") | The program branches on it; [an-alert-answered-now.kdl](demo/an-alert-answered-now.kdl) is the other path, compiled |
+| Two agents at once | Beats are strictly sequential | `Effect.all` would overlap them, but the player has no way to say so; the compiler would have to serialize them |
+| Check before recording | `st demo check` reads the file | Compile it: instant, in virtual time |
+| Who can edit it | Anyone; it reads like a screenplay | Someone who knows TypeScript and Effect |
+
+What it shows:
+
+- **For a screencast, the beats file is the better artifact.** A demo is a linear screenplay
+  that a person reads, times and re-records. The file is shorter, needs no build, and its
+  author does not need to know Effect. Ordinary demos gain nothing from being programs.
+- **The program wins in two places.** Repetition (helpers) and branching on the person's answer.
+  Branching is the real one: in the alert demo the file has to assume "tonight". As a program,
+  one script covers both answers, and the compiler writes one plain file per path.
+- **A path does not compile cleanly.** After an ask, the program waits for the answer; a beats
+  file cannot. The compiler puts a key press there, with a comment saying why. If demos should
+  branch for real, the player should let a beat wait for the alert's answer (`after="answer"`).
+  Then a short `when answer="now" { ... }` block in the file would do what the program does,
+  without a program.
+- **The program is a good generator.** Writing in TypeScript and emitting the plain file keeps
+  `st demo play` simple and makes variants cheap: one per answer, per product name, per pace.
+  The program never has to be played directly.
+
+Verdict for demos: keep the plain format as the thing that plays. Missions as code does not
+make an ordinary demo easier; it helps only for generating variants and branches, and one small
+format addition, waiting for an answer, would cover most of that.
 
 ## What KDL has that the program form loses
 

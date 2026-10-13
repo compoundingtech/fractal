@@ -101,7 +101,7 @@ fn run<E: Engine>(dir: &Path) -> serde_json::Value {
 
     // Memory: hold 20 loaded engines at once and divide.
     let base = rss_bytes();
-    let held: Vec<E> = (0..20).map(|_| E::load(&bundle)).collect();
+    let mut held: Vec<E> = (0..20).map(|_| E::load(&bundle)).collect();
     let per_engine_rss = (rss_bytes().saturating_sub(base)) / 20;
     let engine_heap = held[0].heap_bytes();
     drop(held);

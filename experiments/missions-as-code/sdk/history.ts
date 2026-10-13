@@ -15,6 +15,7 @@ export type OpKind =
   | "wait" // a graph condition such as a merged pull request or a passing CI check
   | "timer" // a durable sleep; Effect.sleep, Effect.timeout and Schedule delays all use it
   | "marker" // patched(id): records that a run took a code path added by a later version
+  | "beat" // a scripted demo action for a player to perform (exp6-port/demo)
 
 export type HistoryEvent =
   | { type: "started"; at: number; program: string; version: string; input: Json }
