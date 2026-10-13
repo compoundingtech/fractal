@@ -1232,7 +1232,15 @@ mission "orchid/round-output" state="ready" {
 
     let checked = daemon.command(&["missions", "check", file, "--workspace", workspace]);
     let gates = checked["gates"].as_array().unwrap();
-    assert_eq!(gates.len(), 3, "{checked:#}");
+    // Normalization also lists the generated round mission; assert the relevant gates by name.
+    for name in ["mission script", "round step script", "round result"] {
+        assert!(gates.iter().any(|gate| gate["gate"] == name), "{checked:#}");
+    }
+    assert_eq!(
+        gates.iter().filter(|gate| gate["gate"] == "round result").count(),
+        1,
+        "{checked:#}"
+    );
     for gate in gates {
         if gate["gate"] == "round result" {
             assert_eq!(gate["answer"], "unchecked", "{gate:#}");
