@@ -22028,10 +22028,14 @@ mission "example/zero-run" state="ready" {
         assert_eq!(running.iter().find(|item| item["id"] == subject).unwrap()["state"], "running");
         // The reconciler on the owner host writes this when the pty or driver is gone.
         append("runtime.observed", json!({"status":"exited", "runtime_id":"native", "incarnation_id":"one"}));
-        let ended = client_agent_resources(&state.store, false, "", state.store.index().unwrap()).unwrap();
+        let index = state.store.index().unwrap();
+        // This seat has no declaration, so the current roster drops it once its runtime ends;
+        // the history roster still carries the card.
+        let current = client_agent_resources(&state.store, false, "", index).unwrap();
+        assert!(current.iter().all(|item| item["id"] != subject), "an ended runtime is not a current seat");
+        let ended = client_agent_resources(&state.store, true, "", index).unwrap();
         let ended = ended.iter().find(|item| item["id"] == subject).unwrap();
-        assert_ne!(ended["state"], "running", "{ended}");
-        assert_ne!(ended["state"], "starting");
+        assert_eq!(ended["state"], "stopped", "{ended}");
     }
 
     #[test]
