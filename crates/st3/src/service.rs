@@ -481,6 +481,88 @@ pub fn stop_owned_runtimes(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// The pid of the process that listens on `socket`, read from the connection itself, so it is the
+/// daemon of exactly this socket and of no other install.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn socket_owner_pid(socket: &Path) -> Option<u32> {
+    use std::os::fd::AsRawFd as _;
+    let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+    #[cfg(target_os = "linux")]
+    let pid = {
+        let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of_val(&credentials) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut size,
+            )
+        };
+        (result == 0).then_some(credentials.pid)?
+    };
+    #[cfg(target_os = "macos")]
+    let pid = {
+        let mut pid: libc::pid_t = 0;
+        let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast(),
+                &mut size,
+            )
+        };
+        (result == 0).then_some(pid)?
+    };
+    u32::try_from(pid).ok().filter(|pid| *pid > 1)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn socket_owner_pid(_socket: &Path) -> Option<u32> {
+    None
+}
+
+fn process_exists(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    unsafe { libc::kill(pid, 0) == 0 }
+    || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied
+}
+
+/// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
+/// then force it after `grace`. Only the process that answers on this socket (or, on Linux, the one
+/// that holds its startup lock) is signalled. Returns whether such a daemon was found and has ended.
+pub fn stop_daemon_at(socket: &Path, grace: std::time::Duration) -> Result<bool> {
+    let pid = socket_owner_pid(socket).or_else(|| crate::startup::read(socket).map(|r| r.pid));
+    let Some(pid) = pid.filter(|pid| *pid != std::process::id()) else {
+        return Ok(false);
+    };
+    let target = libc::pid_t::try_from(pid).context("the daemon's pid is out of range")?;
+    for (signal, wait) in [
+        (libc::SIGTERM, grace),
+        (libc::SIGKILL, std::time::Duration::from_secs(5)),
+    ] {
+        if unsafe { libc::kill(target, signal) } != 0
+            && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("signal the st daemon (pid {pid})"));
+        }
+        let deadline = std::time::Instant::now() + wait;
+        while process_exists(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !process_exists(pid) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn running_pty_ids(
     snapshot: impl IntoIterator<Item = st_runtime::PtyObservation>,
 ) -> std::collections::HashSet<String> {

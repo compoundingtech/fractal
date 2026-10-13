@@ -146,6 +146,89 @@ fn detached_daemon_receives_the_selected_reader_cache() {
     );
 }
 
+/// An instance whose person declined the service runs a plain `st3 up`. Uninstall stops that
+/// daemon itself, and only it; the same situation in the default install is still refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn uninstall_stops_an_instance_daemon_that_runs_without_a_service() {
+    let mut fixture = Fixture::new();
+    fixture.unpack_archive();
+    let instance_setup = |name: Option<&str>| {
+        let mut command = fixture.command(&fixture.path("archive/st"));
+        if let Some(name) = name {
+            command.args(["--instance", name]);
+        }
+        command
+            .args([
+                "setup",
+                "--person",
+                "ada",
+                "--yes",
+                "--install",
+                "false",
+                "--service",
+                "false",
+                "--harness",
+                "none",
+            ])
+            .output()
+            .unwrap()
+    };
+    let uninstall = |name: Option<&str>| {
+        let mut command = fixture.command(&fixture.path("archive/st"));
+        if let Some(name) = name {
+            command.args(["--instance", name]);
+        }
+        command
+            .args(["uninstall", "--yes", "--erase-local-graph"])
+            .output()
+            .unwrap()
+    };
+    let instance_socket = fixture.path("home/.st-instance/kept/run/st3.sock");
+    success(&instance_setup(Some("kept")));
+    let pid = st3::startup::read(&instance_socket)
+        .expect("instance setup started a live daemon")
+        .pid;
+    fixture.daemon_pid = Some(pid);
+    // A second daemon in the default install must not be touched by the instance's uninstall.
+    success(&instance_setup(None));
+    let default_pid = st3::startup::read(&fixture.path("run/st3.sock"))
+        .expect("default setup started a live daemon")
+        .pid;
+    assert_ne!(pid, default_pid);
+
+    let refused = uninstall(None);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("stop st3 up"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(st3::startup::read(&fixture.path("run/st3.sock")).is_some());
+
+    let stdout = success(&uninstall(Some("kept")));
+    assert!(stdout.contains("stopped\t"), "{stdout}");
+    assert!(stdout.contains("uninstalled"), "{stdout}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists()
+            || fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| stat.contains(") Z")),
+        "the instance daemon is still running"
+    );
+    assert!(!fixture.path("home/.st-instance").exists());
+    assert!(
+        st3::startup::read(&fixture.path("run/st3.sock")).is_some(),
+        "the default install's daemon must keep running"
+    );
+    unsafe {
+        libc::kill(default_pid as libc::pid_t, libc::SIGTERM);
+    }
+}
+
 #[test]
 fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
     if st3::test_support::supervise_test() {
