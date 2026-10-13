@@ -152,10 +152,11 @@ impl Store {
             .clone()
     }
 
-    /// Whether the shared counts were never computed since the store opened: as the daemon
-    /// starts they are, before any window asks. Marks them started.
-    pub(crate) fn start_summary_shared(&self) -> bool {
-        !self.smalltalk.summary_list.started.swap(true, AtomicOrdering::AcqRel)
+    /// Mark the shared counts computed once since the store opened. Until they are (the
+    /// complete roster they count agents from may not be published yet), the refresher keeps
+    /// computing them with no window asking, so the first window is served at once.
+    pub(crate) fn start_summary_shared(&self) {
+        self.smalltalk.summary_list.started.store(true, AtomicOrdering::Release);
     }
 
     /// Whether the shared counts are still to be computed as the daemon starts.
