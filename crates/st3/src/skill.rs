@@ -185,7 +185,13 @@ mod tests {
         }
         assert!(SKILL.contains(&format!("`{CODEX_PROFILE}` profile")));
         for mode in [AccessMode::Auto, AccessMode::Bypass] {
-            let flags = st_drivers::access::claude_defaults(mode, false).join(" ");
+            // The skill names the permission flags; the auto Read-rule `--settings` argument is
+            // documented in docs/st3/harness-access.md, not here.
+            let flags = st_drivers::access::claude_defaults(mode, false, Path::new("/workspace"))
+                .into_iter()
+                .take_while(|argument| argument != "--settings")
+                .collect::<Vec<_>>()
+                .join(" ");
             assert!(SKILL.contains(&format!("`{flags}`")), "{flags}");
         }
         assert!(SKILL.contains("## Permission modes"));
