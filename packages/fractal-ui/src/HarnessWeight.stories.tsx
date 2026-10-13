@@ -9,8 +9,8 @@ import type { HarnessWeight } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
-import { QuestionForm, QuestionSummary, NeedsYouBar, NeedsYouInbox } from './assistant-ui/QuestionForm'
-import { questionRequest } from './question-fixtures'
+import { NeedsYouBar, NeedsYouInbox } from './assistant-ui/NeedsYou'
+import { needsYouRequest } from './needs-you-fixtures'
 import { AgentMessage, OutgoingMessageRow } from './assistant-ui/AgentMessage'
 import { agentMessage, broadcastMessage } from './agent-message-fixtures'
 
@@ -26,11 +26,9 @@ export function HarnessWeightComparison({ scheme = 'dark' }: { readonly scheme?:
       <header {...stylex.props(styles.header)}><h2 {...stylex.props(styles.title)}>{variant.name}</h2><p {...stylex.props(styles.note)}>{variant.note}</p></header>
       <p {...stylex.props(styles.prose)}>The retry change is ready for review. I’m collecting the review and background check results.</p>
       <div {...stylex.props(styles.list)}>{harnessWeightExamples.map(item => <HarnessNotice key={item.id} item={item} weight={variant.weight} />)}</div>
-      <section aria-label={`Questions specimens · ${variant.name}`} {...stylex.props(styles.list)}>
-        <div data-component-name="QuestionForm" data-weight-class="card"><QuestionForm ariaLabel={`Question · ${variant.name}`} request={questionRequest} onOpenTerminal={fn()} /></div>
-        <div data-component-name="QuestionSummary" data-weight-class="row"><QuestionSummary ariaLabel={`Question outcome · ${variant.name}`} request={{ ...questionRequest, state: { _tag: 'answered', answers: { single: { selected: ['thread'] } }, by: 'Reviewer', at: 'a moment ago' } }} /></div>
-        <div data-component-name="NeedsYouBar" data-weight-class="shell"><NeedsYouBar ariaLabel={`Needs you · ${variant.name}`} requests={[questionRequest]} expanded={false} onToggle={fn()} /></div>
-        <div data-component-name="NeedsYouInbox" data-weight-class="shell"><NeedsYouInbox ariaLabel={`Needs you inbox · ${variant.name}`} requests={[questionRequest]} onShowInThread={fn()} onOpenTerminal={fn()} /></div>
+      <section aria-label={`Needs you specimens · ${variant.name}`} {...stylex.props(styles.list)}>
+        <div data-component-name="NeedsYouBar" data-weight-class="shell"><NeedsYouBar ariaLabel={`Needs you · ${variant.name}`} requests={[needsYouRequest]} expanded={false} onToggle={fn()} /></div>
+        <div data-component-name="NeedsYouInbox" data-weight-class="shell"><NeedsYouInbox ariaLabel={`Needs you inbox · ${variant.name}`} requests={[needsYouRequest]} onShowInThread={fn()} onOpenTerminal={fn()} /></div>
       </section>
       <section aria-label={`Messages specimens · ${variant.name}`} {...stylex.props(styles.list)}>
         <div data-component-name="AgentMessage" data-weight-class="card"><AgentMessage {...agentMessage} /></div>
@@ -51,12 +49,10 @@ export const Dark: Story = {
       const column = within(canvas.getByTestId(`harness-weight-${weight}`))
       await expect(column.getAllByTestId('harness-notice')).toHaveLength(8)
       await expect(column.queryByText(/<system-notice>|<irc|<task-result|## Goal/)).toBeNull()
-      for (const [name, weightClass] of [['QuestionForm', 'card'], ['QuestionSummary', 'row'], ['NeedsYouBar', 'shell'], ['NeedsYouInbox', 'shell']] as const) {
+      for (const [name, weightClass] of [['NeedsYouBar', 'shell'], ['NeedsYouInbox', 'shell']] as const) {
         await expect(canvas.getByTestId(`harness-weight-${weight}`).querySelector(`[data-component-name="${name}"]`)).toHaveAttribute('data-weight-class', weightClass)
       }
       const specimens = canvas.getByTestId(`harness-weight-${weight}`)
-      await expect(within(specimens.querySelector('[data-component-name="QuestionForm"]') as HTMLElement).getByRole('button', { name: 'Open terminal' })).toBeVisible()
-      await expect(within(specimens.querySelector('[data-component-name="QuestionSummary"]') as HTMLElement).getByRole('button', { name: /Answered.*This thread/ })).toHaveAttribute('aria-expanded', 'false')
       await expect(within(specimens.querySelector('[data-component-name="NeedsYouBar"]') as HTMLElement).getByRole('button', { name: /is waiting on you/ })).toHaveAttribute('aria-expanded', 'false')
       await expect(within(specimens.querySelector('[data-component-name="NeedsYouInbox"]') as HTMLElement).getByRole('region', { name: /^Needs you inbox ·/ }).querySelector('details')).not.toHaveAttribute('open')
       for (const [name, weightClass] of [['AgentMessage', 'card'], ['OutgoingMessageRow', 'row']] as const) {
