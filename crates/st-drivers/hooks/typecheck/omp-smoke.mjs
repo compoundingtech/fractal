@@ -88,10 +88,12 @@ const handlers = new Map();
 // Every message the extension hands to omp, with the options it chose.
 const handedOver = [];
 const sessionMessages = [];
+let handoffWait;
 const pi = {
   on: (name, handler) => handlers.set(name, handler),
   sendUserMessage: (content, options) => {
     handedOver.push(options === undefined ? { content } : { content, options });
+    return handoffWait;
   },
   sendMessage: (message, options) => sessionMessages.push({ message, options }),
 };
@@ -533,6 +535,51 @@ await pause(200);
 assert.deepStrictEqual(handedOver.slice(beforeHumanRestart), [{ content: "after session restart" }]);
 assert.strictEqual(acknowledged().filter(id => id === "message/human-restart").length, 1);
 fs.rmSync(outboxPath, { force: true });
+
+// An earlier asynchronous native handoff can delay a release beyond its boundary.
+// That release must not take mail held for a newer tool batch or a newly opened modal.
+for (const newerBoundary of ["batch", "ask"]) {
+  await handlers.get("session_start")({}, bareCtx);
+  let finishHandoff;
+  handoffWait = new Promise(resolve => { finishHandoff = resolve; });
+  const beforeDeferred = handedOver.length;
+  sendMail("pending native handoff");
+  await pause(150);
+  assert.strictEqual(handedOver.length, beforeDeferred + 1);
+  await handlers.get("agent_start")({}, holdCtx);
+  sendMail("eligible at old boundary");
+  await pause(150);
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  await handlers.get("agent_start")({}, holdCtx);
+  if (newerBoundary === "batch") {
+    await toolCall("newer-batch");
+  } else {
+    await handlers.get("tool_call")({ toolName: "ask", toolCallId: "deferred-ask",
+      input: { questions: [{ question: "Proceed?" }] } }, holdCtx);
+  }
+  sendMail("held at new boundary");
+  await pause(150);
+  handoffWait = undefined;
+  finishHandoff();
+  await pause(150);
+  if (newerBoundary === "batch") {
+    assert.deepStrictEqual(handedOver.slice(beforeDeferred), [
+      { content: "pending native handoff" },
+      { content: "eligible at old boundary", options: { deliverAs: "steer" } },
+    ], "a deferred release cannot drain the new batch's mail");
+    await toolResult("newer-batch");
+    assert.deepStrictEqual(handedOver.at(-1),
+      { content: "held at new boundary", options: { deliverAs: "steer" } });
+  } else {
+    assert.deepStrictEqual(handedOver.slice(beforeDeferred), [{ content: "pending native handoff" }],
+      "a newly opened modal fences an already queued release");
+    await handlers.get("tool_result")({ toolCallId: "deferred-ask" }, holdCtx);
+    assert.deepStrictEqual(handedOver.at(-1),
+      { content: "eligible at old boundary\n\nheld at new boundary", options: { deliverAs: "steer" } });
+  }
+  await handlers.get("agent_end")(successfulEnd, holdCtx);
+  fs.rmSync(outboxPath, { force: true });
+}
 
 
 // A channel that dies during a hold must be replaced. The successor re-sends the unacknowledged

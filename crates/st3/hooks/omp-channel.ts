@@ -967,9 +967,14 @@ export default function (pi: ExtensionAPI) {
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
     clearHoldTimer();
     if (humanBlocked()) return Promise.resolve();
+    // A deferred boundary may release only its eligible prefix, never a newer batch's mail.
+    const last = heldMessages().at(-1);
+    if (!last) return Promise.resolve();
     const deliver = async () => {
       if (humanBlocked()) return;
-      const current = heldMessages().splice(0).filter((message) => message.channel === state.child);
+      const end = heldMessages().indexOf(last);
+      if (end < 0) return;
+      const current = heldMessages().splice(0, end + 1).filter((message) => message.channel === state.child);
       if (current.length > 0) await handOff(current);
     };
     state.handoff = (state.handoff ?? Promise.resolve()).then(deliver, deliver);
