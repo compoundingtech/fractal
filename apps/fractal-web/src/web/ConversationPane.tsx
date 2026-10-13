@@ -13,6 +13,8 @@ import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
+import { QuestionDock, QuestionDockGroup } from './questions/QuestionDock.tsx'
+import { pendingQuestionRequests } from './questions/projection.ts'
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
@@ -107,6 +109,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     refusal, onRefused: setRefusal,
   })
   const retryConversation = source.retryConversation
+  const questions = feed._tag === 'Observed' ? pendingQuestionRequests(feed.value.items, agentName) : []
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: state._tag === 'Observed' && state.isRunning }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
@@ -135,6 +138,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />
     </div>
+    {questions.length > 0 && <QuestionDockGroup>{questions.map(request => <QuestionDock key={request.id} request={request} now={now} />)}</QuestionDockGroup>}
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, paddingBottom: spaceVars.lg }}>

@@ -34,6 +34,7 @@ const source = vi.hoisted(() => ({
   feed: { _tag: 'Waiting' } as Feed<ConversationPage>,
   sync: undefined as FeedSyncObservation | undefined,
   now: 1000,
+  allowSend: false,
   runtimeItems: [] as NonNullable<ConversationRuntimeOptions['messages']>[],
   transcriptTurns: [] as (readonly TranscriptTurn[])[],
   scrollToBottomKeys: [] as (string | undefined)[],
@@ -47,10 +48,10 @@ vi.mock('../data/react.tsx', async () => {
   return ({
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
-  useDataSource: () => ({ agents, conversationInterest: undefined }),
+  useDataSource: () => ({ agents, conversationInterest: undefined, ...(source.allowSend ? { attachments: { send: vi.fn() } } : {}) }),
   useFeedInterest: () => {},
   useNow: () => source.now,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: source.allowSend ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
   })
 })
 
@@ -106,6 +107,7 @@ const container = document.createElement('div')
 
 beforeEach(() => {
   source.now = 1000
+  source.allowSend = false
   source.runtimeItems = []
   source.transcriptTurns = []
   source.scrollToBottomKeys = []
@@ -142,6 +144,40 @@ const mount = async (ux?: UxTelemetry) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('pins a native pending ask expanded without stealing composer focus', async () => {
+    source.allowSend = true
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false } }
+    await mount()
+    const composer = container.querySelector<HTMLTextAreaElement>('textarea')
+    composer?.focus()
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: [...scenario, {
+      _tag: 'ToolCall', id: 'ask', callId: 'ask-call', name: 'ask', status: 'running', callSeen: true, at: at(9),
+      input: { questions: [{ question: 'Which checks should run?', options: [{ label: 'Typecheck' }] }] },
+    }], hasOlder: false } }
+    await mount()
+    const question = container.querySelector('[data-testid="question-dock"]')
+    expect(question?.querySelector('[data-question-panel]')).not.toBeNull()
+    expect(question?.textContent).toContain('Read only')
+    expect(question?.querySelector('[data-question-stop="note"]')).toBeNull()
+    expect(question?.querySelector('button')).toBeNull()
+    expect(document.activeElement).toBe(composer)
+    expect(container.querySelector('[data-testid="conversation-history-host"]')?.contains(question)).toBe(false)
+  })
+  it('shares one pane-relative scroll budget across multiple pending asks', async () => {
+    const asks: ConversationItem[] = [1, 2, 3].map(index => ({
+      _tag: 'ToolCall', id: `ask-${index}`, callId: `call-${index}`, name: 'ask', status: 'running', callSeen: true, at: at(9),
+      input: { questions: [{ question: `Question ${index}`, options: [{ label: 'Typecheck' }] }] },
+    }))
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: asks, hasOlder: false } }
+    await mount()
+    const group = container.querySelector<HTMLElement>('[data-testid="question-dock-group"]')
+    expect(container.querySelectorAll('[data-testid="question-dock-group"]')).toHaveLength(1)
+    expect(group?.querySelectorAll('[data-testid="question-dock"]')).toHaveLength(3)
+    expect(group?.style.maxHeight).toBe('45%')
+    expect(group?.style.minHeight).toBe('0')
+    expect(group?.style.overflowY).toBe('auto')
+    expect(container.querySelector('[data-testid="conversation-composer-dock"]')?.parentElement).toBe(group?.parentElement)
+  })
   it('insets the composer dock so its focus outline stays inside the viewport', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     await mount()

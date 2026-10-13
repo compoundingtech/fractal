@@ -232,7 +232,7 @@ export function LiveAgentWorkspace({ ux, onSelectConversation }: { readonly ux?:
                         </div>)}
                       </div> : null}
                       {filtered.map((row) => (
-                        <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={[]} query={search} active={current === row.ref} onOpen={() => select(row.ref)} />
+                        <SidebarAgentRow key={row.ref} item={sidebarRow({ agent: row, stale, now })} now={now} variant="SR-2" layout="SR2-A" glyph="SG-1" extraSignals={['X-needs']} query={search} active={current === row.ref} onOpen={() => select(row.ref)} />
                       ))}
                     </nav>
                     {fleet._tag !== 'Observed' ? (
