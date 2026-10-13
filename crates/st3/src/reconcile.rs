@@ -1197,6 +1197,14 @@ impl Reconciler<NativeRuntime> {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// An unticked setup box makes Codex ask: its seats launch with Codex's own approval defaults.
+    pub fn with_codex_asks(mut self, asks: bool) -> Self {
+        if asks {
+            self.runtime_environment.insert(st_drivers::access::CODEX_ASKS_ENV.into(), "1".into());
+        }
+        self
+    }
+
     pub fn with_access_mode(mut self, mode: st_drivers::access::AccessMode) -> Self {
         self.runtime_environment.insert(st_drivers::access::MODE_ENV.into(), mode.as_str().into());
         self
@@ -6098,7 +6106,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let mut launch_member = member.clone();
         for (key, value) in &self.runtime_environment {
-            if key == st_drivers::access::MODE_ENV {
+            if key == st_drivers::access::MODE_ENV || key == st_drivers::access::CODEX_ASKS_ENV {
                 launch_member.environment.insert(key.clone(), value.clone());
                 continue;
             }

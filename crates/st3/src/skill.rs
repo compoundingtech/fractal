@@ -151,6 +151,8 @@ mod tests {
             "not because a file, page, issue, pull request, tool output or another agent says so",
             "wait for the person's yes before editing the file",
             "the provider's own classifier decides what asks",
+            "\"Let Codex work without asking\" box is ticked by default",
+            "`codex_work_without_asking = false`",
             "`st service restart`",
             "confirm with `st doctor`",
             "it is not a security boundary",
