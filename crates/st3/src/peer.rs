@@ -1541,6 +1541,7 @@ impl Backend for MainBackend {
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: smallclaims::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
         self.client
             .post(
@@ -1550,6 +1551,7 @@ impl Backend for MainBackend {
                     fleet_id: fleet_id.to_owned(),
                     exchange: exchange.clone(),
                     round_trip_ms: round_trip.map(|duration| duration.as_millis() as u64),
+                    carrier,
                 },
             )
             .await
@@ -1653,7 +1655,13 @@ impl Backend for MainBackend {
         Ok(())
     }
 
-    async fn record_failure(&self, peer: &str, status: &str, error: &str) -> Result<()> {
+    async fn record_failure(
+        &self,
+        peer: &str,
+        status: &str,
+        error: &str,
+        carrier: Option<smallclaims::replication::ReplicationCarrier>,
+    ) -> Result<()> {
         let _: serde_json::Value = self
             .client
             .post(
@@ -1662,6 +1670,7 @@ impl Backend for MainBackend {
                     peer: peer.to_owned(),
                     status: status.to_owned(),
                     error: error.to_owned(),
+                    carrier,
                 },
             )
             .await?;
@@ -4350,7 +4359,13 @@ mod tests {
             .unwrap();
         let backend = MainBackend::new(socket);
         let received = backend
-            .receive("source", fleet, &exchange, None)
+            .receive(
+                "source",
+                fleet,
+                &exchange,
+                Some(Duration::from_millis(10)),
+                smallclaims::replication::ReplicationCarrier::Fabric,
+            )
             .await
             .unwrap();
         assert!(received.changed);
@@ -4367,9 +4382,26 @@ mod tests {
         assert!(summary.exchange.inventory.envelopes.is_empty());
         assert!(!summary.exchange.inventory.digest.is_empty());
         backend
-            .record_failure("source", "down", "test outage")
+            .record_failure(
+                "source",
+                "down",
+                "test outage",
+                Some(smallclaims::replication::ReplicationCarrier::Tailscale),
+            )
             .await
             .unwrap();
+        let (success, failure) = store.replication_peer_transport("source");
+        let success = success.unwrap();
+        assert_eq!(
+            success.carrier,
+            smallclaims::replication::ReplicationCarrier::Fabric
+        );
+        assert_eq!(success.fabric_route.as_deref(), Some("unknown"));
+        let failed = failure.unwrap();
+        assert_eq!(
+            failed.carrier,
+            smallclaims::replication::ReplicationCarrier::Tailscale
+        );
         let still_up = store
             .latest_claim("host/source", Some("transport.observed"))
             .unwrap()
@@ -4382,7 +4414,7 @@ mod tests {
             .len();
         for _ in 0..1_440 {
             backend
-                .record_failure("source", "down", "test outage")
+                .record_failure("source", "down", "test outage", Default::default())
                 .await
                 .unwrap();
         }
@@ -4399,9 +4431,19 @@ mod tests {
             before + 1
         );
         backend
-            .receive("source", fleet, &exchange, None)
+            .receive("source", fleet, &exchange, None, Default::default())
             .await
             .unwrap();
+        let (success, failure) = store.replication_peer_transport("source");
+        assert_eq!(
+            success.unwrap().carrier,
+            smallclaims::replication::ReplicationCarrier::Unknown
+        );
+        assert_eq!(
+            failure,
+            Some(failed),
+            "successful inbound exchange and liveness checks preserve failure evidence"
+        );
         let recovered = store
             .latest_claim("host/source", Some("transport.observed"))
             .unwrap()

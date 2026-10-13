@@ -57,6 +57,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> impl Future<Output = Result<ReplicationReceiveResponse>> + Send;
 
     /// Answer a peer's heal question from this node's claims.
@@ -105,6 +106,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
         peer: &str,
         status: &str,
         error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// Publish host-local worker progress without adding replicated claims.
@@ -202,6 +204,7 @@ where
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
         let backend = self.clone();
         let peer = peer.to_owned();
@@ -213,11 +216,12 @@ where
                 store.record_replication_round_trip(round_trip);
             }
             let receipt = store
-                .receive_replication_exchange_asking(
+                .receive_replication_exchange_via(
                     &peer,
                     &fleet_id,
                     &exchange,
                     round_trip.is_some(),
+                    carrier,
                 )
                 .map_err(anyhow::Error::msg)?;
             store.record_transport_observation(&peer, "up", None, None)?;
@@ -293,8 +297,17 @@ where
         Ok(())
     }
 
-    async fn record_failure(&self, peer: &str, status: &str, error: &str) -> Result<()> {
-        if self.store().record_peer_failure(peer, status, error)? {
+    async fn record_failure(
+        &self,
+        peer: &str,
+        status: &str,
+        error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+    ) -> Result<()> {
+        if self
+            .store()
+            .record_peer_failure_via(peer, status, error, carrier)?
+        {
             self.store()
                 .record_transport_observation(peer, status, Some(error), None)?;
         }

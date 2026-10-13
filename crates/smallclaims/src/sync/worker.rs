@@ -531,7 +531,7 @@ pub async fn run<B: Backend>(
                 tokio::time::sleep(worker_interval(Duration::from_secs(60))).await;
                 super::telemetry::record_error(&name, super::telemetry::ErrorReason::Down);
                 let _ = backend
-                    .record_failure(&name, "down", "no recent inbound exchange")
+                    .record_failure(&name, "down", "no recent inbound exchange", None)
                     .await;
             }
         });
@@ -1147,6 +1147,7 @@ async fn dial_peer<B: Backend>(
         }
         last_attempt_unix_ms = attempt_unix_ms;
         record_worker(&backend, &name, "exchange", attempt_unix_ms, None).await;
+        let carrier = selected.as_ref().map(Route::carrier).unwrap_or_default();
         let is_http = matches!(selected, Some(Route::Http(_)));
         let url = match selected {
             Some(Route::Http(url)) => Some(url),
@@ -1167,7 +1168,12 @@ async fn dial_peer<B: Backend>(
                                     &name, super::telemetry::ErrorReason::Refused,
                                 );
                                 let _ = backend
-                                    .record_failure(&name, "refused", &error.to_string())
+                                    .record_failure(
+                                        &name,
+                                        "refused",
+                                        &error.to_string(),
+                                        Some(carrier),
+                                    )
                                     .await;
                                 route = route.wrapping_add(1);
                                 continue;
@@ -1176,7 +1182,7 @@ async fn dial_peer<B: Backend>(
                                 &name, super::telemetry::ErrorReason::Down,
                             );
                             let _ = backend
-                                .record_failure(&name, "down", &error.to_string())
+                                .record_failure(&name, "down", &error.to_string(), Some(carrier))
                                 .await;
                             None
                         }
@@ -1214,7 +1220,7 @@ async fn dial_peer<B: Backend>(
             name: name.clone(),
             url,
         };
-        match exchange(&http, &backend, &node, &peer, &auth, &fleet).await {
+        match exchange_via(&http, &backend, &node, &peer, &auth, &fleet, carrier).await {
             Ok((moved, heal_now)) => {
                 if is_http {
                     last_http_success = Some((peer.url.clone(), tokio::time::Instant::now()));
@@ -1269,7 +1275,7 @@ async fn dial_peer<B: Backend>(
                     "down"
                 };
                 let _ = backend
-                    .record_failure(&peer.name, status, &error.to_string())
+                    .record_failure(&peer.name, status, &error.to_string(), Some(carrier))
                     .await;
                 let delay = retry_delay(backoff.next(), &fleet, &name);
                 record_worker(&backend, &name, "backoff", attempt_unix_ms, Some(delay)).await;
@@ -1595,7 +1601,13 @@ async fn receive_exchange<B: Backend>(
                 let result = async {
                     let received = state
                         .backend
-                        .receive(&relay, state.auth.fleet_id(), &request, None)
+                        .receive(
+                            &relay,
+                            state.auth.fleet_id(),
+                            &request,
+                            None,
+                            Default::default(),
+                        )
                         .await?;
                     if received.changed {
                         state.backend.changed().await;
@@ -2140,12 +2152,39 @@ pub async fn exchange<B: Backend>(
     auth: &FleetAuth,
     fleet: &FleetContext,
 ) -> Result<(bool, bool)> {
+    let carrier = parse_route(&peer.url)
+        .map(|route| route.carrier())
+        .unwrap_or_default();
+    exchange_via(http, backend, node, peer, auth, fleet, carrier).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exchange_via<B: Backend>(
+    http: &reqwest::Client,
+    backend: &B,
+    node: &str,
+    peer: &PeerConfig,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    carrier: crate::replication::ReplicationCarrier,
+) -> Result<(bool, bool)> {
     let mut telemetry = super::telemetry::Round::new(&peer.name);
-    let result = exchange_inner(http, backend, node, peer, auth, fleet, &mut telemetry).await;
+    let result = exchange_inner(
+        http,
+        backend,
+        node,
+        peer,
+        auth,
+        fleet,
+        &mut telemetry,
+        carrier,
+    )
+    .await;
     telemetry.finish(&result);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exchange_inner<B: Backend>(
     http: &reqwest::Client,
     backend: &B,
@@ -2154,6 +2193,7 @@ async fn exchange_inner<B: Backend>(
     auth: &FleetAuth,
     fleet: &FleetContext,
     telemetry: &mut super::telemetry::Round,
+    carrier: crate::replication::ReplicationCarrier,
 ) -> Result<(bool, bool)> {
     let mut heal_now = false;
     // One compact round, then at most one full-inventory round if the compact prefix
@@ -2179,7 +2219,13 @@ async fn exchange_inner<B: Backend>(
         let round_trip = started.elapsed();
         let different = remote.inventory.digest != query.inventory.digest;
         let received = backend
-            .receive(&peer.name, auth.fleet_id(), &remote, Some(round_trip))
+            .receive(
+                &peer.name,
+                auth.fleet_id(),
+                &remote,
+                Some(round_trip),
+                carrier,
+            )
             .await?;
         telemetry.pull(received.receipt.received);
         // Progress means new envelopes stored on one side or the other. A peer that keeps sending,
@@ -2213,7 +2259,13 @@ async fn exchange_inner<B: Backend>(
                 !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
             telemetry.push(push.envelopes.len(), pushed);
             let received = backend
-                .receive(&peer.name, auth.fleet_id(), &response, Some(round_trip))
+                .receive(
+                    &peer.name,
+                    auth.fleet_id(),
+                    &response,
+                    Some(round_trip),
+                    carrier,
+                )
                 .await?;
             telemetry.pull(received.receipt.received);
             pulled_follow_up = received.receipt.received != 0;

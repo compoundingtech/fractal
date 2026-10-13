@@ -2045,3 +2045,17 @@ matching, even when the expected incarnation is also missing. A summary is not r
 
 The optional claim field changes the registry digest. Older members keep new-field submissions
 as waiting records until upgrade; see [rolling upgrades](../replication.md#rolling-upgrades-and-waiting-claims).
+
+### Exchange carrier observations
+
+`SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each
+an `ExchangeTransport` with `at` (ISO timestamp), `carrier` (an open string:
+`tailscale`, `fabric`, `loopback`, or `unknown` today), and optional `fabric_route`
+(`unknown` for Fabric today). They describe this serving host's local observation,
+not replicated reachability or advertised endpoints. Success and failure records
+are independent: a successful fallback preserves the failed attempt's carrier.
+Incoming exchanges have unknown carrier without local dial evidence; Fabric's
+loopback tunnel address cannot establish an incoming carrier. Restart clears
+these records, and probes never change them. Existing sync notice conditions
+remain the same. Older servers omit these optional fields; older clients ignore
+the additions. No API version, scope, operation or claim shape changes.

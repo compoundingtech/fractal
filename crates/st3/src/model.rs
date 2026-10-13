@@ -1631,7 +1631,19 @@ pub struct ClientSyncNotice {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ClientExchangeTransport {
+    pub at: String,
+    pub carrier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_route: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientSyncPeer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_successful_exchange: Option<ClientExchangeTransport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_exchange: Option<ClientExchangeTransport>,
     pub host_id: String,
     pub peer_only_envelopes: u64,
     pub local_only_envelopes: u64,

@@ -1515,6 +1515,12 @@ mod retry_tests {
         })
         .await
         .expect("a refused Fabric route must not block the HTTP fallback");
+        use crate::replication::ReplicationCarrier;
+        let (success, failure) = stores[1].replication_peer_transport("cobalt");
+        assert_eq!(success.unwrap().carrier, ReplicationCarrier::Loopback);
+        let failed_fabric = failure.unwrap();
+        assert_eq!(failed_fabric.carrier, ReplicationCarrier::Fabric);
+        assert_eq!(failed_fabric.fabric_route.as_deref(), Some("unknown"));
         // A changed membership route is usable immediately, despite the grant cooldown.
         let before_route_change = stores[1].replication_peer_last_success("cobalt").unwrap();
         std::fs::write(&grant, addresses[2].to_string()).unwrap();
@@ -1540,6 +1546,20 @@ mod retry_tests {
         })
         .await
         .expect("a changed route must interrupt the refusal cooldown");
+        let (success, failure) = stores[1].replication_peer_transport("cobalt");
+        let fabric_success = success.unwrap();
+        assert_eq!(
+            fabric_success.carrier,
+            ReplicationCarrier::Fabric,
+            "the tunnel URL is loopback, the carrier is Fabric"
+        );
+        assert_eq!(fabric_success.fabric_route.as_deref(), Some("unknown"));
+        assert_eq!(
+            failure,
+            Some(failed_fabric),
+            "later success retains the earlier failed route"
+        );
+
         for task in tasks {
             task.abort();
             let _ = task.await;
@@ -2043,10 +2063,11 @@ impl Backend for SlowExport {
         fleet_id: &str,
         exchange: &ReplicationExchange,
         round_trip: Option<Duration>,
+        carrier: crate::replication::ReplicationCarrier,
     ) -> Result<ReplicationReceiveResponse> {
         let result = self
             .local
-            .receive(peer, fleet_id, exchange, round_trip)
+            .receive(peer, fleet_id, exchange, round_trip, carrier)
             .await?;
         self.receives
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2091,8 +2112,16 @@ impl Backend for SlowExport {
     async fn fleet_view(&self) -> Result<FleetView> {
         self.local.fleet_view().await
     }
-    async fn record_failure(&self, peer: &str, status: &str, error: &str) -> Result<()> {
-        self.local.record_failure(peer, status, error).await
+    async fn record_failure(
+        &self,
+        peer: &str,
+        status: &str,
+        error: &str,
+        carrier: Option<crate::replication::ReplicationCarrier>,
+    ) -> Result<()> {
+        self.local
+            .record_failure(peer, status, error, carrier)
+            .await
     }
 }
 
@@ -2243,7 +2272,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
     assert_eq!(backend.receives.load(Ordering::Relaxed), 1);
     Local(left.clone())
-        .receive("cedar", fleet_id, &answer, None)
+        .receive("cedar", fleet_id, &answer, None, Default::default())
         .await
         .unwrap();
     for store in [&left, &right] {

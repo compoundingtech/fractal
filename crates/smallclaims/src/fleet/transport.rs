@@ -317,6 +317,36 @@ pub enum Route {
     Fabric { node: String, protocol: String },
 }
 
+impl Route {
+    /// Classify the actual dial route, including config overrides. A Fabric tunnel's
+    /// ephemeral loopback URL must never be classified as a loopback carrier.
+    pub fn carrier(&self) -> crate::replication::ReplicationCarrier {
+        use crate::replication::ReplicationCarrier;
+        match self {
+            Self::Fabric { .. } => ReplicationCarrier::Fabric,
+            Self::Http(url) => {
+                let host = reqwest::Url::parse(url).ok().and_then(|url| {
+                    url.host_str()
+                        .map(|host| host.trim_matches(['[', ']']).to_owned())
+                });
+                match host.as_deref() {
+                    Some(host) if host.eq_ignore_ascii_case("localhost") => {
+                        ReplicationCarrier::Loopback
+                    }
+                    Some(host) => match host.parse::<IpAddr>() {
+                        Ok(address) if address.is_loopback() => ReplicationCarrier::Loopback,
+                        Ok(address) if is_tailnet_address(&address) => {
+                            ReplicationCarrier::Tailscale
+                        }
+                        _ => ReplicationCarrier::Unknown,
+                    },
+                    None => ReplicationCarrier::Unknown,
+                }
+            }
+        }
+    }
+}
+
 /// A lasting peer route. HTTP stays on loopback or the encrypted tailnet; Fabric names
 /// the remote peer/protocol, never an ephemeral local tunnel address.
 pub fn parse_route(route: &str) -> Option<Route> {
@@ -417,6 +447,32 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn carrier_comes_from_the_dial_route_including_overrides() {
+        use crate::replication::ReplicationCarrier;
+        for (route, carrier) in [
+            ("http://127.0.0.1:4000", ReplicationCarrier::Loopback),
+            ("http://[::1]:4000", ReplicationCarrier::Loopback),
+            ("http://localhost:4000", ReplicationCarrier::Loopback),
+            ("http://100.101.102.103:4000", ReplicationCarrier::Tailscale),
+            (
+                "http://[fd7a:115c:a1e0::1]:4000",
+                ReplicationCarrier::Tailscale,
+            ),
+            ("fabric://birch/st3-peer-v1", ReplicationCarrier::Fabric),
+        ] {
+            assert_eq!(parse_route(route).unwrap().carrier(), carrier, "{route}");
+        }
+        assert_eq!(
+            Route::Http("http://example.invalid:4000".into()).carrier(),
+            ReplicationCarrier::Unknown
+        );
+        assert_eq!(
+            Route::Http("malformed".into()).carrier(),
+            ReplicationCarrier::Unknown
+        );
+    }
 
     #[test]
     fn tailnet_ranges_are_exact() {

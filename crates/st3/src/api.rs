@@ -2111,24 +2111,36 @@ fn client_sync_notice(state: &AppState) -> Option<ClientSyncNotice> {
         .replication_peer_sync(&replication_peer_names(state))
         .into_iter()
         .filter(|(_, sync)| sync.catching_up || sync.diverged)
-        .map(|(peer, sync)| ClientSyncPeer {
-            host_id: client_host_id(&peer),
-            peer_only_envelopes: sync.peer_only_envelopes,
-            local_only_envelopes: sync.local_only_envelopes,
-            last_exchange_at: state
-                .store
-                .replication_peer_last_success(&peer)
-                .ok()
-                .flatten()
-                .map(client_timestamp),
-            estimated_catch_up_seconds: sync
-                .estimated_catch_up_seconds
-                .filter(|seconds| *seconds <= smallclaims::replication::MAX_SAFE_DURATION_SECONDS),
-            diverged_since: sync
-                .diverged
-                .then_some(sync.graph_differs_since_unix_ms)
-                .flatten()
-                .map(client_timestamp),
+        .map(|(peer, sync)| {
+            let (success, failure) = state.store.replication_peer_transport(&peer);
+            let transport = |record: smallclaims::replication::ReplicationExchangeTransport| {
+                crate::model::ClientExchangeTransport {
+                    at: client_timestamp(record.at_unix_ms),
+                    carrier: record.carrier.as_str().into(),
+                    fabric_route: record.fabric_route,
+                }
+            };
+            ClientSyncPeer {
+                last_successful_exchange: success.map(transport),
+                last_failed_exchange: failure.map(transport),
+                host_id: client_host_id(&peer),
+                peer_only_envelopes: sync.peer_only_envelopes,
+                local_only_envelopes: sync.local_only_envelopes,
+                last_exchange_at: state
+                    .store
+                    .replication_peer_last_success(&peer)
+                    .ok()
+                    .flatten()
+                    .map(client_timestamp),
+                estimated_catch_up_seconds: sync.estimated_catch_up_seconds.filter(|seconds| {
+                    *seconds <= smallclaims::replication::MAX_SAFE_DURATION_SECONDS
+                }),
+                diverged_since: sync
+                    .diverged
+                    .then_some(sync.graph_differs_since_unix_ms)
+                    .flatten()
+                    .map(client_timestamp),
+            }
         })
         .collect::<Vec<_>>();
     let sync_state = if peers.iter().any(|peer| peer.diverged_since.is_some()) {
@@ -9128,11 +9140,12 @@ async fn replication_receive(
             store.record_replication_round_trip(Duration::from_millis(round_trip_ms));
         }
         // Only the worker's own requests carry a round trip, and only they heal.
-        let receipt = store.receive_replication_exchange_asking(
+        let receipt = store.receive_replication_exchange_via(
             &request.peer,
             &request.fleet_id,
             &request.exchange,
             request.round_trip_ms.is_some(),
+            request.carrier,
         )?;
         if store
             .observes_transport_to(&request.peer)
@@ -9224,10 +9237,12 @@ async fn replication_receive(
             crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::ReplicationReceive, None);
             state.notify.notify_one();
         }
-        state
-            .event_notify
-            .send_modify(|generation| *generation = generation.saturating_add(1));
     }
+    // Receipt updates host-local exchange evidence even when the graph stayed unchanged.
+    // Wake client streams, without asking the reconciler or replication worker to run.
+    state
+        .event_notify
+        .send_modify(|generation| *generation = generation.saturating_add(1));
     Ok(Json(response))
 }
 
@@ -9304,10 +9319,16 @@ async fn replication_peer_failure(
     State(state): State<AppState>,
     Json(request): Json<ReplicationPeerFailureRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let carrier_observed = request.carrier.is_some();
     let store = state.store.clone();
     let changed = blocking_store(move || {
         let before_index = store.index()?;
-        let stale = store.record_peer_failure(&request.peer, &request.status, &request.error)?;
+        let stale = store.record_peer_failure_via(
+            &request.peer,
+            &request.status,
+            &request.error,
+            request.carrier,
+        )?;
         if stale && store.observes_transport_to(&request.peer)? {
             store.record_transport_observation(
                 &request.peer,
@@ -9324,6 +9345,10 @@ async fn replication_peer_failure(
     .await?;
     if changed {
         signal_changed(&state);
+    } else if carrier_observed {
+        state
+            .event_notify
+            .send_modify(|generation| *generation = generation.saturating_add(1));
     }
     Ok(Json(json!({ "recorded": true, "changed": changed })))
 }
@@ -21089,6 +21114,60 @@ agent "good" {{ workspace {:?}; command "true" }}
         assert_eq!(response["peers"][0]["worker"]["next_retry_at_unix_ms"], json!(retry));
         assert!(response["peers"][0]["last_error"].is_null());
         assert_eq!(state.store.index().unwrap(), index);
+    }
+
+    #[tokio::test]
+    async fn replication_exchange_carrier_status_notifies_clients_without_replicating_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        state.configured_peers = vec!["cedar".into()];
+        // Existing reachability is already unknown, so this refusal writes only local evidence.
+        state
+            .store
+            .record_transport_observation("cedar", "unknown", None, None)
+            .unwrap();
+        let index = state.store.index().unwrap();
+        let mut events = state.event_notify.subscribe();
+        let app = router(state.clone());
+        let (status, response) = json_request(app.clone(), "/v1/internal/replication/peer-failure", json!({
+            "peer": "cedar", "status": "refused", "error": "service grant refused", "carrier": "fabric"
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["changed"], false);
+        assert!(
+            events.has_changed().unwrap(),
+            "local evidence must notify client streams"
+        );
+        events.borrow_and_update();
+        let (status, response) = get_request(app.clone(), "/v1/replication/status").await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let failed = &response["peers"][0]["last_failed_exchange"];
+        assert_eq!(failed["carrier"], "fabric");
+        assert_eq!(failed["fabric_route"], "unknown");
+        assert!(failed["at_unix_ms"].as_u64().is_some());
+        assert!(
+            response["peers"][0]
+                .get("last_successful_exchange")
+                .is_none()
+        );
+        assert_eq!(state.store.index().unwrap(), index);
+        assert!(!state.state_dir.join("replication.wake").exists());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), state.notify.notified())
+                .await
+                .is_err()
+        );
+        // Old-worker/liveness reports have no dial evidence and leave the record intact.
+        let (status, _) = json_request(
+            app,
+            "/v1/internal/replication/peer-failure",
+            json!({
+                "peer": "cedar", "status": "refused", "error": "service grant refused"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!events.has_changed().unwrap());
     }
 
     #[tokio::test]
