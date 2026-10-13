@@ -449,6 +449,9 @@ recording.
 | Trim, tombstone and replication tests | `crates/st3/src/store/tombstones_tests.rs` |
 | Agreement and convergence tests | `crates/st3/src/store/checkpoint_agreement_tests.rs` |
 
+What a checkpoint pass may hold in memory, and how the capture resumes after a restart, is in
+[Checkpoint capture in bounded memory](checkpoint-capture.md).
+
 A new rule changes the rules digest, so it takes effect only once every participant runs it. Before
 adding one, list every reader of the kind, give each kept claim a reason in terms of a reader's
 answer, and add a test in `checkpoint_tests.rs` that names the dropped and the kept claims, as the

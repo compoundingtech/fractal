@@ -33,6 +33,9 @@ Use these documents for implementation details:
 - [Checkpoints and trimming](checkpoints.md) explains how every node of a fleet agrees to delete old
   claims together: when a checkpoint is due, seal, verify and trim, which claims a rule may drop and
   why, excusing an unreachable member, and what the first real trim taught.
+- [Checkpoint capture in bounded memory](checkpoint-capture.md) is the design for capturing,
+  planning and proving a checkpoint within a fixed memory budget, with a capture that resumes
+  after a restart (#2492).
 - [Retention](retention.md) names how long st keeps each claim kind: the policy file, its four
   classes, and how a rule is added and measured.
 - [Shell completion](cli-completion/spec.md) defines live entity candidates, their descriptions,
