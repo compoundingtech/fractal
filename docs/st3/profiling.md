@@ -111,6 +111,14 @@ the part not yet used and a reset time. `st slo explain ID` says one row in plai
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
+`st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
+`7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
+remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
+day after seven. A chart column is the lowest reading in its slice of the period, so a brief spend
+shows; a column with no reading is a dot, which means the daemon was down or nothing was
+measured, not that a budget was spent. `GET /v1/slo/history?id=&since_ms=&until_ms=&steps=`
+serves the same columns. A node with a collector keeps the longer history there.
+
 `st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
 over their target in the last five minutes. A p99 target is missed in a window when more than 1%
 of its samples are over. A max target is missed when any one sample is over. A miss is `info`,

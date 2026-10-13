@@ -2499,6 +2499,18 @@ enum SloCommand {
         /// An id from `st slo ls`, or the start of one.
         id: String,
     },
+    /// Chart what is left of one objective or budget over a period, from the daemon's local
+    /// history (a reading a minute, kept seven days).
+    Chart {
+        /// An id from `st slo ls`, or the start of one.
+        id: String,
+        /// The period ending now: a number then m, h or d, such as 90m, 24h or 7d.
+        #[arg(long, default_value = "24h")]
+        over: String,
+        /// Columns of chart; the default fits the terminal.
+        #[arg(long)]
+        width: Option<usize>,
+    },
 }
 
 #[derive(Args)]
@@ -6429,6 +6441,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.observations.clone(),
     ));
     tokio::spawn(catch_up_account_limits(store.clone(), notify.clone()));
+    {
+        let store = store.clone();
+        tokio::spawn(st3::slo_history::run(
+            st3::slo_history::dir(&config.state_dir),
+            move || st3::api::slo_rows(&store),
+        ));
+    }
     tokio::spawn(st3::recorder_receipts::run(
         store.clone(),
         st3::recorder::receipt_path(&config.state_dir),
@@ -10047,6 +10066,24 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
                 print!("{}", render_slo_list(rows));
             }
         }
+        SloCommand::Chart { id, over, width } => {
+            let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
+            let period_ms = parse_slo_period(&over)?;
+            let until = current_unix_ms()? as u64;
+            let since = until.saturating_sub(period_ms);
+            let columns = width.unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7)).clamp(10, 400);
+            let history: Value = client
+                .get(&format!(
+                    "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
+                    row["id"].as_str().unwrap_or_default().replace('/', "%2F"),
+                ))
+                .await?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&history)?);
+            } else {
+                print!("{}", render_slo_chart(row, &history, &over));
+            }
+        }
         SloCommand::Explain { id } => {
             let row = st3::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
             if json_output {
@@ -10117,6 +10154,87 @@ fn render_slo_list(rows: &[Value]) -> String {
     if output.is_empty() {
         output.push_str("No objectives or budgets.\n");
     }
+    output
+}
+
+/// A period such as `90m`, `24h` or `7d`, in milliseconds. The daemon keeps seven days.
+fn parse_slo_period(text: &str) -> Result<u64> {
+    let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--over takes a number then m, h or d, such as 24h; got {text:?}"))?;
+    let unit_ms = match unit {
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => anyhow::bail!("--over takes a number then m, h or d, such as 24h; got {text:?}"),
+    };
+    let period = number.saturating_mul(unit_ms);
+    anyhow::ensure!(period >= 60_000, "--over must be at least a minute");
+    anyhow::ensure!(period <= 7 * 86_400_000, "the history keeps seven days; --over can be at most 7d");
+    Ok(period)
+}
+
+/// What is left of one row over a period: columns of equal time, each as tall as its lowest
+/// reading, from 0% at the bottom to 100% at the top. A column with no reading is a dot.
+fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
+    use std::fmt::Write as _;
+
+    const HEIGHT: usize = 8;
+    const LEVELS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let steps = history["steps"]
+        .as_array()
+        .map(|steps| steps.iter().map(Value::as_f64).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let id = row["id"].as_str().unwrap_or_default();
+    let what = if row["kind"] == "budget" { "allowance left" } else { "error budget left" };
+    let mut output = String::new();
+    let _ = writeln!(output, "{id} · {what} · last {over}");
+    let readings = history["samples"].as_u64().unwrap_or(0);
+    if readings == 0 {
+        let _ = writeln!(
+            output,
+            "No readings in this period. The daemon records one a minute from when it starts, and keeps seven days."
+        );
+        return output;
+    }
+    let known = steps.iter().flatten().copied().collect::<Vec<_>>();
+    for line in 0..HEIGHT {
+        let label = match line {
+            0 => "100%",
+            l if l == HEIGHT / 2 => " 50%",
+            l if l == HEIGHT - 1 => "  0%",
+            _ => "    ",
+        };
+        let cells = steps
+            .iter()
+            .map(|step| match step {
+                Some(percent) => {
+                    let eighths = (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
+                    // Even a spent budget shows its reading as the lowest sliver, never a gap.
+                    let eighths = if line == HEIGHT - 1 { eighths.max(1) } else { eighths };
+                    LEVELS[eighths.saturating_sub((HEIGHT - 1 - line) * 8).min(8)]
+                }
+                None if line == HEIGHT - 1 => '·',
+                None => ' ',
+            })
+            .collect::<String>();
+        let _ = writeln!(output, "{label} │{cells}");
+    }
+    let _ = writeln!(output, "     └{}", "─".repeat(steps.len()));
+    let time = |value: &Value| {
+        value
+            .as_u64()
+            .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+            .map_or_else(|| "?".to_owned(), |at| at.format("%m-%d %H:%M").to_string())
+    };
+    let (from, to) = (time(&history["since_ms"]), time(&history["until_ms"]));
+    let gap = (steps.len() + 1).saturating_sub(from.chars().count() + to.chars().count() + 4).max(1);
+    let _ = writeln!(output, "      {from} UTC{}{to}", " ".repeat(gap));
+    let low = known.iter().copied().fold(f64::INFINITY, f64::min);
+    let now = steps.iter().rev().flatten().next().copied().unwrap_or_default();
+    let _ = writeln!(output, "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading");
     output
 }
 
@@ -26065,6 +26183,37 @@ mod tests {
         assert!(explained.contains("LEFT     60% of the allowance"));
         assert!(explained.contains("RESETS   1970-01-02 00:00 UTC"));
         assert!(explained.ends_with("An allowance that resets.\n"));
+    }
+
+    #[test]
+    fn slo_chart_draws_the_lowest_reading_of_each_column_and_marks_gaps() {
+        let row = json!({"id": "person-read", "kind": "objective"});
+        let history = json!({
+            "since_ms": 0, "until_ms": 86_400_000u64, "samples": 3,
+            "steps": [100.0, 50.0, null, 0.0],
+        });
+        let chart = render_slo_chart(&row, &history, "24h");
+        let lines = chart.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "person-read · error budget left · last 24h");
+        assert_eq!(lines[1], "100% │█   ");
+        assert_eq!(lines[5], " 50% │██  ");
+        assert_eq!(lines[8], "  0% │██·▁");
+        assert_eq!(lines[9], "     └────");
+        assert!(lines[10].starts_with("      01-01 00:00 UTC "), "{}", lines[10]);
+        assert!(lines[10].ends_with("01-02 00:00"), "{}", lines[10]);
+        assert_eq!(lines[11], "LOW 0% · LATEST 0% · 3 readings · a column is its lowest reading");
+        let empty = render_slo_chart(&row, &json!({"samples": 0, "steps": [null]}), "1h");
+        assert!(empty.contains("No readings in this period"));
+    }
+
+    #[test]
+    fn slo_period_takes_minutes_hours_and_days_up_to_the_history() {
+        assert_eq!(parse_slo_period("90m").unwrap(), 5_400_000);
+        assert_eq!(parse_slo_period("24h").unwrap(), 86_400_000);
+        assert_eq!(parse_slo_period("7d").unwrap(), 7 * 86_400_000);
+        for bad in ["8d", "0m", "24", "h", "1w", "", "-1h"] {
+            assert!(parse_slo_period(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

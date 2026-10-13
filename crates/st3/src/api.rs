@@ -745,6 +745,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         .route("/v1/claims", get(list_claims).post(post_claim))
         .route("/v1/usage", get(get_usage))
         .route("/v1/slo", get(get_slo))
+        .route("/v1/slo/history", get(get_slo_history))
         .route("/v1/usage/messages", get(get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(get_claim))
         .route("/v1/reviews", get(list_reviews))
@@ -12484,23 +12485,60 @@ async fn get_usage(
 }
 
 /// Every objective and budget as one list: see `objectives`.
-async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let store = state.store.clone();
-    let limits = blocking_store(move || store.account_limits()).await?;
-    let fresh_ms = tokio::task::spawn_blocking(crate::config::reload_daemon_limits)
-        .await
-        .ok()
-        .flatten()
+pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
+    let limits = store.account_limits()?;
+    let fresh_ms = crate::config::reload_daemon_limits()
         .and_then(|reloaded| reloaded.ok())
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
-    let report = tokio::task::spawn_blocking(request_latency_target_windows)
+    Ok(crate::objectives::rows(
+        &request_latency_target_windows(),
+        &limits,
+        client_now_ms() as u64,
+        fresh_ms,
+    ))
+}
+
+async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let rows = blocking_store(move || slo_rows(&store)).await?;
+    Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
+}
+
+#[derive(Deserialize)]
+struct SloHistoryQuery {
+    id: String,
+    since_ms: Option<u64>,
+    until_ms: Option<u64>,
+    /// How many equal steps to answer in; each holds its lowest reading.
+    steps: Option<usize>,
+}
+
+/// What was left of one objective or budget across a period, from the local history log.
+async fn get_slo_history(
+    State(state): State<AppState>,
+    Query(query): Query<SloHistoryQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let until_ms = query.until_ms.unwrap_or(client_now_ms() as u64);
+    let since_ms = query
+        .since_ms
+        .unwrap_or(until_ms.saturating_sub(crate::slo_history::RETENTION_MS / 7));
+    let steps = query.steps.unwrap_or(120);
+    if since_ms >= until_ms || until_ms - since_ms > crate::slo_history::RETENTION_MS || !(1..=1_000).contains(&steps) {
+        return Err(ApiError::bad(St3Error::new(
+            "invalid-slo-period",
+            "the period must end after it starts, span at most 7 days, and use 1 to 1000 steps",
+        )));
+    }
+    let dir = crate::slo_history::dir(&state.state_dir);
+    let id = query.id.clone();
+    let points = tokio::task::spawn_blocking(move || crate::slo_history::read(&dir, &id, since_ms, until_ms))
         .await
-        .map_err(|error| ApiError::bad(St3Error::new("slo-unavailable", error.to_string())))?;
-    let now = client_now_ms() as u64;
+        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?
+        .map_err(|error| ApiError::bad(St3Error::new("slo-history-unavailable", error.to_string())))?;
     Ok(Json(json!({
-        "as_of_unix_ms": now,
-        "rows": crate::objectives::rows(&report, &limits, now, fresh_ms),
+        "id": query.id, "since_ms": since_ms, "until_ms": until_ms, "samples": points.len(),
+        "steps": crate::slo_history::buckets(&points, since_ms, until_ms, steps),
     })))
 }
 
@@ -18459,6 +18497,53 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    }
+
+    #[tokio::test]
+    async fn slo_lists_objectives_and_account_budgets_and_charts_the_local_history() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let now = client_now_ms() as u64;
+        let (status, body) = json_request(
+            app.clone(),
+            "/v1/claims",
+            json!({"subject": "agent/example.live", "kind": "harness.limits", "actor": "agent/example.live",
+                "fields": {"driver": "claude", "account_ref": "ada/claude-1", "weekly_percent": 30.0,
+                    "five_hour_percent": 10.0, "measured_at_unix_ms": now - 10_000},
+                "evidence": [], "idempotency_key": "slo-limits"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, list) = get_request(app.clone(), "/v1/slo").await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        let rows = list["rows"].as_array().unwrap();
+        let find = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap_or_else(|| panic!("no {id}"));
+        assert_eq!(find("person-read")["kind"], "objective");
+        assert_eq!(find("ada/claude-1/weekly")["kind"], "budget");
+        assert_eq!(find("ada/claude-1/weekly")["remaining_percent"], 70.0);
+        assert_eq!(find("ada/claude-1/5h")["remaining_percent"], 90.0);
+
+        // The history is read from the log the daemon appends; a bad period is refused.
+        let dir = crate::slo_history::dir(&state.state_dir);
+        crate::slo_history::append(&dir, now - 180_000, &[json!({"id": "cpu", "remaining_percent": 80.0})]).unwrap();
+        crate::slo_history::append(&dir, now - 60_000, &[json!({"id": "cpu", "remaining_percent": 60.0})]).unwrap();
+        let (status, history) = get_request(
+            app.clone(),
+            &format!("/v1/slo/history?id=cpu&since_ms={}&until_ms={now}&steps=2", now - 240_000),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{history}");
+        assert_eq!(history["samples"], 2);
+        assert_eq!(history["steps"], json!([80.0, 60.0]));
+        for query in [
+            format!("id=cpu&since_ms={now}&until_ms={now}"),
+            format!("id=cpu&since_ms=0&until_ms={now}"),
+            format!("id=cpu&since_ms={}&until_ms={now}&steps=0", now - 1000),
+        ] {
+            let (status, _) = get_request(app.clone(), &format!("/v1/slo/history?{query}")).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{query}");
+        }
     }
 
     #[tokio::test]

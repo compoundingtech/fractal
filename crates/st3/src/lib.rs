@@ -104,6 +104,7 @@ pub mod onboarding;
 /// The st agent skill bundled in this binary and installed for each harness.
 pub mod skill;
 pub mod slo;
+pub mod slo_history;
 pub mod startup;
 pub mod startup_telemetry;
 pub mod store;
