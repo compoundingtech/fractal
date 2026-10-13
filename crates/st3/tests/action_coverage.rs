@@ -57,6 +57,22 @@ async fn cli_git_change_stage_controls_fence_work_and_keep_source_across_restart
         );
         String::from_utf8(output.stdout).unwrap().trim().into()
     }
+    async fn binding(daemon: &Daemon, step: &str, incarnation: &str) -> st3::changes::WorkBinding {
+        let mut query =
+            reqwest::Url::parse("http://localhost/v1/client/changes/work-binding").unwrap();
+        query
+            .query_pairs_mut()
+            .append_pair("step", step)
+            .append_pair("incarnation", incarnation);
+        st3::client::Client::unix_agent(daemon.socket(), WORKER)
+            .unwrap()
+            .get(&format!(
+                "/v1/client/changes/work-binding?{}",
+                query.query().unwrap()
+            ))
+            .await
+            .unwrap()
+    }
     async fn admitted(daemon: &Daemon, args: &[&str]) -> Value {
         let output = daemon.cli(WORKER, args).await;
         if output.status.success() {
@@ -107,10 +123,7 @@ mission "cli-git-stage" state="ready" {
             },
         )
         .unwrap();
-    let binding = daemon
-        .store()
-        .git_change_work_binding(WORKER, &step, INCARNATION)
-        .unwrap();
+    let original_binding = binding(&daemon, &step, INCARNATION).await;
 
     let source_directory = daemon.root.path().join("stage-source");
     let remote = daemon.root.path().join("stage-remote.git");
@@ -173,6 +186,12 @@ mission "cli-git-stage" state="ready" {
     let denied = daemon.cli(PERSON, &create).await;
     assert!(!denied.status.success());
     assert!(
+        String::from_utf8_lossy(&denied.stderr)
+            .contains("Git stage actions require a local live agent work lease"),
+        "{}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    assert!(
         git(
             &remote,
             &["for-each-ref", "--format=%(refname)", "refs/st/"]
@@ -183,7 +202,7 @@ mission "cli-git-stage" state="ready" {
     assert_eq!(created["revision"]["record"]["change_id"], id);
     assert_eq!(created["revision"]["record"]["state"], "draft");
     assert_eq!(created["revision"]["record"]["actor"], WORKER);
-    assert_eq!(created["work"]["claim_id"], binding.claim_id);
+    assert_eq!(created["work"]["claim_id"], original_binding.claim_id);
     let draft_oid = created["revision"]["oid"].as_str().unwrap();
     let ready: Vec<_> = ["changes", "ready", id.as_str()]
         .into_iter()
@@ -203,7 +222,7 @@ mission "cli-git-stage" state="ready" {
     assert_eq!(claimed["revision"]["record"]["claim"]["worker"], WORKER);
     assert_eq!(
         claimed["revision"]["record"]["claim"]["work"]["claim_id"],
-        binding.claim_id
+        original_binding.claim_id
     );
     let claim_oid = claimed["revision"]["oid"].as_str().unwrap();
     let nonce = claimed["revision"]["record"]["claim"]["nonce"]
@@ -224,11 +243,8 @@ mission "cli-git-stage" state="ready" {
         .install_git_change_registry(Arc::new(Registry::new(&configuration, NODE).unwrap()))
         .unwrap();
     assert_eq!(
-        daemon
-            .store()
-            .git_change_work_binding(WORKER, &step, INCARNATION)
-            .unwrap(),
-        binding
+        binding(&daemon, &step, INCARNATION).await,
+        original_binding
     );
     let release: Vec<_> = ["changes", "release", id.as_str()]
         .into_iter()
@@ -268,7 +284,7 @@ mission "cli-git-stage" state="ready" {
     for published in [&created, &ready, &claimed, &released, &drafted] {
         assert_eq!(published["revision"]["record"]["source_commit"], source);
         assert_eq!(published["revision"]["record"]["source_tree"], tree);
-        assert_eq!(published["work"]["claim_id"], binding.claim_id);
+        assert_eq!(published["work"]["claim_id"], original_binding.claim_id);
     }
     assert_eq!(
         git(
