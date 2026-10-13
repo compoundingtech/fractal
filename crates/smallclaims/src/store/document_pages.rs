@@ -56,10 +56,21 @@ fn query(
         sql.push_str(" AND d.name=?1");
     }
     if lower {
-        sql.push_str(" AND d.name COLLATE BINARY>=?5");
+        // A named page already seeks d.name=?1. Keep redundant range bounds on that
+        // constant too: ranges on the column can spoil the binding-key order proof,
+        // including the correlated latest lookup, under analyzed statistics.
+        sql.push_str(if named {
+            " AND ?1 COLLATE BINARY>=?5"
+        } else {
+            " AND d.name COLLATE BINARY>=?5"
+        });
     }
     if upper {
-        sql.push_str(" AND d.name COLLATE BINARY<?6");
+        sql.push_str(if named {
+            " AND ?1 COLLATE BINARY<?6"
+        } else {
+            " AND d.name COLLATE BINARY<?6"
+        });
     }
     if prefixed {
         // Retain the exact old predicate, including length()/substr() treatment of NUL.
