@@ -324,6 +324,18 @@ fn fresh_auxiliary_schema_families_share_durable_commits() {
         Authorization::Allow
     }));
     Store::create_schema(&connection, &Plain).unwrap();
+    // Plain has no legacy graph tables. Exercise the same fresh-install batch with
+    // two existing graph tables, as a runtime that supplies a legacy digest does.
+    super::install_schema_batch(&connection, true, |connection| {
+        super::create_graph_generation_triggers(
+            connection,
+            &[
+                ("operations", "operations", &["id", "state"], "id"),
+                ("documents", "documents", &["name", "hash"], "name"),
+            ],
+        )
+    })
+    .unwrap();
     connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
     let installations = installations.lock().unwrap();
     for family in ["fleet", "inventory", "graph", "principals"] {
