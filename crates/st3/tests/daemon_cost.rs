@@ -118,6 +118,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/client/alerts/{*id}",
         "the GET /v1/client/attention/{*id} handler, which is measured",
     ),
+    (
+        "GET /v1/harnesses",
+        "probes the account login-shell PATH and filesystem; reads no claim store and has no graph-size-dependent cost",
+    ),
     // Sekrets: neither reads the claim store beyond one primary-key lookup.
     (
         "POST /v1/sekrets/attest",

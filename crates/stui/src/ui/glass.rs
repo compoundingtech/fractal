@@ -377,6 +377,23 @@ impl Glasses {
             .any(|tab| matches!(Pane::parse(&tab.pane), Some(Pane::Machine(_))))
     }
 
+    pub(crate) fn inventories_wanted(&self, tab: usize, hours: u64) -> crate::feed::Inventories {
+        use crate::feed::Inventories;
+        let glass = self.glass();
+        let panes = (0..glass.layout.groups().len()).filter_map(|index| glass.shown(index))
+            .filter_map(|tab| Pane::parse(&tab.pane)).collect::<Vec<_>>();
+        let fleet = tab == 3 || panes.iter().any(|pane| matches!(pane, Pane::List(3)));
+        let machines = fleet || self.sidebar.shown || self.palette.is_some() || self.shows_machine();
+        Inventories {
+            clients: fleet || self.shows_machine(),
+            usage_hours: self.shows_usage().then_some(hours),
+            machines, devices: fleet,
+            sessions: fleet || tab == 1 || self.sidebar.shown || self.palette.is_some()
+                || panes.iter().any(|pane| matches!(pane, Pane::List(1))),
+            terminals: self.sidebar.shown || self.palette.is_some(),
+        }
+    }
+
     /// Whether a list or card of missions is on screen: a Missions list or a mission's card in a
     /// shown tab, the palette (which offers every mission) or the sidebar's Missions section.
     pub(crate) fn shows_missions(&self) -> bool {
@@ -5264,6 +5281,25 @@ mod tests {
     }
 
     #[test]
+    fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
+        let mut ui = glass();
+        let initial = ui.inventories_wanted();
+        assert!(!initial.terminals && initial.usage_hours.is_none());
+        ctrl(&mut ui, 's');
+        let sidebar = ui.inventories_wanted();
+        assert!(sidebar.machines && sidebar.sessions && sidebar.terminals);
+        ui.click(Hit::Usage);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(24));
+        ui.usage_period_next();
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(168), "changing focus keeps the visible usage overlay followed");
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(ui.inventories_wanted().usage_hours, None);
+    }
+
+    #[test]
     fn usage_floats_over_the_glass_and_a_row_shows_its_spend_whatever_the_list_groups_by() {
         let mut ui = glass();
         assert_eq!(ui.usage_wanted(), None, "nothing shows usage yet");
@@ -7365,6 +7401,27 @@ mod tests {
         // A failure keeps it for the next try.
         ui.glass_saved(&local, sent[0].key(), Err("member restarting".into()));
         assert_eq!(ui.unsent_glass_writes(), sent);
+    }
+
+    #[test]
+    fn initial_subject_waits_for_a_restored_glass_then_opens_its_conversation_tab() {
+        let mut ui = glass();
+        let agent = ui.world.agents.items()[0].id.clone();
+        let before = tabs(&ui);
+        let mut subject = Some(agent.clone());
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, false);
+        assert_eq!(tabs(&ui), before);
+        assert!(subject.is_some());
+        let world = ui.world.clone();
+        ui.glasses_from_graph(vec![graph_glass("0190-main", "r1", "main", &[WEEKLY])]);
+        ui.set_world(world);
+        super::super::live::focus_initial_subject(&mut ui, &mut subject, true, true);
+        assert_eq!(tabs(&ui).2, vec![vec![WEEKLY.to_owned(), format!("agent:{agent}")]]);
+        assert_eq!(ui.focus(), (1, Some(agent.clone())));
+        assert_eq!(ui.live_conversations()[0], agent);
+        assert!(!ui.editing);
+        assert!(ui.terminal.is_none());
+        assert!(subject.is_none());
     }
 
     #[test]

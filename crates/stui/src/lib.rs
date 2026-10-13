@@ -8,6 +8,7 @@ mod ui;
 mod version;
 mod voice;
 
+pub use ui::screens::HOME_IDLE_TEXT;
 pub use version::display_version;
 
 use st3_feed as feed;
@@ -685,6 +686,8 @@ async fn send_terminal_key(
 pub struct Args {
     #[arg(skip)]
     endpoint: Option<PathBuf>,
+    #[arg(skip)]
+    initial_subject: Option<String>,
     /// Open a named space instead of the last space used on this device.
     #[arg(long, alias = "glass", conflicts_with = "classic")]
     pub space: Option<String>,
@@ -725,6 +728,13 @@ impl Args {
     /// Override local socket discovery with the CLI's global endpoint option.
     pub fn with_endpoint(mut self, endpoint: PathBuf) -> Self {
         self.endpoint = Some(endpoint);
+        self
+    }
+
+    /// Open this agent's conversation once it appears in the live inventory.
+    /// Used by first-run setup; paired-device clients ignore this request.
+    pub fn with_initial_subject(mut self, subject: impl Into<String>) -> Self {
+        self.initial_subject = Some(subject.into());
         self
     }
 
@@ -875,6 +885,7 @@ pub fn run(options: Args) -> Result<()> {
         glass: ui::glass_request(&args),
         open_timing,
         process_started,
+        initial_subject: options.initial_subject.filter(|_| profile.is_none()),
     })
 }
 
