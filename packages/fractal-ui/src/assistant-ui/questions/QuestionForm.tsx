@@ -212,14 +212,19 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     setActiveId(following.id)
     requestFocus(following.id, OPTIONS_TARGET)
   }
+  /**
+   * Enter is handled in the capture phase: a React Aria Radio or Checkbox row is a pressable label,
+   * so a bubbling Enter would pick the focused row before the form saw the key.
+   */
+  const onKeyDownCapture = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (!canAct || event.key !== 'Enter' || !(event.target instanceof HTMLInputElement) || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
+    event.preventDefault()
+    event.stopPropagation()
+    advanceOrSubmit()
+  }
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (!canAct || event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.nativeEvent.isComposing) return
     const target = event.target as HTMLElement
-    if (event.key === 'Enter' && target instanceof HTMLInputElement) {
-      event.preventDefault()
-      advanceOrSubmit()
-      return
-    }
     const panel = target.closest<HTMLElement>('[data-question-panel]')
     const question = questions.find(entry => entry.id === (panel?.dataset['questionPanel'] ?? activeId))
     if (question === undefined) return
@@ -276,6 +281,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     data-state={state._tag}
     data-variant={variant}
     data-stacked={stacked}
+    onKeyDownCapture={onKeyDownCapture}
     onKeyDown={onKeyDown}
     onFocus={onFocus}
     {...stylex.props(styles.form, variant === 'pinned' ? styles.pinned : styles.card)}

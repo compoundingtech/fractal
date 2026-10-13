@@ -169,10 +169,12 @@ const oneQuestion: Story = {
     await assertPreviewPlacement(form)
     await withLaneWidth(canvasElement, !stacked(form), assertPreviewPlacement)
 
-    // Negative control: Enter with nothing chosen neither submits nor leaves the pending state.
+    // Negative control: Enter with nothing chosen neither picks the focused row, submits nor leaves the pending state.
     await userEvent.keyboard('{Enter}')
     await expect(args.onSubmitted).not.toHaveBeenCalled()
     await expect(form.dataset['state']).toBe('pending')
+    await expect(radios.filter(radio => (radio as HTMLInputElement).checked)).toHaveLength(0)
+    await expect(radios[0]).toHaveFocus()
     await expect(canvas.getByRole('button', { name: 'Submit' })).toBeDisabled()
 
     await userEvent.keyboard('2')
@@ -219,13 +221,17 @@ const fourTabbed: Story = {
     // Negative control: the strip detector rejects a two-row strip as either layout.
     await expect(stripLayout([{ top: 0, left: 0, bottom: 1, right: 1 }, { top: 0, left: 9, bottom: 1, right: 10 }, { top: 9, left: 0, bottom: 10, right: 1 }])).toBe('mixed')
 
+    const storage = canvas.getAllByRole('radio')
+    await waitFor(() => expect(storage[0]).toHaveFocus())
+
+    // RAC ignores hover in keyboard modality, so start the pointer check with a click on the plain title.
+    await userEvent.click(within(form).getByText('Sample app setup'))
     const terminal = canvas.getByRole('button', { name: "Open the agent's terminal" })
     await userEvent.hover(terminal)
     await expect(await within(canvasElement.ownerDocument.body).findByRole('tooltip')).toHaveTextContent("Open the agent's terminal")
     await userEvent.unhover(terminal)
     await waitFor(() => expect(within(canvasElement.ownerDocument.body).queryByRole('tooltip')).toBeNull())
-
-    const storage = canvas.getAllByRole('radio')
+    storage[0]!.focus()
     await waitFor(() => expect(storage[0]).toHaveFocus())
     await userEvent.keyboard('1')
     await waitFor(() => expect(markers(form)).toEqual(['answered', 'open', 'open', 'open']))
