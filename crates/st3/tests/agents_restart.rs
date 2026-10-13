@@ -26,6 +26,10 @@ struct Runtime {
     snapshot_unavailable: Mutex<bool>,
 }
 impl RuntimeControl for Runtime {
+    fn failed_start_closed(&self, _: &MemberSpec) -> anyhow::Result<bool> {
+        // Rejected fixture starts create neither a runtime nor a detached producer.
+        Ok(true)
+    }
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<RuntimeObservation>> {
         anyhow::ensure!(!*self.snapshot_unavailable.lock().unwrap(), "fixture snapshot unavailable");
         Ok(self
