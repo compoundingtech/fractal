@@ -73,7 +73,8 @@ const drawerPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
     return
   }
   await expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull()
-  await expect(thread.getBoundingClientRect().width).toBe(viewport)
+  // The root caps at the page width (maxWidth: 100%), so At700 in a 440 page measures 440, not the story arg.
+  await expect(thread.getBoundingClientRect().width).toBe(root.getBoundingClientRect().width)
   const opener = canvas.getByRole('button', { name: 'Expand sidebar' })
   const before = rect()
   const entries: { readonly value: number; readonly hadRecentInput: boolean }[] = []
