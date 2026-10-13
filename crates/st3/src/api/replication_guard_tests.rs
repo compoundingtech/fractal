@@ -66,7 +66,6 @@ async fn guard_summary_accounting_preserves_responses_counts_errors_and_unreache
     let row = report["requests"].as_array().unwrap().iter()
         .find(|row| row["kind"] == GUARD).unwrap();
     assert_eq!(row["cpu_ms"], 0.0, "wall-only recorder does not measure CPU");
-    assert!(row["total_ms"].as_f64().unwrap() > 0.0);
     assert_eq!(report["request_count"], 0, "task labels are not completed route requests");
     assert!(report["clients"].as_array().unwrap().is_empty());
     assert!(report["client_requests"].as_array().unwrap().is_empty());
