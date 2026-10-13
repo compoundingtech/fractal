@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     let scratch = tempfile::tempdir()?;
     let path = scratch.path().join("claims.sqlite3");
     let connection = rusqlite::Connection::open(&path)?;
-    connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE claims(store_index INTEGER PRIMARY KEY); INSERT INTO claims VALUES(1); CREATE TABLE payload(data BLOB); WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1024) INSERT INTO payload SELECT zeroblob(4096) FROM n;")?;
+    connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE claims(store_index INTEGER PRIMARY KEY); INSERT INTO claims VALUES(1); CREATE TABLE payload(data BLOB); WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<8192) INSERT INTO payload SELECT zeroblob(2000) FROM n;")?;
     let writer = Arc::new(WriterConnection::new(connection, Arc::new(AtomicU64::new(1))));
     let readers = Arc::new(ReadPool::new(&path, false)?);
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
