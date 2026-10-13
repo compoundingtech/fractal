@@ -421,12 +421,14 @@ async function assertGutter(lane: HTMLElement) {
       await expect(box.left).toBeGreaterThanOrEqual(run.right + 8 - 0.5)
       await expect(box.top).toBeGreaterThanOrEqual(firstLine.top - 0.5)
       await expect(box.top).toBeLessThan(firstLine.bottom)
+      // Tooltip engagement may scroll the run into view; compare fresh rectangles for the displacement control.
+      const alignedFirstLine = firstLineRange.getClientRects()[0]!
       const originalTransform = gutter.style.transform
       gutter.style.transform = `translateY(${getComputedStyle(seat.querySelector('[data-turn-content] p')!).lineHeight})`
       try {
-        await expect(gutter.getBoundingClientRect().top, 'one-line-offset gutter must fail first-line alignment').toBeGreaterThanOrEqual(firstLine.bottom)
+        await expect(gutter.getBoundingClientRect().top, 'one-line-offset gutter must fail first-line alignment').toBeGreaterThanOrEqual(alignedFirstLine.bottom)
       } finally { gutter.style.transform = originalTransform }
-      await expect(gutter.getBoundingClientRect().top).toBeLessThan(firstLine.bottom)
+      await expect(gutter.getBoundingClientRect().top).toBeLessThan(alignedFirstLine.bottom)
       await expect(Math.abs(run.top - previous.bottom - 8)).toBeLessThan(0.5)
     } else {
       // Fallback: one 16px row above the run, ending on the run's right edge.
