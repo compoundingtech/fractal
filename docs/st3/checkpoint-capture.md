@@ -41,6 +41,15 @@ point, measured by a counting allocator. The same pass on four times the history
 less than 1.5 times as much. The old code fails both assertions. The second assertion is the
 important one: it fails for anything proportional to history, whatever the constant.
 
+**Time and I/O.** The capture reads each envelope, record and claim body once, a claim by its ID as
+today's capture does. The plan reads bodies again only for slots whose rule reads bodies (harness
+observations, usage, account limits, loop state) and for the status-history sources of each seat,
+so those kinds are read twice. The staging file is written once and read a few times by the plan's
+fixed point. The measurement on two members across a daily cut records, before and after the
+change, the wall time of each pass's capture, plan and proof, the process's bytes read and written
+(`/proc/PID/io`), and peak RSS. A pass more than twice as slow as before is a reason to stop the
+rollout, not a cost of the fix.
+
 The largest slot is the one term that still grows with history. A slot is one subject's claims of
 one kind (and incarnation, code or request), so it is small on every member we know of, and each
 trim shrinks it. The note names it rather than hiding it; a later change can stream a slot if one
@@ -66,11 +75,33 @@ could include bumps the epoch, and nothing else does. A capture whose epoch stil
 therefore a capture of exactly the same set, however long ago it started and however many times
 the daemon restarted since.
 
-The capture writes into a staging SQLite file, `capture-<checkpoint>-<seal_rowid>.sqlite3`, in a
-directory under the checkpoint scratch directory that the scheduler no longer deletes at startup.
-Its `meta` row records the cut, seal row, epoch, staging format version, rules digest and
-checkpoint build. A staging file whose meta differs from the current store-index cut, rules or
-build is deleted and started again; one that matches resumes.
+The capture writes into a staging SQLite file, `capture-<checkpoint>-<seal_rowid>.sqlite3`, in the
+checkpoint scratch directory, which the scheduler no longer deletes at startup (it deletes only
+proof copies there). The file's `meta` row records one identity: the staging format version, which
+names the staging schema, and the cut, seal row, epoch, rules digest, checkpoint build and the
+digest of the running executable. The runtime computes each claim's rule and slot key from its
+body, so a build that changes a rule or the claim registry is a different executable and never
+resumes an older file. A file whose identity differs is deleted and started again; one that
+matches resumes.
+
+**One capture per directory.** A capture takes an exclusive, non-blocking `flock` on
+`capture.lock` in its directory for as long as it holds its staging file. A second capture of the
+same directory fails at once with "another checkpoint capture is running"; its pass ends with that
+error and the next pass tries again. It never waits. The dry run (`st replication checkpoint
+plan`) captures into a directory of its own under the scratch directory and deletes its file when
+it is done, so it never replaces the scheduler's resumable capture.
+
+**Failure and disk.** A failed staging transaction, such as on a full disk, ends that pass with its
+error. The staging file keeps its last committed cursor, and the store is unchanged: the capture
+writes nothing to the store but its epoch bounds. The next pass resumes. A trim that is already
+`trimming` finishes from the store's own tombstones and needs no staging file. A trim that must
+record tombstones again after a crash plans again, which needs the staging file's disk, as the
+proof's copy needs disk today.
+
+**Lifetime.** A directory holds at most one staging file. Opening a capture deletes every other
+staging file in its directory. A trim deletes its file when it has trimmed, and when its plan no
+longer matches the certificate. A pass that has no checkpoint to capture deletes the file. So an
+abandoned capture lasts at most until the next pass that captures or finds nothing to do.
 
 Each phase reads one page from the store on its own snapshot (as today, with the epoch check) and
 writes that page, together with the phase's cursor, in one staging transaction. A crash leaves a
@@ -117,6 +148,19 @@ the staging file they are in.
 The plan is durable too. A staging file holds its plan once it is made, so the next pass after a
 proof backoff, and the trim after verification, reuse it while the epoch matches, instead of
 capturing and planning again.
+
+**What fences a reused plan.** The trim reuses a staged plan only when both hold:
+
+- the file's identity matches the store now: the same epoch, so no row the set could include has
+  changed since the capture (a repair, a late envelope or a trim moves it), and the same rules
+  digest and executable, so the same planner made it; and
+- the plan's sealed and drop digests equal the certificate's, which every participant published
+  after proving its own plan.
+
+Otherwise the trim captures and plans again; and when that plan still differs from the
+certificate, the node marks the checkpoint `plan-changed` and adopts a peer's manifest, as today.
+The trim does not prove again, as it does not today: the certificate is the proof that every
+participant's plan passed.
 
 ### The proof and the trim read pages of the plan
 
