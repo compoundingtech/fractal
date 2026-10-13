@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Clarify runtime state required for rollback after the start-operation upgrade",
+  "replay": {"status": "none", "detail": "Documentation introduces no additional projection replay or recovery trigger."},
+  "schema": {"status": "none", "detail": "No additional schema or storage-version change; this clarifies the separately classified version-19 upgrade."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or digest change."},
+  "compatibility": {"status": "none", "detail": "No additional runtime or client protocol change. New operation-provenance generation records from the start-operation upgrade remain unreadable by older exec runtimes."},
+  "downtime": {"status": "none", "detail": "Documentation requires no restart or additional deployment interruption."},
+  "manual": {"status": "changed", "detail": "Before swapping back after the start-operation upgrade, verify closure of all producers and operation-owned runtimes, preserve the upgraded ledger and generation records, and restore compatible pre-upgrade runtime state together with SQLite and the matching binary. Restoring SQLite alone is insufficient. See docs/seat-lifecycle.md#pending-runtime-starts."},
+  "recovery": {"status": "changed", "detail": "Operation-provenance exec records cannot be read by older runtime binaries. Preserve them as evidence after verified retirement and restore the consistent pre-upgrade runtime state; do not lower the SQLite header or erase unresolved authority. Roll forward when exact producer/runtime closure or consistent restored state cannot be established."}
+}
