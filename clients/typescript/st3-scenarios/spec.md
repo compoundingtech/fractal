@@ -435,6 +435,9 @@ under `gate-slot --class heavy`, with `-- --ignored --nocapture`. Set
 `ST3_SCENARIO_SCRIPT` and `ST3_SCENARIO_OUTPUT` to absolute paths; the output must not
 already exist. Re-record into a new candidate, then review it before replacing the committed
 input. The recorder accepts no caller-owned endpoint or state directory.
+Re-recording creates fresh session/message identities: replace the script's captured `id_map`
+keys with the candidate's observed identities while keeping the public cast values, and remove
+obsolete keys before running `emit`. Prompts, turns and commands remain unchanged.
 Each command-bearing turn has its own projected-screen revision fence and a harness-emitted
 per-turn completion marker after stdout. Earlier or intermediate screen changes cannot
 satisfy the current turn's barrier. All recorder subprocesses, including curl and PTY

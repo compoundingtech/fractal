@@ -175,7 +175,9 @@ describe('recorded transport fidelity', () => {
     const stores = screens.map((frame) => frame.snapshot.store_index)
     expect(stores).toEqual([...stores].sort((a, b) => a - b))
     const http = proof.world.recording?.http
-    expect(http?.at(-1)?.snapshot).toEqual(http?.at(-2)?.snapshot)
+    // The attach screen/read and action share a fence; final GETs may observe later writes.
+    expect(http?.map((entry) => entry.snapshot)).toEqual(imported.recording.http.map((entry) => entry.snapshot))
+    expect(http?.[0]?.snapshot).toEqual(http?.[1]?.snapshot)
     const published = http?.find((entry) => entry.value.kind === 'agents')
     expect(published?.snapshot.store_index).toBeLessThan(stores.at(-1)!)
     expect(stores.every((store) => typeof store === 'number')).toBe(true)

@@ -2,28 +2,28 @@
   {
     "kind": "header",
     "ordinal": 0,
-    "receive_ms": -4447,
+    "receive_ms": -4570,
     "socket_id": null,
     "value": {
-      "daemon_build": "st 0.1.0 — running from local source (204d7bf40, 15 hours ago, dirty)",
-      "daemon_sha256": "ff0f930baddfebd1e755dee8192354bab4a1012411d00934987ab0828f76fb1d",
+      "daemon_build": "st 0.1.0 — running from local source (d160f7e38, 53 minutes ago)",
+      "daemon_sha256": "e87b92f2fb8995346e0d1c857b510deaa3b493bb7201508c8bdb730863172982",
       "format_version": 1,
       "script_format_version": 1,
-      "started_at": "2030-01-01T11:59:29.457Z",
+      "started_at": "2030-01-01T11:59:21.945Z",
       "world": "fleet-mid-refactor"
     }
   },
   {
     "kind": "http",
     "ordinal": 1,
-    "receive_ms": -52,
+    "receive_ms": -82,
     "socket_id": null,
     "value": {
       "body": {
         "api_version": "st3.client.v0",
         "request_id": "request#1",
         "snapshot": {
-          "created_at": "2030-01-01T11:59:59.825Z",
+          "created_at": "2030-01-01T11:59:59.878Z",
           "host_id": "host/meadow",
           "id": "snapshot/host/meadow/store#2",
           "projection_version": "client-projection.v0",
@@ -267,7 +267,7 @@
   {
     "kind": "attach",
     "ordinal": 2,
-    "receive_ms": -46,
+    "receive_ms": -76,
     "socket_id": null,
     "value": {
       "api_version": "st3.client.v0",
@@ -287,18 +287,18 @@
   {
     "kind": "http",
     "ordinal": 3,
-    "receive_ms": -20,
+    "receive_ms": -47,
     "socket_id": null,
     "value": {
       "body": {
         "api_version": "st3.client.v0",
         "request_id": "request#2",
         "snapshot": {
-          "created_at": "2030-01-01T11:59:59.957Z",
+          "created_at": "2030-01-01T11:59:59.878Z",
           "host_id": "host/meadow",
-          "id": "snapshot/host/meadow/store#3",
+          "id": "snapshot/host/meadow/store#2",
           "projection_version": "client-projection.v0",
-          "store_index": "store#3"
+          "store_index": "store#2"
         },
         "value": {
           "action_id": "action/example-attach",
@@ -307,11 +307,11 @@
           ],
           "kind": "action-result",
           "operation_id": "operation#1",
-          "snapshot_id": "snapshot/host/meadow/store#4",
+          "snapshot_id": "snapshot/host/meadow/store#3",
           "status": "completed",
           "terminal_attachment": {
             "attachment_id": "attachment#1",
-            "expires_at": "2030-01-01T12:04:59.970Z",
+            "expires_at": "2030-01-01T12:04:59.944Z",
             "owner_host_id": "host/meadow",
             "retry_hint": null,
             "reusable": true,
@@ -347,7 +347,7 @@
   {
     "kind": "command",
     "ordinal": 4,
-    "receive_ms": -16,
+    "receive_ms": -38,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -359,7 +359,7 @@
   {
     "kind": "frame",
     "ordinal": 5,
-    "receive_ms": -7,
+    "receive_ms": -20,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -376,8 +376,28 @@
           "revision": 1,
           "role": "system",
           "sequence": 28,
-          "timestamp": "2030-01-01T11:59:57.891Z",
+          "timestamp": "2030-01-01T11:59:58.002Z",
           "type": "status"
+        },
+        {
+          "body": {
+            "code": "transcript-not-bound",
+            "details": {
+              "availability": "transcript-unavailable",
+              "claim_id": "139334fa0090fa677222e3c5bfd748d0526c28871266786bd2f408346a7f52ed",
+              "driver": "claude",
+              "not_yet": true
+            },
+            "message": "transcript not bound: the Claude driver has not reported which process owns the seat",
+            "retryable": true
+          },
+          "final": true,
+          "id": "timeline-entry/proof-error-2",
+          "revision": 1,
+          "role": "system",
+          "sequence": 30,
+          "timestamp": "2030-01-01T11:59:58.002Z",
+          "type": "error"
         },
         {
           "body": {
@@ -389,7 +409,7 @@
           "revision": 1,
           "role": "system",
           "sequence": 32,
-          "timestamp": "2030-01-01T11:59:57.991Z",
+          "timestamp": "2030-01-01T11:59:58.054Z",
           "type": "status"
         },
         {
@@ -402,59 +422,8 @@
           "revision": 1,
           "role": "system",
           "sequence": 36,
-          "timestamp": "2030-01-01T11:59:59.825Z",
+          "timestamp": "2030-01-01T11:59:59.878Z",
           "type": "status"
-        },
-        {
-          "body": {
-            "code": "claude-channel-unattached",
-            "details": {
-              "claim_id": "25066a8e92bb26febe2a15466b165c454f0480066e548955c527e707a0d6d597",
-              "severity": "warning"
-            },
-            "message": "claude-channel-unattached: the current Claude session has no live, initialized channel subscription; mail is held in the graph until attachment. The driver rechecks attachment and st will restart the harness with bounded retries if the channel stays missing.",
-            "retryable": true
-          },
-          "final": true,
-          "id": "timeline-entry/proof-error-1",
-          "revision": 1,
-          "role": "system",
-          "sequence": 40,
-          "timestamp": "2030-01-01T11:59:59.957Z",
-          "type": "error"
-        },
-        {
-          "body": {
-            "detail": "idle",
-            "status": "waiting"
-          },
-          "final": true,
-          "id": "timeline-entry/proof-status-4",
-          "revision": 1,
-          "role": "system",
-          "sequence": 52,
-          "timestamp": "2030-01-01T11:59:59.976Z",
-          "type": "status"
-        },
-        {
-          "body": {
-            "code": "transcript-not-bound",
-            "details": {
-              "availability": "transcript-unavailable",
-              "claim_id": "291f030239ac276048eec9dd3cb48ad545d8e977dfe2a63a5344b4af25b657fe",
-              "driver": "claude",
-              "not_yet": true
-            },
-            "message": "transcript not bound: Claude session example-atlas-builder has no transcript file yet",
-            "retryable": true
-          },
-          "final": true,
-          "id": "timeline-entry/proof-error-2",
-          "revision": 1,
-          "role": "system",
-          "sequence": 54,
-          "timestamp": "2030-01-01T11:59:59.976Z",
-          "type": "error"
         }
       ],
       "kind": "conversation",
@@ -465,7 +434,7 @@
   {
     "kind": "command",
     "ordinal": 6,
-    "receive_ms": -5,
+    "receive_ms": -11,
     "socket_id": "socket#1",
     "value": {
       "capability": "capability#1",
@@ -486,11 +455,11 @@
       "id": "terminal",
       "kind": "screen",
       "snapshot": {
-        "created_at": "2030-01-01T11:59:59.976Z",
+        "created_at": "2030-01-01T11:59:59.949Z",
         "host_id": "host/meadow",
-        "id": "snapshot/host/meadow/store#4",
+        "id": "snapshot/host/meadow/store#3",
         "projection_version": "client-projection.v0",
-        "store_index": "store#4"
+        "store_index": "store#3"
       },
       "value": {
         "columns": 80,
@@ -739,14 +708,14 @@
       "answer": "The API export is now loadUser; checking the worker call site next.",
       "command": null,
       "prompt": "Rename fetchUser to loadUser in packages/api.",
-      "timestamp": "2029-12-31T20:12:16.966Z",
+      "timestamp": "2029-12-31T18:25:40.830Z",
       "turn": 0
     }
   },
   {
     "kind": "frame",
     "ordinal": 10,
-    "receive_ms": 85,
+    "receive_ms": 145,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -754,15 +723,21 @@
       "items": [
         {
           "body": {
-            "message_id": "message/proof-delivery"
+            "code": "claude-channel-unattached",
+            "details": {
+              "claim_id": "ff086386e480f56c31f90eaa557846a9ad54273f77421f2f594729b5b5481a85",
+              "severity": "warning"
+            },
+            "message": "claude-channel-unattached: the current Claude session has no live, initialized channel subscription; mail is held in the graph until attachment. The driver rechecks attachment and st will restart the harness with bounded retries if the channel stays missing.",
+            "retryable": true
           },
           "final": true,
-          "id": "timeline-entry/proof-message",
+          "id": "timeline-entry/proof-error-1",
           "revision": 1,
-          "role": "user",
-          "sequence": 1,
-          "timestamp": "2030-01-01T12:00:00.038Z",
-          "type": "message"
+          "role": "system",
+          "sequence": 48,
+          "timestamp": "2030-01-01T12:00:00.124Z",
+          "type": "error"
         }
       ],
       "kind": "conversation",
@@ -773,7 +748,7 @@
   {
     "kind": "frame",
     "ordinal": 11,
-    "receive_ms": 86,
+    "receive_ms": 159,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -796,7 +771,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "user",
-                    "uuid": "43018ca9-6794-4343-a314-4bcc0d4e93cf"
+                    "uuid": "e2a8c349-c677-419e-bb52-814821ae27e7"
                   }
                 },
                 "source_type": "claude",
@@ -810,7 +785,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 16,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -833,7 +808,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 17,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         },
         {
@@ -857,7 +832,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "assistant",
-                    "uuid": "56295ef8-e801-4445-b752-9c0ec2fa4deb"
+                    "uuid": "c62f0aea-2c99-4296-a389-d23ff099c1e2"
                   }
                 },
                 "source_type": "claude",
@@ -871,7 +846,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4560,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -894,7 +869,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4561,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         }
       ],
@@ -906,20 +881,20 @@
   {
     "kind": "harness",
     "ordinal": 12,
-    "receive_ms": 90,
+    "receive_ms": 168,
     "socket_id": null,
     "value": {
       "answer": "The worker still imports fetchUser and needs the matching rename.",
       "command": "printf '\\033[32mpackages/worker: fetchUser -> loadUser\\033[0m\\n'",
       "prompt": "Show the remaining worker call site.",
-      "timestamp": "2029-12-31T20:13:16.966Z",
+      "timestamp": "2029-12-31T18:26:40.830Z",
       "turn": 1
     }
   },
   {
     "kind": "pty_output",
     "ordinal": 13,
-    "receive_ms": 169,
+    "receive_ms": 304,
     "socket_id": null,
     "value": {
       "terminal": "terminal/agent/example/atlas/builder",
@@ -930,7 +905,7 @@
   {
     "kind": "frame",
     "ordinal": 14,
-    "receive_ms": 170,
+    "receive_ms": 305,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -953,7 +928,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "user",
-                    "uuid": "43018ca9-6794-4343-a314-4bcc0d4e93cf"
+                    "uuid": "e2a8c349-c677-419e-bb52-814821ae27e7"
                   }
                 },
                 "source_type": "claude",
@@ -967,7 +942,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 16,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -990,7 +965,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 17,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         },
         {
@@ -1014,7 +989,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "assistant",
-                    "uuid": "56295ef8-e801-4445-b752-9c0ec2fa4deb"
+                    "uuid": "c62f0aea-2c99-4296-a389-d23ff099c1e2"
                   }
                 },
                 "source_type": "claude",
@@ -1028,7 +1003,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4560,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -1051,7 +1026,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4561,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         }
       ],
@@ -1063,7 +1038,7 @@
   {
     "kind": "frame",
     "ordinal": 15,
-    "receive_ms": 173,
+    "receive_ms": 323,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -1086,7 +1061,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "user",
-                    "uuid": "43018ca9-6794-4343-a314-4bcc0d4e93cf"
+                    "uuid": "e2a8c349-c677-419e-bb52-814821ae27e7"
                   }
                 },
                 "source_type": "claude",
@@ -1100,7 +1075,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 16,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -1123,7 +1098,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 17,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         },
         {
@@ -1147,7 +1122,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "assistant",
-                    "uuid": "56295ef8-e801-4445-b752-9c0ec2fa4deb"
+                    "uuid": "c62f0aea-2c99-4296-a389-d23ff099c1e2"
                   }
                 },
                 "source_type": "claude",
@@ -1161,7 +1136,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4560,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -1184,7 +1159,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4561,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         }
       ],
@@ -1196,7 +1171,7 @@
   {
     "kind": "frame",
     "ordinal": 16,
-    "receive_ms": 177,
+    "receive_ms": 328,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -1219,7 +1194,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "user",
-                    "uuid": "43018ca9-6794-4343-a314-4bcc0d4e93cf"
+                    "uuid": "e2a8c349-c677-419e-bb52-814821ae27e7"
                   }
                 },
                 "source_type": "claude",
@@ -1233,7 +1208,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 16,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -1256,7 +1231,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 17,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         },
         {
@@ -1280,7 +1255,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "assistant",
-                    "uuid": "56295ef8-e801-4445-b752-9c0ec2fa4deb"
+                    "uuid": "c62f0aea-2c99-4296-a389-d23ff099c1e2"
                   }
                 },
                 "source_type": "claude",
@@ -1294,7 +1269,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4560,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -1317,7 +1292,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4561,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         }
       ],
@@ -1329,7 +1304,7 @@
   {
     "kind": "frame",
     "ordinal": 17,
-    "receive_ms": 182,
+    "receive_ms": 332,
     "socket_id": "socket#1",
     "value": {
       "collection": "conversation",
@@ -1352,7 +1327,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "user",
-                    "uuid": "43018ca9-6794-4343-a314-4bcc0d4e93cf"
+                    "uuid": "e2a8c349-c677-419e-bb52-814821ae27e7"
                   }
                 },
                 "source_type": "claude",
@@ -1366,7 +1341,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 16,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -1389,7 +1364,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 17,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         },
         {
@@ -1413,7 +1388,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:20:00Z",
                     "type": "assistant",
-                    "uuid": "56295ef8-e801-4445-b752-9c0ec2fa4deb"
+                    "uuid": "c62f0aea-2c99-4296-a389-d23ff099c1e2"
                   }
                 },
                 "source_type": "claude",
@@ -1427,7 +1402,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4560,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "message"
         },
         {
@@ -1450,7 +1425,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 4561,
-          "timestamp": "2029-12-31T20:12:16.966Z",
+          "timestamp": "2029-12-31T18:25:40.830Z",
           "type": "content"
         },
         {
@@ -1469,7 +1444,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:21:00Z",
                     "type": "user",
-                    "uuid": "7578c394-772b-4627-a15e-23ea3cbc11ce"
+                    "uuid": "2094cad0-da18-4593-9465-babf53a29188"
                   }
                 },
                 "source_type": "claude",
@@ -1483,7 +1458,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 10064,
-          "timestamp": "2029-12-31T20:13:16.966Z",
+          "timestamp": "2029-12-31T18:26:40.830Z",
           "type": "message"
         },
         {
@@ -1506,7 +1481,7 @@
           "revision": 1,
           "role": "user",
           "sequence": 10065,
-          "timestamp": "2029-12-31T20:13:16.966Z",
+          "timestamp": "2029-12-31T18:26:40.830Z",
           "type": "content"
         },
         {
@@ -1530,7 +1505,7 @@
                     "sessionId": "example-atlas-builder",
                     "timestamp": "2026-10-12T11:21:00Z",
                     "type": "assistant",
-                    "uuid": "3570ddd7-9bb3-4d77-92eb-2cb000e93136"
+                    "uuid": "d509b628-237c-4cff-b2b6-4fe74d84b128"
                   }
                 },
                 "source_type": "claude",
@@ -1544,7 +1519,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 14464,
-          "timestamp": "2029-12-31T20:13:16.966Z",
+          "timestamp": "2029-12-31T18:26:40.830Z",
           "type": "message"
         },
         {
@@ -1567,7 +1542,7 @@
           "revision": 1,
           "role": "assistant",
           "sequence": 14465,
-          "timestamp": "2029-12-31T20:13:16.966Z",
+          "timestamp": "2029-12-31T18:26:40.830Z",
           "type": "content"
         }
       ],
@@ -1579,25 +1554,25 @@
   {
     "kind": "frame",
     "ordinal": 18,
-    "receive_ms": 188,
+    "receive_ms": 341,
     "socket_id": "socket#1",
     "value": {
       "collection": "terminal",
       "id": "terminal",
       "kind": "screen",
       "snapshot": {
-        "created_at": "2030-01-01T12:00:00.087Z",
+        "created_at": "2030-01-01T12:00:00.256Z",
         "host_id": "host/meadow",
-        "id": "snapshot/host/meadow/store#5",
+        "id": "snapshot/host/meadow/store#4",
         "projection_version": "client-projection.v0",
-        "store_index": "store#5"
+        "store_index": "store#4"
       },
       "value": {
         "columns": 80,
         "cursor": {
           "blinking": false,
           "column": 0,
-          "row": 2,
+          "row": 4,
           "style": "block",
           "visible": true
         },
@@ -1641,8 +1616,13 @@
           {
             "redacted": false,
             "row": 3,
-            "runs": [],
-            "text": "",
+            "runs": [
+              {
+                "cells": 31,
+                "text": "scenario turn 1 output complete"
+              }
+            ],
+            "text": "scenario turn 1 output complete",
             "truncated": false,
             "wrapped": false
           },
@@ -1817,8 +1797,8 @@
           "mouse_encoding": "default",
           "mouse_tracking": "none"
         },
-        "next_sequence": 525967188552529,
-        "revision": "1de5d476feb51e6e48139a3b",
+        "next_sequence": 428962939711466,
+        "revision": "18623b7a4afea1396cb93efc",
         "rows": 24,
         "runtime_incarnation": "incarnation#1",
         "terminal_id": "terminal/agent/example/atlas/builder",
@@ -1830,18 +1810,18 @@
   {
     "kind": "http",
     "ordinal": 19,
-    "receive_ms": 203,
+    "receive_ms": 369,
     "socket_id": null,
     "value": {
       "body": {
         "api_version": "st3.client.v0",
         "request_id": "request#3",
         "snapshot": {
-          "created_at": "2030-01-01T11:59:55.765Z",
+          "created_at": "2030-01-01T11:59:55.784Z",
           "host_id": "host/meadow",
           "id": "snapshot/host/meadow/store#1",
           "projection_version": "client-projection.v0",
-          "published_at": "2030-01-01T11:59:55.814Z",
+          "published_at": "2030-01-01T11:59:55.883Z",
           "store_index": "store#1"
         },
         "value": {
@@ -1865,18 +1845,18 @@
   {
     "kind": "http",
     "ordinal": 20,
-    "receive_ms": 213,
+    "receive_ms": 384,
     "socket_id": null,
     "value": {
       "body": {
         "api_version": "st3.client.v0",
         "request_id": "request#4",
         "snapshot": {
-          "created_at": "2030-01-01T12:00:00.157Z",
+          "created_at": "2030-01-01T12:00:00.327Z",
           "host_id": "host/meadow",
-          "id": "snapshot/host/meadow/store#6",
+          "id": "snapshot/host/meadow/store#5",
           "projection_version": "client-projection.v0",
-          "store_index": "store#6"
+          "store_index": "store#5"
         },
         "value": {
           "items": [
@@ -1889,7 +1869,7 @@
               "revision": 1,
               "role": "user",
               "sequence": 16,
-              "timestamp": "2029-12-31T20:12:16.966Z",
+              "timestamp": "2029-12-31T18:25:40.830Z",
               "type": "message"
             },
             {
@@ -1902,7 +1882,7 @@
               "revision": 1,
               "role": "user",
               "sequence": 17,
-              "timestamp": "2029-12-31T20:12:16.966Z",
+              "timestamp": "2029-12-31T18:25:40.830Z",
               "type": "content"
             },
             {
@@ -1914,7 +1894,7 @@
               "revision": 1,
               "role": "assistant",
               "sequence": 4560,
-              "timestamp": "2029-12-31T20:12:16.966Z",
+              "timestamp": "2029-12-31T18:25:40.830Z",
               "type": "message"
             },
             {
@@ -1927,7 +1907,7 @@
               "revision": 1,
               "role": "assistant",
               "sequence": 4561,
-              "timestamp": "2029-12-31T20:12:16.966Z",
+              "timestamp": "2029-12-31T18:25:40.830Z",
               "type": "content"
             },
             {
@@ -1939,7 +1919,7 @@
               "revision": 1,
               "role": "user",
               "sequence": 10064,
-              "timestamp": "2029-12-31T20:13:16.966Z",
+              "timestamp": "2029-12-31T18:26:40.830Z",
               "type": "message"
             },
             {
@@ -1952,7 +1932,7 @@
               "revision": 1,
               "role": "user",
               "sequence": 10065,
-              "timestamp": "2029-12-31T20:13:16.966Z",
+              "timestamp": "2029-12-31T18:26:40.830Z",
               "type": "content"
             },
             {
@@ -1964,7 +1944,7 @@
               "revision": 1,
               "role": "assistant",
               "sequence": 14464,
-              "timestamp": "2029-12-31T20:13:16.966Z",
+              "timestamp": "2029-12-31T18:26:40.830Z",
               "type": "message"
             },
             {
@@ -1977,7 +1957,7 @@
               "revision": 1,
               "role": "assistant",
               "sequence": 14465,
-              "timestamp": "2029-12-31T20:13:16.966Z",
+              "timestamp": "2029-12-31T18:26:40.830Z",
               "type": "content"
             }
           ],
@@ -1999,14 +1979,14 @@
   {
     "kind": "http",
     "ordinal": 21,
-    "receive_ms": 227,
+    "receive_ms": 408,
     "socket_id": null,
     "value": {
       "body": {
         "api_version": "st3.client.v0",
         "request_id": "request#5",
         "snapshot": {
-          "created_at": "2030-01-01T12:00:00.157Z",
+          "created_at": "2030-01-01T12:00:00.380Z",
           "host_id": "host/meadow",
           "id": "snapshot/host/meadow/store#6",
           "projection_version": "client-projection.v0",
@@ -2017,7 +1997,7 @@
           "cursor": {
             "blinking": false,
             "column": 0,
-            "row": 2,
+            "row": 4,
             "style": "block",
             "visible": true
           },
@@ -2061,8 +2041,13 @@
             {
               "redacted": false,
               "row": 3,
-              "runs": [],
-              "text": "",
+              "runs": [
+                {
+                  "cells": 31,
+                  "text": "scenario turn 1 output complete"
+                }
+              ],
+              "text": "scenario turn 1 output complete",
               "truncated": false,
               "wrapped": false
             },
@@ -2237,8 +2222,8 @@
             "mouse_encoding": "default",
             "mouse_tracking": "none"
           },
-          "next_sequence": 525967188552529,
-          "revision": "1de5d476feb51e6e48139a3b",
+          "next_sequence": 428962939711466,
+          "revision": "18623b7a4afea1396cb93efc",
           "rows": 24,
           "runtime_incarnation": "incarnation#1",
           "terminal_id": "terminal/agent/example/atlas/builder",
