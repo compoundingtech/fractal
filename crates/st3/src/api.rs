@@ -8349,9 +8349,9 @@ fn doctor_report_with_operation_drift(
                 .fleet_view_sealed()
                 .map(|view| {
                     view.members
-                        .into_iter()
+                        .iter()
                         .filter(|member| member.state == "current" && member.mode == "listening")
-                        .map(|member| member.name)
+                        .map(|member| member.name.clone())
                         .collect::<BTreeSet<_>>()
                 })
                 .unwrap_or_default();
@@ -9260,7 +9260,7 @@ pub struct FleetStatus {
     pub node: String,
     pub fleet_id: Option<String>,
     pub member_key: Option<String>,
-    pub view: crate::fleet::FleetView,
+    pub view: Arc<crate::fleet::FleetView>,
     pub peers: Vec<crate::model::ReplicationPeerStatus>,
     pub invites: Vec<crate::store::FleetInviteView>,
     /// A member refused this node as removed or left, so it no longer syncs.
@@ -9521,7 +9521,7 @@ async fn refuse_while_leaving(
 
 async fn fleet_membership_view(
     State(state): State<AppState>,
-) -> Result<Json<crate::fleet::FleetView>, ApiError> {
+) -> Result<Json<Arc<crate::fleet::FleetView>>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || store.fleet_view_sealed())
         .await

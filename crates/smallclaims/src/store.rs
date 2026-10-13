@@ -45,6 +45,8 @@ mod receive_writer_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
+mod sealed_view_cache_tests;
+#[cfg(test)]
 mod repair_operation_tests;
 mod binary_payloads;
 pub mod events;
@@ -466,6 +468,8 @@ CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, st
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
+-- Generation triggers test fleet membership without scanning a batch's unrelated claims.
+CREATE INDEX IF NOT EXISTS claims_batch_kind ON claims(batch_id, kind);
 -- Heal compares claim identities, not bodies. Keep both join keys in a compact index so a
 -- range digest does not visit every body-bearing claim page.
 CREATE INDEX IF NOT EXISTS claims_batch_claim_id ON claims(batch_id, id);
@@ -743,6 +747,8 @@ pub struct Store {
     pub admission: Mutex<()>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// The sealed read view shared by callers at the same fleet generation.
+    sealed_view_cache: Mutex<Option<(i64, Arc<crate::fleet::FleetView>)>>,
     /// The member part of the trust roots, folded at the `fleet_generation` shown.
     pub roots_cache: Mutex<Option<(i64, MemberRoots)>>,
     /// Serializes projection passes while they lend the writer back between chunks.
@@ -987,6 +993,7 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             admission: Mutex::new(()),
             membership_cache: Mutex::new(None),
+            sealed_view_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
             projection: Mutex::new(()),
             replication_timers: ReplicationTimers::default(),
@@ -2059,13 +2066,32 @@ impl Store {
 
     /// The fleet as its sealed envelopes show it, without taking the writer, for reads. A local
     /// membership claim shows once the next exchange seals its batch.
-    pub fn fleet_view_sealed(&self) -> Result<crate::fleet::FleetView> {
-        // Membership reads the sealed envelope rows directly; no inventory or graph digest
-        // is needed for this view.
-        let connection = self.readers.get();
-        Ok(crate::fleet::FleetView::from_membership(
-            &fleet_membership_tx(&connection)?,
-        ))
+    pub fn fleet_view_sealed(&self) -> Result<Arc<crate::fleet::FleetView>> {
+        // Serialize cache fills so concurrent readers share the view, not just its key.
+        let mut cache = self
+            .sealed_view_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = fleet_generation(&self.readers.get())?;
+        if let Some((folded_at, view)) = cache.as_ref()
+            && *folded_at == current
+        {
+            return Ok(Arc::clone(view));
+        }
+        // A raw reader takes a snapshot per statement. On a miss, pin a reader before
+        // reading the authoritative generation and folding, so a concurrent seal cannot
+        // publish a view under the wrong key. Reentry preserves an existing read snapshot.
+        // Unlike fleet_membership, this path never seals or requests the writer.
+        let (folded_at, view) = self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let generation = fleet_generation(&connection)?;
+            let view = Arc::new(crate::fleet::FleetView::from_membership(
+                &fleet_membership_tx(&connection)?,
+            ));
+            Ok((generation, view))
+        })?;
+        *cache = Some((folded_at, Arc::clone(&view)));
+        Ok(view)
     }
 
     /// Read the already admitted membership for client projections. Seeding a
@@ -2319,17 +2345,18 @@ pub fn max_envelope_rowid(connection: &Connection) -> Result<i64> {
 /// it, a signature on that envelope, or the anchor. `fleet_membership` re-folds only when it moved.
 fn fleet_generation_schema() -> String {
     let bump = "UPDATE fleet_generation SET value=value+1 WHERE id=1;";
-    let carries_fleet_claims = |envelope: &str| {
+    let carries_fleet_claims = |row: &str, column: &str| {
         format!(
-            "EXISTS (SELECT 1 FROM claims WHERE batch_id={envelope}.batch_id \
+            "EXISTS (SELECT 1 FROM claims WHERE batch_id={row}.{column} \
              AND kind IN ({FLEET_CLAIM_KINDS}))"
         )
     };
     let signs_fleet_claims = |signature: &str| {
         format!(
-            "EXISTS (SELECT 1 FROM replica_envelopes AS envelopes \
-             JOIN claims ON claims.batch_id=envelopes.batch_id \
-             WHERE envelopes.writer={signature}.writer AND envelopes.sequence={signature}.sequence \
+            "EXISTS (SELECT 1 FROM batches \
+             JOIN claims ON claims.batch_id=batches.id \
+             JOIN replica_envelopes AS envelopes ON envelopes.batch_id=batches.id \
+             WHERE batches.origin={signature}.writer AND batches.replica_sequence={signature}.sequence \
              AND envelopes.envelope_hash={signature}.envelope_hash \
              AND claims.kind IN ({FLEET_CLAIM_KINDS}))"
         )
@@ -2342,29 +2369,49 @@ fn fleet_generation_schema() -> String {
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_delete AFTER DELETE ON claims
          WHEN OLD.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_update
-         AFTER UPDATE OF kind, batch_id, body ON claims
+         DROP TRIGGER IF EXISTS fleet_generation_claim_update;
+         CREATE TRIGGER fleet_generation_claim_update
+         AFTER UPDATE OF id, kind, subject, body, batch_id ON claims
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) OR OLD.kind IN ({FLEET_CLAIM_KINDS})
          BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_insert AFTER INSERT ON batches
+         WHEN {insert_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_delete AFTER DELETE ON batches
+         WHEN {delete_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_update
+         AFTER UPDATE OF id, origin, replica_sequence ON batches
+         WHEN {insert_batch} OR {delete_batch} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_insert AFTER INSERT ON replica_envelopes
          WHEN NEW.batch_id IS NOT NULL AND {insert_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_update
-         AFTER UPDATE OF batch_id ON replica_envelopes
-         WHEN NEW.batch_id IS NOT NULL AND {update_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_insert
+         DROP TRIGGER IF EXISTS fleet_generation_envelope_update;
+         DROP TRIGGER IF EXISTS fleet_generation_envelope_detach;
+         CREATE TRIGGER fleet_generation_envelope_update
+         AFTER UPDATE OF batch_id, envelope_hash ON replica_envelopes
+         WHEN {insert_envelope} OR {delete_envelope} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_delete AFTER DELETE ON replica_envelopes
+         WHEN {delete_envelope} BEGIN {bump} END;
+         DROP TRIGGER IF EXISTS fleet_generation_signature_insert;
+         CREATE TRIGGER fleet_generation_signature_insert
          AFTER INSERT ON replica_envelope_signatures
          WHEN {insert_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_delete
+         DROP TRIGGER IF EXISTS fleet_generation_signature_delete;
+         CREATE TRIGGER fleet_generation_signature_delete
          AFTER DELETE ON replica_envelope_signatures
          WHEN {delete_signature} BEGIN {bump} END;
+         DROP TRIGGER IF EXISTS fleet_generation_signature_update;
+         CREATE TRIGGER fleet_generation_signature_update
+         AFTER UPDATE OF writer, sequence, envelope_hash, member_key ON replica_envelope_signatures
+         WHEN {insert_signature} OR {delete_signature} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_insert AFTER INSERT ON meta
          WHEN NEW.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_update AFTER UPDATE ON meta
          WHEN NEW.key='fleet_anchor_key' OR OLD.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_delete AFTER DELETE ON meta
          WHEN OLD.key='fleet_anchor_key' BEGIN {bump} END;",
-        insert_envelope = carries_fleet_claims("NEW"),
-        update_envelope = carries_fleet_claims("NEW"),
+        insert_batch = carries_fleet_claims("NEW", "id"),
+        delete_batch = carries_fleet_claims("OLD", "id"),
+        insert_envelope = carries_fleet_claims("NEW", "batch_id"),
+        delete_envelope = carries_fleet_claims("OLD", "batch_id"),
         insert_signature = signs_fleet_claims("NEW"),
         delete_signature = signs_fleet_claims("OLD"),
     )

@@ -48,7 +48,7 @@ pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "1ae8c187
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
