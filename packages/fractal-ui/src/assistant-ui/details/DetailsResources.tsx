@@ -1,8 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useDrag } from 'react-aria'
-import { Button as AriaButton, Tooltip as AriaTooltip, TooltipTrigger } from 'react-aria-components'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { Button as AriaButton, Tooltip as AriaTooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon, type IconName } from '../composition/Icons'
 import { SidebarAgentRow } from '../sidebar/SidebarAgentRow'
 import { ResourceCardV1, ResourceHoverV1, WholeResourceMeta } from '../resources/ResourceCardV1'
@@ -57,7 +57,7 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
             <span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span>
             {section.title !== 'Subagents' && section.items._tag === 'Known' && section.items.value.length > 0 && (state === 'loading'
               ? <span aria-hidden="true" data-details-skeleton-count {...stylex.props(styles.count)}><DetailsInk ch={String(section.items.value.length).length} /></span>
-              : <span {...stylex.props(styles.count)}>{section.items.value.length}</span>)}
+              : <span data-details-section-count {...stylex.props(styles.count)}>{section.items.value.length}</span>)}
           </AriaButton>
         </div>
         {!isCollapsed && <div {...stylex.props(styles.body)}>
@@ -241,7 +241,7 @@ function SectionItems({ section, now, form, open, pending }: { section: DetailsS
   return <>
     {form === 'R2' && <div role="list" aria-label={section.title} {...stylex.props(styles.dense)}>{shown.map(resource => row(resource, <DenseRow resource={resource} now={now} open={open} />))}</div>}
     {form !== 'R2' && shown.map(resource => row(resource, <ResourceEntry resource={resource} now={now} open={open} />))}
-    {capped && <SkeletonLine pending={pending}><AriaButton onPress={()=>setExpanded(value=>!value)} {...stylex.props(styles.splitButton)}>{expanded?'Show fewer':`+${items.length - shown.length} more`}</AriaButton></SkeletonLine>}
+    {capped && <SkeletonLine pending={pending}><AriaButton data-details-quiet-action onPress={()=>setExpanded(value=>!value)} {...stylex.props(styles.splitButton)}>{expanded?'Show fewer':`+${items.length - shown.length} more`}</AriaButton></SkeletonLine>}
   </>
 }
 
@@ -265,7 +265,7 @@ function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now
   if (resource.agent !== undefined) {
     return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.agentEntry)}>
       <div {...stylex.props(styles.agentRow)}><SidebarAgentRow item={resource.agent} variant="SR-2" reportedStatusOnly now={now} onOpen={row => open(agentPaneKey(row.ref), splitPress.current)} /></div>
-      <AriaButton aria-label={`Open in split: ${resource.card.label}`} onPress={() => open(paneKey, true)} {...stylex.props(styles.splitButton, styles.inlineSplit)}>Open in split</AriaButton>
+      <AriaButton data-details-quiet-action aria-label={`Open in split: ${resource.card.label}`} onPress={() => open(paneKey, true)} {...stylex.props(styles.splitButton, styles.inlineSplit)}>Open in split</AriaButton>
     </div>
   }
   // Traced sessions and incarnations carry their reported facts only in the detail, so the card paints it.
@@ -293,7 +293,7 @@ function resourceIcon(resource: DetailsResource): IconName {
   }
 }
 
-/** Dense rows retain aligned metadata while branch and PR identities get two lines. */
+/** Dense rows retain aligned metadata while branch and PR identities get two lines; painted text names the row and its facts describe it. */
 function DenseRow({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
   const paneKey = agentPaneKey(resource.uri)
   const getItems=React.useCallback(()=>[{[AGENT_DRAG_MIME]:paneKey,'text/plain':paneKey}],[paneKey])
@@ -304,23 +304,26 @@ function DenseRow({ resource, now, open }: { resource: DetailsResource; now: num
       ? [resource.file.added._tag === 'Known' && resource.file.added.value !== 0 ? `+${resource.file.added.value}` : '', resource.file.removed._tag === 'Known' && resource.file.removed.value !== 0 ? `−${resource.file.removed.value}` : ''].filter(Boolean).join(' ')
     : resource.card.detail
   const isSubagent = resource.agent !== undefined || resource.uri.startsWith('session:')
+  // An absent agent status must not fall back to the card's projected status text; whole meta may be hidden when it does not fit.
+  const facts = [...new Set([meta, resource.agent === undefined ? resource.card.detail : undefined, resource.file !== undefined && resource.file.path !== resource.card.label ? resource.file.path : undefined])].filter((fact): fact is string => fact !== undefined && fact !== '')
+  const descriptionId = React.useId()
   return <div data-resource-card role="listitem" {...dragProps} {...stylex.props(styles.denseEntry)}><TooltipTrigger delay={150}>
-    <AriaButton data-details-resource-row aria-label={`Open ${resource.card.label}${meta ? ` ${meta}` : ''}`} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow)}>
+    <AriaButton data-details-resource-row aria-describedby={facts.length > 0 ? descriptionId : undefined} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow)}>
       <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
       <span data-details-resource-title data-resource-title-lines={wrapsIdentity(resource) ? 'wrap' : 1} {...stylex.props(styles.denseLabel, wrapsIdentity(resource) && styles.wrappedLabel)}>{resource.card.label}</span>{' '}
       <WholeResourceMeta numeric={resource.file !== undefined} styles={styles.denseMeta}>{meta}</WholeResourceMeta>
     </AriaButton>
     <AriaTooltip placement="left" {...stylex.props(styles.tooltip)}><HoverContent resource={resource} now={now} /></AriaTooltip>
-  </TooltipTrigger>{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit)}><Icon name="panel" /></AriaButton>}</div>
+  </TooltipTrigger>{facts.length > 0 && <VisuallyHidden elementType="span"><span id={descriptionId} data-details-resource-facts>{facts.join(' · ')}</span></VisuallyHidden>}{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit)}><Icon name="panel" /></AriaButton>}</div>
 }
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, fontFamily: t.fontSans, color: ink.fg },
   section: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   header: { minHeight: g.toolRow, display: 'flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.md },
-  headerButton: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, flexGrow: 1, height: g.toolRow, padding: s.zero, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outline: `2px solid ${border.focusBorder}`, outlineOffset: -2 } },
+  headerButton: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0, flexGrow: 1, height: g.toolRow, padding: s.zero, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
   headerTitle: { color: ink.fg, fontWeight: t.weightSemibold, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  count: { fontFamily: t.fontMono, fontSize: t.microSize, color: ink.fgFaint, flexShrink: 0 },
+  count: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, flexShrink: 0 },
   body: { display: 'flex', flexDirection: 'column', gap: s.sm, paddingInline: s.xxl, paddingBottom: s.md, minWidth: 0 },
   metaLine: { margin: s.zero, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   allHidden: { padding: s.md },
@@ -328,11 +331,11 @@ const styles = stylex.create({
   agentEntry: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0 },
   agentRow: { flex: 1, minWidth: 0 },
   inlineSplit: { flexShrink: 0, whiteSpace: 'nowrap' },
-  splitButton: { height: g.controlSm, paddingInline: s.sm, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgFaint, fontFamily: t.fontSans, fontSize: t.microSize, borderRadius: r.sm, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outline: `2px solid ${border.focusBorder}` } },
+  splitButton: { height: g.controlSm, paddingInline: s.sm, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, borderRadius: r.sm, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}` } },
   dense: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   denseEntry: { position: 'relative', display: 'flex', alignItems: 'center', minWidth: 0 },
-  denseSplit: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.toolRow, height: g.toolRow, padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outline: `2px solid ${border.focusBorder}`, outlineOffset: -2 } },
-  denseRow: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minWidth: 0, flex: 1, boxSizing: 'border-box', minHeight: g.toolRow, paddingInline: s.sm, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, borderRadius: r.sm, color: ink.fg }, ':focus-visible': { outline: `2px solid ${border.focusBorder}`, outlineOffset: -2 } },
+  denseSplit: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.toolRow, height: g.toolRow, padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
+  denseRow: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minWidth: 0, flex: 1, boxSizing: 'border-box', minHeight: g.toolRow, paddingInline: s.sm, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, borderRadius: r.sm, color: ink.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: -2 } },
   resourceIcon: { display: 'inline-flex', flexShrink: 0, color: ink.fgMuted },
   denseLabel: { flexBasis: 0, flexGrow: 1, flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   // Identity labels wrap in full (no clamp) with balanced lines: a long branch never leaves one orphaned word beside its badge.
