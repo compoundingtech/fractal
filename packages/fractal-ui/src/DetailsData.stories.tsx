@@ -6,6 +6,7 @@ import { DetailsLabelContext } from './assistant-ui/details/DetailsResources'
 import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
 import { fullTraceFixture } from './assistant-ui/details/trace/fixture-provider'
 import type { TraceFact, TraceSeries } from './assistant-ui/details/trace-series'
+import type { DetailsOverview, DetailsSection } from './assistant-ui/details/model'
 import { Workbench } from './assistant-ui/workbench/Workbench'
 import { group } from './assistant-ui/workbench/workbench-model'
 import { detailsWorkbenchResources as workbenchResources } from './assistant-ui/details/story-fixtures'
@@ -80,8 +81,56 @@ const invalidCoverage=(fraction:number):TraceSeries=>({...inclusive,
   meters:{...inclusive.meters,spend:{...inclusive.meters.spend,totalUsdCoverage:{_tag:'Partial',attributedFraction:fraction}}},
 })
 const invalidNaN=invalidCoverage(Number.NaN),invalidNegative=invalidCoverage(-0.1),invalidOverflow=invalidCoverage(1.1)
-const scenarios = { partial, boundary, boundary995, zeroCoverage, fullPartial, notCovered, independent: native, session: inclusive, partialFacts, percentOnly, percentSamples, mixedWindows, unknownTotalScope, invalidNaN, invalidNegative, invalidOverflow } as const
-interface Args extends DetailsPaneProps { scenario: keyof typeof scenarios; scheme: 'dark' | 'light'; width: 320 | 400 | 520 }
+const reportedLong: TraceSeries = { ...mixedWindows, meters: { ...mixedWindows.meters, spend: { ...mixedWindows.meters.spend,
+  usdWindow: known({ _tag: 'Reported', label: 'last 7 days (as reported; exact cut bounds and attribution window are not supplied)' }),
+} } }
+const knownZero: TraceSeries = { ...native, subagents: known([]), subagentCount: known(0) }
+const unknownCount: TraceSeries = { ...knownZero, subagentCount: unavailable }
+const boundedCount: TraceSeries = { ...inclusive, subagentCount: known(309) }
+const scenarios = { partial, boundary, boundary995, zeroCoverage, fullPartial, notCovered, independent: native, session: inclusive, partialFacts, percentOnly, percentSamples, mixedWindows, unknownTotalScope, invalidNaN, invalidNegative, invalidOverflow,
+  reportedLong, knownZero, unknownCount, boundedCount, observedEmpty: native,
+  firstRead: native, firstReadDense: native, firstReadCompact: native, firstReadHideEmpty: native, firstReadShowEmpty: native, settledUnavailable: native, knownEmpty: native, timing: native,
+} as const
+/** Observed st resources reported as an explicit empty list, independent of the traced breakdown. */
+const sectionsForScenario = (scenario: string, sections: readonly DetailsSection[]): readonly DetailsSection[] =>
+  ['knownZero', 'unknownCount', 'observedEmpty'].includes(scenario)
+    ? sections.map(section => section.title === 'Subagents' ? { ...section, items: { _tag: 'Known' as const, value: [] } } : section)
+    : sections
+const unavailableSections: readonly DetailsSection[] = [
+  { title: 'Workspace', items: { _tag: 'Unknown' }, unavailableReason: 'Workspace details are not supplied by this source.' },
+  { title: 'Declared bindings', items: { _tag: 'Unknown' }, unavailableReason: 'Declared bindings are not supplied by this source.' },
+  { title: 'Reviews', items: { _tag: 'Unknown' }, unavailableReason: 'Reviews are not supplied by this source.' },
+]
+const firstReadSections = unavailableSections.map(section => section.title === 'Reviews' ? section : { ...section, pending: true })
+const emptySections: readonly DetailsSection[] = unavailableSections.map(section => ({ title: section.title, items: { _tag: 'Known', value: [] } }))
+const resourceScenarios = {
+  firstRead: { sections: firstReadSections, resources: 'R1', empty: 'E3' },
+  firstReadDense: { sections: firstReadSections, resources: 'R2', empty: 'E3' },
+  firstReadCompact: { sections: firstReadSections, resources: 'R3', empty: 'E3' },
+  firstReadHideEmpty: { sections: firstReadSections, resources: 'R1', empty: 'E1' },
+  firstReadShowEmpty: { sections: firstReadSections, resources: 'R1', empty: 'E2' },
+  settledUnavailable: { sections: unavailableSections, resources: 'R1', empty: 'E3' },
+  knownEmpty: { sections: emptySections, resources: 'R1', empty: 'E2' },
+} as const
+const elapsedLabel = 'Managed-session elapsed (from session start to end or now; wall time, not active)'
+const ageLabel = 'Current-incarnation session age (from managed session start; native launch not reported)'
+const spanLabel = 'Root observed span (first to last native observation)'
+const timingGuard = 'The session start equals the producer snapshot time, so duration cannot be established.'
+const timingProvenance = 'Observed by the host from native observations; not a managed session start.'
+/** One first-read field beside a guarded missing value and a known value with host provenance. */
+const timingDurations: DetailsOverview['durations'] = [
+  { label: elapsedLabel, value: 'Loading', pending: true },
+  { label: ageLabel, value: 'Unreported', detail: timingGuard },
+  { label: spanLabel, value: '42m', detail: timingProvenance },
+]
+type ScenarioProps = Pick<DetailsPaneProps, 'sections' | 'variants' | 'overview'>
+const scenarioProps = (scenario: string, props: ScenarioProps): ScenarioProps => {
+  const resource = Object.entries(resourceScenarios).find(([name]) => name === scenario)?.[1]
+  if (resource !== undefined) return { ...props, sections: resource.sections, variants: { ...props.variants, resources: resource.resources, empty: resource.empty } }
+  if (scenario === 'timing') return { ...props, overview: { ...props.overview, durations: timingDurations } }
+  return { ...props, sections: sectionsForScenario(scenario, props.sections) }
+}
+interface Args extends DetailsPaneProps { scenario: keyof typeof scenarios; scheme: 'dark' | 'light'; width: 240 | 320 | 400 | 520 }
 const styles = stylex.create({
   frame: { height: 720, minHeight: 0, overflow: 'hidden', backgroundColor: surface.canvas },
   width: (width: number) => ({ width }),
@@ -100,12 +149,12 @@ const meta = {
   argTypes: {
     scenario: { control: 'select', options: Object.keys(scenarios) },
     scheme: { control: 'inline-radio', options: ['dark', 'light'] },
-    width: { control: 'inline-radio', options: [320, 400, 520] },
+    width: { control: 'inline-radio', options: [240, 320, 400, 520] },
     trace: { control: false }, overview: { control: false }, sections: { control: false },
   },
   render: ({ scenario, scheme, width, ...props }) => <section aria-label={`Data case ${scenario}`} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
     <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-${scenario}`} scheme={scheme}
-      renderPane={() => <DetailsPane {...props} trace={scenarios[scenario]} pendingTrace={scenarios[scenario]} />}/></ThemePortal>
+      renderPane={() => <DetailsPane {...props} {...scenarioProps(scenario, props)} trace={scenarios[scenario]} pendingTrace={scenarios[scenario]} />}/></ThemePortal>
   </section>,
 } satisfies Meta<Args>
 export default meta
@@ -307,6 +356,7 @@ function assertPartialFacts(root:HTMLElement) {
  requireContract(!text.includes('Invalid Date')&&!text.includes('NaN')&&!text.includes('First observed')&&!text.includes('Parent ·')&&text.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
  requireContract(root.textContent?.includes('Showing 1 of 4 traced sessions'), 'Missing descendant facts changed the reported descendant count')
  requireContract(!card.textContent?.includes('gpt-5.4'), 'Unavailable model was fabricated')
+ requireContract(card.querySelector('[data-details-resource-title]')?.textContent === 'role unreported · native-child', 'Missing descendant role was rendered as a bare identity')
 }
 function assertContextSamples(root:HTMLElement) {
  assertPercentOnly(root)
@@ -316,12 +366,77 @@ function assertContextSamples(root:HTMLElement) {
  const titles=Array.from(section.querySelectorAll('circle title')).map(title=>title.textContent??'')
  requireContract(titles.length===2&&titles.every(title=>/\d+%/.test(title)&&!title.includes('tokens')), 'Historical occupancy escaped percentage units')
 }
+function assertResourceRead(root: HTMLElement, scenario: string, prefix: string) {
+  const firstRead = scenario.startsWith('firstRead')
+  requireContract(root.getAttribute('data-details-pane-state') === 'busy' && !root.querySelector('[data-details-skeleton="overview"]'), 'Resource read replaced loaded sibling details')
+  for (const title of ['Workspace', 'Declared bindings']) {
+    const section = root.querySelector<HTMLElement>(`section[aria-label="${prefix}${title}"]`)
+    requireContract(section, 'First-read or settled resource section was filtered out')
+    const notes = [...section.querySelectorAll<HTMLElement>('[data-details-unavailable]')]
+    if (firstRead) {
+      requireContract(section.getAttribute('aria-busy') === 'true' && section.querySelector(`[data-details-skeleton="${title}"][aria-hidden="true"][inert] [data-details-skeleton-row]`), 'First-read resource rendered settled-unavailable instead of a pending skeleton')
+      requireContract(notes.every(note => note.closest('[aria-hidden="true"][inert]')), 'First-read resource exposed settled-unavailable copy')
+    } else {
+      requireContract(!section.hasAttribute('aria-busy') && !section.querySelector('[data-details-skeleton]'), 'Settled resource stayed pending')
+      if (scenario === 'knownEmpty') requireContract(notes.length === 0 && section.querySelector('p')?.textContent === 'None', 'Known-empty resources became unavailable')
+      else requireContract(notes.length === 1 && !notes[0]!.closest('[inert],[aria-hidden="true"]') && within(notes[0]!).queryByRole('button', { name: 'Unavailable observations: unavailable' }), 'Settled absence lost its explicit unavailable reason')
+    }
+  }
+  const reviews = root.querySelector<HTMLElement>(`section[aria-label="${prefix}Reviews"]`)
+  if (scenario !== 'firstReadHideEmpty') {
+    requireContract(reviews && !reviews.hasAttribute('aria-busy') && !reviews.querySelector('[data-details-skeleton]'), 'Static unreported section became pending')
+    if (scenario === 'knownEmpty') requireContract(reviews.querySelector('p')?.textContent === 'None', 'Known-empty resources became unavailable')
+    else requireContract(reviews.querySelector('[data-details-unavailable]') && !reviews.querySelector('[data-details-unavailable]')?.closest('[inert]'), 'Static unreported section lost its explicit absence')
+  }
+}
+function durationRow(root: HTMLElement, shortLabel: string): HTMLElement {
+  const row = [...root.querySelectorAll<HTMLElement>('[data-details-description-row]')].find(item => item.querySelector('button')?.textContent === shortLabel)
+  requireContract(row, 'Timing row is missing')
+  return row
+}
+/** Timing fields settle independently; host provenance stays in each value's tooltip rather than repeating beneath values. */
+function assertTiming(root: HTMLElement) {
+  requireContract(root.getAttribute('data-details-pane-state') === 'busy' && !root.querySelector('[data-details-skeleton="overview"]') && root.querySelector('[data-details-name]')?.textContent === 'UI redesign milestone', 'Pending timing replaced loaded sibling details')
+  const elapsed = durationRow(root, 'Managed-session elapsed'), age = durationRow(root, 'Current-incarnation session age'), span = durationRow(root, 'Root observed span')
+  requireContract(elapsed.getAttribute('aria-busy') === 'true' && elapsed.querySelector('[data-details-skeleton="duration"][aria-hidden="true"][inert]') && elapsed.textContent?.endsWith('Loading') && !elapsed.querySelector('[data-details-missing-value]'), 'First-read timing rendered a settled value')
+  requireContract(!age.hasAttribute('aria-busy') && !age.querySelector('[data-details-skeleton]') && age.querySelector(`[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`)?.textContent === '—', 'Settled timing stayed pending')
+  requireContract(!span.hasAttribute('aria-busy') && [...span.querySelectorAll('button')].some(button => button.textContent === '42m'), 'Known timing lost its value')
+  requireContract(!root.textContent?.includes(timingGuard) && !root.textContent?.includes(timingProvenance), 'Timing guard reason repeats beneath values')
+}
 function assertAllStates(root:HTMLElement) {
  const names=Object.keys(scenarios)
  const mounted=root.querySelectorAll('[data-testid="details-pane"]')
  requireContract(mounted.length===names.length, 'AllStates omitted a production pane')
  for(const name of names)requireContract(root.querySelectorAll(`section[aria-label="${name}"] [data-testid="details-pane"]`).length===1, 'AllStates omitted a named scenario')
  mounted.forEach(element=>requireContract(!/\bUnknown\b/.test(element.textContent??''), 'Literal Unknown escaped the fact boundary'))
+ const period = root.querySelector<HTMLElement>('section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]')
+ requireContract(period?.textContent === 'reported window · last 7 days (as reported; exact cut bounds and attribution window are not supplied)', 'Reported accumulation description was shortened')
+ const knownZeroSection = root.querySelector<HTMLElement>('section[aria-label="knownZero"] section[aria-label="knownZero Subagents"]')
+ requireContract(knownZeroSection?.querySelector('[data-details-subagent-count]')?.textContent === 'Showing 0 of 0 traced sessions', 'Known zero traced sessions disappeared under E3')
+ requireContract(knownZeroSection?.querySelector('button[aria-expanded]')?.textContent === 'Subagents0', 'Known zero is absent from the Subagents heading')
+ for (const name of ['knownZero', 'unknownCount', 'observedEmpty']) {
+  const observed = root.querySelector(`section[aria-label="${name}"] [data-details-observed-subagent-count]`)
+  requireContract(observed?.textContent === 'Observed st resources · 0', 'Known empty st resources became unreported')
+ }
+ for (const name of ['unknownCount', 'observedEmpty']) {
+  const section = root.querySelector(`section[aria-label="${name}"] section[aria-label="${name} Subagents"]`)
+  requireContract(section && !section.querySelector('[data-details-subagent-count]')?.textContent?.includes('of 0')
+    && section.querySelector('button[aria-expanded]')?.textContent === 'Subagents', 'Unknown traced count became zero')
+ }
+ // Observed st rows precede the traced breakdown, so select the traced card by its session identity.
+ const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('native-child'))
+ requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · native-child', 'Traced role, model or identity is hidden behind Open')
+ const boundedSection = root.querySelector('section[aria-label="boundedCount"] section[aria-label="boundedCount Subagents"]')
+ requireContract(boundedSection?.querySelector('button[aria-expanded]')?.textContent === 'Subagents309', 'Reported traced total disappeared from the Subagents heading')
+ requireContract(boundedSection?.querySelector('[data-details-subagent-count]')?.textContent === 'Showing 1 of 309 traced sessions', 'Traced heading total became the retained list size')
+ for (const name of Object.keys(resourceScenarios)) {
+  const resourceRoot = root.querySelector<HTMLElement>(`section[aria-label="${name}"] [data-testid="details-pane"]`)
+  requireContract(resourceRoot, 'AllStates omitted a resource-read control')
+  assertResourceRead(resourceRoot, name, `${name} `)
+ }
+ const timingRoot = root.querySelector<HTMLElement>('section[aria-label="timing"] [data-testid="details-pane"]')
+ requireContract(timingRoot, 'AllStates omitted the timing control')
+ assertTiming(timingRoot)
 }
 export const SessionVersusDescendants: Story = {
   args: { scenario: 'session' },
@@ -350,6 +465,14 @@ export const PartialDescendantFacts: Story = {
       facts.textContent=original
       facts.style.setProperty('visibility','hidden')
       await rejectsControl('Reported descendant facts are hidden behind hover',()=>assertPartialFacts(root))
+      facts.style.removeProperty('visibility')
+      const title=card.querySelector<HTMLElement>('[data-details-resource-title]')
+      requireContract(title,'Missing role-wording negative control target')
+      const titleText=title.textContent
+      try {
+        title.textContent='native-child'
+        await rejectsControl('Missing descendant role was rendered as a bare identity',()=>assertPartialFacts(root))
+      } finally { title.textContent=titleText }
     } finally { invented.remove(); facts.textContent=original; facts.style.removeProperty('visibility') }
     assertPartialFacts(root)
   },
@@ -394,7 +517,7 @@ export const InvalidPartialOverflow:Story={args:{scenario:'invalidOverflow'},pla
 export const AllStates: Story = {
   render: ({ scheme, width, ...props }) => <div {...stylex.props(styles.comparison)}>{Object.entries(scenarios).map(([name, trace]) => <section key={name} aria-label={name} {...stylex.props(styles.frame, styles.width(width), ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}>
     <ThemePortal><Workbench resources={workbenchResources} layout={group([{ uri: 'agent:worker-1', view: 'details' }])} workspaceId={`details-data-all-${name}`} scheme={scheme}
-      renderPane={() => <DetailsLabelContext.Provider value={`${name} `}><DetailsPane {...props} trace={trace} pendingTrace={trace} /></DetailsLabelContext.Provider>}/></ThemePortal>
+      renderPane={() => <DetailsLabelContext.Provider value={`${name} `}><DetailsPane {...props} {...scenarioProps(name, props)} trace={trace} pendingTrace={trace} /></DetailsLabelContext.Provider>}/></ThemePortal>
   </section>)}</div>,
   play:async({canvasElement})=>{
     assertAllStates(canvasElement)
@@ -403,5 +526,102 @@ export const AllStates: Story = {
     requireContract(missing,'Missing AllStates negative control target')
     missing.remove()
     await rejectsControl('AllStates omitted a production pane',()=>assertAllStates(wrong))
+    await rejectsControl('Reported accumulation description was shortened',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="reportedLong"] [data-details-metric="total-usd"] [data-details-metric-period]','reported window · last 7 days')))
+    await rejectsControl('Known zero is absent from the Subagents heading',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownZero Subagents"] button[aria-expanded]','Subagents')))
+    await rejectsControl('Unknown traced count became zero',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="unknownCount Subagents"] button[aria-expanded]','Subagents0')))
+    await rejectsControl('Traced heading total became the retained list size',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 traced sessions')))
+    await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · native-child')))
+    await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertAllStates(mutated(canvasElement,'section[aria-label="firstReadDense Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
+    await rejectsControl('Settled absence lost its explicit unavailable reason',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable Workspace"] [data-details-unavailable]',node=>node.remove())))
+    await rejectsControl('Settled resource stayed pending',()=>assertAllStates(mutated(canvasElement,'section[aria-label="settledUnavailable Workspace"]',node=>node.setAttribute('aria-busy','true'))))
+    await rejectsControl('Known-empty resources became unavailable',()=>assertAllStates(falsifyText(canvasElement,'section[aria-label="knownEmpty Workspace"] p','Unavailable')))
+    await rejectsControl('First-read timing rendered a settled value',()=>assertAllStates(mutated(canvasElement,'section[aria-label="timing"] [data-details-skeleton="duration"]',node=>node.remove())))
+  },
+}
+/** Clones the canvas and applies one mutation to every match, so the live tree stays intact. */
+function mutated(root: HTMLElement, selector: string, mutate: (node: HTMLElement) => void): HTMLElement {
+  const wrong = root.cloneNode(true) as HTMLElement
+  const nodes = wrong.querySelectorAll<HTMLElement>(selector)
+  requireContract(nodes.length > 0, `Missing negative control target: ${selector}`)
+  nodes.forEach(mutate)
+  return wrong
+}
+function unclipped(element: Element | null): boolean {
+  return element instanceof HTMLElement && element.scrollWidth <= element.clientWidth + 1 && element.getBoundingClientRect().height > 0
+}
+/** A reported window keeps its full description at the narrowest pane, wrapping between words instead of clipping. */
+function assertReportedNarrow(root: HTMLElement) {
+  const row = root.querySelector<HTMLElement>('[data-details-metric="total-usd"]')
+  const period = row?.querySelector<HTMLElement>('[data-details-metric-period]')
+  requireContract(row && period?.textContent === 'reported window · last 7 days (as reported; exact cut bounds and attribution window are not supplied)', 'Reported accumulation description was shortened')
+  requireContract(unclipped(period) && unclipped(row.querySelector('dt')) && unclipped(row), 'Reported accumulation description clips instead of wrapping')
+  const amount = row.querySelector('dd')
+  requireContract(amount?.textContent === '$100.00' && unclipped(amount) && amount.getBoundingClientRect().right <= row.getBoundingClientRect().right + 1, 'Reported spend amount is clipped beside its description')
+}
+export const ReportedWindowNarrow: Story = {
+  args: { scenario: 'reportedLong', width: 240 },
+  play: async ({ canvasElement }) => {
+    const root = pane(canvasElement)
+    await waitFor(() => assertReportedNarrow(root))
+    const parts = [...root.querySelectorAll<HTMLElement>('[data-details-metric="total-usd"] [data-details-metric-period] span span')]
+    requireContract(parts.length > 0, 'Missing reported-window negative control target')
+    try {
+      parts.forEach(part => part.style.setProperty('white-space', 'nowrap'))
+      await rejectsControl('Reported accumulation description clips instead of wrapping', () => assertReportedNarrow(root))
+    } finally { parts.forEach(part => part.style.removeProperty('white-space')) }
+    await waitFor(() => assertReportedNarrow(root))
+  },
+}
+/** Opens a value's tooltip from the keyboard and returns it once it carries the expected text, skipping a closing sibling. */
+async function tooltipFor(canvas: HTMLElement, trigger: HTMLElement, expected: string, cause: string): Promise<HTMLElement> {
+  trigger.focus()
+  requireContract(canvas.ownerDocument.activeElement === trigger, 'Timing value is not keyboard reachable')
+  await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
+  await waitFor(() => requireContract(canvas.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the timing value'))
+  let tooltip: HTMLElement | undefined
+  await waitFor(() => {
+    tooltip = within(canvas.ownerDocument.body).queryAllByRole('tooltip').find(item => item.textContent === expected)
+    requireContract(tooltip, cause)
+  })
+  requireContract(tooltip, cause)
+  return tooltip
+}
+export const TimingProvenance: Story = {
+  args: { scenario: 'timing' },
+  play: async ({ canvasElement }) => {
+    const root = pane(canvasElement)
+    await waitFor(() => assertTiming(root))
+    await rejectsControl('First-read timing rendered a settled value', () => assertTiming(mutated(root, '[data-details-skeleton="duration"]', node => node.remove())))
+    await rejectsControl('Settled timing stayed pending', () => assertTiming(mutated(root, `[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`, node => node.closest('[data-details-description-row]')?.setAttribute('aria-busy', 'true'))))
+    await rejectsControl('Timing guard reason repeats beneath values', () => assertTiming(mutated(root, `[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`, node => { const prose = node.ownerDocument.createElement('p'); prose.textContent = timingGuard; node.closest('[data-details-description-row]')?.after(prose) })))
+    const missing = root.querySelector<HTMLElement>(`[data-details-missing-value][aria-label="${ageLabel}: unavailable"]`)
+    requireContract(missing, 'Missing guarded timing value')
+    const guard = await tooltipFor(canvasElement, missing, timingGuard, 'Guarded timing tooltip lost the host reason')
+    const wrongGuard = guard.cloneNode(true) as HTMLElement
+    wrongGuard.textContent = `${ageLabel} is not reported by this source.`
+    await rejectsControl('Guarded timing tooltip lost the host reason', () => requireContract(wrongGuard.textContent === timingGuard, 'Guarded timing tooltip lost the host reason'))
+    const value = [...durationRow(root, 'Root observed span').querySelectorAll<HTMLElement>('button')].find(button => button.textContent === '42m')
+    requireContract(value, 'Missing known timing value')
+    const provenance = await tooltipFor(canvasElement, value, `42m${timingProvenance}`, 'Known timing tooltip lost host provenance')
+    requireContract(provenance.querySelector('[data-details-value-detail]')?.textContent === timingProvenance, 'Known timing tooltip lost host provenance')
+  },
+}
+export const FirstReadResources: Story = {
+  args: { scenario: 'firstRead' },
+  play: async ({ canvasElement }) => {
+    const root = pane(canvasElement)
+    await waitFor(() => assertResourceRead(root, 'firstRead', ''))
+    await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton', () => assertResourceRead(mutated(root, 'section[aria-label="Workspace"] [data-details-skeleton]', node => node.removeAttribute('data-details-skeleton')), 'firstRead', ''))
+    await rejectsControl('First-read resource exposed settled-unavailable copy', () => assertResourceRead(mutated(root, 'section[aria-label="Workspace"]', node => { const note = node.querySelector('[data-details-unavailable]')?.cloneNode(true); if (note) node.append(note) }), 'firstRead', ''))
+    await rejectsControl('Static unreported section became pending', () => assertResourceRead(mutated(root, 'section[aria-label="Reviews"]', node => node.setAttribute('aria-busy', 'true')), 'firstRead', ''))
+    await rejectsControl('Resource read replaced loaded sibling details', () => assertResourceRead(mutated(root, '[data-details-content-slot]', node => node.closest('[data-testid="details-pane"]')?.setAttribute('data-details-pane-state', 'loading')), 'firstRead', ''))
+    await rejectsControl('First-read or settled resource section was filtered out', () => assertResourceRead(mutated(root, 'section[aria-label="Declared bindings"]', node => node.remove()), 'firstRead', ''))
+    const reviews = root.querySelector<HTMLElement>('section[aria-label="Reviews"]')
+    const trigger = reviews ? within(reviews).getByRole('button', { name: 'Unavailable observations: unavailable' }) : undefined
+    requireContract(trigger, 'Reviews absence is not keyboard reachable')
+    trigger.focus()
+    await userEvent.keyboard('{Tab}{Shift>}{Tab}{/Shift}')
+    await waitFor(() => requireContract(canvasElement.ownerDocument.activeElement === trigger, 'Keyboard navigation skipped the Reviews absence'))
+    await waitFor(() => requireContract(within(canvasElement.ownerDocument.body).getByRole('tooltip').textContent === 'Reviews are not supplied by this source.', 'Reviews absence lost its source reason'))
   },
 }

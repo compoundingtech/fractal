@@ -9,6 +9,10 @@ export type DetailsValue<A> = ResourceMetadata<A>
 export interface DetailsDisplayObservation {
   readonly label: string
   readonly value: string
+  /** Host-supplied provenance or guard reason; never a guessed value. */
+  readonly detail?: string
+  /** This field's first observation is acquiring independently of loaded sibling fields. */
+  readonly pending?: boolean
 }
 
 export interface DetailsOverview {
@@ -41,4 +45,6 @@ export interface DetailsSection {
   readonly items: DetailsValue<readonly DetailsResource[]>
   /** Safe host copy for unreported, unavailable or ungranted items; known [] means observed empty. */
   readonly unavailableReason?: string
+  /** First acquisition is pending, distinct from an unavailable or unreported result. */
+  readonly pending?: boolean
 }

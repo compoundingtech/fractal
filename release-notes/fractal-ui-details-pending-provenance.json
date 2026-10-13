@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Fractal UI Details accepts per-field pending durations and host-supplied provenance or guard reasons, shown in each value's tooltip instead of repeated beneath values. Resource sections on their first read stay visible as skeletons rather than appearing unavailable. The Subagents badge shows the reported traced total, known-zero traced sessions and empty observed resource lists are shown as evidence, traced titles show role, model and session id, and long reported spend windows wrap at narrow widths.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Additive optional fields: DetailsDisplayObservation.pending/detail and DetailsSection.pending. Hosts that omit them render as before, except that the Subagents badge now shows the reported total instead of the retained row count."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}

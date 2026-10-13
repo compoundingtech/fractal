@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Checkbox, Dialog, DialogTrigger, Heading, Popover, ProgressBar, Tooltip, TooltipTrigger } from 'react-aria-components'
+import { Button, Checkbox, Dialog, DialogTrigger, Heading, Popover, ProgressBar, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import { DetailsResources, DetailsLabelContext } from './DetailsResources'
 import type { DetailsState, DetailsOverview, DetailsSection } from './model'
 import { DetailsCharts, DetailsChartsPending, hasDetailsChartData, pendingShapeFromTrace, type DetailsPendingShape } from './DetailsCharts'
@@ -17,9 +17,10 @@ import { MissingDetailsValue } from './DetailsUnavailable'
 export interface DetailsVariants {
   overview: 'O1'|'O2'|'O3'; context:'C1'|'C2'|'C3'; spend:'S1'|'S2'|'S3'; resources:'R1'|'R2'|'R3'; empty:'E1'|'E2'|'E3'
 }
-function OverviewValue({label,value}:{label:string;value:string|undefined}) {
-  if(value===undefined||/\b(unreported|unavailable)\b/i.test(value))return <MissingDetailsValue label={label} reason={value??`${label} is not reported by this source.`}/>
-  return <TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{value}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{value}</Tooltip></TooltipTrigger>
+/** A host `detail` is the missing value's provenance, or a known value's provenance beneath it in the tooltip. */
+function OverviewValue({label,value,detail}:{label:string;value:string|undefined;detail?:string|undefined}) {
+  if(value===undefined||/\b(unreported|unavailable)\b/i.test(value))return <MissingDetailsValue label={label} reason={detail??value??`${label} is not reported by this source.`}/>
+  return <TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{value}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{value}{detail!==undefined&&<span data-details-value-detail {...stylex.props(styles.tooltipDetail)}>{detail}</span>}</Tooltip></TooltipTrigger>
 }
 export interface DetailsLayoutIntent { readonly hiddenSections: readonly string[] }
 function Section({title,children,hidden}:{title:string;children:React.ReactNode;hidden:boolean}) {
@@ -171,7 +172,11 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         </>}
         </>}
         {(pending?pendingOverview.mission:overview.mission)!==undefined&&<div data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(styles.line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.pendingText)}>Mission</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{pendingOverview.mission}</span></>:<><span {...stylex.props(styles.shortLabel)}>Mission</span><TooltipTrigger delay={0}><Button {...stylex.props(styles.overviewValue)}>{overview.mission}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{overview.mission}</Tooltip></TooltipTrigger></>}</div>}
-        {(pending?pendingOverview.durations:overview.durations)?.map(duration=><div key={duration.label} data-details-overview-line data-details-description-row aria-hidden={pending||undefined} {...stylex.props(styles.line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<><TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger><OverviewValue label={duration.label} value={duration.value}/></>}</div>)}
+        {(pending?pendingOverview.durations:overview.durations)?.map(duration=>{
+          // A first-read field keeps its known label and reserves the host's placeholder value; settled siblings stay readable.
+          const fieldPending=!pending&&duration.pending===true
+          return <div key={duration.label} data-details-overview-line data-details-description-row data-details-duration-pending={pending||fieldPending||undefined} aria-busy={fieldPending||undefined} aria-hidden={pending||undefined} {...stylex.props(styles.line,styles.descriptionLine)}>{pending?<><span inert {...stylex.props(styles.shortLabel,styles.durationLabel,styles.pendingText)}>{duration.label.split(' (')[0]}</span><span inert {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span></>:<><TooltipTrigger delay={0}><Button {...stylex.props(styles.shortLabel,styles.durationLabel)}>{duration.label.split(' (')[0]}</Button><Tooltip {...stylex.props(styles.overviewTooltip)}>{duration.label}</Tooltip></TooltipTrigger>{fieldPending?<><span aria-hidden="true" inert data-details-skeleton="duration" {...stylex.props(styles.overviewValue,styles.pendingText)}>{duration.value}</span><VisuallyHidden>Loading</VisuallyHidden></>:<OverviewValue label={duration.label} value={duration.value} detail={duration.detail}/>}</>}</div>
+        })}
       </div>
     </Section>
     {(['Context','Spend'] as const).map(title=><Section key={title} title={title} hidden={intent.hiddenSections.includes(title)||(!pending&&consolidateUnavailable&&!hasDetailsChartData({trace,context:variants.context,spend:variants.spend,empty:variants.empty,section:title==='Context'?'context':'spend'}))}>{pending
@@ -201,6 +206,7 @@ const styles=stylex.create({
   // Known identity while pending keeps the settled one-line truncation, so the footprint does not reflow when values arrive.
   pendingIdentity:{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'},
   overviewTooltip:{maxWidth:g.tooltipMax,padding:s.md,backgroundColor:sf.raised,color:tx.fg,borderRadius:r.sm,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
+  tooltipDetail:{display:'block',marginTop:s.xs,color:tx.fgMuted},
   iconButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0,width:g.controlSm,height:g.controlSm,padding:s.zero,borderWidth:0,borderRadius:r.sm,backgroundColor:sf.transparent,color:tx.fgMuted,cursor:'pointer',':hover':{backgroundColor:sf.rowHover,color:tx.fg},':focus-visible':{outline:`2px solid ${ac.primary}`}},
   iconSlot:{flexShrink:0,width:g.controlSm,height:g.controlSm},
   popover:{maxWidth:g.tooltipMax,backgroundColor:sf.raised,color:tx.fg,borderRadius:r.sm,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},

@@ -37,31 +37,40 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
   const labelPrefix=React.useContext(DetailsLabelContext)
   // Pending geometry derives only from the host's supplied observations.
   const observedSubagents = suppliedSections.find(section => section.title === 'Subagents')
-  const hasObservedSubagents = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
+  // Known [] is an observed empty st resource list, distinct from an unreported one; it is evidence once the agent has started.
+  const hasObservedSubagents = observedSubagents?.items._tag === 'Known'
+  const hasObservedSubagentRows = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
+  const hasNoTracedSubagents = knownZeroTracedSubagents(trace)
   const [collapsed, setCollapsed] = React.useState<Readonly<Record<string, boolean>>>({})
   const hidden = React.useMemo(() => new Set(hiddenSections), [hiddenSections])
   const toggle = React.useCallback((title: string) => setCollapsed(current => ({ ...current, [title]: !current[title] })), [])
   const open = React.useCallback((uri: string, split: boolean) => onOpen(agentPaneKey(uri), split), [onOpen])
   const sections = state === 'error' ? [] : suppliedSections
     .map(section => section.title === 'Subagents' ? { ...section, ...traceSubagentSection(trace) } : section.title === 'History' ? { ...section, ...traceHistorySection(trace) } : section)
-    .filter(section => state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagents))
-    .filter(section => visible(section.items, empty) || (section.title === 'Subagents' && hasObservedSubagents))
+    // A first read stays visible as pending; it is neither empty nor unavailable until its feed settles.
+    // A new agent's data-only view offers no empty disclosure, so only observed rows keep Subagents there.
+    .filter(section => section.pending === true || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
+    .filter(section => section.pending === true || visible(section.items, empty) || (section.title === 'Subagents' && (hasObservedSubagents || hasNoTracedSubagents)))
     .filter(section => !hidden.has(section.title))
   return <div data-details-state={state} data-details-form={form} data-details-empty={empty} {...stylex.props(styles.root, callerStyles)}>
     {sections.map(section => {
       const isCollapsed = collapsed[section.title] === true
-      return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} {...stylex.props(styles.section)}>
+      // The Subagents badge is the reported traced total, never the retained list length; an unknown total has no badge.
+      const count = section.title === 'Subagents' ? trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : undefined
+        : section.items._tag === 'Known' && section.items.value.length > 0 ? section.items.value.length : undefined
+      const pending = state === 'loading' || section.pending === true
+      return <section key={section.title} aria-label={`${labelPrefix}${section.title}`} aria-busy={pending || undefined} {...stylex.props(styles.section)}>
         <div {...stylex.props(styles.header)}>
           <AriaButton aria-expanded={!isCollapsed} onPress={() => toggle(section.title)} {...stylex.props(styles.headerButton)}>
             <Icon name={isCollapsed?'chevron-right':'chevron-down'}/>
             <span data-details-heading {...stylex.props(styles.headerTitle)}>{section.title}</span>
-            {section.title !== 'Subagents' && section.items._tag === 'Known' && section.items.value.length > 0 && (state === 'loading'
-              ? <span aria-hidden="true" data-details-skeleton-count {...stylex.props(styles.count)}><DetailsInk ch={String(section.items.value.length).length} /></span>
-              : <span {...stylex.props(styles.count)}>{section.items.value.length}</span>)}
+            {count !== undefined && (pending
+              ? <span aria-hidden="true" data-details-skeleton-count {...stylex.props(styles.count)}><DetailsInk ch={String(count).length} /></span>
+              : <span {...stylex.props(styles.count)}>{count}</span>)}
           </AriaButton>
         </div>
         {!isCollapsed && <div {...stylex.props(styles.body)}>
-          <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={state === 'loading'} />
+          <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={pending} />
         </div>}
       </section>
     })}
@@ -76,6 +85,9 @@ function visible(items: DetailsValue<readonly DetailsResource[]>, rule: DetailsE
   return items.value.length > 0
 }
 
+/** An explicitly reported zero is data, not an empty-list inference. */
+const knownZeroTracedSubagents = (trace: TraceSeries): boolean => trace.subagentCount._tag === 'Known'
+  && trace.subagentCount.value === 0 && trace.subagents._tag === 'Known' && trace.subagents.value.length === 0
 
 /** Collection provenance stays in the missing-value tooltip. */
 const humanSubagentReasons: Readonly<Record<TraceUnknownReason, string>> = {
@@ -118,7 +130,8 @@ export function traceSubagentSection(trace: TraceSeries): DetailsSection {
   return {
     title: 'Subagents',
     items: { _tag: 'Known', value: trace.subagents.value.map(subagent => {
-      const label = subagent.label._tag === 'Known' ? subagent.label.value : subagent.sessionId
+      // Reported role, known model and full native session identity are visible before Open; a generic role stays generic.
+      const label = [subagent.label._tag === 'Known' ? subagent.label.value : 'role unreported', subagent.model._tag === 'Known' ? subagent.model.value : undefined, subagent.sessionId].filter(value => value !== undefined).join(' · ')
       const detail = traceSubagentDetail(subagent)
       return {
         uri: `session:${subagent.sessionId}`,
@@ -128,11 +141,10 @@ export function traceSubagentSection(trace: TraceSeries): DetailsSection {
     }) },
   }
 }
-/** Missing descendant facts are omitted, never fabricated parentage or timing. */
+/** Missing descendant facts are omitted, never fabricated parentage or timing; the model is part of the title. */
 const traceSubagentDetail = (subagent: TraceSubagent): string => [
   `$${subagent.usd.toFixed(2)}`,
   `${subagent.requests} requests`,
-  subagent.model._tag === 'Known' ? subagent.model.value : undefined,
   subagent.parentSessionId._tag === 'Known' ? `Parent · ${subagent.parentSessionId.value}` : undefined,
   subagent.firstMs._tag === 'Known' ? `First observed ${historyTimestamp.format(subagent.firstMs.value)} UTC` : undefined,
   subagent.lastMs._tag === 'Known' ? `Last observed ${historyTimestamp.format(subagent.lastMs.value)} UTC` : undefined,
@@ -160,8 +172,9 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
   section: DetailsSection; observedSubagents: DetailsSection | undefined; trace: TraceSeries; now: number;
   form: DetailsResourceForm; empty: DetailsEmptyRule; open: (uri: string, split: boolean) => void; pending: boolean
 }) {
-  const hasObserved = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
-  const showBreakdown = section.title !== 'Subagents' || visible(section.items, empty)
+  const hasObserved = observedSubagents?.items._tag === 'Known'
+  // A first-read Subagents section reserves its breakdown; pane-level loading keeps the settled footprint.
+  const showBreakdown = section.pending === true || section.title !== 'Subagents' || visible(section.items, empty) || knownZeroTracedSubagents(trace)
   const subagentWindow=section.title==='Subagents'?accumulationParts(trace.subagentsWindow):undefined
   const collectionReason = showBreakdown && section.items._tag === 'Unknown' ? unavailableReason(section, trace, empty) : undefined
   const observedReason = section.title === 'Subagents' && observedSubagents?.items._tag === 'Unknown'
@@ -182,9 +195,9 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
   const missingReason = [collectionReason, observedReason, partialNote, windowReason, countReason, coverageReason].filter(reason => reason !== undefined).join(' ')
   return <div aria-hidden={pending || undefined} inert={pending} data-details-skeleton={pending ? section.title : undefined} {...stylex.props(styles.contentShell)}>
     <div {...stylex.props(styles.content, pending && styles.skeletonHidden)}>
-      {section.title === 'Subagents' && hasObserved && observedSubagents !== undefined && <>
-        <SectionItems section={observedSubagents} now={now} form={form} open={open} pending={pending} />
-      </>}
+      {section.title === 'Subagents' && hasObserved && observedSubagents !== undefined && observedSubagents.items._tag === 'Known' && (observedSubagents.items.value.length === 0
+        ? <SkeletonLine pending={pending}><p data-details-observed-subagent-count {...stylex.props(styles.metaLine)}>Observed st resources · 0</p></SkeletonLine>
+        : <SectionItems section={observedSubagents} now={now} form={form} open={open} pending={pending} />)}
       {showBreakdown && <>
         {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>Traced sessions · {subagentWindow === undefined ? <MissingDetailsValue label="Traced-session accumulation window" reason={windowReason ?? 'Traced-session accumulation window is unreported.'} /> : subagentWindow.join('')}</p></SkeletonLine>}
         {section.title === 'Subagents' && trace.subagents._tag === 'Known' && <SkeletonLine pending={pending}><p data-details-subagent-count {...stylex.props(styles.metaLine)}>Showing {trace.subagents.value.length} of {trace.subagentCount._tag === 'Known' ? trace.subagentCount.value : <MissingDetailsValue label="Total traced-session count" reason={countReason ?? 'Traced-session total count is unreported.'} />} traced sessions</p></SkeletonLine>}
@@ -270,7 +283,7 @@ function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now
   }
   // Traced sessions and incarnations carry their reported facts only in the detail, so the card paints it.
   return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.entry)}>
-    <ResourceCardV1 resource={resource.card} variant="RC-1" titlePriority titleLines={wrapsIdentity(resource) ? 'wrap' : 1} icon={resourceIcon(resource)} detailLine={resource.uri.startsWith('session:')} onOpen={() => open(paneKey, splitPress.current)} />
+    <ResourceCardV1 resource={resource.card} variant="RC-1" titlePriority titleLines={wrapsIdentity(resource) || resource.uri.startsWith('session:') ? 'wrap' : 1} icon={resourceIcon(resource)} detailLine={resource.uri.startsWith('session:')} onOpen={() => open(paneKey, splitPress.current)} />
   </div>
 }
 
