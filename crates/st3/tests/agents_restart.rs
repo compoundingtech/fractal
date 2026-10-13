@@ -1215,7 +1215,20 @@ async fn starts_a_stopped_mission_seat_on_its_own_declaration(shape: Shape) {
     let starts = fixture.runtime.starts.lock().unwrap().clone();
     assert_eq!(starts.len(), 2);
     assert_eq!(starts[0].workspace, starts[1].workspace);
-    assert_eq!(starts[0].environment, starts[1].environment);
+    let environments: Vec<_> = starts
+        .iter()
+        .map(|member| {
+            let mut environment = member.environment.clone();
+            let operation = environment.remove("ST3_START_OPERATION").unwrap();
+            assert_eq!(member.tags.get("st3.start-operation"), Some(&operation));
+            environment
+        })
+        .collect();
+    assert_ne!(
+        starts[0].environment["ST3_START_OPERATION"], starts[1].environment["ST3_START_OPERATION"],
+        "each physical launch must retain its own operation identity"
+    );
+    assert_eq!(environments[0], environments[1]);
     // Once started again, the seat is the run's own: a restarted daemon keeps it running.
     let daemon = restarted_daemon(&fixture);
     for _ in 0..3 {

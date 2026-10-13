@@ -356,8 +356,31 @@ impl<R: RuntimeControl> Reconciler<R> {
                         &operation.subject,
                         error.map_or(Ok(()), |error| Err(anyhow::anyhow!(error))),
                     )?,
-                    StartCompletion::Superseded => self.revoke_start(&operation.subject)?,
+                    StartCompletion::Superseded => {
+                        self.revoke_start(&operation.subject)?;
+                        if self.store.selected_desired_token(&operation.subject)?
+                            != prepared.selected_token
+                            && let Some(request) = &prepared.request
+                        {
+                            self.record_requested_restart_failure(
+                                &prepared.subject,
+                                &prepared.member,
+                                request,
+                                "launch operation was superseded before completion",
+                            )?;
+                        }
+                    }
                 }
+            } else if !current && let Some(request) = &prepared.request {
+                // Revocation suppresses the stale physical result, but the original explicit
+                // restart still needs its administrative result. The request's declaration
+                // fence keeps this failure from parking the replacement declaration.
+                self.record_requested_restart_failure(
+                    &prepared.subject,
+                    &prepared.member,
+                    request,
+                    "launch operation was superseded before completion",
+                )?;
             }
             if operation.result.as_ref().is_some_and(|result| {
                 result["error"].is_string() && result["producer_closed"] != true
