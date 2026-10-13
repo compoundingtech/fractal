@@ -13,12 +13,32 @@ struct Script {
     host: String,
     person: String,
     workspace: String,
+    id_map: BTreeMap<String, String>,
     turns: Vec<Turn>,
     reads: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Turn { prompt: String, answer: String, timestamp: String, command: Option<String> }
+
+fn decode_script(bytes: &[u8]) -> Result<Script> {
+    let schema: Value = serde_json::from_str(include_str!("../../../clients/typescript/st3-scenarios/scripts/recording-script.schema.json"))?;
+    let value: Value = serde_json::from_slice(bytes)?;
+    let validator = jsonschema::options().should_validate_formats(true).build(&schema)?;
+    validator.validate(&value).map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(serde_json::from_value(value)?)
+}
+
+fn shell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn terminal_ready(frame: &Value, fence: &Value, turn: usize) -> bool {
+    let marker = format!("scenario turn {turn} output complete");
+    frame["id"] == "terminal" && frame["value"]["revision"] != *fence
+        && frame["value"]["lines"].as_array().is_some_and(|lines|
+            lines.iter().any(|line| line["text"].as_str().is_some_and(|text| text.contains(&marker))))
+}
 
 /// All destinations are beneath the freshly owned root; existing state or socket is foreign.
 fn owned_destinations(root: &Path, state: &Path, endpoint: &Path) -> Result<()> {
@@ -37,7 +57,7 @@ impl Scratch {
         fs::write(root.path().join("bin/claude.py"), include_str!("scenario_recorder/claude.py"))?;
         let python = executable("python3")?;
         let wrapper = root.path().join("bin/claude");
-        fs::write(&wrapper, format!("#!/bin/sh\nexec '{}' '{}' \"$@\"\n", python.display(), root.path().join("bin/claude.py").display()))?;
+        fs::write(&wrapper, format!("#!/bin/sh\nexec {} {} \"$@\"\n", shell_literal(&python.display().to_string()), shell_literal(&root.path().join("bin/claude.py").display().to_string())))?;
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(wrapper, fs::Permissions::from_mode(0o755))?;
         let path = format!("{}:{}", root.path().join("bin").display(), std::env::var("PATH")?);
@@ -52,7 +72,7 @@ impl Scratch {
             ("ST3_ENDPOINT".into(), root.path().join("run/st.sock").display().to_string()),
             ("ST3_DAEMON_WAIT".into(), "0".into()),
         ]);
-        for name in [".profile", ".bash_profile", ".bashrc"] { fs::write(root.path().join("home").join(name), format!("export PATH='{path}'\n"))?; }
+        for name in [".profile", ".bash_profile", ".bashrc"] { fs::write(root.path().join("home").join(name), format!("export PATH={}\n", shell_literal(&path)))?; }
         fs::write(root.path().join("config.toml"), format!("node = {host:?}\nperson = {person:?}\nstate_dir = {:?}\npty_root = {:?}\nsocket = {:?}\nclient_gateway_socket = {:?}\n", root.path().join("state"), root.path().join("pty"), root.path().join("run/st.sock"), root.path().join("run/client.sock")))?;
         Ok(Self { root, env, daemon: None })
     }
@@ -76,8 +96,8 @@ impl Scratch {
         Ok(String::from_utf8(output.stdout)?)
     }
     fn http(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value)> {
-        let mut cmd = Command::new(executable("curl")?);
-        cmd.args(["-sS", "--max-time", "10", "--unix-socket"]).arg(self.root.path().join("run/st.sock"))
+        let mut cmd = self.command(&executable("curl")?);
+        cmd.args(["-q", "-sS", "--max-time", "10", "--unix-socket"]).arg(self.root.path().join("run/st.sock"))
             .args(["-X", method, "-w", "\n%{http_code}"]).arg(format!("http://localhost{path}"));
         if let Some(body) = body { cmd.args(["-H", "content-type: application/json", "--data"]).arg(body.to_string()); }
         let output = cmd.output()?;
@@ -91,9 +111,9 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         // Only PTYs in our private registry can be stopped.
         if let Ok(pty) = executable("pty") {
-            let output = Command::new(&pty).env("PTY_ROOT", self.root.path().join("pty")).args(["list", "--json"]).output();
+            let output = self.command(&pty).env("PTY_ROOT", self.root.path().join("pty")).args(["list", "--json"]).output();
             if let Ok(output) = output && let Ok(rows) = serde_json::from_slice::<Vec<Value>>(&output.stdout) {
-                for row in rows { if let Some(name) = row["name"].as_str() { let _ = Command::new(&pty).env("PTY_ROOT", self.root.path().join("pty")).args(["kill", name]).output(); } }
+                for row in rows { if let Some(name) = row["name"].as_str() { let _ = self.command(&pty).env("PTY_ROOT", self.root.path().join("pty")).args(["kill", name]).output(); } }
             }
         }
         if let Some(child) = &mut self.daemon {
@@ -169,7 +189,7 @@ async fn frame_until(stream: &mut st3_client::CollectionStream, capture: &mut Ca
 async fn record_scenario() -> Result<()> {
     ensure!(std::env::var_os("ST3_SCENARIO_ENDPOINT").is_none() && std::env::var_os("ST3_SCENARIO_STATE_DIR").is_none(), "foreign daemon/state override refused");
     let bytes = fs::read(std::env::var("ST3_SCENARIO_SCRIPT")?)?;
-    let script: Script = serde_json::from_slice(&bytes)?;
+    let script = decode_script(&bytes)?;
     ensure!(script.format_version == 1 && !script.turns.is_empty(), "unsupported or empty script");
     ensure!(script.agent.starts_with("agent/example/") && script.host.starts_with("host/") && script.person.starts_with("person/") && script.workspace.starts_with("~/src/"), "script must use public cast identities");
     let mut scratch = Scratch::new(&bytes, script.host.trim_start_matches("host/"), &script.person)?;
@@ -213,8 +233,10 @@ async fn record_scenario() -> Result<()> {
     capture.record("command", Some("socket#1"), json!({"kind":"subscribe","id":"terminal","collection":"terminal","terminal":terminal,"incarnation":incarnation,"capability":capability}))?;
     stream.subscribe_terminal("terminal", &terminal, Some(incarnation), capability).await?;
     let initial_terminal = frame_until(&mut stream, &mut capture, |f| f["id"] == "terminal").await?;
+    let mut terminal_revision = initial_terminal["value"]["revision"].clone();
     capture.record("baseline", None, json!({"last_pre_timeline_ordinal":capture.ordinal - 1}))?;
     for (index, turn) in script.turns.iter().enumerate() {
+        let fence = terminal_revision.clone();
         capture.record("harness", None, json!({"turn":index,"prompt":turn.prompt,"answer":turn.answer,"timestamp":turn.timestamp,"command":turn.command}))?;
         fs::write(scratch.root.path().join(format!("step-{index}")), "")?;
         barrier(|| scratch.root.path().join(format!("done-{index}")).exists(), "native turn complete").await?;
@@ -227,7 +249,8 @@ async fn record_scenario() -> Result<()> {
         let mut terminal_seen = output.is_none();
         frame_until(&mut stream, &mut capture, |f| {
             conversation_seen |= f["id"] == "conversation" && f.to_string().contains(&turn.answer);
-            terminal_seen |= f["id"] == "terminal" && f["value"]["revision"] != initial_terminal["value"]["revision"];
+            terminal_seen |= terminal_ready(f, &fence, index);
+            if f["id"] == "terminal" && !f["value"]["revision"].is_null() { terminal_revision = f["value"]["revision"].clone(); }
             conversation_seen && terminal_seen
         }).await?;
     }
@@ -263,4 +286,51 @@ fn temporary_paths_never_reach_output() {
     capture.record("frame", Some("socket#1"), json!({"cwd":root.path().join("ws"),"nested":[root.path().join("home/transcript.jsonl")]})).unwrap();
     let text = fs::read_to_string(root.path().join("output")).unwrap();
     assert!(!text.contains(&root.path().display().to_string())); assert!(text.contains("~/src/atlas"));
+}
+
+#[test]
+fn committed_script_matches_shared_schema() {
+    let bytes = include_bytes!("../../../clients/typescript/st3-scenarios/recordings/fleet-mid-refactor-proof.script.json");
+    let script = decode_script(bytes).unwrap();
+    assert!(script.id_map.contains_key(&script.agent));
+    let mut value: Value = serde_json::from_slice(bytes).unwrap();
+    value["unexpected"] = json!(true);
+    assert!(decode_script(&serde_json::to_vec(&value).unwrap()).is_err());
+    value.as_object_mut().unwrap().remove("unexpected");
+    value.as_object_mut().unwrap().remove("id_map");
+    assert!(decode_script(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+
+#[test]
+fn each_command_requires_its_own_projected_output() {
+    let fence = json!("screen-1");
+    let screen = |revision, marker| json!({"id":"terminal","value":{"revision":revision,"lines":[{"text":marker}]}});
+    assert!(!terminal_ready(&screen("screen-2", "scenario turn 0 output complete"), &fence, 1));
+    assert!(!terminal_ready(&screen("screen-1", "scenario turn 1 output complete"), &fence, 1));
+    assert!(!terminal_ready(&screen("screen-3", "intermediate output"), &fence, 1));
+    assert!(terminal_ready(&screen("screen-4", "scenario turn 1 output complete"), &fence, 1));
+}
+
+#[test]
+fn generated_shell_literals_preserve_apostrophes_without_execution() {
+    let root = tempfile::Builder::new().prefix("recorder-'quoted-").tempdir().unwrap();
+    let planted = root.path().join("must-not-exist");
+    let value = format!("{}:'; touch {}; #", root.path().display(), planted.display());
+    let output = Command::new("/bin/sh").args(["-c", &format!("value={}; printf '%s' \"$value\"", shell_literal(&value))]).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), value);
+    assert!(!planted.exists());
+}
+
+#[test]
+fn scratch_commands_have_only_owned_environment_and_curl_ignores_config() {
+    let scratch = Scratch::new(b"{}", "meadow", "person/ada").unwrap();
+    let output = scratch.command(&executable("env").unwrap()).output().unwrap();
+    let actual: BTreeMap<String, String> = String::from_utf8(output.stdout).unwrap().lines()
+        .map(|line| { let (key, value) = line.split_once('=').unwrap(); (key.into(), value.into()) }).collect();
+    assert_eq!(actual, scratch.env);
+    let planted = scratch.root.path().join("curlrc-loaded");
+    fs::write(scratch.root.path().join("home/.curlrc"), format!("output = {:?}\nurl = \"file:///etc/hostname\"\n", planted)).unwrap();
+    assert!(scratch.http("GET", "/v1/health", None).is_err());
+    assert!(!planted.exists());
 }

@@ -61,6 +61,8 @@ for index, turn in enumerate(script["turns"]):
         sys.stdout.buffer.write(result.stdout)
         sys.stdout.buffer.flush()
         (root / f"output-{index}").write_bytes(result.stdout)
+        # A projected per-turn marker fences this command, not a previous screen change.
+        print(f"\nscenario turn {index} output complete", flush=True)
     append("assistant", turn["answer"], turn["timestamp"])
     hook("Stop", stop_hook_active=False, last_assistant_message=turn["answer"])
     (root / f"done-{index}").touch()
