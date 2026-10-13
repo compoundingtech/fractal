@@ -32,8 +32,8 @@ const sizes = [12, 14, 16] as const
  * The production spinner (Lucide loader-circle, one linear turn per second) in the sidebar agent row, the thread
  * header status and the work block. A send in flight in the composer adopts it once the composer send states land.
  */
-function Spinners({ scheme }: { readonly scheme: Scheme }) {
-  return <main data-spinner-root data-scheme={scheme} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.root)}>
+function Spinners({ scheme, width = 1440 }: { readonly scheme: Scheme; readonly width?: 440 | 1440 }) {
+  return <main data-spinner-root data-scheme={scheme} data-width={width} {...stylex.props(...baselineTheme, scheme === 'light' && lightTheme, styles.root, styles.width(width))}>
     <section aria-label="Sizes" data-context="sizes" {...stylex.props(styles.sizes)}>
       {sizes.map(size => <span key={size} data-size={size} {...stylex.props(styles.size)}><Spinner size={size} /><span>{size}px · Working</span></span>)}
     </section>
@@ -60,13 +60,13 @@ const meta = {
   title: 'Fractal/Foundations/Spinner',
   component: Spinners,
   parameters: { layout: 'fullscreen' },
-  args: { scheme: 'dark' },
-  argTypes: { scheme: { options: ['dark', 'light'], control: 'inline-radio' } },
+  args: { scheme: 'dark', width: 1440 },
+  argTypes: { scheme: { options: ['dark', 'light'], control: 'inline-radio' }, width: { options: [440, 1440], control: 'inline-radio' } },
 } satisfies Meta<typeof Spinners>
 export default meta
 type Story = StoryObj<typeof meta>
 
-const loaderPaths: Record<string, true> = { 'M14 8a6 6 0 1 1-4.146-5.707': true, 'M17.5 10a7.5 7.5 0 1 1-5.183-7.133': true }
+const loaderPaths: Record<string, true> = { 'M14 8a6 6 0 1 1-4.146-5.707': true }
 const timingKeys: Record<string, true> = { offset: true, computedOffset: true, easing: true, composite: true }
 const contexts = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>('[data-context]:not([data-context="offscreen"])')]
 /** Every animated glyph; assertMotion proves each target is an outermost <svg>. */
@@ -161,6 +161,8 @@ export const Contexts: Story = { play: async ({ canvasElement, step }) => {
   })
 } }
 export const ContextsLight: Story = { ...Contexts, args: { scheme: 'light' } }
+export const Contexts440: Story = { ...Contexts, args: { width: 440 } }
+export const Contexts440Light: Story = { ...Contexts, args: { width: 440, scheme: 'light' } }
 
 /** A spinner scrolled out of view pauses and resumes when it scrolls back. */
 export const OffscreenPause: Story = { play: async ({ canvasElement }) => {
@@ -180,9 +182,11 @@ export const OffscreenPause: Story = { play: async ({ canvasElement }) => {
   scroller.scrollTop = 0
   await waitFor(() => assertPlayState(hidden, 'paused'))
 } }
+export const OffscreenPauseLight: Story = { ...OffscreenPause, args: { scheme: 'light' } }
 
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: s.xl, padding: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
+  width: (width: number) => ({ width, maxWidth: '100%' }),
   sizes: { display: 'flex', alignItems: 'center', gap: s.xl, color: ink.fgSoft },
   size: { display: 'inline-flex', alignItems: 'center', gap: s.sm },
   sidebar: { display: 'flex', flexDirection: 'column', gap: s.xs, width: g.sidebarDefault },
