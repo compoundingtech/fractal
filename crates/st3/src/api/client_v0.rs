@@ -7192,11 +7192,13 @@ const CONVERSATION_MARK_REUSE: Duration = Duration::from_secs(10);
 type HashMap<K, V> = std::collections::HashMap<K, V>;
 const ISSUED_CURSORS: usize = 4096;
 
-fn issued_cursors()
--> &'static std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)> {
-    static ISSUED: std::sync::OnceLock<
-        std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)>,
-    > = std::sync::OnceLock::new();
+type IssuedCursors = std::sync::Mutex<(
+    std::collections::VecDeque<String>,
+    HashMap<String, TranscriptSeen>,
+)>;
+
+fn issued_cursors() -> &'static IssuedCursors {
+    static ISSUED: std::sync::OnceLock<IssuedCursors> = std::sync::OnceLock::new();
     ISSUED.get_or_init(Default::default)
 }
 
@@ -7432,45 +7434,41 @@ pub(super) async fn conversation_changes(
         || {
             let session_id = conversation_session_id(&state, &id)?;
             let snapshot = new_client_snapshot(&state);
-            let owner = super::managed_session_owner_at(
-                &state.store, snapshot.store_index, &session_id,
-            ).map_err(ApiError::internal)?;
+            let owner =
+                super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                    .map_err(ApiError::internal)?;
             Ok((session_id, owner))
         },
     )?;
     if let Some((_, _, Some(origin))) = owner
+        && origin != state.store.origin()
     {
-        if origin != state.store.origin() {
-            if !acting_party(&session) {
-                return Err(forbidden(
-                    "remote conversation changes require a concrete person or agent",
-                ));
-            }
-            let owner = client_host_id(&origin);
-            let relay = state
-                .client_relay
-                .as_ref()
-                .ok_or_else(|| conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner)))?;
-            let mut value = relay
-                .read(
-                    &owner,
-                    &crate::peer::ClientReadRequest {
-                        authority_actor: session.authority_actor.clone(),
-                        relay: None,
-                        request: crate::peer::ClientReadOperation::ConversationChanges {
-                            session_id,
-                            after: query.after,
-                            wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
-                        },
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    conversation_blocks::availability(remote_read_error(&owner, error))
-                })?;
-            conversation_blocks::legacy(&mut value, &session);
-            return Ok(Json(value));
+        if !acting_party(&session) {
+            return Err(forbidden(
+                "remote conversation changes require a concrete person or agent",
+            ));
         }
+        let owner = client_host_id(&origin);
+        let relay = state.client_relay.as_ref().ok_or_else(|| {
+            conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner))
+        })?;
+        let mut value = relay
+            .read(
+                &owner,
+                &crate::peer::ClientReadRequest {
+                    authority_actor: session.authority_actor.clone(),
+                    relay: None,
+                    request: crate::peer::ClientReadOperation::ConversationChanges {
+                        session_id,
+                        after: query.after,
+                        wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
+                    },
+                },
+            )
+            .await
+            .map_err(|error| conversation_blocks::availability(remote_read_error(&owner, error)))?;
+        conversation_blocks::legacy(&mut value, &session);
+        return Ok(Json(value));
     }
     conversation_changes_local(
         &state,
@@ -10946,6 +10944,7 @@ async fn dispatch_action(
                     &target,
                     action.trim_start_matches("work."),
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some(authority_actor.clone()),
                         incarnation: request.fence.runtime_incarnation.clone(),
                         summary: p.get("summary").and_then(Value::as_str).map(str::to_owned),
@@ -13001,7 +13000,7 @@ mission "queue-parity" state="ready" {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn fresh_agent_roster_read_cuts_the_refresh_pause_short_and_plain_reads_do_not() {
+    async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let subject = "agent/fresh-pause";
@@ -13050,21 +13049,41 @@ mission "queue-parity" state="ready" {
             "plain reads must not shorten the refresher's minimum pause",
         );
 
-        // Changed: a fresh read waits for one fold, not the rest of the pause (about 750 ms here).
+        // A healthy attempt is already in flight; a fresh read must wait for its result.
+        let _admission = state.store.admit_agent_resources("other").await;
+        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one",
+            "observed_at_ms":2}));
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
         let started = std::time::Instant::now();
-        let (Extension(snapshot), Json(page)) = list(true).await.unwrap();
+        let read = list(true);
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (Extension(snapshot), Json(page)) = read.await.unwrap();
+        worker.await.unwrap().unwrap();
         let waited = started.elapsed();
         assert!(snapshot.store_index >= idle, "a fresh read shows what was written before it");
         assert_eq!(page.items[0]["harness_state"], "idle");
-        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the pause");
+        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the healthy attempt");
         // The fresh read's wait and page, and the refresher's folds, land in their stage rows.
         let stages = crate::api::request_latency_snapshot().into_iter()
             .filter(|row| row["scope"] == "agents-roster")
             .filter_map(|row| row["stage"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
-        for stage in ["fresh-wait", "fresh-page", "refresh"] {
+        for stage in ["fresh-wait", "fresh-page"] {
             assert!(stages.contains(stage), "{stage} recorded: {stages:?}");
         }
+        assert!(stages.contains("refresh") || stages.contains("refresh-cold"),
+            "a warm or cold refresher fold is recorded: {stages:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -13252,13 +13271,29 @@ mission "queue-parity" state="ready" {
         assert_eq!(index, cut, "the unchanged roster is served under its own cut");
         assert_eq!(page.items, before.items);
 
-        // A claim about the agent changes its card: the fresh read still waits for a roster
-        // at or after it, and shows it.
+        // A claim about the agent changes its card. Start a healthy attempt and hold it:
+        // the fresh read must wait for this attempt's publication, not answer early.
+        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
         assert!(!state.store.published_agent_roster_unchanged_through(written, false).unwrap());
-        let (_, index, page) = fresh().await;
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
+        let read = fresh();
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (_, index, page) = read.await;
+        worker.await.unwrap().unwrap();
         assert_eq!(index, written);
         assert_ne!(page.items, before.items, "the fresh read shows the claim it waited for");
         assert!(*published.borrow_and_update() > revision);
@@ -16960,6 +16995,7 @@ mission "example/steps" state="ready" {
             // A seat holds one step at a time: the first run's is claimed and under way.
             if run == 0 {
                 let request = |summary: Option<&str>, key: &str| crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: summary.map(str::to_owned),
@@ -17065,6 +17101,7 @@ mission "example/steps" state="ready" {
         assert!(no_progress["steps"].as_array().unwrap().iter().all(|step| step["progress_at"].is_null()));
         // Renewing the operational lease does not prove the claimant made progress.
         state.store.work_action(&progressed.subject, "renew", &crate::model::WorkRequest {
+            wait_ms: None,
             actor: progressed.claimant.clone(),
             incarnation: Some("builder-1".into()),
             summary: None,

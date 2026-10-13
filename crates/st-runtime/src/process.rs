@@ -15,6 +15,19 @@ use sha2::{Digest as _, Sha256};
 
 const SCHEMA: &str = "st.runtime.exec-generation.v1";
 
+/// Positive producer evidence: this exact attempt returned before creating any child.
+/// Absence of a generation record after a child was created is not this proof.
+#[derive(Debug)]
+pub struct StartRejected {
+    pub operation: Option<String>,
+}
+impl std::fmt::Display for StartRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("launch rejected before producer creation")
+    }
+}
+impl std::error::Error for StartRejected {}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecGeneration {
@@ -33,6 +46,8 @@ pub struct ExecGeneration {
     pub isolation_mode: String,
     #[serde(default)]
     pub scope_unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_operation: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +80,50 @@ impl ExecRuntime {
         launch: &crate::Launch,
         cwd: &Path,
         env: &BTreeMap<String, String>,
+    ) -> Result<ExecGeneration> {
+        self.spawn_guarded(id, launch, cwd, env, None)
+    }
+
+    pub fn spawn_checked(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: &dyn Fn() -> Result<()>,
+    ) -> Result<ExecGeneration> {
+        self.spawn_guarded(id, launch, cwd, env, Some(guard))
+    }
+
+    fn spawn_guarded(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: Option<&dyn Fn() -> Result<()>>,
+    ) -> Result<ExecGeneration> {
+        let mut child_created = false;
+        self.spawn_inner(id, launch, cwd, env, guard, &mut child_created)
+            .map_err(|error| {
+                if child_created {
+                    error
+                } else {
+                    error.context(StartRejected {
+                        operation: env.get("ST3_START_OPERATION").cloned(),
+                    })
+                }
+            })
+    }
+
+    fn spawn_inner(
+        &self,
+        id: &str,
+        launch: &crate::Launch,
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        guard: Option<&dyn Fn() -> Result<()>>,
+        child_created: &mut bool,
     ) -> Result<ExecGeneration> {
         fs::create_dir_all(&self.state_dir)?;
         fs::create_dir_all(&self.log_dir)?;
@@ -134,7 +193,11 @@ impl ExecRuntime {
                 }
             });
         }
+        if let Some(guard) = guard {
+            guard()?;
+        }
         let child = command.spawn().context("spawn detached exec")?;
+        *child_created = true;
         let pid = child.id();
         let start_token = process_start_token(pid)?;
         let created_at_unix_ms = SystemTime::now()
@@ -153,6 +216,7 @@ impl ExecRuntime {
             group_exited: false,
             isolation_mode: isolation_name(crate::isolation_mode()).into(),
             scope_unit: (crate::isolation_mode() == crate::Isolation::Scope).then_some(unit),
+            start_operation: env.get("ST3_START_OPERATION").cloned(),
         };
         self.write_generation(id, &generation)?;
         self.owned_children
@@ -617,6 +681,7 @@ mod tests {
             group_exited: true,
             isolation_mode: "detached".into(),
             scope_unit: None,
+            start_operation: None,
         };
         fs::create_dir_all(&runtime.state_dir).unwrap();
         runtime.write_generation("completed", &generation).unwrap();
@@ -624,6 +689,31 @@ mod tests {
         assert_eq!(
             runtime.observe("completed").unwrap(),
             Some(ExecObservation::Exited(generation))
+        );
+    }
+
+    #[test]
+    fn launch_operation_is_bound_to_the_persisted_exec_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let mut environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        environment.insert("ST3_START_OPERATION".into(), "operation-one".into());
+        let launched = runtime
+            .spawn(
+                "operation-proof",
+                &crate::Launch::Argv(vec!["sh".into(), "-c".into(), "exit 0".into()]),
+                root.path(),
+                &environment,
+            )
+            .unwrap();
+        assert_eq!(launched.start_operation.as_deref(), Some("operation-one"));
+        let exited = wait_for_exit(&runtime, "operation-proof");
+        assert_eq!(exited.generation_id, launched.generation_id);
+        assert_eq!(exited.start_operation, launched.start_operation);
+        let reopened = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(
+            reopened.observe("operation-proof").unwrap(),
+            Some(ExecObservation::Exited(exited))
         );
     }
 

@@ -562,6 +562,34 @@ impl st3::reconcile::RuntimeControl for RolloutRuntime {
         );
         Ok(())
     }
+    fn start_operation(
+        &self,
+        id: &str,
+        terminal: bool,
+        incarnation: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let matches = self
+            .observations
+            .lock()
+            .unwrap()
+            .get(id)
+            .is_some_and(|observed| {
+                observed.terminal == terminal
+                    && observed.incarnation_id.as_deref() == Some(incarnation)
+            });
+        if !matches {
+            return Ok(None);
+        }
+        Ok(self
+            .starts
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|member| member.runtime_id == id && member.terminal == terminal)
+            .and_then(|member| member.tags.get("st3.start-operation"))
+            .cloned())
+    }
     fn stop(&self, id: &str, _: bool, expected: Option<&str>) -> anyhow::Result<()> {
         let mut observations = self.observations.lock().unwrap();
         let observed = observations.get_mut(id).unwrap();

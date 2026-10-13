@@ -1,5 +1,5 @@
 import { Component, createRef, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
@@ -11,6 +11,7 @@ import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConv
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
+import { quality } from '../qualityNative';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
 import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@smalltalk/st3-views';
@@ -42,7 +43,7 @@ function nowClock() {
 // above the composer, unless the person has scrolled back to read.
 export function ConversationScreen({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
-  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, actions, simpleOn } = useStore();
+  const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
   // A running session st manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
@@ -91,6 +92,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const [find, setFind] = useState(route.params.find ?? '');
   const [findOpen, setFinding] = useState(!!route.params.find);
   const [draft, setDraft] = useState(() => draftCache.current.get(target) ?? '');
+  const draftTouched = useRef(false);
+  useEffect(() => {
+    if (draftTouched.current) { if (!draft) draftCache.current.delete(target); return; }
+    const restored = draftCache.current.get(target);
+    if (restored) setDraft(restored);
+  }, [draftsReady, target]);
+  useEffect(() => { saveDrafts(); }, [draft, draftsReady]);
   const [away, setAway] = useState(false);
   // Scrolled a little way up from the newest entry: new entries must then not move what is read.
   const [reading, setReading] = useState(false);
@@ -105,7 +113,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const box = useRef<TextInput>(null);
   /** Empty the message box. Clearing it natively too lets it shrink back to one line; with the
    * value alone it kept the height of what was sent (Nathan, 2026-10-02). */
-  const emptyBox = () => { setDraft(''); draftCache.current.delete(target); box.current?.clear(); };
+  const emptyBox = () => { draftTouched.current = true; setDraft(''); draftCache.current.delete(target); box.current?.clear(); };
   // Leaving the conversation while listening stops it, so the microphone and other audio are freed.
   useEffect(() => () => { const stop = stopListening.current; stopListening.current = null; void stop?.(); }, []);
   const canDictate = useMemo(() => dictationAvailable(), []);
@@ -155,6 +163,18 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   useEffect(() => {
     if (currentSession && timeline.sessionId && timeline.sessionId !== currentSession && followed !== currentSession) setFollowed(currentSession);
   }, [currentSession, timeline.sessionId, followed]);
+  const qualityOpen = useRef(0);
+  useFocusEffect(useCallback(() => {
+    qualityOpen.current = quality.beginConversation();
+    if (unresolved) quality.conversationError(qualityOpen.current, 'transcript-not-bound');
+    return () => quality.endConversation(qualityOpen.current);
+  }, [target, unresolved, attempt]));
+  const visibleEntries = useRef((info: { viewableItems: ViewToken<Row>[] }) => {
+    for (const item of info.viewableItems) {
+      const kind = item.item.kind;
+      if (item.isViewable && (kind === 'entry' || kind === 'call' || kind === 'bundle')) { quality.conversationVisible(qualityOpen.current); break; }
+    }
+  });
   // The socket sends the newest page, then each change; it never polls. Only while visible.
   useFocusEffect(useCallback(() => {
     if (!feed || unresolved) return;
@@ -171,6 +191,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         return next;
       }),
       onIssue: (text, refused = false) => { setIssue(text); setStopped(refused); },
+      onQualityError: code => quality.conversationError(qualityOpen.current, code),
     });
     return () => follow.close();
   }, [feed, target, unresolved, conversationCache, followed, attempt]));
@@ -185,6 +206,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   }, [data.agents, caps?.session_actor]);
   // Half a conversation is worse than none: when st could not read the transcript, say why.
   const unreadable = useMemo(() => unreadableTranscript(timeline.entries), [timeline.entries]);
+  useEffect(() => { if (unreadable) quality.conversationError(qualityOpen.current, 'transcript-not-bound'); }, [unreadable]);
   // An entry that did not change keeps its object, so its row is not drawn and measured again:
   // redrawing every row on each frame made the list jump.
   const stable = useRef(new Map<string, { key: string; entry: ConversationEntry }>());
@@ -340,6 +362,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     <View ref={imageViewportBox} collapsable={false} style={{ flex: 1 }} onLayout={measureImageViewport}>
     <FlatList
       ref={list}
+      onViewableItemsChanged={visibleEntries.current}
       inverted
       data={rows}
       extraData={selecting}
@@ -400,7 +423,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
         <Field
           ref={box}
           value={draft}
-          onChangeText={text => { setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
+          onChangeText={text => { draftTouched.current = true; setDraft(text); if (text) rememberBounded(draftCache.current, target, text, 24); else draftCache.current.delete(target); }}
           placeholder={`Message ${title}`}
           multiline
           style={[styles.input, canDictate ? { paddingRight: 36 } : null]}
