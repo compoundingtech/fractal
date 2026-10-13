@@ -1299,7 +1299,7 @@ impl Client {
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
         loop {
-            let attempt = self.request_once::<Envelope<Page>>(Method::GET, &path, None, None, "application/json");
+            let attempt = self.request_once::<Envelope<Page>>(Method::GET, &path, None, None, "application/json", None);
             let outcome = if self.outage_wait.is_zero() {
                 attempt.await
             } else {
