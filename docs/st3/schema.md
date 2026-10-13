@@ -5,7 +5,7 @@ This file is generated from `st3-schema`.
 Schema: `st3.v1`
 Digest: `8557d6faef36d92821aa027f3c0271879f815f5096cf8a1ecc2dd0068a4e021e`
 Storage version: `19`
-Storage digest: `24580ab6af4c2da25c778adddc79afd1c93bdec649a151a3ca6625e499f4a10c`
+Storage digest: `0f54df9560e19037adbe8537cf517196731bcc049d39caca205f3c2d8ae10259`
 
 ## Subject families
 
@@ -282,7 +282,7 @@ Storage version 19 adds the owner-local `local_runtime_starts` ledger and its ad
 
 In the same installation transaction, `meta` captures `publication-operation-format-shared-cut` from `MAX(claims.store_index)` and `publication-operation-format-local-cut` from `MAX(local_observations.id)`, using zero for an empty table and `INSERT OR IGNORE`. These are two indexed maxima before the first operation-bound request, not history scans. Reopen, graph replay and view forgetting preserve both immutable cuts. A store with existing operation rows but a missing cut is refused rather than capturing a later boundary; preserve that store and its original boundary evidence for forward recovery. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary.
 
-Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. Reconcile observation admission refuses a stale prior or absent incarnation after an exact verified launch, even if that old physical snapshot would have a newer publication timestamp.
+Admission retains full original physical and optional requester-control receipt snapshots and the physical request local position. Per-subject expression indexes order all operations and verified incarnations by that immutable local position, never UUID creation time. The completion writer retains its authoritative runtime observation and canonical sortable key. The owner-local singleton `local_runtime_start_observation_generation` advances transactionally through ledger INSERT/UPDATE/DELETE triggers and survives replay/forget. A synchronous physical pass captures that generation before observing. The observation writer rejects a changed generation when publishing a differing or absent incarnation; a fresh absence can still advance normal reconciliation, but never proves closure. A prior expected incarnation cannot become replacement proof even after a fresh capture or newer publication timestamp.
 
 Resolved ledger rows, prepared bindings and result proof remain stored indefinitely. Releasing evidence removes only trim pins: the original local request/result observation bodies can subsequently be trimmed. Consumers must bind a modern request to the retained owner ledger and original request ID; UUID text or a status label alone cannot exclude legacy uncertainty.
 

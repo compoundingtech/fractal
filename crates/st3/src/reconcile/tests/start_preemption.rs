@@ -15,6 +15,7 @@ struct BarrierRuntime {
     reject_gates: AtomicBool,
     verification_hidden: AtomicBool,
     provenance_error: AtomicBool,
+    ending_unverified: AtomicBool,
 }
 
 impl RuntimeControl for BarrierRuntime {
@@ -101,12 +102,20 @@ impl RuntimeControl for BarrierRuntime {
         Ok(self.operations.lock().unwrap().get(id).cloned())
     }
     fn start_operation_closed(&self, member: &MemberSpec) -> Result<bool> {
-        // Held backends may have published early or may still have a detached producer.
-        Ok(self.reject_gates.load(Ordering::Acquire)
-            && member
-                .driver
-                .as_deref()
-                .is_some_and(|driver| driver.ends_with("gate")))
+        // The held fixture has no detached producer or work scope after its
+        // exact operation-owned runtime has exited. A running row is no proof.
+        let ended = self.inner.ptys.lock().unwrap().iter().any(|observation| {
+            observation.runtime_id == member.runtime_id
+                && observation.incarnation_id.as_deref() == Some("blocked-start-incarnation")
+                && matches!(observation.status.as_str(), "exited" | "stopped")
+        }) && self.operations.lock().unwrap().get(&member.runtime_id)
+            == member.tags.get(start_jobs::OPERATION_TAG);
+        Ok((ended && !self.ending_unverified.load(Ordering::Acquire))
+            || (self.reject_gates.load(Ordering::Acquire)
+                && member
+                    .driver
+                    .as_deref()
+                    .is_some_and(|driver| driver.ends_with("gate"))))
     }
     fn stop(&self, id: &str, terminal: bool, incarnation: Option<&str>) -> Result<()> {
         let subject = format!("agent/{}", id.replace('.', "/"));
@@ -231,6 +240,7 @@ fn fixture(
         reject_gates: AtomicBool::new(false),
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
+        ending_unverified: AtomicBool::new(false),
     });
     let reconciler = Arc::new(Reconciler::new(
         store.clone(),
@@ -381,6 +391,7 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
         .unwrap();
     // Capture the old physical generation, then pause its publication until the
     // replacement worker and its owner completion have both finished.
+    let capture_fence = store.capture_runtime_observations().unwrap();
     let captured = runtime.snapshot_ptys().unwrap().remove(0);
     runtime.inner.ptys.lock().unwrap().clear();
     assert!(launch(&reconciler, &desired.subject));
@@ -425,6 +436,8 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
             .id,
         completed.id
     );
+    drop(capture_fence);
+    let _fresh_capture = store.capture_runtime_observations().unwrap();
     let fresh = runtime.snapshot_ptys().unwrap().remove(0);
     reconciler.record_member(&desired, &fresh, false).unwrap();
     let current = store
@@ -436,6 +449,20 @@ async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() 
         current.body["fields"]["incarnation_id"],
         "blocked-start-incarnation"
     );
+    // A fresh native PTY exit can lack a PID/incarnation in its registry row.
+    // It may describe absence after this unchanged capture; absence itself is
+    // still never an operation-ending or replacement proof for the consumer.
+    let ended = RuntimeObservation {
+        status: "exited".into(),
+        incarnation_id: None,
+        ..fresh
+    };
+    reconciler.record_member(&desired, &ended, false).unwrap();
+    let absent = store
+        .latest_claim(&desired.subject, Some("runtime.observed"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(absent.body["fields"]["status"], "exited");
 }
 
 #[tokio::test]
@@ -469,6 +496,7 @@ agent "example/worker" { workspace "/tmp"; command "true" }
         reject_gates: AtomicBool::new(false),
         verification_hidden: AtomicBool::new(false),
         provenance_error: AtomicBool::new(false),
+        ending_unverified: AtomicBool::new(false),
     });
     let notify = Arc::new(Notify::new());
     let reconciler = Arc::new(
@@ -976,6 +1004,46 @@ async fn accepted_but_unverified_starts_retain_admission_until_exact_verificatio
         );
         assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
     }
+}
+
+#[tokio::test]
+async fn ended_pty_without_complete_retirement_proof_keeps_the_seat_busy() {
+    let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        "ended-unverified-start",
+    );
+    assert!(launch(&reconciler, "agent/example/worker"));
+    tokio::time::timeout(Duration::from_secs(30), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    // The daemon exited, but its work scope cannot be proven empty. The runtime
+    // accepts a stop signal; that asynchronous acceptance is still no proof.
+    runtime.ending_unverified.store(true, Ordering::Release);
+    runtime.inner.ptys.lock().unwrap()[0].status = "exited".into();
+    reconciler.revoke_start("agent/example/worker").unwrap();
+    reconciler.reconcile_start_jobs().unwrap();
+    let operation = store
+        .runtime_start_for("agent/example/worker")
+        .unwrap()
+        .unwrap();
+    assert!(!operation.cleanup_verified);
+    assert!(operation.result.as_ref().unwrap()["closure_proof"].is_null());
+    assert_eq!(*runtime.inner.stops.lock().unwrap(), ["example.worker"]);
+    assert!(!launch(&reconciler, "agent/example/worker"));
+    // Only the fixture's later positive exact-operation closure permits release.
+    runtime.ending_unverified.store(false, Ordering::Release);
+    reconciler.reconcile_start_jobs().unwrap();
+    assert!(
+        store
+            .runtime_start_for("agent/example/worker")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

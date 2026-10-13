@@ -2332,6 +2332,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
+        let _observation_capture = self.store.capture_runtime_observations()?;
         let pty_span = crate::profile::span("pass/pty-snapshot");
         let ptys = self.runtime.snapshot_ptys();
         drop(pty_span);
@@ -5532,7 +5533,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             operation.finished
                 && member["runtime_id"] == runtime_id
                 && member["terminal"] == terminal
-                && observation.is_some_and(|o| o.status == "running")
+                && observation.is_some_and(|o| {
+                    matches!(
+                        o.status.as_str(),
+                        "running" | "exited" | "stopped" | "vanished"
+                    )
+                })
                 && match self
                     .runtime
                     .start_operation(runtime_id, terminal, incarnation)
@@ -5595,9 +5601,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         }) {
             let now = now_ms();
             let (due, report, episode_started_at) = {
-                let mut retries = self.stop_observation_retries
-                    .lock().unwrap_or_else(PoisonError::into_inner);
-                let retry = retries.entry(subject.into())
+                let mut retries = self
+                    .stop_observation_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let retry = retries
+                    .entry(subject.into())
                     .or_insert_with(|| StopObservationRetry::new(now));
                 let (due, report) = retry.poll(now);
                 (due, report, retry.started_at)
@@ -5617,28 +5626,45 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ("reason".into(), Value::String("runtime state remained unreadable for ten minutes; stop is still pending".into())),
                     ]))?;
                 }
-                eprintln!("st3: WARN stop for {subject} remains pending: runtime state was unreadable for ten minutes");
-                if let Some(retry) = self.stop_observation_retries
-                    .lock().unwrap_or_else(PoisonError::into_inner).get_mut(subject)
+                eprintln!(
+                    "st3: WARN stop for {subject} remains pending: runtime state was unreadable for ten minutes"
+                );
+                if let Some(retry) = self
+                    .stop_observation_retries
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_mut(subject)
                 {
                     retry.fault_reported = true;
                 }
             }
             return Ok(false);
         }
-        let recovered_fault = self.stop_observation_retries.lock()
-            .unwrap_or_else(PoisonError::into_inner).remove(subject)
+        let recovered_fault = self
+            .stop_observation_retries
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(subject)
             .is_some_and(|retry| retry.fault_reported);
         if recovered_fault && reconcile_decision_admitted(subject) {
-            self.record_once(subject, "runtime.reconcile-decision", BTreeMap::from([
-                ("key".into(), Value::String("stop-observation".into())),
-                ("decision".into(), Value::String("hold".into())),
-                ("reachability".into(), Value::String("reachable".into())),
-                ("reason".into(), Value::Null),
-            ]))?;
+            self.record_once(
+                subject,
+                "runtime.reconcile-decision",
+                BTreeMap::from([
+                    ("key".into(), Value::String("stop-observation".into())),
+                    ("decision".into(), Value::String("hold".into())),
+                    ("reachability".into(), Value::String("reachable".into())),
+                    ("reason".into(), Value::Null),
+                ]),
+            )?;
         }
-        if observation.is_none_or(|observation| observation.status != "running") {
-            self.reported_kill_survivors.lock().unwrap_or_else(PoisonError::into_inner).remove(subject);
+        if retirement_operation.is_none()
+            && observation.is_none_or(|observation| observation.status != "running")
+        {
+            self.reported_kill_survivors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(subject);
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
@@ -5656,7 +5682,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             // Stops for a restart of a still-live declaration cannot release a placement fence.
             let mut evidence = Vec::new();
             if let Some(token) = self.store.selected_desired_token(subject)?
-                && self.store.claim_by_id(&token)?.is_some_and(|c| c.body["kind"] == "stop")
+                && self
+                    .store
+                    .claim_by_id(&token)?
+                    .is_some_and(|c| c.body["kind"] == "stop")
             {
                 evidence.push(token);
             }
@@ -5784,7 +5813,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         {
             let report_survivor = {
-                let mut reported = self.reported_kill_survivors.lock()
+                let mut reported = self
+                    .reported_kill_survivors
+                    .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 if reported.get(subject) == Some(&deadline_key) {
                     false
@@ -5794,7 +5825,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             };
             if report_survivor {
-                eprintln!("st3: WARN runtime {runtime_id} remains live on the observation after SIGKILL");
+                eprintln!(
+                    "st3: WARN runtime {runtime_id} remains live on the observation after SIGKILL"
+                );
             }
             if reconcile_decision_admitted(subject) {
                 self.record_once(
@@ -5810,11 +5843,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                     ]),
                 )?;
             } else {
-                self.record_diagnostic_once(subject, BTreeMap::from([
-                    ("severity".into(), Value::String("warning".into())),
-                    ("code".into(), Value::String("kill-survivor".into())),
-                    ("reason".into(), Value::String(format!("{subject} (runtime {runtime_id}) remained live after SIGKILL"))),
-                ]))?;
+                self.record_diagnostic_once(
+                    subject,
+                    BTreeMap::from([
+                        ("severity".into(), Value::String("warning".into())),
+                        ("code".into(), Value::String("kill-survivor".into())),
+                        (
+                            "reason".into(),
+                            Value::String(format!(
+                                "{subject} (runtime {runtime_id}) remained live after SIGKILL"
+                            )),
+                        ),
+                    ]),
+                )?;
             }
             return Ok(false);
         }

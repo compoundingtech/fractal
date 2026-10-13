@@ -8,6 +8,11 @@ use std::os::unix::fs::OpenOptionsExt;
 pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     transaction.execute_batch(r#"
+CREATE TABLE IF NOT EXISTS local_runtime_start_observation_generation (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    value INTEGER NOT NULL CHECK(typeof(value)='integer' AND value>=0)
+);
+INSERT OR IGNORE INTO local_runtime_start_observation_generation VALUES(1,0);
 CREATE TABLE IF NOT EXISTS local_runtime_starts (
     id TEXT PRIMARY KEY,
     subject TEXT NOT NULL,
@@ -21,6 +26,12 @@ CREATE TABLE IF NOT EXISTS local_runtime_starts (
     dispatched INTEGER NOT NULL DEFAULT 0,
     receipted INTEGER NOT NULL DEFAULT 0
 );
+CREATE TRIGGER IF NOT EXISTS local_runtime_starts_observation_insert AFTER INSERT ON local_runtime_starts
+BEGIN UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS local_runtime_starts_observation_update AFTER UPDATE ON local_runtime_starts
+BEGIN UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS local_runtime_starts_observation_delete AFTER DELETE ON local_runtime_starts
+BEGIN UPDATE local_runtime_start_observation_generation SET value=value+1 WHERE id=1; END;
 CREATE INDEX IF NOT EXISTS local_runtime_starts_subject ON local_runtime_starts(subject,id DESC);
 CREATE INDEX IF NOT EXISTS local_runtime_starts_subject_request
 ON local_runtime_starts(subject,CAST(json_extract(body,'$.start_request_position') AS INTEGER) DESC);
@@ -68,6 +79,24 @@ CREATE INDEX IF NOT EXISTS local_runtime_start_evidence_observation ON local_run
     }
     transaction.commit()?;
     Ok(())
+}
+
+thread_local! {
+    static RUNTIME_OBSERVATION_CAPTURE: std::cell::RefCell<Option<(std::path::PathBuf,u64)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Physical captures are synchronous and thread-scoped. Never carry the witness
+/// to another thread or allow a nested capture to erase its predecessor.
+pub(crate) struct RuntimeObservationCapture {
+    previous: Option<(std::path::PathBuf, u64)>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl Drop for RuntimeObservationCapture {
+    fn drop(&mut self) {
+        RUNTIME_OBSERVATION_CAPTURE.with(|capture| {
+            capture.replace(self.previous.take());
+        });
+    }
 }
 
 const PENDING: &str = "finished=0 OR applied=0 OR (revoked_by IS NOT NULL AND cleanup_verified=0) OR (json_extract(result,'$.error') IS NOT NULL AND cleanup_verified=0)";
@@ -285,6 +314,20 @@ fn closed_runtime_start_result(
 }
 
 impl Store {
+    pub(crate) fn capture_runtime_observations(&self) -> Result<RuntimeObservationCapture> {
+        let epoch = self.readers.get().query_row(
+            "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
+            [],
+            |row| row.get::<_, u64>(0),
+        )?;
+        let previous = RUNTIME_OBSERVATION_CAPTURE
+            .with(|capture| capture.replace(Some((self.path.clone(), epoch))));
+        Ok(RuntimeObservationCapture {
+            previous,
+            _thread: std::marker::PhantomData,
+        })
+    }
+
     /// A late physical snapshot cannot turn the prior target into a replacement
     /// for a newly verified launch. Admission order comes from the exact local
     /// request position, never UUID creation time or claim publication time.
@@ -296,6 +339,13 @@ impl Store {
             input.kind == "runtime.observed" && input.actor.is_none(),
             "expected owner runtime observation"
         );
+        let capture_epoch = RUNTIME_OBSERVATION_CAPTURE.with(|capture| {
+            capture
+                .borrow()
+                .as_ref()
+                .filter(|(path, _)| path == &self.path)
+                .map(|(_, epoch)| *epoch)
+        });
         let admission = |connection: &Connection| -> Result<(), St3Error> {
             let latest: Option<RuntimeStartOperation> = connection.query_row(
                 "SELECT * FROM local_runtime_starts WHERE subject=?1
@@ -309,7 +359,17 @@ impl Store {
             {
                 let observed = input.fields.get("incarnation_id").and_then(Value::as_str);
                 let prior = operation.body["expected_incarnation"].as_str();
-                if observed != Some(actual) && (observed.is_none() || observed == prior) {
+                let current = connection
+                    .query_row(
+                        "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
+                        [],
+                        |row| row.get::<_, u64>(0),
+                    )
+                    .map_err(internal)?;
+                let stale_capture = capture_epoch != Some(current);
+                if observed != Some(actual)
+                    && (stale_capture || (observed.is_some() && observed == prior))
+                {
                     return Err(St3Error::new(
                         "stale-runtime-observation",
                         "physical snapshot precedes the verified start incarnation",
@@ -1950,7 +2010,7 @@ mod tests {
             .unwrap();
         assert!(shared > 0 && local > 0);
         legacy.execute_batch(
-            "DROP TABLE local_runtime_start_evidence; DROP TABLE local_runtime_starts;
+            "DROP TABLE local_runtime_start_evidence; DROP TABLE local_runtime_starts; DROP TABLE local_runtime_start_observation_generation;
              DELETE FROM meta WHERE key IN ('publication-operation-format-shared-cut','publication-operation-format-local-cut');
              PRAGMA user_version=18;",
         ).unwrap();
@@ -1979,6 +2039,17 @@ mod tests {
             })
             .unwrap();
         assert!(request_position > local);
+        let generation = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT value FROM local_runtime_start_observation_generation WHERE id=1",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap()
+        };
+        let captured_generation = generation(&store.readers.get());
+        assert!(captured_generation > 0);
         publish(
             &store,
             "version 2\nstop \"agent/example/worker\"",
@@ -1989,13 +2060,16 @@ mod tests {
             let transaction = writer.transaction().unwrap();
             replay_graph_from_nothing_tx(&transaction).unwrap();
             assert_eq!(format_cuts(&transaction), (shared, local));
+            assert_eq!(generation(&transaction), captured_generation);
             transaction.commit().unwrap();
         }
         store.forget_current_views();
         assert_eq!(format_cuts(&store.readers.get()), (shared, local));
+        assert_eq!(generation(&store.readers.get()), captured_generation);
         drop(store);
         let reopened = Store::open(&path, "node").unwrap();
         assert_eq!(format_cuts(&reopened.readers.get()), (shared, local));
+        assert_eq!(generation(&reopened.readers.get()), captured_generation);
         assert_eq!(
             reopened.runtime_start_for(subject).unwrap().unwrap().body["start_request"],
             start.body["start_request"]

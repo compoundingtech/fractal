@@ -561,20 +561,23 @@ impl<R: RuntimeControl> Reconciler<R> {
             "exited" | "stopped" | "vanished"
         ) && operation.finished
         {
-            if !member.terminal
-                && !self
-                    .runtime
-                    .start_operation_closed(&prepared.launch_member)?
+            if self
+                .runtime
+                .start_operation_closed(&prepared.launch_member)?
             {
+                self.store.retain_runtime_start_ended(
+                    &operation.id,
+                    incarnation,
+                    &observation.status,
+                )?;
+                self.start_changed(&operation.subject);
                 return Ok(());
             }
-            self.store.retain_runtime_start_ended(
-                &operation.id,
-                incarnation,
-                &observation.status,
-            )?;
-            self.start_changed(&operation.subject);
-            return Ok(());
+            // An ended PTY daemon can leave a live tree or work scope. Route it
+            // through exact native retirement rather than certifying absence.
+            if !member.terminal {
+                return Ok(());
+            }
         }
         self.reconcile_runtime_stop(
             &operation.subject,
