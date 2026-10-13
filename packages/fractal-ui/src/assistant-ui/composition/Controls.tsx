@@ -13,12 +13,16 @@ export function IconButton({ icon, label, ...props }: Omit<ButtonProps, 'childre
 }
 /** Quiet time after the last scroll before a keyboard-focused card reopens at its new position. */
 const scrollSettleMs = 100
+/** Announces an opened kit card so every other open kit card closes, including one reopened outside React Aria's registry. */
+const tooltipOpenEvent = 'fractal-kit-tooltip-open'
 /**
  * The themed host owns each React Aria portal; menus never fall back to the global palette.
  * React Aria closes an open card on any ancestor scroll, including the scroll that brings a newly focused trigger into view
- * (a transcript row reached with Tab). While the trigger keeps keyboard focus, the card reopens once that scroll settles.
+ * (a transcript row reached with Tab). While the trigger keeps keyboard focus, the card reopens once that scroll settles;
+ * Escape during the settle cancels it, and only one kit card is open at a time.
  */
 export function Tooltip({ label, placement = 'bottom', delay = 350, children }: { label: string; placement?: 'top' | 'bottom'; delay?: number; children: React.ReactNode }) {
+  const id = React.useId()
   const scope = React.useRef<HTMLSpanElement>(null)
   const lastScroll = React.useRef(Number.NEGATIVE_INFINITY)
   const [isOpen, setOpen] = React.useState(false)
@@ -42,6 +46,13 @@ export function Tooltip({ label, placement = 'bottom', delay = 350, children }: 
     if (settling) settle()
     return () => { window.clearTimeout(timer); window.removeEventListener('scroll', onScroll, true) }
   }, [isOpen, settling])
+  React.useEffect(() => {
+    if (!isOpen) return
+    const onOtherOpen = (event: Event) => { if ((event as CustomEvent<string>).detail !== id) setOpen(false) }
+    window.addEventListener(tooltipOpenEvent, onOtherOpen)
+    window.dispatchEvent(new CustomEvent(tooltipOpenEvent, { detail: id }))
+    return () => window.removeEventListener(tooltipOpenEvent, onOtherOpen)
+  }, [isOpen, id])
   const onOpenChange = (open: boolean) => {
     setOpen(open)
     if (open) return
@@ -49,7 +60,7 @@ export function Tooltip({ label, placement = 'bottom', delay = 350, children }: 
     // Decide after the scroll dispatch finishes, whichever capture listener ran first.
     window.setTimeout(() => { if (Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
   }
-  return <ThemePortal><span ref={scope} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={onOpenChange}>{children}<AriaTooltip placement={placement} offset={geometryNumbers.tooltipOffset} {...stylex.props(styles.tooltip)}>{label}</AriaTooltip></TooltipTrigger></span></ThemePortal>
+  return <ThemePortal><span ref={scope} onKeyDownCapture={event => { if (event.key === 'Escape') setSettling(false) }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={onOpenChange}>{children}<AriaTooltip placement={placement} offset={geometryNumbers.tooltipOffset} {...stylex.props(styles.tooltip)}>{label}</AriaTooltip></TooltipTrigger></span></ThemePortal>
 }
 const styles = stylex.create({
   button: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: s.xs, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: text.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', flexShrink: 0, ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline }, ':disabled': { opacity: 0.64, cursor: 'default' } },
