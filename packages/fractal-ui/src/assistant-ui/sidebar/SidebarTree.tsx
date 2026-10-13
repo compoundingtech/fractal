@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useLocale } from 'react-aria'
-import { Button, Collection, DragAndDropContext, ListLayout, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
+import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
 
@@ -106,6 +106,13 @@ function DragSessionObserver({ onChange }: { readonly onChange: (dragging: boole
   return null
 }
 
+// RAC's TreeItem gives row content these slots. Pinned and measured copies render host rows outside
+// any TreeItem, so they get the same slot names without the real row's handlers. Otherwise a host
+// `slot="drag"` would resolve against an ancestor's slots and throw, such as a Dialog's `close`.
+const copyButtonSlots: React.ContextType<typeof ButtonContext> = { slots: { [DEFAULT_SLOT]: {}, chevron: {}, drag: {} } }
+const copyCheckboxSlots: React.ContextType<typeof CheckboxContext> = { slots: { [DEFAULT_SLOT]: {}, selection: {} } }
+const copyCheckboxFieldSlots: React.ContextType<typeof CheckboxFieldContext> = { slots: { [DEFAULT_SLOT]: {}, selection: {} } }
+
 interface RowContentProps<T extends SidebarTreeItem<T>> {
   readonly item: T
   readonly expanded: boolean
@@ -117,7 +124,10 @@ interface RowContentProps<T extends SidebarTreeItem<T>> {
  * virtualizer repositions it or the tree re-renders; a retained item at a new offset reuses its content.
  */
 const RowContent = React.memo(function RowContent<T extends SidebarTreeItem<T>>({ item, expanded, pinned, renderRow }: RowContentProps<T>) {
-  return renderRow(item, { depth: item.depth, expanded, pinned })
+  const content = renderRow(item, { depth: item.depth, expanded, pinned })
+  return pinned
+    ? <ButtonContext.Provider value={copyButtonSlots}><CheckboxContext.Provider value={copyCheckboxSlots}><CheckboxFieldContext.Provider value={copyCheckboxFieldSlots}>{content}</CheckboxFieldContext.Provider></CheckboxContext.Provider></ButtonContext.Provider>
+    : content
 }) as <T extends SidebarTreeItem<T>>(props: RowContentProps<T>) => React.ReactNode
 
 /** RAC owns the sole accessible tree; sticky rows are pointer-only visual proxies. */
