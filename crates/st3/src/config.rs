@@ -215,7 +215,7 @@ impl Default for ReconcileConfig {
     fn default() -> Self {
         Self {
             max_passes_per_minute: 30,
-            idle_nudge_after: "30m".into(),
+            idle_nudge_after: "15m".into(),
             idle_nudge_quiet_watch: "2h".into(),
         }
     }
@@ -1076,7 +1076,7 @@ sekrets_profile = "nathan/daemon-gh"
     fn idle_nudges_default_to_thirty_minutes_and_a_two_hour_quiet_watch() {
         let config = Config::default();
         let settings = config.reconcile.idle_nudge().unwrap();
-        assert_eq!(settings.after_ms, Some(30 * 60_000));
+        assert_eq!(settings.after_ms, Some(15 * 60_000));
         assert_eq!(settings.quiet_watch_ms, 2 * 3_600_000);
         assert!(!toml::to_string(&config).unwrap().contains("[reconcile]"));
 

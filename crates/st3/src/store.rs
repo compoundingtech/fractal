@@ -160,6 +160,9 @@ mod watches;
 mod idle_holds;
 mod declared_waits;
 pub use declared_waits::{WORK_WAIT_ENDED_KIND, WaitTarget, WaitWake, describe_wait};
+mod quiet_claims;
+pub use quiet_claims::{STALLED_GRACE_MS, STEP_QUIET_CONDITION, STEP_STALLED_CONDITION};
+pub(crate) use quiet_claims::quiet_episode;
 mod idle_mail;
 pub use idle_holds::WORK_NUDGED_KIND;
 pub use checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest};
@@ -32848,6 +32851,7 @@ fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunView> {
         not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
         nudged_at_unix_ms: None,
         waiting_on: None,
+        stalled_at_unix_ms: None,
         created_at_unix_ms: created.parse().unwrap_or(0),
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         person_answers: Vec::new(),
@@ -32910,6 +32914,7 @@ fn enrich_step_queue_at(
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
     declared_waits::enrich_declared_wait_at(connection, view, snapshot_unix_ms)?;
+    quiet_claims::enrich_stalled_at(connection, view, snapshot_unix_ms)?;
     enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
     enrich_step_definition(connection, view)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;

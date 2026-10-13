@@ -2608,7 +2608,7 @@ fn parse_run_report(
 }
 
 /// How long a reported run may go without progress before it counts as stalled.
-pub const DEFAULT_STALLED_AFTER_MS: u64 = 30 * 60_000;
+pub const DEFAULT_STALLED_AFTER_MS: u64 = 3 * 60 * 60_000;
 
 /// A run report goes to an agent. A person is reached through their own agent.
 pub fn validate_report_to(report_to: &str) -> Result<(), St3Error> {
@@ -4192,7 +4192,7 @@ mission "observed" state="ready" {
         let default = parse(r#"report-to="agent/ops/watcher""#).unwrap();
         let default = &default.missions["watched"];
         assert_eq!(default.report_to.as_deref(), Some("agent/ops/watcher"));
-        assert_eq!(default.stalled_after_ms, Some(30 * 60_000));
+        assert_eq!(default.stalled_after_ms, Some(3 * 60 * 60_000));
         assert!(!default.report_completed);
         assert!(default.report_stalls);
 
@@ -4209,7 +4209,7 @@ mission "observed" state="ready" {
         let muted = parse(r#"report-to="agent/ops/watcher" report-stalls=#false"#).unwrap();
         let muted = &muted.missions["watched"];
         assert!(!muted.report_stalls);
-        assert_eq!(muted.stalled_after_ms, Some(30 * 60_000));
+        assert_eq!(muted.stalled_after_ms, Some(3 * 60 * 60_000));
         assert_ne!(default.revision, muted.revision);
         // Older stored definitions decode and serialize byte-for-byte without a new field.
         let old = serde_json::to_value(default).unwrap();

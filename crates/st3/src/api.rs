@@ -2414,6 +2414,7 @@ fn client_work_values(
                 "nudged_at_unix_ms": work.nudged_at_unix_ms,
                 "waiting_on": work.waiting_on.as_ref().map(crate::store::describe_wait),
                 "waiting_since_unix_ms": work.waiting_on.as_ref().map(|wait| wait.since_unix_ms),
+                "stalled_at_unix_ms": work.stalled_at_unix_ms,
                 "execution_elapsed_ms": work.execution_elapsed_ms,
                 "timeout_ms": work.timeout_ms,
                 "goals": work.goals,
@@ -7234,6 +7235,7 @@ fn isolation_name(mode: st_runtime::Isolation) -> &'static str {
 
 async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, ApiError> {
     let reader_store = state.store.clone();
+    let stalled_store = state.store.clone();
     let environment = crate::api::read_deadline::spawn_blocking(crate::environment::snapshot)
         .await
         .map_err(ApiError::internal)?;
@@ -7320,6 +7322,16 @@ async fn doctor(State(state): State<AppState>) -> Result<Json<DoctorReport>, Api
             message,
         });
     }
+    let stalled = tokio::task::spawn_blocking(move || stalled_store.stalled_runs(client_now_ms()))
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(|error| ApiError::internal(format!("{error:#}")))?;
+    let (name, status, message) = crate::slo::stalled_runs_line(&stalled);
+    report.checks.push(DoctorCheck {
+        name,
+        status: status.into(),
+        message,
+    });
     report.checks.extend(github_usage_checks(
         &crate::resource::github_usage_report(),
         client_now_ms(),
