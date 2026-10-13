@@ -286,6 +286,49 @@ fn specialized_pages_match_old_full_metadata_filters_cursors_and_randomized_name
             [0, 1, 3, 1000][seed as usize % 4],
         );
     }
+    // Deterministic named-page cursor inside a three-version run, in addition to the
+    // randomized named/cursor combinations above. Both history policies share the clock.
+    let name = "doc/named-cursor";
+    let oldest = bind(&store, name, "cursor-first", 10_000, "cursor-first", None);
+    let middle = bind(&store, name, "cursor-middle", 20_000, "cursor-middle", None);
+    let newest = bind(&store, name, "cursor-newest", 30_000, "cursor-newest", None);
+    for history in [false, true] {
+        for limit in [0, 1, 2, 10] {
+            for cursor in [&oldest, &middle, &newest] {
+                parity(
+                    &store,
+                    Some(name),
+                    None,
+                    history,
+                    Some((name, cursor.store_index)),
+                    limit,
+                );
+            }
+        }
+    }
+    let page = read(
+        &store,
+        Some(name),
+        None,
+        true,
+        Some((name, middle.store_index)),
+        1,
+    )
+    .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].binding_claim_id, oldest.id);
+    assert!(
+        read(
+            &store,
+            Some(name),
+            None,
+            false,
+            Some((name, middle.store_index)),
+            10
+        )
+        .unwrap()
+        .is_empty()
+    );
     parity(&store, Some("doc/missing"), None, true, None, 5);
 }
 
