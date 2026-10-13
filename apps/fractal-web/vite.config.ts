@@ -5,6 +5,7 @@ import { createStylexVitePlugins } from './scripts/stylex.mjs'
 import { webfractalGateway } from './scripts/vite-gateway.mjs'
 import { extensionBuild } from './scripts/extensions-build.mjs'
 import { fractalContentSecurityPolicy } from './scripts/vite-csp.mjs'
+import { fractalCssAssets } from './scripts/vite-css-assets.mjs'
 export default defineConfig({
   root: 'src/web',
   plugins: [
@@ -31,6 +32,7 @@ export default defineConfig({
     }),
     react(),
     webfractalGateway(),
+    fractalCssAssets(),
   ],
   server: { strictPort: true, host: '127.0.0.1', allowedHosts: (process.env.WF_ALLOWED_HOSTS ?? '127.0.0.1,localhost').split(',') },
   resolve: { dedupe: ['effect', 'react', 'react-dom'] },

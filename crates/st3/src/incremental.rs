@@ -464,6 +464,7 @@ pub fn step_due(step: &crate::model::StepRunView, now: u128) -> Option<u128> {
     [
         step.claim_expires_at_unix_ms,
         step.not_before_unix_ms,
+        step.execution_paused_until_unix_ms,
         timeout,
     ]
     .into_iter()

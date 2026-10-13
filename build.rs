@@ -29,6 +29,15 @@ fn main() {
         let commit_ts = git(&["log", "-1", "--format=%ct"])
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
+        // Reject an invalid release identity during the build, before emitting a stamp.
+        // This is the same local machine-version grammar as st-drivers::version.
+        let version = std::env::var("CARGO_PKG_VERSION")
+            .expect("Cargo must supply the package version to the build stamp generator");
+        let suffix = if dirty { ".dirty" } else { "" };
+        assert!(
+            format!("{version}+local.{rev}{suffix}").len() <= 128,
+            "build machine version exceeds 128 bytes; correct the package version or revision"
+        );
         // Hand-assembled JSON: the short-sha is hex so no escaping is needed, and
         // this avoids a build-dependency just to serialize three fields.
         let stamp =

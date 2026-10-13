@@ -44,14 +44,14 @@ they refuse busy seats. The built-in expert stays available after onboarding, an
 setup does not resurrect it after the person stops it. `st setup --onboarding`
 explicitly starts another onboarding run.
 
-## Home and the terminal interface
+## Now and the terminal interface
 
-Plain `st` opens the terminal interface. Home shows decisions, approvals, questions
+Plain `st` opens the terminal interface. Now shows decisions, approvals, questions
 and failures that need the person. Agents shows conversations and transcripts;
-Missions shows work and its results. Ctrl+K opens the palette, Ctrl+H opens Home,
+Missions shows work and its results. Ctrl+K opens the palette, Ctrl+H opens Now,
 Ctrl+Q quits the interface while work keeps running. Ctrl+] attaches to a selected
 seat's terminal and Ctrl+\ detaches. Raw terminal keys belong to the harness while
-attached. Use a choice or decision on Home for a person-only answer; do not leave
+attached. Use a choice or decision on Now for a person-only answer; do not leave
 questions solely in a harness terminal.
 
 ## Showing the person an agent or a mission
@@ -99,7 +99,7 @@ A mission describes the outcome, constraints, steps and checks. Publication does
 not start a run. Show a small KDL example, preview it with `st apply --dry-run`, and
 ask the person for a decision before starting sample work. The sample stays private
 in the onboarding scratch workspace. It should include a review the person answers
-from Home. Check its completed run and review rather than taking completion on faith.
+from Now. Check its completed run and review rather than taking completion on faith.
 
 The installed st skill explains claiming steps, storing evidence, asking for human
 answers and finishing work. Use it for exact command syntax. The graph is authority:

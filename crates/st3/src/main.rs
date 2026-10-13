@@ -85,6 +85,11 @@ struct Cli {
     read_contract_inventory_json: bool,
     #[arg(long, global = true)]
     endpoint: Option<String>,
+    /// Run a second, fully separate st on this machine: its own state, config, sockets, node
+    /// name, service names and harness accounts, all under ~/.st-instance/NAME. Same as the
+    /// ST_INSTANCE environment variable.
+    #[arg(long, global = true, env = "ST_INSTANCE", value_name = "NAME")]
+    instance: Option<String>,
     #[arg(long, global = true, hide = true)]
     catalog: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -1306,6 +1311,10 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
     Ok(())
 }
 
+fn directory_is_empty(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
+}
+
 async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -1323,6 +1332,7 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         .map(Path::to_path_buf)
         .context("the state directory has no parent")?;
     let data_dir = data_home.join("st3");
+    let instance = st3::instance::current();
     let manifest: Option<Value> = fs::read(data_dir.join("install.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok());
@@ -1333,6 +1343,7 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         .flatten()
         .filter_map(|path| path.as_str().map(PathBuf::from))
         .collect::<Vec<_>>();
+    let work_root = config.work_root().ok();
     let st2_state = state_home.join("st2");
     let st2_only_hooks = fs::read_dir(&st2_state)
         .is_ok_and(|entries| entries.flatten().all(|entry| entry.file_name() == "hooks"));
@@ -1350,14 +1361,60 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     if !args.keep_binaries {
         paths.extend(binaries.iter().cloned());
     }
+    // What the default install writes outside its own directories: st's Claude plugin
+    // marketplace, and the copies of the st skill that seats install into harness directories.
+    let skill_copies = st3::skill::untouched_installs();
+    let plugin_files = st_drivers::claude_channel::st3_marketplace_root()
+        .ok()
+        .and_then(|root| root.ancestors().nth(2).map(Path::to_path_buf))
+        .filter(|root| root.ends_with("st/plugins") && root.exists());
+    paths.extend(skill_copies.iter().cloned());
+    paths.extend(plugin_files);
+    if let Some(instance) = &instance {
+        // An instance owns exactly one directory, and every path above lies inside it. Removing
+        // that directory is the whole uninstall, and nothing outside it is listed or touched.
+        let root = instance.root().to_path_buf();
+        anyhow::ensure!(
+            paths.iter().all(|path| path.starts_with(&root)),
+            "the instance would remove a path outside {}: {:?}",
+            root.display(),
+            paths.iter().filter(|path| !path.starts_with(&root)).collect::<Vec<_>>()
+        );
+        // The work root can lie inside the instance but holds the person's work: everything
+        // else in the instance goes and the work root stays.
+        let work = work_root.clone().unwrap_or_else(|| instance.work_dir());
+        paths = fs::read_dir(&root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| !work.starts_with(path))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
     paths.sort();
     paths.dedup();
     if args.dry_run {
         for path in &paths {
             println!("remove\t{}", path.display());
         }
-        println!("remove\tthe st3 user services, if installed");
-        if manifest.is_none() && !args.keep_binaries {
+        if let Some(work) = work_root.as_ref().filter(|work| !directory_is_empty(work)) {
+            println!(
+                "keep\t{}\tthe work folder: what your agents made there stays",
+                work.display()
+            );
+        }
+        if let Some(instance) = &instance {
+            println!(
+                "remove\tthe user services of instance {}, if installed",
+                instance.name()
+            );
+        } else {
+            println!("remove\tthe st3 user services, if installed");
+            println!("remove\tst's Claude plugin and marketplace registration, if installed");
+        }
+        if instance.is_none() && manifest.is_none() && !args.keep_binaries {
             println!(
                 "keep\tthe st3 executables: no release install manifest; remove them the way you installed them"
             );
@@ -1399,6 +1456,17 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
     {
         anyhow::bail!("stop st3 up and st3 replication-worker, then run st uninstall --yes again");
     }
+    if instance.is_none()
+        && let Err(error) = st_drivers::claude_channel::remove_st3_channel(true)
+        // No `claude` on this machine means there is no plugin registration to remove.
+        && !error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        })
+    {
+        eprintln!("could not unregister st's Claude plugin: {error:#}");
+    }
     for path in &paths {
         let result = if path.is_dir() {
             fs::remove_dir_all(path)
@@ -1410,6 +1478,26 @@ async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs) -> Result<()> {
         {
             eprintln!("could not remove {}: {error}", path.display());
         }
+    }
+    // The work folder setup created goes only while nothing is in it; `remove_dir` refuses a
+    // folder that holds anything.
+    if let Some(work) = &work_root {
+        let _ = fs::remove_dir(work.join("agents"));
+        let _ = fs::remove_dir(work);
+    }
+    if let Some(instance) = &instance {
+        // The directory that holds instances goes with the last one; `remove_dir` leaves it alone
+        // while another instance, or anything else, is inside.
+        let _ = fs::remove_dir(instance.root());
+        if let Some(parent) = instance.root().parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    if let Some(work) = work_root.as_ref().filter(|work| work.exists()) {
+        println!(
+            "kept\t{}\tthe work folder: what your agents made there stays; remove it yourself if you want it gone",
+            work.display()
+        );
     }
     let remaining = paths
         .iter()
@@ -3951,6 +4039,16 @@ enum WorkCommand {
     Progress(WorkActionArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
+    /// Stop the execution clock while claimed work waits for something outside this seat.
+    ///
+    /// A build slot or the merge queue is waiting, not execution: the step's timeout counts
+    /// only the time it runs. The clock restarts at `work resume`, or after `--for` at the
+    /// latest, so a seat that stops answering cannot hide behind a wait. The lease still
+    /// needs its renewals.
+    Wait(WorkWaitArgs),
+    /// Start the execution clock again after `work wait`.
+    #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
+    Resume(WorkActionArgs),
     /// Finish claimed work and attach its durable evidence.
     ///
     /// Include the result, exact revision, verification and material limits. Gates can keep
@@ -4165,6 +4263,23 @@ struct WorkExtendArgs {
     #[arg(long)]
     by: String,
     /// Why the step needs more time.
+    #[arg(long)]
+    reason: String,
+}
+
+#[derive(Args)]
+struct WorkWaitArgs {
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))]
+    subject: String,
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as")]
+    actor: Option<String>,
+    #[arg(long, env = "ST3_INCARNATION")]
+    incarnation: Option<String>,
+    /// The longest the clock stays stopped, such as 30m or 4h; at most 12h.
+    #[arg(long = "for")]
+    wait_for: String,
+    /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
 }
@@ -4790,6 +4905,16 @@ fn cli_main() -> ExitCode {
             return ExitCode::from(2);
         }
         None => {}
+    }
+    // An instance changes where every path resolves, so it comes before anything reads one.
+    let instance_name = st3::instance::requested(&arguments)
+        .or_else(|| std::env::var(st3::instance::ENV).ok().filter(|name| !name.is_empty()));
+    if let Some(name) = instance_name {
+        // SAFETY: no other thread exists yet; the async runtime starts after this returns.
+        if let Err(error) = unsafe { st3::instance::activate(&name) } {
+            eprintln!("st: --instance {name}: {error:#}");
+            return ExitCode::from(2);
+        }
     }
     // A shell stub from `st completions` calls back with `COMPLETE=<shell>` on each TAB. Answer
     // before any config, runtime, or daemon work; this exits when the variable is set.
@@ -6158,6 +6283,20 @@ mod private_gateway_tests {
     }
 }
 
+fn daemon_start_version(machine_version: &str) -> Result<&str> {
+    anyhow::ensure!(
+        machine_version.len() <= 128,
+        "daemon build identity exceeds 128 bytes; correct the compile-time build stamp"
+    );
+    Ok(
+        if machine_version == concat!(env!("CARGO_PKG_VERSION"), "+dev") {
+            env!("CARGO_PKG_VERSION")
+        } else {
+            machine_version
+        },
+    )
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let args_config = args.config.clone();
     let private_state = args.state_dir.is_some();
@@ -6314,7 +6453,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ("pid".into(), Value::from(std::process::id())),
             (
                 "version".into(),
-                Value::String(env!("CARGO_PKG_VERSION").into()),
+                Value::String(daemon_start_version(&st_drivers::version::machine_version())?.into()),
             ),
             (
                 "schema".into(),
@@ -6387,7 +6526,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_access_mode(config.active_access_mode()).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute)?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     startup.phase("start-services");
@@ -6515,6 +6654,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     run_checkpoints(activation_store, context).await;
                 }
             });
+            spawn_publication_evidence(store.clone());
             startup_telemetry.serving();
             startup.serving();
             eprintln!("st: local API listening at {}", config.socket.display());
@@ -11813,17 +11953,22 @@ fn render_replication_peers(
                     "  same envelopes (measured {}); projection comparison waits for a settled exchange or a compatible build",
                     relative_time(sync.measured_at_unix_ms, now)
                 );
-            } else if peer.graph_digest.as_deref() == Some(local_graph_digest) {
+                if let Some(reason) = peer.projection_comparison_waiting_reason.as_deref() {
+                    let _ = writeln!(output, "  waiting because {reason}");
+                }
+            } else if peer_graphs_equal(peer, local_graph_digest) {
                 let _ = writeln!(
                     output,
-                    "  in sync: the same envelopes and the same graph (measured {})",
-                    relative_time(sync.measured_at_unix_ms, now)
+                    "  in sync: the same envelopes and the same graph (measured {}, graphs compared {})",
+                    relative_time(sync.measured_at_unix_ms, now),
+                    compared_ago(peer, now)
                 );
             } else {
                 let _ = writeln!(
                     output,
-                    "  same envelopes (measured {}), but the graphs differ ({digests}); the next exchange compares them",
-                    relative_time(sync.measured_at_unix_ms, now)
+                    "  same envelopes (measured {}), but the graphs differ ({digests}; compared {}); the next exchange compares them",
+                    relative_time(sync.measured_at_unix_ms, now),
+                    compared_ago(peer, now)
                 );
             }
             continue;
@@ -11854,6 +11999,22 @@ fn render_replication_peers(
         }
     }
     output
+}
+
+/// Whether the comparison the status reports for a peer found its projections equal. An older
+/// daemon reports no result, and its digests are compared as they were before.
+fn peer_graphs_equal(peer: &ReplicationPeerStatus, local_graph_digest: &str) -> bool {
+    peer.projection_graphs_equal
+        .unwrap_or_else(|| peer.graph_digest.as_deref() == Some(local_graph_digest))
+}
+
+/// When the reported comparison was made, so one held from an earlier exchange is never
+/// presented as current.
+fn compared_ago(peer: &ReplicationPeerStatus, now: u128) -> String {
+    peer.projection_compared_at_unix_ms
+        .or(peer.sync.as_ref().and_then(|sync| sync.graph_compared_at_unix_ms))
+        .map(|at| relative_time(at, now))
+        .unwrap_or_else(|| "at the last exchange".into())
 }
 
 /// The first 12 characters of a digest, enough to tell two apart in a status line.
@@ -12007,7 +12168,9 @@ async fn run_replication(
                 "graph": {
                     "local": status.graph_digest,
                     "remote": remote.graph_digest,
-                    "equal": if remote.projection_digests.is_empty() || remote.projection_comparison_waiting { None } else { Some(remote.graph_digest.as_deref() == Some(status.graph_digest.as_str())) },
+                    "waiting_reason": remote.projection_comparison_waiting_reason,
+                    "equal": if remote.projection_digests.is_empty() || remote.projection_comparison_waiting { None } else { Some(peer_graphs_equal(remote, &status.graph_digest)) },
+                    "compared_at_unix_ms": remote.projection_compared_at_unix_ms,
                     "coverage": if remote.projection_digests.is_empty() { "legacy-only" } else if remote.projection_comparison_waiting { "pending" } else { "all-shared-projections" },
                 },
             });
@@ -12034,7 +12197,7 @@ async fn run_replication(
                     "unverified (legacy peer)"
                 } else if remote.projection_comparison_waiting {
                     "pending comparison"
-                } else if remote.graph_digest.as_deref() == Some(status.graph_digest.as_str()) {
+                } else if peer_graphs_equal(remote, &status.graph_digest) {
                     "equal"
                 } else {
                     "different"
@@ -12162,6 +12325,13 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
         );
     }
     output.push_str(&format!("participants  {}\n", names(&status.participants)));
+    output.push_str("last daemon start (advertised build)\n");
+    for member in &status.participants {
+        output.push_str(&format!(
+            "  machine_version  {member}: {}\n",
+            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
+        ));
+    }
     if !status.excused.is_empty() {
         output.push_str(&format!("excused       {}\n", names(&status.excused)));
     }
@@ -12170,6 +12340,9 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
     }
     if let Some(pending) = &status.pending {
         output.push_str(&format!("pending       {}\n", pending.checkpoint));
+        for (member, build) in &pending.builds {
+            output.push_str(&format!("  seal build  {member}: {build}\n"));
+        }
         output.push_str(&format!("  sealed      {}\n", names(&pending.sealed)));
         output.push_str(&format!("  unsealed    {}\n", names(&pending.unsealed)));
         for (writer, difference) in &pending.disagreeing {
@@ -15052,6 +15225,19 @@ fn render_client_agent(
     if let Some(incarnation) = &agent.incarnation_id {
         let _ = writeln!(output, "INCARNATION  {incarnation}");
     }
+    if let Some(operation) = agent.extra.get("runtime_start") {
+        let phase = operation["phase"].as_str().unwrap_or("unknown");
+        let id = operation["operation_id"].as_str().unwrap_or("unknown");
+        let running = operation["worker_running"] == true;
+        let _ = writeln!(output, "START        {phase} · {id}{}",
+            if running && phase == "revoked" { " · launch worker still running" } else { "" });
+        let _ = writeln!(output, "START JOBS   {} running · {} revoked and still running",
+            operation["running_jobs"].as_u64().unwrap_or(0),
+            operation["revoked_running_jobs"].as_u64().unwrap_or(0));
+        let _ = writeln!(output, "START OPEN   {} unresolved · {} revoked and unresolved",
+            operation["unresolved_jobs"].as_u64().unwrap_or(0),
+            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0));
+    }
     if let Some(owner) = &agent.owner_run_id {
         let _ = writeln!(output, "MISSION      {owner}");
     }
@@ -16204,6 +16390,46 @@ async fn run_work(
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,
+        WorkCommand::Resume(args) => post_work(client, "resume", args, json_output).await,
+        WorkCommand::Wait(args) => {
+            let actor = args.actor.context("a work wait needs explicit --as")?;
+            reject_foreign_agent_actor(&actor)?;
+            let wait_ms = st3::graph::parse_duration(&args.wait_for, true)?;
+            let subject = if args.subject.starts_with("step-run/") {
+                args.subject.clone()
+            } else {
+                format!("step-run/{}", args.subject)
+            };
+            let incarnation = match args.incarnation {
+                Some(incarnation) => Some(incarnation),
+                None => current_agent_incarnation(client, &actor).await?,
+            };
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let response: StepRunView = client
+                .post(
+                    &format!("/v1/work/wait/{}", urlencoding::encode(&subject)),
+                    &WorkRequest {
+                        actor: Some(actor.clone()),
+                        incarnation,
+                        summary: Some(format!(
+                            "Waiting for {}; the execution clock is stopped for at most {}.",
+                            args.reason.trim(),
+                            args.wait_for
+                        )),
+                        reason: Some(args.reason),
+                        evidence: Vec::new(),
+                        wait_ms: Some(wait_ms),
+                        idempotency_key: format!("work:wait:{subject}:{actor}:{nonce}"),
+                    },
+                )
+                .await?;
+            if json_output {
+                print_value(&response, true)
+            } else {
+                println!("{}\t{}", response.status, response.subject);
+                Ok(())
+            }
+        }
         WorkCommand::Extend(args) => {
             let actor = args.actor.context("a work extension needs explicit --as")?;
             reject_foreign_agent_actor(&actor)?;
@@ -16581,6 +16807,7 @@ async fn post_work(
             .post(
                 &format!("/v1/work/{action}/{}", urlencoding::encode(&args.subject)),
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(actor.clone()),
                     incarnation,
                     summary: args.summary,
@@ -22941,6 +23168,7 @@ async fn renew_claimed_work(client: &Client, subject: &str, minute: u64) -> Resu
             .post(
                 &format!("/v1/work/renew/{}", urlencoding::encode(&step.subject)),
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(subject.into()),
                     incarnation: step.claim_incarnation,
                     summary: None,
@@ -25288,6 +25516,51 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
     }
 }
 
+/// Commit notifications drive exact-delta maintenance after the API has bound.
+/// Each bootstrap page yields the FIFO writer; malformed source stops the job and
+/// leaves a durable incomplete state for doctor, rather than retrying a local defect.
+fn spawn_publication_evidence(store: Arc<Store>) {
+    let (changed, mut receiver) = tokio::sync::watch::channel(());
+    let observer = store.observe_commits(move |connection| {
+        if connection.is_autocommit() {
+            changed.send_replace(());
+        }
+    });
+    tokio::spawn(async move {
+        let _observer = observer;
+        loop {
+            receiver.borrow_and_update();
+            let read_store = store.clone();
+            match tokio::task::spawn_blocking(move || read_store.publication_evidence_ready()).await
+            {
+                Ok(Ok(true)) => {
+                    if receiver.changed().await.is_err() {
+                        return;
+                    }
+                }
+                Ok(Ok(false)) => {
+                    let page_store = store.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        page_store.advance_publication_evidence()
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => tokio::task::yield_now().await,
+                        error => {
+                            eprintln!("st3: publication evidence bootstrap stopped: {error:?}");
+                            return;
+                        }
+                    }
+                }
+                error => {
+                    eprintln!("st3: publication evidence status failed: {error:?}");
+                    return;
+                }
+            }
+        }
+    });
+}
+
 async fn migrate_event_payloads(store: Arc<Store>) {
     match st3::maintenance::migrate_event_payloads(store).await {
         Ok(report) if report.pending_at_start => {
@@ -25912,6 +26185,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
+        let unstamped = concat!(env!("CARGO_PKG_VERSION"), "+dev");
+        assert_eq!(
+            daemon_start_version(unstamped).unwrap(),
+            env!("CARGO_PKG_VERSION")
+        );
+        for version in ["0.1.0+abc1234-dirty", "0.1.0+local.abc1234.dirty"] {
+            assert_eq!(daemon_start_version(version).unwrap(), version);
+        }
+        assert!(daemon_start_version(&"x".repeat(128)).is_ok());
+        assert!(daemon_start_version(&"x".repeat(129)).is_err());
+        assert!(daemon_start_version(&"é".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
+        let status = st3::store::CheckpointStatusView {
+            node: "alder".into(),
+            newest_stable: None,
+            trimmed: None,
+            halted: false,
+            pending: None,
+            participants: ["alder".into(), "birch".into()].into(),
+            excused: Default::default(),
+            left: Default::default(),
+            machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
+        };
+        let output = render_checkpoint_status(&status);
+        assert!(output.contains("last daemon start (advertised build)"));
+        assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
+        assert!(output.contains("machine_version  birch: not advertised"));
+    }
+
+    #[test]
     fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
         let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
         let mut renewals_per_second = [0usize; 60];
@@ -26215,6 +26522,9 @@ mod tests {
             projection_digests: Default::default(),
             differing_tables: Vec::new(),
             projection_comparison_waiting: false,
+            projection_comparison_waiting_reason: None,
+            projection_graphs_equal: None,
+            projection_compared_at_unix_ms: None,
             peer: peer.into(),
             status: "up".into(),
             last_success_at_unix_ms: None,
@@ -26290,12 +26600,35 @@ mod tests {
         let mut peer = peer_status("alder", Some("log-digest"));
         peer.graph_digest = Some("another-graph".into());
         peer.projection_comparison_waiting = true;
+        peer.projection_comparison_waiting_reason = Some("sample reason".into());
         peer.sync = Some(Default::default());
         let rendered = render_replication_peers(&[peer], "local-graph", 0);
         assert!(rendered.contains("same envelopes"));
+        assert!(rendered.contains("waiting because sample reason"));
         assert!(rendered.contains("projection comparison waits for a settled exchange or a compatible build"));
         assert!(!rendered.contains("graphs differ"));
         assert!(!rendered.contains("diverged"));
+    }
+
+    #[test]
+    fn a_held_comparison_decides_in_sync_and_shows_its_age() {
+        let held = |equal: bool| {
+            let mut peer = peer_status("alder", Some("log-digest"));
+            peer.projection_digests = [("documents".to_string(), "x".to_string())].into();
+            peer.graph_digest = Some("older-graph".into());
+            peer.projection_graphs_equal = Some(equal);
+            peer.projection_compared_at_unix_ms = Some(60_000);
+            peer.sync = Some(Default::default());
+            render_replication_peers(&[peer], "local-graph", 240_000)
+        };
+        let equal = held(true);
+        assert!(equal.contains("in sync"), "{equal}");
+        assert!(equal.contains("graphs compared 3m ago"), "{equal}");
+        assert!(!equal.contains("graphs differ"), "{equal}");
+        let different = held(false);
+        assert!(different.contains("graphs differ"), "{different}");
+        assert!(different.contains("compared 3m ago"), "{different}");
+        assert!(!different.contains("in sync"), "{different}");
     }
 
     #[test]
@@ -28033,6 +28366,9 @@ mod tests {
                     projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
                     differing_tables: Vec::new(),
                     projection_comparison_waiting: false,
+                    projection_comparison_waiting_reason: None,
+                    projection_graphs_equal: None,
+                    projection_compared_at_unix_ms: None,
                     peer: name.into(),
                     status: "up".into(),
                     last_success_at_unix_ms: Some(now - 2_000),
@@ -28104,11 +28440,11 @@ mod tests {
              \x20 receiving 142.5 envelopes/s, caught up in about 15m (measured 2s ago)\n\
              peer\tQuiet\tup\t\n\
              \x20 last seen 2s ago\n\
-             \x20 in sync: the same envelopes and the same graph (measured now)\n\
+             \x20 in sync: the same envelopes and the same graph (measured now, graphs compared now)\n\
              peer\tMoved\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 same envelopes (measured now), but the graphs differ (this node \
-             111111111111, Moved 444444444444); the next exchange compares them\n\
+             111111111111, Moved 444444444444; compared now); the next exchange compares them\n\
              peer\tSettling\tup\t\n\
              \x20 last seen 2s ago\n\
              \x20 graphs differ: the same envelopes project different graphs since 10s ago \

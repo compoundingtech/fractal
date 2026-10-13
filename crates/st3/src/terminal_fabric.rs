@@ -74,7 +74,7 @@ pub async fn serve_stdio(pty_root: &Path) -> Result<()> {
             return;
         }
         if let Ok(mut session) = session.recv() {
-            let _ = std::io::copy(&mut stdin, &mut session);
+            let _ = pump(&mut stdin, &mut session);
             let _ = session.shutdown(std::net::Shutdown::Write);
         }
     });
@@ -106,10 +106,27 @@ pub async fn serve_stdio(pty_root: &Path) -> Result<()> {
     let mut from_session = stream;
     // A closed tunnel is how the attach client leaves, so neither direction's end is an error.
     tokio::task::spawn_blocking(move || {
-        let _ = std::io::copy(&mut from_session, &mut stdout);
+        let _ = pump(&mut from_session, &mut stdout);
     })
     .await?;
     Ok(())
+}
+
+/// Copy `from` to `to` until `from` ends, one bounded read and one write at a time.
+///
+/// Not `std::io::copy`: on Linux it splices a socket into a pipe, and a splice from an idle
+/// session socket sleeps in the kernel holding the stdout pipe's lock, so Fabric's read of that
+/// pipe blocks uninterruptibly, even when nonblocking, until the terminal next prints.
+fn pump(from: &mut impl std::io::Read, to: &mut impl std::io::Write) -> std::io::Result<()> {
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        match from.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => to.write_all(&buffer[..read])?,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// The PTY session a route line names, connected and proven: it is tagged as the subject's
@@ -160,6 +177,33 @@ fn is_session_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fabric reads a tunnel child's stdout on its runtime. While the session is idle the pump
+    /// waits on the session socket, and that wait must leave the stdout pipe free: a splice
+    /// would hold the pipe's lock, so any other use of the pipe would block until the session
+    /// next writes.
+    #[test]
+    fn an_idle_session_leaves_the_tunnel_pipe_usable() {
+        let (mut session, mut owner) = StdUnixStream::pair().unwrap();
+        let (mut tunnel, mut stdout) = std::io::pipe().unwrap();
+        let mut probe = stdout.try_clone().unwrap();
+        let pumping = std::thread::spawn(move || pump(&mut session, &mut stdout));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let (probed, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || probed.send(probe.write_all(b"probe")));
+        let usable = done.recv_timeout(std::time::Duration::from_secs(5));
+        // Release the pump either way so a failure ends instead of hanging the suite.
+        owner.write_all(b"screen").unwrap();
+        drop(owner);
+        assert!(
+            matches!(usable, Ok(Ok(()))),
+            "a write to the tunnel pipe blocked while the pump waited on an idle session"
+        );
+        pumping.join().unwrap().unwrap();
+        let mut seen = Vec::new();
+        tunnel.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, b"probescreen");
+    }
 
     #[test]
     fn a_route_names_one_file_under_the_pty_root() {
