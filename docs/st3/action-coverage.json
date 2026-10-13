@@ -1871,6 +1871,30 @@
       "verification": "real CLI over isolated disk-backed Unix daemons; source fences, partition/heal and retirement confirmation"
     },
     {
+      "command": "st slo",
+      "description": "List every objective and budget: target, current value, window and what is left; `explain` says one in plain words",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo explain",
+      "description": "Explain one objective or budget in plain words",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st slo ls",
+      "description": "List every objective and budget: target, current value, window and what is left",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st setup",
       "description": "Configure this machine and start st, with flags for unattended setup",
       "tests": [
