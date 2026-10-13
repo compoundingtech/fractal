@@ -199,7 +199,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
     failureNote: facts.failureNote, startedAt: facts.startedAt,
     foldable: facts.completeHistory === undefined ? undefined : complete,
     commands: complete ? items.filter(item => item._tag === 'ToolCall' && item.callSeen && !item.skipped && facts.kindFor(item.name, item) === 'run').length : undefined,
-    messagesSent: complete ? calls.filter(call => call.kind === 'message' && !call.skipped).length : undefined,
+    messagesSent: complete ? calls.filter(call => call.kind === 'message' && !call.skipped && call.status === 'success').length : undefined,
     changedFiles: complete && edits.every(call => call.changedPath !== undefined) ? new Set(edits.map(call => call.changedPath)).size : undefined,
   }
 }
@@ -220,9 +220,16 @@ const outputMediaLanguages: Readonly<Record<string, string>> = {
   'application/yaml': 'yaml', 'text/yaml': 'yaml', 'application/x-yaml': 'yaml',
 }
 export const workLogOutputLanguage = (call: WorkLogCall): string => call.outputLanguage ?? (call.kind === 'run' ? 'bash' : '')
-/** Readable output text, else the complete recorded semantic result; absent when nothing was recorded. */
-export const workLogOutputText = (call: WorkLogCall): string | undefined =>
-  call.detail || (call.output === undefined || call.output === null || call.output === '' ? undefined : typeof call.output === 'string' ? call.output : JSON.stringify(call.output, null, 2))
+/**
+ * Readable output text, else a recorded semantic result record shown verbatim; absent when nothing readable was recorded.
+ * Native content arrays already reduce to their text (or to nothing, for empty and non-text blocks), so they are never dumped.
+ */
+export const workLogOutputText = (call: WorkLogCall): string | undefined => {
+  if (call.detail) return call.detail
+  const output = call.output
+  if (typeof output === 'string') return output || undefined
+  return typeof output === 'object' && output !== null && !Array.isArray(output) && Object.keys(output).length > 0 ? JSON.stringify(output, null, 2) : undefined
+}
 /** Never let a newer caller projection fold an older committed message snapshot. */
 export function committedWorkLogs(items: readonly ConversationItem[], projections: readonly WorkLogProjection[]): ReadonlyMap<number, WorkLogProjection> {
   const positions = new Map(items.map((item, index) => [item.id, index]))

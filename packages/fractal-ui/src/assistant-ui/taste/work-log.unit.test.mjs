@@ -195,6 +195,9 @@ test('orphan results stay unknown and the host classifies observed calls from th
   // Skipped calls neither count as commands nor as sent messages.
   assert.equal(turn.commands, 0)
   assert.equal(turn.messagesSent, 1)
+  // Only a delivered send counts: a failed send is not a sent message.
+  const failedSend = workLogTurnFromItems([{ ...items[1], id: 'native/failed-send', callId: 'native/failed-send', status: 'error', result: { content: 'rejected', isError: true, at } }], { kindFor: () => 'message', running: false, failed: false, interrupted: false, completeHistory: true })
+  assert.equal(failedSend.messagesSent, 0)
 })
 
 test('semantic results without readable text remain inspectable as the recorded value', () => {
@@ -202,4 +205,6 @@ test('semantic results without readable text remain inspectable as the recorded 
   assert.equal(workLogOutputText(call('Plan updated.')), 'Plan updated.')
   assert.equal(workLogOutputText(call({ items: [{ done: true }] })), JSON.stringify({ items: [{ done: true }] }, null, 2))
   for (const empty of ['', undefined, null]) assert.equal(workLogOutputText(call(empty)), undefined)
+  // Native content arrays reduce to their text or to nothing; they are never dumped as JSON.
+  for (const native of [[], [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }]]) assert.equal(workLogOutputText(call(native)), undefined)
 })
