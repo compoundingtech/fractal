@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, ButtonContext, GridList, GridListItem, ListLayout, Virtualizer } from 'react-aria-components'
-import { ScrollController, type ScrollAnchor } from './embrace-virtual/ScrollController'
+import { ScrollController, type JumpResult, type ScrollAnchor } from './embrace-virtual/ScrollController'
 import { measuredListLayoutOptions } from './composition/virtual-layout'
 import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers } from './composition-tokens.stylex'
 
@@ -298,7 +298,7 @@ class ViewportController {
 }
 
 /** `version` is the row's rendered content; without one, the row object itself is its version. */
-export interface ViewportRow { readonly id: string; readonly version?: string }
+export interface ViewportRow { readonly id: string; readonly version?: string; readonly targetIds?: readonly string[] }
 
 /** A republished snapshot with the same rows is not news: compare ids and content versions, not array identity. */
 function sameRows(previous: readonly ViewportRow[], next: readonly ViewportRow[]) {
@@ -353,21 +353,24 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   </div>
 })
 
-export interface VirtualViewportHandle { readonly jumpTo: (id: string) => void }
+export type { JumpResult } from './embrace-virtual/ScrollController'
+export interface VirtualViewportHandle { readonly jumpTo: (id: string) => Promise<JumpResult> }
 export type VirtualViewportHistory =
+  | { readonly _tag: 'Pending' }
   | { readonly _tag: 'Complete' }
-  | { readonly _tag: 'More'; readonly loadOlder: () => void }
+  | { readonly _tag: 'More'; readonly loadOlder: () => Promise<void> }
   | { readonly _tag: 'Loading' }
-  | { readonly _tag: 'Failed'; readonly retry: () => void }
+  | { readonly _tag: 'Failed'; readonly retry: () => Promise<void>; readonly detail?: string }
 
 /** RAC owns the bounded collection; the controller owns id-keyed measured anchoring. */
 export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
-  items, renderItem, history, boundary, empty, stateKey, scrollToBottomKey, ref, contentProps, ...props
+  items, sourceIds, renderItem, history, boundary, empty, stateKey, scrollToBottomKey, ref, contentProps, ...props
 }: Omit<EmbraceScrollViewportProps, 'items' | 'children'> & {
   readonly items: readonly T[]
+  readonly sourceIds?: ReadonlySet<string>
   readonly renderItem: (item: T) => React.ReactNode
   readonly history: VirtualViewportHistory
-  readonly boundary: React.ReactNode
+  readonly boundary: (retry: () => void) => React.ReactNode
   readonly empty: React.ReactNode
   readonly ref?: React.Ref<VirtualViewportHandle>
 }) {
@@ -393,6 +396,21 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
   const element = React.useRef<HTMLDivElement | null>(null)
   const current = React.useRef(history)
   current.current = history
+  const flight = React.useRef<Promise<void> | undefined>(undefined)
+  const invokeHistory = React.useCallback((action: () => Promise<void>): Promise<void> => {
+    if (flight.current !== undefined) return flight.current
+    const promise = Promise.resolve().then(action).catch(error => {
+      console.warn('Transcript history request rejected; waiting for host history state.', error)
+    }).finally(() => {
+      if (flight.current === promise) flight.current = undefined
+    })
+    flight.current = promise
+    return promise
+  }, [])
+  const retry = React.useCallback(() => {
+    const source = current.current
+    if (source._tag === 'Failed') void invokeHistory(source.retry)
+  }, [invokeHistory])
   const request = React.useRef({ first: items[0]?.id, moreCalled: false })
   if (request.current.first !== items[0]?.id) {
     request.current = { first: items[0]?.id, moreCalled: false }
@@ -411,9 +429,9 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     if (source._tag === 'More' && (entered && scrolled || olderIntent)) request.current.moreCalled = false
     if (source._tag === 'More' && !request.current.moreCalled) {
       request.current.moreCalled = true
-      source.loadOlder()
+      void invokeHistory(source.loadOlder)
     }
-  }, [])
+  }, [invokeHistory])
   const attach = React.useCallback((viewport: HTMLDivElement | null) => {
     element.current = viewport
     if (viewport === null) return
@@ -422,8 +440,8 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     let viewportHeight = viewport.clientHeight
     // Intent is independent of scroll events: at the top edge there may be
     // nothing left to scroll, but the reader can still request the next page.
-    const olderGesture = () => {
-      controller.read()
+    const olderGesture = (home = false) => {
+      controller.read(home)
       prefetch(true)
     }
     let draggingScrollbar = false
@@ -467,7 +485,7 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     const onWheel = (event: WheelEvent) => { if (event.deltaY < 0) olderGesture() }
     const onKey = (event: KeyboardEvent) => {
       if (!(event.target instanceof HTMLElement) || event.target.closest('input,textarea,[contenteditable="true"]')) return
-      if (event.key === 'PageUp' || event.key === 'Home' || event.key === 'ArrowUp') olderGesture()
+      if (event.key === 'PageUp' || event.key === 'Home' || event.key === 'ArrowUp') olderGesture(event.key === 'Home')
     }
     viewport.addEventListener('scroll', onScroll, { passive: true })
     viewport.addEventListener('touchstart', onTouchStart, { passive: true })
@@ -497,23 +515,33 @@ export function EmbraceVirtualScrollViewport<T extends ViewportRow>({
     }
   }, [controller, prefetch])
   const command = React.useRef(scrollToBottomKey)
+  const hasBoundary = history._tag !== 'Pending' && history._tag !== 'More' || items.length === 0
   React.useLayoutEffect(() => {
     if (scrollToBottomKey !== undefined && command.current !== scrollToBottomKey) controller.jump()
     command.current = scrollToBottomKey
-    controller.afterRowsChange(items, history._tag !== 'More' || items.length === 0 ? '__fractal_history__' : undefined)
+    controller.afterRowsChange(items, hasBoundary ? '__fractal_history__' : undefined, sourceIds)
     prefetch()
-  }, [controller, items, history._tag, prefetch, scrollToBottomKey])
-  React.useImperativeHandle(ref, () => ({ jumpTo: controller.jumpTo }), [controller])
+  })
+  // A jump resolves against the next committed render; request one so an
+  // absent target settles Missing even when the host commits nothing else.
+  const [, requestJumpCommit] = React.useReducer((count: number) => count + 1, 0)
+  React.useImperativeHandle(ref, () => ({
+    jumpTo: (id: string) => {
+      const result = controller.jumpTo(id)
+      requestJumpCommit()
+      return result
+    },
+  }), [controller])
   const collection = React.useMemo(() => [
-    ...((history._tag !== 'More' || items.length === 0) ? [{ id: '__fractal_history__', item: undefined }] : []),
+    ...(hasBoundary ? [{ id: '__fractal_history__', item: undefined }] : []),
     ...items.map(item => ({ id: item.id, item })),
-  ], [items, history._tag])
+  ], [items, hasBoundary])
   return <div {...stylex.props(styles.frame)}>
     <Virtualizer layout={layout} layoutOptions={measuredListLayoutOptions} shouldObserveItemSize>
       <GridList {...props} ref={attach} items={collection} dependencies={[renderItem, boundary, empty, contentProps]} keyboardNavigationBehavior="tab" render={domProps => <div {...domProps} aria-busy={history._tag === 'Loading'} />} style={{ ...props.style, overflowAnchor: 'none' }}>
         {row => <GridListItem id={row.id} textValue={row.id} {...stylex.props(styles.virtualRow)}>
           <div data-embrace-entry-id={row.id} {...contentProps}>
-            <ButtonContext.Provider value={null}>{row.item === undefined ? <>{boundary}{items.length === 0 ? empty : null}</> : renderItem(row.item)}</ButtonContext.Provider>
+            <ButtonContext.Provider value={null}>{row.item === undefined ? <>{boundary(retry)}{items.length === 0 ? empty : null}</> : renderItem(row.item)}</ButtonContext.Provider>
           </div>
         </GridListItem>}
       </GridList>

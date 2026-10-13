@@ -75,6 +75,14 @@ pub fn codex_defaults(
                 )?,
                 "-c".into(),
                 format!("default_permissions=\"{CODEX_PROFILE}\""),
+                // The remote TUI that owns the thread flattens the named profile and drops its
+                // network table, so the daemon socket gets EPERM. Only this legacy key carries
+                // network through (verified against Codex 0.160.1 through server plus remote TUI).
+                "-c".into(),
+                "sandbox_workspace_write.network_access=true".into(),
+                // Live search is Codex's default only with no sandbox; an agent without it is not useful.
+                "-c".into(),
+                "web_search=\"live\"".into(),
                 "-a".into(),
                 "on-request".into(),
                 "-c".into(),

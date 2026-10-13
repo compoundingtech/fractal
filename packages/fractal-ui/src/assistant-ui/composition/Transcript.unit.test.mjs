@@ -20,13 +20,19 @@ const now = Date.parse('2026-01-15T12:30:00Z')
 const prompt = { _tag: 'Text', id: 'prompt/example', role: 'user', text: 'Keep the visible rows grouped.', attachments: [], streaming: false, at: new Date(now).toISOString() }
 const turn = { id: 'turn/example', prompt, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }
 
-for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length === 0 ? 'empty history' : 'an unpublished prompt'} without throwing`, () => {
+for (const turns of [[], [turn]]) for (const history of [undefined, { _tag: 'Pending' }, { _tag: 'Complete' }]) test(`Transcript server-renders ${turns.length === 0 ? 'empty history' : 'an unpublished prompt'} with ${history?._tag ?? 'omitted'} history without throwing`, () => {
   const element = React.createElement(EmbraceRuntimeProvider, {
     options: { messages: turns.flatMap(entry => [entry.prompt]), isRunning: false, onNew: async () => {} },
-  }, React.createElement(Transcript, { turns, title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now }))
+  }, React.createElement(Transcript, { turns, history, title: 'Row projection', sync: { _tag: 'Live', since: now }, now, observedAt: now }))
   let markup
   assert.doesNotThrow(() => { markup = renderToStaticMarkup(element) })
   assert.match(markup, /Row projection/)
+  // RAC's viewport collection mounts in the browser. The StartMarker/Pending
+  // plays prove Complete's marker there; unobserved server output must not invent it.
+  if (history?._tag !== 'Complete') {
+    assert.ok(!markup.includes('data-testid="history-start"'))
+    assert.ok(!markup.includes('Start of conversation'))
+  }
 })
 
 test('live activity shares compact header durations and host-supplied waiting state', () => {
