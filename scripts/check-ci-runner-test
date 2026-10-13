@@ -196,12 +196,12 @@ canaries = blocks['mail-redelivery-canaries']
 assert 'needs: [pick-runner, linux-test-build]' in canaries and 'needs: [linux-tests]' not in canaries, "canaries must run beside both test shards after the shared build"
 assert 'scripts/ci-linux mail-redelivery-canaries' in canaries, "the required check must execute the canaries itself"
 assert 'cargo-linux-tests-' in blocks['linux-test-build'], "producer must reuse protected-main test dependency caches"
-for consumer in ('linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries', 'isolation-vm'):
+for consumer in ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'mail-redelivery-canaries', 'isolation-vm'):
     assert 'cargo-cache' not in blocks[consumer] and 'Build selected test targets' not in blocks[consumer], (consumer, 'archive consumers must not restore/rebuild Cargo targets')
     assert 'needs.linux-test-build.outputs.artifact-id' in blocks[consumer], (consumer, 'artifact must come from its successful producer')
     assert 'needs.linux-test-build.outputs.manifest-sha256' in blocks[consumer], (consumer, 'manifest hash must come from its successful producer')
 assert 'needs.linux-test-build.result' in blocks['linux-gate'], 'the gate must explicitly fail a failed producer'
-for consumer in ('linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries', 'isolation-vm'):
+for consumer in ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'mail-redelivery-canaries', 'isolation-vm'):
     assert 'Require the shared test producer to succeed' in blocks[consumer]
     assert 'PRODUCER_RESULT' in blocks[consumer] and 'shared test producer failed or was skipped' in blocks[consumer]
     assert 'CI_TEST_ARCHIVE_PRODUCER_ATTEMPT' in blocks[consumer]
@@ -239,9 +239,9 @@ assert "fromJSON(needs['pick-runner'].outputs.ci1" in portable
 assert "if: ${{ !cancelled() }}" in portable, 'picker failure cannot silently skip a portable release'
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/release-daily.yml').read_text()
 assert "linux-tests-shard-2" in blocks["linux-gate"], "both shards must be required"
-assert 'CI_TEST_PARTITION: "hash:1/2"' in blocks["linux-tests"]
-assert 'CI_TEST_PARTITION: "hash:2/2"' in blocks["linux-tests-shard-2"]
-for job in ("linux-tests", "linux-tests-shard-2"):
+assert "'hash:1/4' || 'hash:1/2'" in blocks['linux-tests']
+assert "'hash:2/4' || 'hash:2/2'" in blocks['linux-tests-shard-2']
+for job in ("linux-tests", "linux-tests-shard-2", "linux-tests-shard-3", "linux-tests-shard-4"):
     assert 'CI_TEST_THREADS: "8"' in blocks[job], "bound each shard's test concurrency"
 assert "vars.CI1_MIN_IDLE || '1'" in picker, "use an idle general slot without requiring the entire pool"
 
@@ -264,6 +264,31 @@ for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation
         ordinary = route(job, event)
         assert ordinary == route(job, event, 'queue-reserved', merge_ci1='on'), (job, 'PRs cannot consume reserved profile')
         assert f"job.priority={2 if event == 'pull_request' else 3}" in ordinary[0], (job, 'ordinary fallback retains its queue class')
+for n in (3,4):
+    job = f'linux-tests-shard-{n}'
+    assert f'CI_TEST_PARTITION: "hash:{n}/4"' in blocks[job]
+    assert "github.event_name == 'merge_group'" in blocks[job]
+    assert job in blocks['linux-gate']
+    assert route(job,'merge_group',picked='["ci1-priority"]') == ['ci1-merge']
+    assert route(job,'merge_group',picked='["namespace-profile-linux-x86-64;job.priority=1;github.run-id=123"]') == ['namespace-profile-linux-x86-64;job.priority=1;github.run-id=123']
+# Execute the generated aggregate. Every merge shard must really pass; normal
+# events must prove the two additional merge-only jobs were skipped.
+gate_script = textwrap.dedent(blocks['linux-gate'].split('run: |\n',1)[1].split('\n      - ',1)[0])
+def gate(event,base,extra):
+    return subprocess.run([bash,'-c',gate_script],env={**os.environ,'EVENT':event,
+        'RESULTS':' '.join(base),'MERGE_RESULTS':' '.join(extra)},capture_output=True).returncode
+assert gate('merge_group',['success']*7,['success']*2) == 0
+assert gate('pull_request',['success']*7,['skipped']*2) == 0
+assert gate('workflow_dispatch',['success']*7,['skipped']*2) == 0
+for i in range(9):
+    for bad in ('failure','cancelled','skipped'):
+        results=['success']*9;results[i]=bad
+        assert gate('merge_group',results[:7],results[7:]) != 0,(i,bad)
+assert gate('merge_group',['success']*6,['success']*2) != 0
+assert gate('merge_group',['success']*7,['success']) != 0
+assert gate('pull_request',['success']*7,['success']*2) != 0
+print('passed: four merge shards preserve exact archive provenance, merge roles and strict event-qualified aggregation')
+
 assert 'runs-on: ubuntu-latest' in (ROOT / '.github/workflows/public-repo.yml').read_text()
 assert required_priority not in blocks['perf-cost'], 'optional cost must not join required PR priority'
 assert "job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in blocks['perf-cost']

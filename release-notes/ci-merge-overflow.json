@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Route saturated merge-group work to the existing Namespace Linux profile without changing required tests.",
+  "summary": "Run merge-group tests in four complete shards and admit saturated merge work to the existing Namespace lane.",
   "replay": {
     "status": "none",
     "detail": "CI admission policy only; no daemon, persisted state or release content change."

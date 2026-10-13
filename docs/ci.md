@@ -63,7 +63,7 @@ tested source rather than a later `origin/main` fetch;
 unrelated unreleased main changes do not block a new PR's check. It does not download dependencies
 or compile. Manual dispatch runs the safety tests without inventing a PR delta.
 
-The Linux gate runs two test partitions plus Clippy and fleet compatibility on separate runners.
+The Linux gate runs four test partitions for merge groups and two for other events, plus Clippy and fleet compatibility on separate runners. The extra merge partitions use the common merge role on either host, including ci2-merge-1, or the same Namespace overflow choice. Each uses the one exact-source producer archive. Before shard 1 executes, actual nextest lists must prove the selected inventory is a disjoint, complete union of all four (or both) shards. The unchanged linux-gate requires genuine success from every applicable shard; skipped merge shards fail it. No test filter, retry cap, timeout or required context is changed.
 `linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, the four stage jobs and the named mail redelivery
 check, and passes only when every one succeeded (a skipped or cancelled stage fails it). The stage jobs use the shape label
 `nscloud-ubuntu-24.04-amd64-8x16-with-features`; `isolation-vm` uses
