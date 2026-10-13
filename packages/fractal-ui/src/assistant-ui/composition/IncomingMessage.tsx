@@ -16,7 +16,7 @@ export function IncomingMessage({ delivery, text }: { readonly delivery: Incomin
       <span data-testid="incoming-message-sender">From {delivery.from}</span>
       <span>Small Talk</span>
       {verified
-        ? <TooltipTrigger delay={150} closeDelay={0}><Focusable><span data-testid="message-verified" tabIndex={0} role="note" aria-describedby={detailId} {...stylex.props(styles.verdict, styles.focusable)}><Icon name="check" size={12} />Signed · verified<VisuallyHidden id={detailId}>{detail}</VisuallyHidden></span></Focusable><Tooltip {...stylex.props(styles.tooltip)}>{detail}</Tooltip></TooltipTrigger>
+        ? <><TooltipTrigger delay={150} closeDelay={0}><Focusable><span data-testid="message-verified" tabIndex={0} role="note" aria-describedby={detailId} {...stylex.props(styles.verdict, styles.focusable)}><Icon name="check" size={12} />Signed · verified</span></Focusable><Tooltip {...stylex.props(styles.tooltip)}>{detail}</Tooltip></TooltipTrigger><VisuallyHidden id={detailId}>{detail}</VisuallyHidden></>
         : <span data-testid="message-unverified" {...stylex.props(styles.verdict)}>Unverified</span>}
     </header>
     {delivery.title !== undefined && <h3 data-testid="incoming-message-subject" {...stylex.props(styles.subject)}>{delivery.title}</h3>}
