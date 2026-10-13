@@ -58963,7 +58963,7 @@ impl Store {
                 [id], |row| Ok((row.get(0)?, row.get(1)?)),
             ).optional()?;
             let Some((payload, identity)) = lengths else { return Ok(None); };
-            anyhow::ensure!(payload >= 0 && identity >= 0 && identity <= 8192,
+            anyhow::ensure!(payload >= 0 && (0..=8192).contains(&identity),
                 "requested launch source exceeds the read budget");
             let copied = payload.checked_add(identity)
                 .context("launch source byte budget overflow")?;

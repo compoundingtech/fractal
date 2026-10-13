@@ -1470,7 +1470,8 @@ async fn launch_waiters_coalesce_unrelated_event_storms() {
         assert_eq!(spent.sorts, 0);
         assert_eq!(spent.autoindex_rows, 0);
         println!(
-            "launch-wait cost: event_ms={event_ms}, events={sent}, waiters={WAITERS}, single={one:?}, total={spent:?}, elapsed={elapsed:?}, captures_per_waiter_max={MAX_CAPTURES}"
+            "launch-wait cost: event_ms={event_ms}, events={sent}, waiters={WAITERS}, single={one:?}, total={spent:?}, elapsed={elapsed:?}, captures_per_waiter_max={MAX_CAPTURES}, inclusive_reads_per_second_per_waiter={}, steady_limit_per_second=2 (initial and dirty final partial capture included in measured rate)",
+            spent.statements as f64 / (one.statements as f64 * WAITERS as f64 * elapsed.as_secs_f64())
         );
     }
 }

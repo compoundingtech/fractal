@@ -35,21 +35,15 @@ fn fixture(now: u128) -> (Arc<Store>, Reconciler<FakeRuntime>, DesiredSubject) {
 async fn a_stale_restart_timer_cannot_erase_or_count_or_wake_its_replacement() {
     let _clock = Clock;
     let now = 1_800_000_000_000;
-    let (_, reconciler, desired) = fixture(now);
-    let count = || {
-        crate::performance::snapshot()["reconciler_wakes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["cause"] == "timer restart · member")
-            .map_or(0, |row| row["count"].as_u64().unwrap())
-    };
-    let before = count();
+    let (_, mut reconciler, desired) = fixture(now);
+    let (observer, mut events) = tokio::sync::mpsc::unbounded_channel();
+    reconciler.restart_timer_observer = Some(observer);
     reconciler.arm_restart(&desired.subject, now + 10);
+    assert_eq!(events.recv().await, Some((now + 10, "installed")));
     reconciler.arm_restart(&desired.subject, now + 20);
-    tokio::task::yield_now().await;
+    assert_eq!(events.recv().await, Some((now + 20, "installed")));
     tokio::time::advance(Duration::from_millis(10)).await;
-    tokio::task::yield_now().await;
+    assert_eq!(events.recv().await, Some((now + 10, "stale")));
     assert_eq!(
         reconciler
             .delayed_restarts
@@ -58,18 +52,17 @@ async fn a_stale_restart_timer_cannot_erase_or_count_or_wake_its_replacement() {
             .get(&desired.subject),
         Some(&(now + 20))
     );
-    assert_eq!(
-        count(),
-        before,
-        "a stale timer must not invent an actual wake"
-    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     assert!(
         tokio::time::timeout(Duration::ZERO, reconciler.notify.notified())
             .await
             .is_err()
     );
     tokio::time::advance(Duration::from_millis(10)).await;
-    tokio::task::yield_now().await;
+    assert_eq!(events.recv().await, Some((now + 20, "fired")));
     assert!(
         !reconciler
             .delayed_restarts
@@ -80,7 +73,15 @@ async fn a_stale_restart_timer_cannot_erase_or_count_or_wake_its_replacement() {
     tokio::time::timeout(Duration::ZERO, reconciler.notify.notified())
         .await
         .unwrap();
-    assert_eq!(count(), before + 1);
+    assert!(
+        tokio::time::timeout(Duration::ZERO, reconciler.notify.notified())
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 }
 fn launch(
     store: &Store,
@@ -146,9 +147,12 @@ fn quiet_ready_passes_do_not_enqueue_duplicate_local_receipts() {
             .unwrap()
             .is_ready()
     );
+    let mut updates = reconciler.event_notify.subscribe();
     reconciler
         .reconcile_driver_readiness(&desired, &member, &observed, now)
         .unwrap();
+    assert!(updates.has_changed().unwrap());
+    updates.borrow_and_update();
     let key = format!("launch-ready:{}:quiet-ready", desired.subject);
     assert!(
         store.operation_claim(&key).unwrap().is_none(),
@@ -178,6 +182,10 @@ fn quiet_ready_passes_do_not_enqueue_duplicate_local_receipts() {
             .load(std::sync::atomic::Ordering::Relaxed),
         queued,
         "quiet ready passes entered the writer queue even if local dedupe avoided row inserts"
+    );
+    assert!(
+        !updates.has_changed().unwrap(),
+        "quiet ready passes woke readers again"
     );
 }
 #[test]

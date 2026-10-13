@@ -896,6 +896,8 @@ pub struct Reconciler<R = NativeRuntime> {
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     delayed_restarts: Arc<Mutex<HashMap<String, u128>>>,
+    #[cfg(test)]
+    restart_timer_observer: Option<tokio::sync::mpsc::UnboundedSender<(u128, &'static str)>>,
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
     /// The kill deadline already logged for each active stop operation.
     reported_kill_survivors: Mutex<HashMap<String, String>>,
@@ -1055,6 +1057,8 @@ impl Reconciler<NativeRuntime> {
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            restart_timer_observer: None,
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
@@ -1139,6 +1143,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            restart_timer_observer: None,
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
@@ -3433,6 +3439,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     expected_subject: None,
                     idempotency_key: Some(key),
                 })?;
+                // SystemLocal receipts do not advance the durable claim index. Wake
+                // conditional launch readers after the newly committed milestone.
+                self.signal_changed();
             }
             self.resolve_superseded_harness_auth_attention(&subject.subject, incarnation)?;
             self.resolve_recovered_seat_attention(&subject.subject, incarnation)?;
@@ -7485,17 +7494,50 @@ impl<R: RuntimeControl> Reconciler<R> {
         let notify = self.notify.clone();
         let delayed = self.delayed_restarts.clone();
         let subject = subject.to_owned();
+        #[cfg(test)]
+        let observer = self.restart_timer_observer.clone();
         handle.spawn(async move {
             let delay = until.saturating_sub(now_ms()).min(u64::MAX as u128) as u64;
-            tokio::time::sleep(Duration::from_millis(delay)).await;
+            let sleep = tokio::time::sleep(Duration::from_millis(delay));
+            #[cfg(test)]
+            {
+                use std::future::Future as _;
+                tokio::pin!(sleep);
+                let mut installed = false;
+                std::future::poll_fn(|context| {
+                    let polled = sleep.as_mut().poll(context);
+                    if !installed && polled.is_pending() {
+                        installed = true;
+                        if let Some(observer) = &observer {
+                            let _ = observer.send((until, "installed"));
+                        }
+                    }
+                    polled
+                })
+                .await;
+            }
+            #[cfg(not(test))]
+            sleep.await;
             let mut armed = delayed.lock().unwrap_or_else(PoisonError::into_inner);
             if armed.get(&subject) != Some(&until) {
+                drop(armed);
+                #[cfg(test)]
+                if let Some(observer) = &observer {
+                    let _ = observer.send((until, "stale"));
+                }
                 return;
             }
             armed.remove(&subject);
             drop(armed);
-            crate::reconcile_telemetry::record_wake(crate::reconcile_telemetry::WakeCause::TimerRestart, Some(restart_wake_kind(&subject)));
+            crate::reconcile_telemetry::record_wake(
+                crate::reconcile_telemetry::WakeCause::TimerRestart,
+                Some(restart_wake_kind(&subject)),
+            );
             notify.notify_one();
+            #[cfg(test)]
+            if let Some(observer) = &observer {
+                let _ = observer.send((until, "fired"));
+            }
         });
     }
 
