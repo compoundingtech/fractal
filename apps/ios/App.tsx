@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import { Linking, StatusBar, View } from 'react-native';
 import { DarkTheme, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@react-navigation/native-stack';
@@ -26,6 +26,8 @@ import { GlassesScreen, SpaceScreen } from './screens/Glasses';
 import { ResourceScreen } from './screens/Resource';
 import { SidebarScreen } from './screens/Sidebar';
 import { FabricProofScreen } from './screens/FabricProof';
+import { quality } from './qualityNative';
+import { qualityVisibility } from './qualityView';
 import { parseFabricProofLink, type FabricProofInput } from './fabricProof';
 
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
@@ -88,9 +90,20 @@ function tabBarHidden(route: RouteProp<TabParams>): boolean {
 }
 
 function Main({ proofSession = false }: { proofSession?: boolean }) {
-  const { pairDraft, credential, url, order, data, caps, actions, requestScroll } = useStore();
+  const { pairDraft, credential, url, order, data, caps, actions, requestScroll, status } = useStore();
+  const [shownRoute, setShownRoute] = useState(() => navigationRef.getCurrentRoute());
+  useEffect(() => {
+    setShownRoute(navigationRef.getCurrentRoute());
+    return navigationRef.addListener('state', () => setShownRoute(navigationRef.getCurrentRoute()));
+  }, []);
   const homeCount = openAlerts(data.attention, caps?.session_actor).length;
   const paired = !!url && !!credential;
+  const shownName = shownRoute?.name ?? ROOTS[order[0]];
+  const target = (shownRoute?.params as { target?: string } | undefined)?.target;
+  const shownMask = qualityVisibility(shownName, paired, target, data.agents, data.sessions);
+  useLayoutEffect(() => {
+    if (!proofSession) quality.commit(shownMask, paired && quality.windowsReady && status === 'online', status === 'online' ? 2 : status === 'offline' ? 3 : status === 'connecting' ? 1 : 0, quality.loadingMask);
+  }, [proofSession, shownMask, paired, status, data.attention, data.agents]);
 
   // Debug-only deep links for simulator checks; disabled in Release.
   useEffect(() => {
@@ -148,6 +161,8 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
   </Tabs.Navigator>;
 }
 
+const qualityLayout = () => quality.commit();
+
 export default function App() {
   const [fabricProof, setFabricProof] = useState<FabricProofInput | null>(null);
   useEffect(() => {
@@ -162,8 +177,8 @@ export default function App() {
     return () => subscription.remove();
   }, []);
   const [fontsLoaded] = useFonts({ IBMPlexMono_400Regular, IBMPlexMono_400Regular_Italic, IBMPlexMono_600SemiBold, IBMPlexMono_700Bold });
-  if (!fontsLoaded) return <View style={{ flex: 1, backgroundColor: theme.base }} />;
-  return <SafeAreaProvider>
+  if (!fontsLoaded) return <View onLayout={qualityLayout} style={{ flex: 1, backgroundColor: theme.base }} />;
+  return <SafeAreaProvider onLayout={qualityLayout}>
     <StatusBar barStyle="light-content" />
     {__DEV__ && fabricProof ? <FabricProofScreen key={fabricProof.id ?? `${fabricProof.node}/${fabricProof.service}`} input={fabricProof} onClose={() => setFabricProof(null)} renderClient={proof =>
       <StoreProvider proof={proof}>
