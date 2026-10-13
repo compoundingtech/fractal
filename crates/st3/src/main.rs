@@ -1,3 +1,4 @@
+use st3::agent_trace::issuer::write_driver_log;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{IsTerminal as _, Read as _, Write as _};
@@ -16561,7 +16562,8 @@ async fn post_work(
         && let Some(path) = std::env::var_os("AGENT_TRACE_FILE")
         && matches!(action, "claim" | "complete" | "fail" | "release" | "submit")
     {
-        refresh_agent_trace(client, &actor, Path::new(&path), None, None).await;
+        let capture_client = client.clone().with_outage_wait(Duration::ZERO, false);
+        refresh_agent_trace(&capture_client, &actor, Path::new(&path), None, None).await;
     }
     if json_output {
         print_value(&response, true)
@@ -16686,6 +16688,12 @@ async fn initialize_agent_trace(
     if let Err(error) = try_initialize_agent_trace(client, subject, driver, incarnation, path, argv).await {
         omit_failed_agent_trace(subject, path, &error, &lock);
     }
+    drop(lock);
+    match st3::agent_trace::issuer::refresh_requested(path) {
+        Ok(true) => refresh_agent_trace(client, subject, path, None, None).await,
+        Ok(false) => {}
+        Err(error) => report_agent_trace_failure(subject, &error, None),
+    }
 }
 
 async fn try_initialize_agent_trace(
@@ -16774,15 +16782,42 @@ async fn refresh_agent_trace(
     client: &Client, subject: &str, path: &Path, source_incarnation: Option<&str>,
     observed: Option<&st_drivers::harness_context::Observed>,
 ) {
-    let lock = match lock_agent_trace(path).await {
-        Ok(lock) => lock,
-        Err(error) => {
-            report_agent_trace_failure(subject, &error, None);
-            return;
+    use st3::agent_trace::issuer;
+    if let Err(error) = issuer::request_refresh(path) {
+        report_agent_trace_failure(subject, &error, None);
+        return;
+    }
+    let mut source_incarnation = source_incarnation;
+    let mut observed = observed;
+    loop {
+        let lock = match lock_agent_trace(path).await {
+            Ok(lock) => lock,
+            Err(error) => {
+                report_agent_trace_failure(subject, &error, None);
+                return;
+            }
+        };
+        let result = async {
+            issuer::consume_refresh(path)?;
+            try_refresh_agent_trace(client, subject, path, source_incarnation, observed).await
+        }.await;
+        if let Err(error) = result {
+            omit_failed_agent_trace(subject, path, &error, &lock);
         }
-    };
-    if let Err(error) = try_refresh_agent_trace(client, subject, path, source_incarnation, observed).await {
-        omit_failed_agent_trace(subject, path, &error, &lock);
+        drop(lock);
+        match issuer::refresh_requested(path) {
+            Ok(true) => {
+                // A queued lifecycle update must reconcile even if the original
+                // provider observation belonged to a predecessor incarnation.
+                source_incarnation = None;
+                observed = None;
+            }
+            Ok(false) => return,
+            Err(error) => {
+                report_agent_trace_failure(subject, &error, None);
+                return;
+            }
+        }
     }
 }
 
@@ -23125,26 +23160,6 @@ where
     }
 }
 
-/// Driver notes go to a private log, never to the terminal the driver shares with its provider.
-fn write_driver_log(subject: &str, line: &str) -> Result<()> {
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let state_home = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .context("no state directory for driver warning")?;
-    let directory = state_home.join("st3");
-    fs::create_dir_all(&directory)?;
-    let mut options = fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(directory.join("driver-api-warnings.log"))?;
-    let at = current_unix_ms()?;
-    writeln!(file, "{at} {subject} {}", line.replace('\n', " "))?;
-    Ok(())
-}
 
 fn work_incarnation_key(incarnation: Option<&str>) -> String {
     incarnation.map_or_else(
@@ -26169,6 +26184,94 @@ mod tests {
         assert_eq!(trace_model_route("omp", "anthropic/claude-sonnet-4", Some("openrouter")),
             Some("openrouter/anthropic/claude-sonnet-4".into()));
         assert_eq!(trace_model_route("codex", "openai/gpt-5", None), Some("openai/gpt-5".into()));
+    }
+
+    #[tokio::test]
+    async fn agent_trace_completion_queued_behind_an_older_snapshot_finishes_idle() {
+        use axum::{Json, Router, extract::OriginalUri};
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use st3::agent_trace::{Runtime, issuer};
+        let subject = "agent/example/seat";
+        let step = json!({
+            "subject":"step-run/0123456789abcdef0123456789abcdef/work",
+            "run":"mission-run/example/repo/check/abcdef0123456789abcdef0123456789",
+            "generation":"run-generation/0123456789abcdef0123456789abcdef",
+            "step":"work","definition_hash":"hash","status":"working","attempt":1,
+            "assigned_to":subject,"agentless":false,"title":null,"worker_reported":false,
+            "claimant":subject,"claim_incarnation":"current","claim_expires_at_unix_ms":u64::MAX,
+            "readiness_epoch":1,"blocked_reason":null,"not_before_unix_ms":null,
+            "created_at_unix_ms":0,"updated_at_unix_ms":0,
+        });
+        let held = Arc::new(AtomicBool::new(true));
+        let first_read = Arc::new(AtomicBool::new(true));
+        let snapshot_read = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().fallback({
+            let held = held.clone();
+            let snapshot_read = snapshot_read.clone();
+            let resume = resume.clone();
+            move |OriginalUri(uri): OriginalUri| {
+                let held = held.clone();
+                let first_read = first_read.clone();
+                let snapshot_read = snapshot_read.clone();
+                let resume = resume.clone();
+                let step = step.clone();
+                async move {
+                    let value = match uri.path() {
+                        "/v1/work" => {
+                            let snapshot = if held.load(Ordering::SeqCst) { json!([step]) } else { json!([]) };
+                            if first_read.swap(false, Ordering::SeqCst) {
+                                snapshot_read.notify_one();
+                                resume.notified().await;
+                            }
+                            snapshot
+                        }
+                        path if path.starts_with("/v1/work/complete/") => {
+                            held.store(false, Ordering::SeqCst);
+                            let mut completed = step;
+                            completed["status"] = json!("verifying");
+                            completed
+                        }
+                        "/v1/status" => json!({"store_index":0,"pending_actions":[],"subjects":[{
+                            "subject":subject,"conflicts":[],"claims":[],"reachability":"local",
+                            "harness":{"state":"ready","driver":"omp","incarnation_id":"current",
+                                "claim":"claim/current","observed_at_unix_ms":0},
+                        }]}),
+                        path if path.starts_with("/v1/agent-trace/principal/") => json!("person/avery"),
+                        path if path.starts_with("/v1/agent-trace/mission/") => json!("mission/example/repo/check"),
+                        _ => panic!("unexpected trace request: {uri}"),
+                    };
+                    Json(json!({"api_version":"st3.v1","value":value}))
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = Client::new(Endpoint::Http(format!("http://{}", listener.local_addr().unwrap())));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent-trace.json");
+        let runtime: Runtime = serde_json::from_value(json!({
+            "type":"agent-trace-runtime/v1","who":{"agent":subject,"principal":"person/avery"},
+            "why":{"_tag":"idle"},"how":{"harness":{"tool":"omp"}},"where":{},
+        })).unwrap();
+        issuer::write_atomic(&path, &runtime).unwrap();
+        let writer = tokio::spawn({
+            let client = client.clone();
+            let path = path.clone();
+            async move { refresh_agent_trace(&client, subject, &path, Some("current"), None).await }
+        });
+        snapshot_read.notified().await;
+        let committed: StepRunView = client.post("/v1/work/complete/fixture", &json!({})).await.unwrap();
+        assert_eq!(committed.status, "verifying");
+        refresh_agent_trace(&client, subject, &path, None, None).await;
+        assert!(issuer::refresh_requested(&path).unwrap());
+        resume.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), writer).await.unwrap().unwrap();
+        let final_runtime: Runtime = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(final_runtime.why).unwrap(), json!({"_tag":"idle"}));
+        assert!(final_runtime.how.issuance.is_none());
+        assert!(!issuer::refresh_requested(&path).unwrap());
+        server.abort();
     }
 
     #[tokio::test]

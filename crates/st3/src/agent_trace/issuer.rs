@@ -61,6 +61,58 @@ pub fn lock(path: &Path) -> Result<std::fs::File> {
     Ok(lock)
 }
 
+/// Request another snapshot before trying the writer lock. A busy writer drains
+/// requests after releasing its lock, closing the final-check/unlock race.
+///
+/// # Errors
+/// Propagates request-marker creation failures.
+pub fn request_refresh(path: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .mode(0o600).open(path.with_extension("refresh"))?;
+    Ok(())
+}
+
+/// Consume queued requests before reading authoritative work.
+///
+/// # Errors
+/// Propagates request-marker removal failures other than absence.
+pub fn consume_refresh(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path.with_extension("refresh")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Check after unlocking: a contender either owns the next transaction or its
+/// marker is now visible to the previous owner.
+///
+/// # Errors
+/// Propagates request-marker inspection failures.
+pub fn refresh_requested(path: &Path) -> Result<bool> {
+    Ok(path.with_extension("refresh").try_exists()?)
+}
+
+/// Driver notes go to a private log, never to the provider's terminal.
+///
+/// # Errors
+/// Propagates state-directory, clock and log-write failures.
+pub fn write_driver_log(subject: &str, line: &str) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME")
+            .map(|home| std::path::PathBuf::from(home).join(".local/state")))
+        .context("no state directory for driver warning")?;
+    let directory = state_home.join("st3");
+    std::fs::create_dir_all(&directory)?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true)
+        .mode(0o600).open(directory.join("driver-api-warnings.log"))?;
+    writeln!(file, "{} {subject} {}", now_ms()?, line.replace('\n', " "))?;
+    Ok(())
+}
+
 fn now_ms() -> Result<u128> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())
 }
@@ -214,11 +266,12 @@ pub fn update_model(runtime: &mut Runtime, route: &str, effort: Option<&str>) {
     runtime.how.model = match model {
         Ok(model) => Some(model),
         Err(error) => {
-            tracing::warn!(
-                event = "agent_trace_model_unrepresentable",
-                agent = %runtime.who.agent.as_str(), route, effort,
-                %error, "runtime authority cannot represent model facts"
-            );
+            let diagnostic = serde_json::json!({
+                "event": "agent_trace_model_unrepresentable",
+                "agent": runtime.who.agent.as_str(), "route": route, "effort": effort,
+                "error": format!("{error:#}"),
+            });
+            let _ = write_driver_log(runtime.who.agent.as_str(), &diagnostic.to_string());
             None
         }
     };
@@ -245,6 +298,34 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn agent_trace_rejected_model_diagnostic_reaches_private_log() {
+        const CHILD: &str = "ST3_TRACE_DIAGNOSTIC_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut runtime = build(&facts(), ClaimPurpose::Idle).unwrap();
+            update_model(&mut runtime, "invalid route\n", None);
+            assert!(runtime.how.model.is_none());
+            update_model(&mut runtime, "openai/gpt-5", Some("invalid effort\n"));
+            assert!(runtime.how.model.is_none());
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "agent_trace::issuer::tests::agent_trace_rejected_model_diagnostic_reaches_private_log"])
+            .env(CHILD, "1").env("XDG_STATE_HOME", root.path())
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
+        let log = std::fs::read_to_string(root.path().join("st3/driver-api-warnings.log")).unwrap();
+        let diagnostics: Vec<serde_json::Value> = log.lines().map(|line|
+            serde_json::from_str(line.splitn(3, ' ').nth(2).unwrap()).unwrap()).collect();
+        assert_eq!(diagnostics.len(), 2);
+        for diagnostic in &diagnostics {
+            assert_eq!(diagnostic["event"], "agent_trace_model_unrepresentable");
+            assert_eq!(diagnostic["agent"], facts().agent);
+            assert!(diagnostic["error"].as_str().is_some_and(|error| !error.is_empty()));
+        }
+    }
 
     const MISSION: &str = "0123456789abcdef0123456789abcdef";
     const GENERATION: &str = "abcdef0123456789abcdef0123456789";

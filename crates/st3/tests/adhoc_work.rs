@@ -77,6 +77,9 @@ impl Daemon {
         self.root.join("api.sock")
     }
     async fn start(&mut self) {
+        self.start_with_claim_outage(false).await;
+    }
+    async fn start_with_claim_outage(&mut self, outage: bool) {
         let state = AppState {
             store: self.store.clone(),
             notify: Arc::new(Notify::new()),
@@ -92,8 +95,26 @@ impl Daemon {
             planner_default: st3::model::PlannerSpec::default(),
         };
         let socket = self.socket();
+        let self_socket = socket.clone();
         self.server = Some(tokio::spawn(async move {
-            st3::api::serve_unix(&socket, st3::api::router(state))
+            let app = st3::api::router(state).layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let socket = socket.clone();
+                    async move {
+                        let disconnect = outage && request.method() == axum::http::Method::POST
+                            && request.uri().path().starts_with("/v1/work/claim/");
+                        let response = next.run(request).await;
+                        if disconnect && response.status().is_success() {
+                            // Leave a refused socket after the authoritative commit,
+                            // before its response reaches the work-command process.
+                            std::fs::remove_file(&socket).unwrap();
+                            drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+                        }
+                        response
+                    }
+                },
+            ));
+            st3::api::serve_unix(&self_socket, app)
                 .await
                 .unwrap();
         }));
@@ -198,20 +219,33 @@ impl Drop for Daemon {
 
 #[tokio::test]
 async fn post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
-    check_trace_claim_complete(false, false).await;
+    check_trace_claim_end(false, false, TraceEnd::Complete).await;
 }
 
 #[tokio::test]
 async fn ad_hoc_post_work_refreshes_trace_on_claim_and_clears_it_on_complete() {
-    check_trace_claim_complete(true, false).await;
+    check_trace_claim_end(true, false, TraceEnd::Complete).await;
 }
 
 #[tokio::test]
 async fn post_work_reports_committed_result_when_trace_publication_fails() {
-    check_trace_claim_complete(true, true).await;
+    check_trace_claim_end(true, true, TraceEnd::Complete).await;
 }
 
-async fn check_trace_claim_complete(ad_hoc: bool, broken_trace: bool) {
+#[derive(Clone, Copy)]
+enum TraceEnd { Complete, Release, Outage }
+
+#[tokio::test]
+async fn post_work_release_refreshes_trace_to_idle() {
+    check_trace_claim_end(false, false, TraceEnd::Release).await;
+}
+
+#[tokio::test]
+async fn post_work_capture_does_not_inherit_daemon_outage_wait() {
+    check_trace_claim_end(false, false, TraceEnd::Outage).await;
+}
+
+async fn check_trace_claim_end(ad_hoc: bool, broken_trace: bool, end: TraceEnd) {
     use st3::agent_trace::issuer::{self, Facts};
     let root = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(root.path());
@@ -241,7 +275,7 @@ mission "trace-check" state="ready" {
         kdl: source.into(), source_name: None,
     }).unwrap();
     daemon.store.apply_as(&intent, &preview.subject_tokens, "trace-mission", Some("person/avery")).unwrap();
-    daemon.start().await;
+    daemon.start_with_claim_outage(matches!(end, TraceEnd::Outage)).await;
     let opened = if ad_hoc {
         daemon.ok(&["work", "start", "Check trace lifecycle", "--as", ALDER]).await
     } else {
@@ -288,7 +322,12 @@ mission "trace-check" state="ready" {
     } else {
         issuer::write_atomic(&path, &runtime).unwrap();
     }
-    for action in ["claim", "complete"] {
+    let actions = if matches!(end, TraceEnd::Outage) {
+        vec!["claim"]
+    } else {
+        vec!["claim", if matches!(end, TraceEnd::Release) { "release" } else { "complete" }]
+    };
+    for action in actions {
         let mut command = st3::test_support::async_command(test_bin!("st3-fixture"));
         command.env("HOME", root.path())
             .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -296,15 +335,29 @@ mission "trace-check" state="ready" {
             .env("ST_AGENT", ALDER)
             .env("AGENT_TRACE_FILE", &path)
             .arg("--endpoint").arg(daemon.socket())
-            .args(["--daemon-wait", "0", "--json", "work", action, step,
+            .env("ST3_DAEMON_WAIT", "30")
+            .args(["--json", "work", action, step,
                 "--as", ALDER, "--incarnation", "alder-one",
                 "--summary", "Trace lifecycle checked", "--evidence", "file:trace"]);
-        let output = command.output().await.unwrap();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output())
+            .await.expect("advisory capture inherited the 30-second daemon wait").unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
         let committed: st3::model::StepRunView = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(committed.subject, step);
-        assert_eq!(committed.status, if action == "claim" { "claimed" } else { "verifying" });
+        assert_eq!(committed.status, match action {
+            "claim" => "claimed",
+            "release" => "ready",
+            _ => "verifying",
+        });
+        if matches!(end, TraceEnd::Outage) {
+            let log = std::fs::read_to_string(
+                root.path().join("state/st3/driver-api-warnings.log")).unwrap();
+            assert!(log.contains("agent_trace_omitted"), "{log}");
+            assert!(log.contains("Connection refused"), "{log}");
+            assert!(!path.exists(), "failed capture leaves no stale trace");
+            continue;
+        }
         if broken_trace {
             let log = std::fs::read_to_string(
                 root.path().join("state/st3/driver-api-warnings.log")).unwrap();
