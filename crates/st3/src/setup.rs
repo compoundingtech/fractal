@@ -625,8 +625,12 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
 }
 
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
+    // An instance always gets its own copies, below its own directory, so removing the
+    // directory removes them and the default install is never the one that runs.
+    let instance = crate::instance::current();
     // Keep managed installations (including the signed macOS app bundle) in place.
-    if let Ok(environment) = crate::environment::snapshot()
+    if instance.is_none()
+        && let Ok(environment) = crate::environment::snapshot()
         && st_runtime::resolve_executable("st", &environment)
             .ok()
             .is_some_and(|st| same_file(&st, executable))
@@ -634,7 +638,10 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
         return Ok(executable.into());
     }
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let bin = home.join(".local/bin");
+    let bin = match &instance {
+        Some(instance) => instance.bin_dir(),
+        None => home.join(".local/bin"),
+    };
     // Locate pty before changing any installed file.
     let pty = find_pty(executable)?;
     fs::create_dir_all(&bin)?;
@@ -698,6 +705,16 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
 }
 
 fn check_login_path(executable: &Path) {
+    // An instance is run by name from its own directory; nothing belongs on the login PATH.
+    if let Some(instance) = crate::instance::current() {
+        println!(
+            "This instance's commands are in {}. Run them with: {} --instance {}",
+            instance.bin_dir().display(),
+            instance.bin_dir().join("st").display(),
+            instance.name()
+        );
+        return;
+    }
     match crate::environment::snapshot() {
         Ok(environment) => {
             if st_runtime::resolve_executable("st", &environment)
@@ -730,7 +747,8 @@ async fn daemon_ready(config: &Config) -> bool {
 fn try_linger() {
     let user = std::env::var("USER").ok().filter(|user| !user.is_empty());
     // Never allow a polkit/password conversation to open in setup.
-    let mut command = Command::new("loginctl");
+    // Lingering belongs to the real user session, never to an instance's environment.
+    let mut command = crate::service::host_command("loginctl");
     command.args(["--no-ask-password", "enable-linger"]);
     if let Some(user) = &user {
         command.arg(user);
