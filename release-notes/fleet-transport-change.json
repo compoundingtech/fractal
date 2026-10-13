@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add or remove Fabric on an existing fleet member without rejoining",
+  "replay": { "status": "none", "detail": "Existing endpoint claims and membership projection; history is preserved." },
+  "schema": { "status": "none", "detail": "No claim shape, schema, or fleet.toml format changes." },
+  "rules": { "status": "changed", "detail": "Fabric add exposes before announcing; remove withdraws before unexposing and refuses the last or unusable transport. Mode and transport changes serialize with worker exposure and publication." },
+  "compatibility": { "status": "changed", "detail": "Adds st fleet transports add/remove fabric and additive transports/fabric_protocol fields in fleet status JSON. Older membership builds fold the unchanged endpoint claim and refresh their route list; config-peer-only builds retain configured routes." },
+  "downtime": { "status": "changed", "detail": "Transport and mode changes refresh the installed services. Other peers continue using available routes during restart." },
+  "manual": { "status": "changed", "detail": "With --no-service or no installed service, restart the replication worker to apply changed settings. Fabric trust and service grants remain operator-managed." },
+  "recovery": { "status": "changed", "detail": "Remove Fabric to return to the remaining configured carrier. Failed exposure leaves settings and endpoint claims unchanged; failed unexposure reports explicit cleanup while the endpoint remains withdrawn." }
+}

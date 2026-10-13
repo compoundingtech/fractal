@@ -357,6 +357,11 @@ enum FleetCommand {
     Migrate(FleetMigrateArgs),
     /// Switch this member between listening and dial-out.
     Mode(FleetModeArgs),
+    /// Add or remove Fabric on this member without rejoining.
+    Transports {
+        #[command(subcommand)]
+        command: FleetTransportsCommand,
+    },
     /// Show this node, the fleet's members, and open invites.
     Status,
     /// Wait for this node's first sync to end, then check that it projects the same graph as
@@ -920,6 +925,7 @@ async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool
         FleetCommand::Remove(args) => run_fleet_remove(&client, &config, args).await,
         FleetCommand::Migrate(args) => run_fleet_migrate(&client, &config, args).await,
         FleetCommand::Mode(args) => {
+            let lock = lock_fleet_settings(&config.state_dir).await?;
             let mut file = st3::config::FleetFile::load(&config.state_dir)?
                 .context("this machine is not a fleet member")?;
             file.mode = match args.mode.as_str() {
@@ -935,16 +941,16 @@ async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool
                 }),
             };
             file.save(&config.state_dir)?;
+            drop(lock);
             println!(
                 "This member is now {}; it announces the change when its replication worker starts.",
                 file.mode.as_str()
             );
-            if !args.no_service && services_installed() {
-                st3::service::install(Config::load_with_fleet(None)?)?;
-            } else {
-                println!("Restart st3 replication-worker for the change to take effect.");
-            }
+            refresh_fleet_worker(args.no_service)?;
             Ok(())
+        }
+        FleetCommand::Transports { command } => {
+            run_fleet_transports(&client, &config, command).await
         }
         FleetCommand::Leave(args) => {
             let person = fleet_person(args.actor.clone(), &config)?;
@@ -992,6 +998,10 @@ async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool
                 status.fleet_id.as_deref().unwrap_or("none"),
                 status.node
             );
+            println!("TRANSPORTS  {}", status.transports.join(","));
+            if let Some(protocol) = &status.fabric_protocol {
+                println!("FABRIC-PROTOCOL  {protocol}");
+            }
             if let Some(removed) = &status.removed {
                 println!("REMOVED  {}", removed.describe(status.fleet_id.as_deref()));
             }
@@ -1523,6 +1533,235 @@ struct FleetModeArgs {
     port: Option<u16>,
     #[arg(long)]
     no_service: bool,
+}
+
+#[derive(Subcommand)]
+enum FleetTransportsCommand {
+    /// Expose Fabric, then announce it. Requires a listening member with a port.
+    Add {
+        #[arg(value_parser = ["fabric"])]
+        transport: String,
+        /// Use this protocol instead of the saved protocol or st3/fleet/FLEET_ID.
+        #[arg(long)]
+        fabric_protocol: Option<String>,
+        /// Leave the replication worker restart to the operator.
+        #[arg(long)]
+        no_service: bool,
+    },
+    /// Withdraw Fabric's endpoint, then unexpose it. Keep at least one usable transport.
+    Remove {
+        #[arg(value_parser = ["fabric"])]
+        transport: String,
+        /// Leave the replication worker restart to the operator.
+        #[arg(long)]
+        no_service: bool,
+    },
+}
+
+async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::File> {
+    let state_dir = state_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || st3::config::FleetFile::lock_settings(&state_dir)).await?
+}
+
+async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
+    let view: st3::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let member = view
+        .members
+        .iter()
+        .find(|member| member.name == node)
+        .context("this node has no fleet membership yet; wait for its first sync")?;
+    anyhow::ensure!(
+        member.state == "current",
+        "this node is not a current fleet member"
+    );
+    Ok(member.endpoints.clone())
+}
+
+/// Transport changes use mode's atomic settings write and service refresh. They also
+/// publish immediately, so removal is announced before unexposure. The caller holds the
+/// settings lock until publication and unexposure end.
+async fn save_and_publish_fleet_settings(
+    client: &Client,
+    config: &Config,
+    file: &st3::config::FleetFile,
+    mut endpoints: Vec<Value>,
+) -> Result<()> {
+    if file.mode == st3::config::FleetMode::DialOut {
+        endpoints.clear();
+    } else {
+        endpoints.retain(|endpoint| match endpoint["transport"].as_str() {
+            Some("fabric") => file.transports.iter().any(|name| name == "fabric"),
+            Some(name @ ("loopback" | "tailscale")) => {
+                (file.transports.iter().any(|transport| transport == name)
+                    || (name == "loopback" && file.advertise_loopback))
+                    && endpoint["address"]
+                        .as_str()
+                        .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                        .is_some_and(|address| Some(address.port()) == file.port)
+            }
+            _ => false,
+        });
+    }
+    file.save(&config.state_dir)?;
+    let _: Value = client
+        .post(
+            "/v1/internal/fleet/endpoints",
+            &st3::api::FleetEndpointsRequest {
+                mode: file.mode.as_str().into(),
+                endpoints,
+            },
+        )
+        .await
+        .context("fleet.toml saved; endpoint publication did not complete; restart the replication worker to announce the saved settings")?;
+    Ok(())
+}
+
+fn refresh_fleet_worker(no_service: bool) -> Result<()> {
+    if !no_service && services_installed() {
+        st3::service::install(Config::load_with_fleet(None)?)?;
+    } else {
+        println!("Restart st3 replication-worker for the change to take effect.");
+    }
+    Ok(())
+}
+
+async fn run_fleet_transports(
+    client: &Client,
+    config: &Config,
+    command: FleetTransportsCommand,
+) -> Result<()> {
+    use st3::fleet::transport::{Fabric, default_fabric_protocol, resolve_tool};
+    let lock = lock_fleet_settings(&config.state_dir).await?;
+    let mut file = st3::config::FleetFile::load(&config.state_dir)?
+        .context("this machine is not a fleet member")?;
+    anyhow::ensure!(
+        file.removed.is_none(),
+        "this member was removed from its fleet"
+    );
+    let transport = match &command {
+        FleetTransportsCommand::Add { transport, .. }
+        | FleetTransportsCommand::Remove { transport, .. } => transport,
+    };
+    let enabled = file
+        .transports
+        .iter()
+        .any(|configured| configured == transport);
+    // A repeated add never reconfigures an existing exposure, even with a different flag.
+    if matches!(&command, FleetTransportsCommand::Add { .. }) && enabled {
+        println!("Fabric is already enabled; remove it before changing its protocol.");
+        return Ok(());
+    }
+    if matches!(&command, FleetTransportsCommand::Remove { .. }) {
+        anyhow::ensure!(enabled, "Fabric is not configured on this member");
+        anyhow::ensure!(
+            file.transports
+                .iter()
+                .any(|configured| configured != transport),
+            "cannot remove this member's last transport"
+        );
+    }
+    let mut endpoints = member_endpoints(client, &config.node).await?;
+    let fabric = Fabric::new(
+        resolve_tool(file.fabric.as_deref(), "fabric")
+            .context("this machine cannot use Fabric: fabric is not installed")?,
+    );
+    let node = fabric
+        .id()
+        .await
+        .context("this machine cannot use Fabric")?;
+    let protocol = file
+        .fabric_protocol
+        .clone()
+        .unwrap_or_else(|| default_fabric_protocol(&file.fleet_id));
+    let no_service = match command {
+        FleetTransportsCommand::Add {
+            fabric_protocol,
+            no_service,
+            ..
+        } => {
+            anyhow::ensure!(
+                file.mode == st3::config::FleetMode::Listening,
+                "adding Fabric requires a listening member; run st fleet mode listening first"
+            );
+            let port = file
+                .port
+                .context("adding Fabric requires this member's configured replication port")?;
+            anyhow::ensure!(port != 0,
+                "adding Fabric requires a fixed nonzero replication port; run st fleet mode listening --port PORT first");
+            let protocol = fabric_protocol.unwrap_or(protocol);
+            anyhow::ensure!(
+                !protocol.trim().is_empty(),
+                "Fabric protocol must not be empty"
+            );
+            fabric
+                .expose(&protocol, &format!("127.0.0.1:{port}"))
+                .await
+                .context("Fabric exposure failed; fleet settings and endpoints are unchanged")?;
+            file.transports.push("fabric".into());
+            file.fabric_protocol = Some(protocol.clone());
+            endpoints.retain(|endpoint| endpoint["transport"] != "fabric");
+            endpoints.push(json!({"transport":"fabric", "node":node, "protocol":protocol}));
+            // A lost publication response can follow a committed claim. Keep the exposure
+            // reachable and report the incomplete operation rather than undoing that route.
+            save_and_publish_fleet_settings(client, config, &file, endpoints)
+                .await
+                .with_context(|| format!("Fabric remains exposed as {protocol}"))?;
+            println!("Fabric enabled with protocol {protocol}.");
+            no_service
+        }
+        FleetTransportsCommand::Remove { no_service, .. } => {
+            // A configured but unavailable carrier cannot provide the promised rollback.
+            let local = st3::fleet::transport::local_addresses();
+            anyhow::ensure!(
+                (file.mode == st3::config::FleetMode::DialOut
+                    && file
+                        .transports
+                        .iter()
+                        .any(|transport| match transport.as_str() {
+                            "loopback" => local.iter().any(std::net::IpAddr::is_loopback),
+                            "tailscale" =>
+                                local.iter().any(st3::fleet::transport::is_tailnet_address)
+                                    && resolve_tool(file.tailscale.as_deref(), "tailscale")
+                                        .is_some(),
+                            _ => false,
+                        }))
+                    || endpoints.iter().any(|endpoint| {
+                        let Some(transport) = endpoint["transport"].as_str() else {
+                            return false;
+                        };
+                        transport != "fabric"
+                            && file.transports.iter().any(|name| name == transport)
+                            && endpoint["address"]
+                                .as_str()
+                                .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
+                                .is_some_and(|address| {
+                                    local.contains(&address.ip())
+                                        && Some(address.port()) == file.port
+                                })
+                    }),
+                "cannot remove Fabric: no remaining configured transport is usable on this machine"
+            );
+            file.transports.retain(|transport| transport != "fabric");
+            // Retain the existing protocol setting so a later add can restore it.
+            save_and_publish_fleet_settings(client, config, &file, endpoints).await?;
+            let result = fabric.unexpose(&protocol).await;
+            drop(lock);
+            // Refresh even when cleanup fails: no worker may keep using the removed carrier.
+            refresh_fleet_worker(no_service)?;
+            result.with_context(|| {
+                format!(
+                    "Fabric endpoint removed; unexposure failed; run fabric unexpose {protocol}"
+                )
+            })?;
+            println!(
+                "Fabric removed; remaining transports: {}.",
+                file.transports.join(",")
+            );
+            return Ok(());
+        }
+    };
+    drop(lock);
+    refresh_fleet_worker(no_service)
 }
 
 #[derive(Args)]

@@ -592,12 +592,16 @@ pub async fn run<B: Backend>(
                 address,
                 endpoints.clone(),
                 fleet.connectivity_changed.subscribe(),
+                config.state_dir.clone(),
+                file.clone(),
             ));
         }
         tokio::spawn(keep_endpoints_published(
             backend,
             file.mode.as_str(),
             endpoints.clone(),
+            config.state_dir.clone(),
+            file.clone(),
         ));
     }
     // A dial-out member accepts no connections.
@@ -735,13 +739,24 @@ async fn keep_fabric_exposed(
     address: SocketAddr,
     endpoints: Endpoints,
     mut connectivity: watch::Receiver<u64>,
+    state_dir: PathBuf,
+    settings: FleetFile,
 ) {
     loop {
+        let lock = match lock_current_settings(&state_dir, &settings).await {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("st: cannot verify fleet settings before Fabric exposure: {error:#}");
+                return;
+            }
+        };
         if fabric.expose(&protocol, &address.to_string()).await.is_ok()
             && let Ok(node) = fabric.id().await
         {
             endpoints.update(|set| set.fabric = Some((node, protocol.clone())));
         }
+        drop(lock);
         tokio::select! {
             _ = connectivity.changed() => {},
             _ = tokio::time::sleep(worker_interval(Duration::from_secs(60))) => {},
@@ -863,14 +878,41 @@ async fn keep_endpoints_published<B: Backend>(
     backend: B,
     mode: &'static str,
     endpoints: Endpoints,
+    state_dir: PathBuf,
+    settings: FleetFile,
 ) {
     loop {
+        let lock = match lock_current_settings(&state_dir, &settings).await {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("st: cannot verify fleet settings before endpoint publication: {error:#}");
+                return;
+            }
+        };
         let _ = backend.publish_endpoints(mode, &endpoints.list()).await;
+        drop(lock);
         tokio::select! {
             _ = endpoints.changed.notified() => {}
             _ = tokio::time::sleep(worker_interval(Duration::from_secs(60))) => {}
         }
     }
+}
+
+/// Serialize exposure and publication with CLI settings changes. In particular, an old
+/// worker must not restore an endpoint or exposure after `transports remove --no-service`.
+/// The operator restarts that worker to apply its new configuration, as with mode changes.
+async fn lock_current_settings(
+    state_dir: &Path,
+    settings: &FleetFile,
+) -> Result<Option<std::fs::File>> {
+    let state_dir = state_dir.to_path_buf();
+    let settings = settings.clone();
+    tokio::task::spawn_blocking(move || {
+        let lock = FleetFile::lock_settings(&state_dir)?;
+        Ok((FleetFile::load(&state_dir)?.as_ref() == Some(&settings)).then_some(lock))
+    })
+    .await?
 }
 
 /// Who this node dials, and the loopback URLs that reach each, most preferred first: every

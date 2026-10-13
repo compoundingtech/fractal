@@ -764,7 +764,7 @@ st3 replication-worker --node studio --state-dir STATE --socket SOCKET
 ```
 
 The worker unit is installed whenever the node is in a fleet. Changing membership changes
-nothing on disk and needs no restart. `st fleet join`, creating a fleet, `st fleet mode`, `st fleet leave`,
+nothing on disk and needs no restart. `st fleet join`, creating a fleet, `st fleet mode`, `st fleet transports`, `st fleet leave`,
 and `st fleet migrate` refresh the units themselves when the daemon runs as a service.
 
 Units installed by an older build keep their baked `--peer` arguments and keep working until
@@ -884,6 +884,52 @@ Then `st uninstall` also requires `--erase-local-graph`.
 
 The worker owns all three transports. There is no helper process and no extra service.
 
+### Changing an existing member's transports
+
+```text
+st fleet transports add fabric [--fabric-protocol PROTOCOL] [--no-service]
+st fleet transports remove fabric [--no-service]
+```
+
+Run these commands on the member whose transports should change. They update the existing
+`fleet.toml`, publish `fleet.member-endpoints` immediately, and refresh the service using the
+same path as `st fleet mode`. Run them with the local daemon running. The member's name,
+identity, secret, signing key and graph history stay intact.
+The command currently supports Fabric; changing Tailscale is outside this command's scope.
+
+Adding Fabric requires a listening member with a configured replication port and a working
+local `fabric` command. Use `st fleet mode listening` first for a dial-out member. Add exposes
+`127.0.0.1:PORT` before saving or announcing the Fabric endpoint; if exposure fails, settings
+and endpoints are unchanged. The protocol defaults to the saved `fabric_protocol`, or
+`st3/fleet/FLEET_ID`. Re-adding an enabled transport changes nothing; to change its protocol,
+remove it and add it with `--fabric-protocol PROTOCOL`. Configure Fabric trust and grants on
+the peers as described below.
+
+Removing Fabric first publishes the endpoint list without Fabric, then unexposes the saved
+protocol. It refuses an absent or unusable Fabric transport, the last configured transport,
+or a listening member with no usable remaining configured endpoint. The saved protocol is
+retained for a later add. If unexposure fails, the endpoint stays withdrawn and the command
+reports the exact `fabric unexpose PROTOCOL` cleanup command.
+
+If endpoint publication fails after the settings write, the command reports that partial
+result and keeps the exposure reachable: a lost response can follow a committed claim.
+Restart the worker to publish the saved settings; after a failed remove publication, then
+run `fabric unexpose PROTOCOL` to finish cleanup.
+
+With `--no-service`, or when no service is installed, restart `st3 replication-worker` yourself
+to apply its new transport selection. Until that restart, the old worker cannot re-expose
+Fabric or republish its previous endpoint list after a settings change. The worker restores
+the configured exposure from `fleet.toml` when it starts. `st fleet status` shows the local
+configured transports and enabled Fabric protocol, including before the worker restart.
+
+The endpoint claim's shape is unchanged. Older membership-capable builds read the new claim
+through their existing membership fold and derive routes from its complete endpoint list:
+they can dial an added Fabric route when Fabric is locally available and stop choosing a
+removed route once the claim replicates. A peer that still holds the earlier claim may try
+the withdrawn route until it receives the update; its existing network route retry behavior
+can continue over the remaining carrier. Builds that only support config peers keep using
+their configured routes and need the existing migration workflow to consume membership.
+
 ### Listening
 
 A listening member runs:
@@ -931,7 +977,7 @@ in use for each member.
   exposure name it already uses.
 - **Inbound.** The worker runs `fabric expose PROTOCOL --tcp 127.0.0.1:PORT` at start,
   on a local reconnect, and every 60 seconds. Fabric persists and restores the exposure after a
-  restart. `st fleet leave`, `st fleet mode dial-out`, and `st uninstall` remove it with
+  restart. `st fleet transports remove fabric`, `st fleet leave`, `st fleet mode dial-out`, and `st uninstall` remove it with
   `fabric unexpose PROTOCOL`.
 - **Outbound.** Before an exchange over Fabric, the worker runs
   `fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`. Fabric's daemon creates or reuses a loopback
@@ -1052,6 +1098,8 @@ others again (`st fleet migrate --unfinish`).
 
 ```text
 FLEET  5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12   this node: studio
+TRANSPORTS  tailscale,fabric
+FABRIC-PROTOCOL  st3/fleet/5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12
 MEMBER  MODE  STATE  ROUTE-ENDPOINTS
 server  listening  current  tailscale,fabric
 beacon  listening  current  fabric
@@ -1065,7 +1113,8 @@ PEER  beacon  last-seen
 time yet. An absent listening member, which is meant to answer, makes doctor warn; an absent
 dial-out member is only named, and neither produces delivery-probe attention. Invalid
 authentication, conflicting membership, rejected envelopes and projection faults remain
-visible. `st fleet status --json` includes the membership, endpoints and peer results for
+visible. `st fleet status --json` includes local `transports` and the enabled `fabric_protocol`,
+as well as the membership, endpoints and peer results for
 inspection.
 
 ## Failure cases
@@ -1305,6 +1354,15 @@ files. For each test, the "fails if" clause is the assertion that would catch a 
     node is missing on another, if N3 does not end up admitting N1's and N2's envelopes through
     signature requests, or if O holds any `invalid` record (its `fleet.*` records must be
     `unknown`).
+16. `an_existing_member_adds_and_removes_fabric_without_rejoining`: admitted loopback members
+    add Fabric through the CLI, sync with only Fabric advertised, restore the rollback carrier,
+    restart with lost exposure state, and remove Fabric during graph traffic. The Fabric shim
+    checks endpoint withdrawal at unexposure; the old running worker cannot restore the route
+    on local recovery. Settings, status, peer endpoint replication, keys and earlier history
+    are checked, as is sync over loopback after removal and restart.
+17. `fabric_transport_change_refusals_leave_settings_and_endpoints_unchanged`: refused exposure
+    leaves settings and membership unchanged; default protocol persistence, last-transport
+    refusal, unavailable remaining carriers, and unusable Fabric are checked.
 
 The docs step adds `readme_multi_machine_section_runs` to this file. It extracts the commands from
 the README section on running st on more than one machine and runs them against isolated nodes.
