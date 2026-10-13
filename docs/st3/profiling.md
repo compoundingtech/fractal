@@ -103,8 +103,9 @@ phone's live share is a minimum over foreground milliseconds, so it is not in th
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
 the targets, not every path's snapshot.
 
-`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo` serves it
-to the phone and the web app. An objective is a target with windows and an error budget: a p99
+`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo`, the daemon's own route
+beside `/v1/usage`, serves it to the CLI. The phone and the web app read it through a client route
+that comes later, with its capability, schema and generated clients. An objective is a target with windows and an error budget: a p99
 target may have 1% of its samples over, so `LEFT` is how much of that 1% the last hour has not
 spent; a max target has no allowance, so it is whole or empty; CPU and the database's size read
 against their own ceilings; a phone's live share against the disconnected time its minimum
