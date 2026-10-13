@@ -775,7 +775,6 @@ impl Store {
                     ("action".into(), Value::from("start")),
                     ("reason".into(), operation.body["reason"].clone()),
                     ("operation".into(), Value::from(operation.id.clone())),
-                    ("desired_token".into(), operation.body["desired_token"].clone()),
                     ("runtime_id".into(), operation.body["member"]["runtime_id"].clone()),
                     ("terminal".into(), operation.body["member"]["terminal"].clone()),
                 ]);
@@ -1442,7 +1441,7 @@ mod tests {
             ]),
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: Some(format!("observed:{status}:{incarnation}")),
+            idempotency_key: None,
         };
         store
             .append_claim(&observed("stopped", "prior-incarnation"))

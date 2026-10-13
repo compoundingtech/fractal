@@ -2279,6 +2279,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn reconcile_pass(&self) -> Result<()> {
         self.reconcile_start_jobs()?;
+        let _observation_capture = self.store.capture_runtime_observations()?;
         let observe_span = crate::profile::span("pass/changes");
         self.incremental.observe(&self.store)?;
         drop(observe_span);
@@ -2332,7 +2333,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
-        let _observation_capture = self.store.capture_runtime_observations()?;
         let pty_span = crate::profile::span("pass/pty-snapshot");
         let ptys = self.runtime.snapshot_ptys();
         drop(pty_span);
@@ -17446,9 +17446,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
 
     impl RuntimeControl for FakeRuntime {
         fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
-            let started = self.started_members.lock().unwrap().iter().rev()
-                .find(|started| started.tags.get(start_jobs::OPERATION_TAG)
-                    == member.tags.get(start_jobs::OPERATION_TAG))
+            let started = self
+                .started_members
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|started| {
+                    started.tags.get(start_jobs::OPERATION_TAG)
+                        == member.tags.get(start_jobs::OPERATION_TAG)
+                })
                 .cloned();
             let Some(started) = started else {
                 return Ok(None);
@@ -17457,15 +17464,29 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             // that first launch incarnation once; later planner observations cannot
             // manufacture provenance for another incarnation.
             let observation = if member.terminal {
-                self.snapshot_ptys()?.into_iter().find(|item| item.runtime_id == member.runtime_id)
+                self.snapshot_ptys()?
+                    .into_iter()
+                    .find(|item| item.runtime_id == member.runtime_id)
             } else {
                 self.observe_exec(&member.runtime_id)?
-            }.unwrap_or_else(|| RuntimeObservation {
+            };
+            if observation.is_none()
+                && member
+                    .driver
+                    .as_deref()
+                    .is_some_and(|driver| driver.ends_with("gate"))
+            {
+                return Ok(None);
+            }
+            let observation = observation.unwrap_or_else(|| RuntimeObservation {
                 runtime_id: started.runtime_id.clone(),
                 terminal: started.terminal,
                 status: "running".into(),
                 exit_code: None,
-                incarnation_id: Some(format!("fake-start:{}", started.tags[start_jobs::OPERATION_TAG])),
+                incarnation_id: Some(format!(
+                    "fake-start:{}",
+                    started.tags[start_jobs::OPERATION_TAG]
+                )),
             });
             if let Some(incarnation) = &observation.incarnation_id {
                 let operation = &started.tags[start_jobs::OPERATION_TAG];
@@ -17752,6 +17773,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 .unwrap()
                 .unwrap()
                 .0;
+            let _capture = store.capture_runtime_observations().unwrap();
             reconciler
                 .record_member(
                     &desired,

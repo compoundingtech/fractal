@@ -299,14 +299,18 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
         .desired_subjects_named(&[subject.into()])
         .unwrap()
         .remove(0);
-    let projection = rusqlite::Connection::open(&path).unwrap();
+
     // Save genuine selected rows. Retraction selects A between the separate
     // token/body reads; restoration selects the identical B token at admission.
-    projection
-        .execute(
-            "CREATE TEMP TABLE aba_a AS SELECT * FROM desired WHERE subject=?1",
-            [subject],
-        )
+    store
+        .connection
+        .batched(|tx| {
+            tx.execute(
+                "CREATE TEMP TABLE aba_a AS SELECT * FROM desired WHERE subject=?1",
+                [subject],
+            )
+        })
+        .unwrap()
         .unwrap();
     apply_source(
         &store,
@@ -314,20 +318,24 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
         "aba-b",
     );
     let token = store.selected_desired_token(subject).unwrap();
-    projection
-        .execute(
-            "CREATE TEMP TABLE aba_b AS SELECT * FROM desired WHERE subject=?1",
-            [subject],
-        )
+    store
+        .connection
+        .batched(|tx| {
+            tx.execute(
+                "CREATE TEMP TABLE aba_b AS SELECT * FROM desired WHERE subject=?1",
+                [subject],
+            )
+        })
+        .unwrap()
         .unwrap();
-    projection.execute_batch("BEGIN; DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_a; COMMIT;").unwrap();
+    store.connection.batched(|tx| tx.execute_batch("DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_a;")).unwrap().unwrap();
     let after_retraction = store
         .desired_subjects_named(&[subject.into()])
         .unwrap()
         .remove(0);
     assert_eq!(after_retraction.kind, stale.kind);
     assert_eq!(after_retraction.desired, stale.desired);
-    projection.execute_batch("BEGIN; DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_b; COMMIT;").unwrap();
+    store.connection.batched(|tx| tx.execute_batch("DELETE FROM desired WHERE subject='exec/example/worker'; INSERT INTO desired SELECT * FROM aba_b;")).unwrap().unwrap();
     assert_eq!(store.selected_desired_token(subject).unwrap(), token);
     let member = stale.member.as_ref().unwrap().clone();
     let prepared = start_jobs::PreparedStart {
