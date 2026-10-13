@@ -11,6 +11,7 @@ import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import type { ConversationItem, SendState, TextItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems, type WorkKind, type WorkLogCall, type WorkLogTurn } from './assistant-ui/taste/work-log'
 import { WorkLogV1 } from './assistant-ui/taste/WorkLogV1'
+import { workKindPresentation } from './assistant-ui/taste/work-row-presentation'
 import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
@@ -881,13 +882,24 @@ const semanticTurn: WorkLogTurn = { running: false, failed: false, interrupted: 
 const rejectsAbsence = async (text: () => string | null, absent: string) => {
   await expect((async () => { await expect(text()).not.toContain(absent) })()).rejects.toThrow()
 }
-/** Every host-classified kind keeps its identity on the row; a semantic result without text stays behind the raw disclosure. */
+/** Every host-classified kind keeps its identity on the row; unclassified results wait behind one system-events disclosure; a semantic result without text stays behind the raw disclosure. */
 export const SemanticToolKinds: Story = {
   render: args => <main data-scheme={args.scheme} {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={semanticTurn} /></main>,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await canvas.findByTestId('work-log')
-    for (const kind of semanticKinds) await expect(canvasElement.querySelector(`[data-item-id="semantic/${kind}"] [data-tool-kind="${kind}"]`)).not.toBeNull()
+    for (const kind of semanticKinds.filter(kind => kind !== 'unknown')) await expect(canvasElement.querySelector(`[data-item-id="semantic/${kind}"] [data-tool-kind="${kind}"]`)).not.toBeNull()
+    // An unclassified result stays out of the default rows until the system-events disclosure opens.
+    const systemRow = () => canvasElement.querySelector('[data-item-id="semantic/unknown"]')
+    await expect(systemRow()).toBeNull()
+    await expect(canvasElement.textContent).not.toContain('orphan_result')
+    await userEvent.click(canvas.getByRole('button', { name: 'Show system events · 1' }))
+    await waitFor(() => expect(systemRow()).not.toBeNull())
+    await expect(systemRow()!.querySelector('[data-tool-kind="unknown"]')).not.toBeNull()
+    // Control: the absence probe that passed while the disclosure was closed now fails.
+    await rejectsAbsence(() => canvasElement.textContent, 'orphan_result')
+    await userEvent.click(canvas.getByRole('button', { name: 'Hide system events · 1' }))
+    await waitFor(() => expect(systemRow()).toBeNull())
     // A skipped call says so; it is neither Failed nor failure-inked.
     const skipped = canvasElement.querySelector<HTMLElement>('[data-item-id="semantic/skipped"]')!
     await expect(skipped.querySelector('[data-call-word]')).toHaveTextContent('Skipped')
@@ -938,7 +950,7 @@ export const SuccessfulToolArrival: Story = {
 export const SuccessfulToolArrivalLight: Story = { ...SuccessfulToolArrival, args: { scheme: 'light' } }
 
 const scopedTargetsData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'scoped-targets', items: scopedToolItems, work: workLogTurnFromItems(scopedToolItems, { kindFor: fixtureToolKind, running: false, failed: false, interrupted: false, completeHistory: false }) }] }
-/** Each row's target is scoped to its kind: a run's command, a search term within its path, a delegated task's name. */
+/** Each row's target is scoped to its kind: a run's command, a search term within its path, a delegated task's name. The call's own intent leads; the kind's verb and target follow. */
 export const ScopedToolTargets: Story = {
   render: args => <main data-scheme={args.scheme} {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={scopedTargetsData} onOpenTool={() => {}} onRetry={() => {}} /></main>,
   play: async ({ canvasElement }) => {
@@ -947,6 +959,8 @@ export const ScopedToolTargets: Story = {
       const row = await waitFor(() => { const element = canvasElement.querySelector<HTMLElement>(`[data-item-id="scoped/${example.kind}"][data-tool-status]`); if (element === null) throw new Error(`${example.kind} row not rendered`); return element })
       await expect(row.querySelector('[data-tool-kind]')).toHaveAttribute('data-tool-kind', example.kind)
       await expect(row.querySelector('[data-call-title]')!.textContent).toContain(example.target)
+      await expect(row.querySelector('[data-tool-intent]')).toHaveTextContent(example.input.i)
+      await expect(row.querySelector('[data-tool-secondary]')).toHaveTextContent(`${workKindPresentation[example.kind].verb} ${example.target}`)
       await expect(within(row).queryByTestId('tool-raw-input')).toBeNull()
     }
     // Control: a run's target is its command, so the cwd probe must fail on the run row's own input.

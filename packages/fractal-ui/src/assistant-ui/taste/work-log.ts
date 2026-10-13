@@ -1,12 +1,17 @@
 /** Controlled presentation types for the work log. */
 import type { ConversationItem, ToolCallItem } from '../embrace-data/model'
-import { toolHumanSummary, toolOutput } from '../embrace-tool-preview'
+import { toolHumanSummary, toolOutput, toolString } from '../embrace-tool-preview'
 /** Host-classified semantic kinds; `unknown` is an orphan result whose invocation was never observed. */
 export type WorkKind = 'read' | 'search' | 'run' | 'change' | 'subagent' | 'web' | 'decision' | 'todo' | 'wait' | 'message' | 'schedule' | 'terminal-input' | 'skill' | 'eval' | 'unknown'
 export interface WorkLogCall {
   readonly id: string
   readonly kind: WorkKind
   readonly title: string
+  /**
+   * The human intent for this call, never the tool name. A host-recorded intent replaces this value;
+   * without one, the projection derives it from the call's own `i`, `description` or `summary`.
+   */
+  readonly intent?: string
   readonly argsSummary?: string
   readonly summary?: string
   readonly status: 'running' | 'success' | 'error' | 'interrupted'
@@ -178,6 +183,7 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
     const displayedCommand = kind === 'run' ? (detail === undefined ? undefined : failedCommandSource(detail)) ?? command : command
     return [{
       id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input, kind, displayedCommand),
+      intent: toolString(call.input, ['i', 'description', 'summary']).trim() || undefined,
       // Empty input carries nothing to inspect, so it does not make a row expandable.
       rawInput: typeof call.input === 'string' ? call.input || undefined : call.input === undefined || call.input === null || typeof call.input === 'object' && Object.keys(call.input).length === 0 ? undefined : JSON.stringify(call.input, null, 2),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,

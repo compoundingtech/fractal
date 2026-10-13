@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button } from 'react-aria-components'
 import { WorkLogV1 } from './assistant-ui/taste/WorkLogV1.tsx'
 import type { WorkLogCall, WorkLogTurn } from './assistant-ui/taste/work-log.ts'
@@ -18,14 +18,22 @@ const projectedService = workLogTurnFromItems([
 ], { kindFor: () => 'run', running: false, failed: false, interrupted: false }).calls[0]!
 const PolicySurface = ({ scheme = 'dark', width = 1440, omitServiceFacts = false }: { readonly scheme?: Scheme; readonly width?: number; readonly omitServiceFacts?: boolean }) => {
   const [ready, setReady] = React.useState(false)
+  const [intentRecorded, setIntentRecorded] = React.useState(true)
   const service = serviceCall(ready)
+  const intentCalls: readonly WorkLogCall[] = [
+    { ...call, id: 'sample-intent', status: 'success', argsSummary: 'pnpm test release', ...(intentRecorded ? { intent: 'Check release readiness' } : {}) },
+    { ...call, id: 'sample-intent-fallback', status: 'success', argsSummary: 'pnpm test release' },
+    { ...call, id: 'sample-wait-intent', kind: 'wait', title: 'wait', status: 'success', intent: 'Await design review' },
+  ]
   return <section aria-label={`${scheme} work log policy`} data-policy-surface="" data-scheme={scheme} style={{ width, maxWidth: '100%' }} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <h1>Work log policy</h1>
     <section aria-label="Routine command failure"><WorkLogV1 ariaLabel="Routine command work" turn={turn} interactiveCalls={false} /></section>
     <section aria-label="Run-ending failure"><WorkLogV1 ariaLabel="Run-ending command work" turn={{ ...turn, failed: true, failureNote: 'The command ended the run.' }} interactiveCalls={false} /></section>
     <section aria-label="Interrupted run"><WorkLogV1 ariaLabel="Interrupted command work" turn={{ ...turn, failed: true, interrupted: true }} interactiveCalls={false} /></section>
     <section aria-label="Service readiness"><WorkLogV1 ariaLabel="Recorded service work" turn={{ ...turn, calls: [{ ...service, metadata: omitServiceFacts ? undefined : service.metadata }, projectedService, { ...call, id: 'sample-command-timeout', status: 'success', metadata: { timedOut: true } }] }} interactiveCalls={false} /></section>
+    <section aria-label="Recorded intent"><WorkLogV1 ariaLabel="Recorded intent work" turn={{ ...turn, calls: intentCalls }} interactiveCalls={false} /></section>
     <Button onPress={() => setReady(value => !value)}>{ready ? 'Record readiness timeout' : 'Record ready service'}</Button>
+    <Button onPress={() => setIntentRecorded(value => !value)}>{intentRecorded ? 'Strip recorded intent' : 'Restore recorded intent'}</Button>
   </section>
 }
 const meta = { title: 'Fractal UI/Transcript/Work log policy', component: PolicySurface, decorators: [Story => <main><Story /></main>], parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440, omitServiceFacts: false }, argTypes: { scheme: { control: 'radio', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] }, omitServiceFacts: { control: false, table: { disable: true } } } } satisfies Meta<typeof PolicySurface>
@@ -51,6 +59,22 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await expect(service.querySelector('[data-service-tone]')).toHaveAttribute('data-service-tone', 'neutral')
   await userEvent.click(canvas.getByRole('button', { name: 'Record readiness timeout' }))
   await expect(service.querySelector('[data-service-readiness]')).toHaveTextContent('Timed out')
+  // A recorded intent leads the row; the kind's verb and target follow in muted secondary text.
+  const intent = canvasElement.querySelector<HTMLElement>('[data-item-id="sample-intent"]')!
+  await expect(intent.querySelector('[data-tool-intent]')).toHaveTextContent('Check release readiness')
+  await expect(intent.querySelector('[data-tool-secondary]')).toHaveTextContent('Run command pnpm test release')
+  await expect(canvasElement.querySelector('[data-item-id="sample-wait-intent"] [data-tool-intent]')).toHaveTextContent('Await design review')
+  await expect(canvasElement.querySelector('[data-item-id="sample-wait-intent"] [data-tool-secondary]')).toHaveTextContent('Wait for results')
+  await expect(canvasElement.querySelector('[data-item-id="sample-intent-fallback"] [data-tool-intent]')).toBeNull()
+  await expect(canvasElement.querySelector('[data-item-id="sample-intent-fallback"] [data-call-title]')).toHaveTextContent('Search for matches pnpm test release')
+  // Control: stripping the recorded intent falls back to the host title and target on the same row.
+  await userEvent.click(canvas.getByRole('button', { name: 'Strip recorded intent' }))
+  await waitFor(() => expect(intent.querySelector('[data-tool-intent]')).toBeNull())
+  await expect(canvasElement.querySelector('[data-item-id="sample-intent"]')).toBe(intent)
+  await expect(intent.querySelector('[data-call-title]')).toHaveTextContent('Search for matches pnpm test release')
+  await expect(intent).not.toHaveTextContent('Check release readiness')
+  await userEvent.click(canvas.getByRole('button', { name: 'Restore recorded intent' }))
+  await waitFor(() => expect(intent.querySelector('[data-tool-intent]')).toHaveTextContent('Check release readiness'))
 }
 export const Dark1440: Story = { play }
 export const Light1440: Story = { args: { scheme: 'light' }, play }

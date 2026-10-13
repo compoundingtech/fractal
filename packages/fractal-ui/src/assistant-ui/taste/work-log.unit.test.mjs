@@ -203,3 +203,13 @@ test('semantic results without readable text remain inspectable as the recorded 
   assert.equal(workLogOutputText(call({ items: [{ done: true }] })), JSON.stringify({ items: [{ done: true }] }, null, 2))
   for (const empty of ['', undefined, null]) assert.equal(workLogOutputText(call(empty)), undefined)
 })
+
+test('a call carries its own intent from i, description or summary, never from its name or command', () => {
+  const intentOf = input => workLogTurnFromItems([{ _tag: 'ToolCall', id: 'intent/run', callId: 'intent/run', name: 'bash', input, status: 'success', callSeen: true, at }], { kindFor: () => 'run', running: false, failed: false, interrupted: false }).calls[0]
+  assert.equal(intentOf({ i: '  Check release readiness ', command: 'pnpm test release' }).intent, 'Check release readiness')
+  assert.equal(intentOf({ description: 'Review rows', summary: 'Later key' }).intent, 'Review rows')
+  assert.equal(intentOf({ summary: 'Summarize rows' }).intent, 'Summarize rows')
+  // Control: without an intent key, or with only whitespace, nothing is invented from the tool name or command.
+  assert.equal(intentOf({ command: 'pnpm test release' }).intent, undefined)
+  assert.equal(intentOf({ i: '   ', command: 'pnpm test release' }).intent, undefined)
+})

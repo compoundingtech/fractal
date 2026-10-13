@@ -29,6 +29,9 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   const settled = !turn.running && !turn.failed && !turn.interrupted && turn.foldable !== false
   const durationLabel = formatWorkDuration(turn.durationMs)
   const [open, setOpen] = React.useState(false)
+  const [showSystemEvents, setShowSystemEvents] = React.useState(false)
+  // Unclassified results (orphans) stay out of the default rows; one disclosure reveals them.
+  const systemCalls = turn.calls.filter(call => call.kind === 'unknown')
   const failedCall = turn.calls.find(call => call.status === 'error')
   const failed = turn.failed && !turn.interrupted
   const workLabel = turn.running ? 'Working' : settled ? `Worked${durationLabel ? ` for ${durationLabel}` : ''}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
@@ -40,7 +43,10 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   return <CallDetailRenderer.Provider value={renderCallDetail}><CallPresentation.Provider value={{ preview: previewCallDetail, interactive: interactiveCalls }}><section aria-label={ariaLabel} data-testid="work-log">
     {turn.running && !hideLiveRow && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.live)}><Icon name="spinner" spinning /><span>Working</span></div>}
     {interactiveCalls ? <Button isDisabled={!settled} aria-expanded={!settled || open} onPress={() => setOpen(value => !value)} {...stylex.props(styles.summary, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)}><span {...stylex.props(styles.chevron, (!settled || open) && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span></span>{summaryContent}</Button> : <div {...stylex.props(styles.summary, styles.staticCall, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)} />{summaryContent}</div>}
-    {(!interactiveCalls || !settled || open) && <div data-testid="work-log-children" {...stylex.props(styles.children)}><div {...stylex.props(styles.list, listStyle)}>{turn.calls.map(call => <TimelineCall key={call.id} call={call} />)}{expandedBody}</div></div>}
+    {(!interactiveCalls || !settled || open) && <div data-testid="work-log-children" {...stylex.props(styles.children)}><div {...stylex.props(styles.list, listStyle)}>{turn.calls.filter(call => call.kind !== 'unknown').map(call => <TimelineCall key={call.id} call={call} />)}{systemCalls.length > 0 && <>
+      <Button data-system-events aria-expanded={showSystemEvents} onPress={() => setShowSystemEvents(value => !value)} {...stylex.props(styles.call)}><span aria-hidden="true" {...stylex.props(styles.slot)}><span {...stylex.props(styles.chevron, showSystemEvents && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span></span><span {...stylex.props(styles.callLabel)}>{showSystemEvents ? 'Hide system events' : 'Show system events'} · {systemCalls.length}</span></Button>
+      {showSystemEvents && systemCalls.map(call => <TimelineCall key={call.id} call={call} />)}
+    </>}{expandedBody}</div></div>}
     {failed && <ErrorOverlay id={`work-failure-${turn.calls[0]?.id ?? 'turn'}`} title={failedCommand === undefined ? 'Run failed.' : 'Command did not complete'} detail={errorReason(failedCall?.detail ?? turn.failureNote ?? '')} rawDetail={detail} command={failedCall === undefined ? failedCommandSource(turn.failureNote ?? '') : readableCommand(failedCall)} onRetry={onRetry} onOpenOutput={failedCall === undefined || onOpenOutput === undefined ? undefined : () => onOpenOutput(failedCall)} />}
     {turn.interrupted && <div {...stylex.props(styles.promoted)}><Icon name="stop" size={14} /><span>Run interrupted.</span></div>}
   </section></CallPresentation.Provider></CallDetailRenderer.Provider>
@@ -55,8 +61,11 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   // Input-only rows still open an intent summary and the explicit raw disclosure.
   const expandable = hasOutput || call.rawInput !== undefined
   const displayed = interactive ? expandable && (open || hasOutput && preview && call.status !== 'error') : hasOutput
-  const label = call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`
+  const presentation = workKindPresentation[call.kind]
   const service = workServicePresentation(call)
+  // Recorded service facts name the row; otherwise a call's intent leads and the kind's verb and target follow.
+  const intent = service === undefined ? call.intent : undefined
+  const label = intent === undefined ? call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}` : [intent, presentation.verb, call.argsSummary].filter(value => value !== undefined).join(' · ')
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // A non-success outcome stays visible as a word beside the pinned disclosure; running rows say so in the duration column until they end.
@@ -66,7 +75,9 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
       <Icon name={call.skipped ? 'stop-circle' : call.status === 'running' ? 'spinner' : call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : workKindPresentation[call.kind].icon} spinning={!call.skipped && call.status === 'running'} size={14} />
     </span>
     <span data-call-title title={label} {...stylex.props(styles.callLabel)}>
-      {service !== undefined ? <>Service {service.name}{service.state === undefined ? null : <> · {service.state}</>}</> : call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}
+      {service !== undefined ? <>Service {service.name}{service.state === undefined ? null : <> · {service.state}</>}</>
+        : intent !== undefined ? <><span data-tool-intent>{intent}</span><span data-tool-secondary {...stylex.props(styles.secondary)}>{' · '}{presentation.verb}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.kind === 'run' ? <HighlightedSource code={call.argsSummary} language="bash" /> : call.argsSummary}</code></>}</span></>
+        : call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}
     </span>
     <span data-call-word data-service-readiness={service === undefined ? undefined : ''} data-service-tone={service === undefined ? undefined : service.warning ? 'warning' : 'neutral'} {...stylex.props(styles.callWord, failedInk && styles.failureInk, service?.warning && styles.serviceWarning)}>{word}</span>
     <span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span>
@@ -107,6 +118,7 @@ const styles = stylex.create({
   expanded: { backgroundColor: surface.rowActive, color: ink.fg }, staticCall: { cursor: 'default' },
   rawTrigger: { display: 'flex', paddingInline: s.xs },
   mono: { fontFamily: t.fontMono, fontSize: t.metaSize },
+  secondary: { color: ink.fgMuted, fontSize: t.metaSize },
   output: { marginBlockStart: s.xs2, marginBlockEnd: 0, marginInlineStart: g.textColumn, paddingInline: s.lg, paddingBlock: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, color: ink.fgMuted, fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   time: { flexShrink: 0, color: ink.fgMuted, fontSize: t.metaSize, marginLeft: 'auto' },
   live: { minHeight: g.toolRow, display: 'flex', alignItems: 'center', gap: s.md, color: ink.fgMuted, fontSize: t.metaSize },
