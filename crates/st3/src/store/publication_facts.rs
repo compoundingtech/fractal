@@ -74,8 +74,7 @@ CREATE TRIGGER IF NOT EXISTS publication_claim_insert AFTER INSERT ON claims
 WHEN NEW.kind IN ('runtime.observed','runtime.action.succeeded') BEGIN
     INSERT OR IGNORE INTO local_publication_pending VALUES(NEW.id);
 END;
-DROP TRIGGER IF EXISTS publication_claim_delete;
-CREATE TRIGGER publication_claim_delete AFTER DELETE ON claims BEGIN
+CREATE TRIGGER IF NOT EXISTS publication_claim_delete AFTER DELETE ON claims BEGIN
     DELETE FROM local_publication_claims WHERE claim_id=OLD.id;
     DELETE FROM local_publication_pending WHERE claim_id=OLD.id;
     INSERT INTO local_publication_batches
@@ -1264,6 +1263,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(selected, first.id);
+    }
+
+    #[test]
+    fn publication_facts_second_open_preserves_schema_cookie() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("reopen.db");
+        let store = Store::open(&path, "node").unwrap();
+        let cookie: i64 = store
+            .readers
+            .get()
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .unwrap();
+        drop(store);
+        let reopened = Store::open(&path, "node").unwrap();
+        assert_eq!(
+            cookie,
+            reopened
+                .readers
+                .get()
+                .query_row::<i64, _, _>("PRAGMA schema_version", [], |row| row.get(0))
+                .unwrap()
+        );
+        assert!(reopened.publication_evidence_ready().unwrap());
     }
 
     #[test]
