@@ -72,7 +72,7 @@ Mixed storage tables below are classified by their logical shared fields; local 
 | `planning_candidates` | Shared projection | Shared immutable variant/revision/document references, mission revision and submission timestamp. |
 | `planning_previews` | Shared projection | Shared serialized preview claim fields, graph/diff/response/hash and candidate fence. store_index here is an originating claim payload field, not this replica’s admission cursor: identical claim payloads must compare identically. Future cross-node preview fencing should use stable claim/frontier identity. |
 | `graph_generation` | Local | Local cache invalidation counter; same graph can have different mutation counts. |
-| `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source or operation projections. |
+| `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source, operation or actual-state projections. Actual values, provenance, runtime origin and runtime-epoch reads use this durable repaired-ID membership even after local receipt cleanup. |
 | `replica_envelope_signatures` | Shared storage, with stated local fields | Shared signed envelope identity/member-key/signature; stored_at is local receipt time. Authority/signature inventory is distinct from outcome projection digests. |
 | `claim_signatures` | Shared storage | Each claim's signature exactly as its envelope payload carried it; written once at sealing or admission, never rewritten. Covered by the envelope hash and writer signature, so it adds nothing to any digest. |
 | `claim_verdicts`, `claim_verdict_links`, `claim_verdict_queue`, `claim_verdict_fresh` | Local cache | Signature verdicts folded from admitted claims in canonical order; never synced, outside every digest, rebuilt by `recheck_claim_verdicts`. |
@@ -102,6 +102,16 @@ overflow becomes visible when a slot opens. Deleted IDs remain retired.
 Historical snapshot reads retain the claim fold, as do reads while projection work is pending.
 Latest eligibility and pinned-head retrieval share one SQL snapshot so a concurrent append
 cannot leak a later head into an earlier `through` snapshot. Durable glass claims are not pruned.
+### Current person directive note heads
+
+`person_directive_notes` is a shared, rebuildable person-keyed projection of the
+latest unrepaired note revision, including clear and expired tombstones. Its
+complete logical row, including canonical head-key bytes, participates in production
+digests and shuffled-arrival/restart/replay comparisons. The audit fixture writes
+a real note revision and exercises digest coverage for every projected column.
+`local_directive_note_pending` and `local_directive_note_dirty` are local disposable
+work queues, not replicated projection outcomes.
+
 ### Arrangement heads added after the baseline audit
 
 Person arrangements are shared claim-derived projections, not local sidebar caches.
@@ -175,10 +185,10 @@ history cursor is not an exception for choosing a shared reason.
 | 12661 | `usage_summaries_at` | Shared | Shared usage fold per subject; same issue as usage_summary_at. |
 | 12921 | `usage_period_rows` | Shared | Shared period totals; equal observed-time ties currently use local store index. |
 | 13051 | `claims_for_subject_kind_at` | Local | Local raw-history page using a local cursor; callers reducing shared state need the canonical helper instead. |
-| 13235 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
-| 13241 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
-| 13242 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
-| 13243 | `agent_last_activity_at` | Local | Local operational activity/silence view combines host-only timeline observations with newest arrivals. |
+| 13235 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
+| 13241 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
+| 13242 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
+| 13243 | `agent_last_activity_at` | Shared + local overlay | Replicated activity selects the greatest numeric acceptance time within the snapshot; host-only timeline observations remain local. |
 | 13301 | `timeline_claim_rows_for_incarnation_at` | Local | Local harness timeline/history page. Current timeline retention is local; legacy rows can appear in claims. |
 | 13339 | `claims_for_kind_at` | Local | Local raw-kind history page; not a permitted source of arrival-ordered shared reduction. |
 | 13435 | `work_claim_is_orphaned` | Shared | Shared runtime-incarnation/terminal-state selection controls durable work ownership. |
@@ -295,3 +305,9 @@ The local `coordination_offer` trigger runs after lifecycle claims are inserted 
 for staged, delivered, read and closed receipts it clears `coordination_sends.held` with one
 guarded primary-key update in the existing writer transaction. It adds no reader write or
 conversation payload and is outside shared projection digests.
+
+The Git change reader uses `local_git_change_records` and
+`local_git_change_latest` as node-local verified-object receipts and latest indexed
+pointers. They start empty, rebuild from explicitly fetched Git objects, and do
+not participate in replicated projection order or digests. The table inventory
+audit classifies both as local storage.

@@ -211,7 +211,18 @@ impl Daemon {
         let socket = self.socket();
         let state = self.state.clone();
         self.server = Some(tokio::spawn(async move {
-            st3::api::serve_unix(&socket, st3::api::router(state)).await
+            // Provider lifecycle is simulated here; discovery must use the same fixture.
+            let router = st3::api::router(state).layer(axum::middleware::from_fn(
+                |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    if request.uri().path() == "/v1/harnesses" {
+                        return axum::response::IntoResponse::into_response(axum::Json(json!({
+                            "api_version": "st3.v1", "value": ["claude"]
+                        })));
+                    }
+                    next.run(request).await
+                },
+            ));
+            st3::api::serve_unix(&socket, router).await
         }));
         let mut last_error = None;
         for _ in 0..200 {
@@ -718,6 +729,7 @@ mission "example/review" state="ready" {{
                         step,
                         action,
                         &st3::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),
@@ -2042,6 +2054,8 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
                     "agent/example/watcher",
                     "--stalled-after",
                     "1h",
+                    "--report-stalls",
+                    "false",
                     "--as",
                     PERSON,
                 ],
@@ -2057,6 +2071,7 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
     assert_eq!(report.actor.as_deref(), Some(PERSON));
     assert_eq!(report.body["fields"]["report_to"], "agent/example/watcher");
     assert_eq!(report.body["fields"]["stalled_after_ms"], 3_600_000);
+    assert_eq!(report.body["fields"]["report_stalls"], false);
     let step = &run.steps[0].subject;
     daemon.store().set_step_state(step, "ready", None).unwrap();
     // An unclaimed step must still reject an obsolete caller incarnation without writes.
@@ -2127,6 +2142,50 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
                     .timeout_extension_ms,
                 3_600_000
             );
+            cli_value(
+                daemon
+                    .cli(
+                        WORKER,
+                        &[
+                            "work",
+                            "wait",
+                            step,
+                            "--as",
+                            WORKER,
+                            "--incarnation",
+                            "4242:fixture",
+                            "--for",
+                            "1h",
+                            "--reason",
+                            "build slot",
+                        ],
+                    )
+                    .await,
+            );
+            daemon.restart().await;
+            let waiting = daemon.store().step_run(step).unwrap().unwrap();
+            assert_eq!(waiting.execution_started_at_unix_ms, None);
+            assert!(waiting.execution_paused_until_unix_ms.is_some());
+            assert_eq!(waiting.blocked_reason.as_deref(), Some("build slot"));
+            cli_value(
+                daemon
+                    .cli(
+                        WORKER,
+                        &[
+                            "work",
+                            "resume",
+                            step,
+                            "--as",
+                            WORKER,
+                            "--incarnation",
+                            "4242:fixture",
+                        ],
+                    )
+                    .await,
+            );
+            let running = daemon.store().step_run(step).unwrap().unwrap();
+            assert!(running.execution_started_at_unix_ms.is_some());
+            assert_eq!(running.execution_paused_until_unix_ms, None);
         }
     }
     daemon.restart().await;
@@ -3170,7 +3229,13 @@ def start():
     child = subprocess.Popen([os.environ['ST3_COVERAGE_BINARY'], 'up', '--config', str(root / 'config/st3/config.toml'), '--pty-binary', str(root / 'bin/pty')], stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
     pid_file.write_text(str(child.pid))
 if 'show' in args:
+    if 'st3-replication.service' in args and not (root / 'config/systemd/user/st3-replication.service').exists():
+        print('LoadState=not-found\nActiveState=inactive\nSubState=dead')
+        sys.exit(4)
     print('LoadState=loaded\nActiveState=active\nSubState=running')
+elif 'st3-replication.service' in args and not (root / 'config/systemd/user/st3-replication.service').exists():
+    print('Failed to stop st3-replication.service: Unit not loaded.', file=sys.stderr)
+    sys.exit(5)
 elif 'st3.service' in args:
     if 'stop' in args or 'restart' in args or ('disable' in args and '--now' in args): stop()
     if 'start' in args or 'restart' in args: start()
@@ -3252,6 +3317,7 @@ PY
         if action == "reset" {
             assert!(!config.state_dir.join("must-be-erased").exists());
         }
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Unit not loaded"));
         if matches!(action, "install" | "restart" | "reset") {
             Client::unix_as(&config.socket, PERSON)
                 .capabilities()
@@ -4204,6 +4270,7 @@ mission "example/review" state="ready" {{
                         step,
                         action,
                         &st3::model::WorkRequest {
+                            wait_ms: None,
                             actor: Some(WORKER.into()),
                             incarnation: Some("4242:fixture".into()),
                             summary: Some("Drafted the copper proof.".into()),

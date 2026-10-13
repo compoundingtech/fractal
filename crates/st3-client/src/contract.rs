@@ -62,6 +62,7 @@ pub const ACTION_NAMES: &[&str] = &[
 ];
 #[rustfmt::skip]
 pub const READ_OPERATIONS: &[(&str, &str)] = &[
+    ("notes.list", "/v1/client/notes"),
     ("custom-subjects.list", "/v1/client/custom-subjects"),
     ("custom-subjects.get", "/v1/client/custom-subjects/{id}"),
     ("host.repositories", "/v1/client/hosts/{id}/repositories"),
@@ -81,6 +82,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("attention.get", "/v1/client/attention/{id}"),
     ("messages.list", "/v1/client/messages"),
     ("messages.get", "/v1/client/messages/{id}"),
+    ("message-body.get", "/v1/client/message-bodies/{id}"),
     ("launches.list", "/v1/client/launches"),
     ("launches.get", "/v1/client/launches/{id}"),
     ("launch-variants.list", "/v1/client/launches/{id}/variants"),

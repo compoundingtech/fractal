@@ -72,6 +72,17 @@ agent "ada/builder" {
 }
 ```
 
+An agent declared inside a mission or step binds an account the same way, so a mission can run on
+an allowance that is about to reset. Only the `account` declaration stays at the root: an `account`
+that declares one inside a mission or step is refused with `account-inside-mission`.
+
+A binding is also an authority fact, not only a choice of allowance. A bound account's owner (or a
+pool's person) decides whose person the agent is: asks the agent raises and its own-ask authority
+are attributed to that person ahead of the declaration author or the mission requester. A mission
+agent that binds another person's account is therefore treated as acting for that person, exactly
+as a top-level seat is. st checks that the account exists, belongs to the harness's provider and
+has a login on the host; it does not check that the declarer owns it.
+
 Only `claude` and `codex` harness blocks take a binding. st sets the harness's login variable and
 `ST3_ACCOUNT` on the seat, so an `env` entry for the same variable is refused. A restart on the same
 account continues the native session the driver last bound. The session binding records the
@@ -87,7 +98,7 @@ logins.
 ## Usage and limits per account
 
 A bound seat's limits readings carry the declared account's name (`account_ref`) next to the
-opaque account label, so `st usage` and stui name the account:
+opaque account label, so `st usage` and the terminal UI name the account:
 
 ```
 LIMITS  2 · the freshest reading of each account
@@ -101,6 +112,18 @@ resets. Declared accounts have separate readings even when the provider reports 
 Their spend and limits use a stable label derived from the declared name; unbound seats keep the
 provider's label. Queued observations capture the account at their source, so replay after a
 switch still charges the account that produced them.
+
+A seat that binds nothing but sets its harness's login variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) to
+a declared account's login directory on its host runs on that account: it is launched with
+`ST3_ACCOUNT`, and its readings carry the declared name, whatever identity the provider shows. A
+re-login in that directory changes the provider's identity but not the account. When one seat has
+reported both under a provider identity and under a declared account, that identity's readings are
+the declared account's, so `st usage` and the pool show the account once, with the live reading.
+Identity readings that share no seat with a declared account are never assigned to one.
+
+A limits reading older than the limits cadence (`[limits] fresh`, one hour unless configured) is the
+last known reading, not the current one. `st --json usage` marks it `stale: true`, and `st usage`
+ends its row with `stale`. The pool chooses by the account's freshest reading.
 
 Limits include `identified`: true when the source names a provider identity or a declared account,
 false when it names neither. Older servers omit this additive metadata. Identity and quota

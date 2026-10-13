@@ -8,6 +8,14 @@ const FINAL_STEP_FAULT_MS: u128 = 24 * 60 * 60 * 1000;
 /// that never starts parks nothing and fails nothing, so nobody finds it by looking.
 const SEAT_NOT_STARTED_MS: u128 = 10 * 60 * 1000;
 
+/// The open steps assigned to a person (`?1` NULL for any person). A range on the assignee index,
+/// not `LIKE 'person/%'`: SQLite does not use an index for a case-insensitive LIKE, so that read
+/// every step run in the store. Assignees are written in lower case; the range also drops an
+/// upper-case `Person/` spelling that LIKE would have matched. A test pins the plan.
+const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
+    WHERE assignee>='person/' AND assignee<'person0'
+    AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
+
 impl Store {
     /// The mission context of a person ask a mission step made: its mission, and the step that
     /// waits on the answer with its goal. `None` for a standalone ask or an update, which belong
@@ -190,14 +198,7 @@ impl Store {
     ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        let mut query = connection.prepare(
-            // A range on the assignee index, not `LIKE 'person/%'`: SQLite does not use an index
-            // for a case-insensitive LIKE, so that read every step run in the store. Assignees
-            // are written in lower case; the range also drops an upper-case `Person/` spelling
-            // that LIKE would have matched.
-            "SELECT subject FROM step_runs WHERE assignee>='person/' AND assignee<'person0'
-            AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject",
-        )?;
+        let mut query = connection.prepare(PERSON_STEPS_QUERY)?;
         let subjects = query
             .query_map([person], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -594,6 +595,20 @@ impl Store {
             .unwrap_or_default();
         if !matches!(status, "failed" | "cancelled") {
             return Ok(None);
+        }
+        if status == "cancelled" {
+            // Cancellation before admission changes the loop step's state without ever
+            // starting a round. A stopped-loop fault needs round activity in that case;
+            // structural failures still need attention even before the first round.
+            smallclaims::touched::note_read(|| format!("children-of-step:{}", view.subject));
+            let has_round: bool = self.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE parent_step_run=?1)",
+                [&view.subject],
+                |row| row.get(0),
+            )?;
+            if !has_round {
+                return Ok(None);
+            }
         }
         let reason = state
             .body
@@ -992,9 +1007,18 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        self.broken_gate_items_from_failures(person, as_of, self.operational_failures()?)
+    }
+
+    pub(super) fn broken_gate_items_from_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+        failures: Vec<AttentionRequestView>,
+    ) -> Result<Vec<AttentionItemView>> {
         let connection = self.readers.get();
         let mut items = Vec::new();
-        for failure in self.operational_failures()? {
+        for failure in failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -1037,18 +1061,32 @@ impl Store {
         Ok(items)
     }
 
+    // The independently folding operational reader is now used only by parity controls.
+    #[cfg(test)]
     pub(super) fn operational_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        let (items, _) = self.operational_attention_items_with_failures(person, as_of)?;
+        Ok(items)
+    }
+
+    /// Return this call's history cut for the broken-gate reducer, without caching authority.
+    /// Read it at its original first-use point, after the derived fault families below.
+    pub(super) fn operational_attention_items_with_failures(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
         let connection = self.readers.get();
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
         items.extend(self.parked_runtime_attention_items(person, as_of)?);
         items.extend(self.unstarted_seat_attention_items(person, as_of)?);
-        for failure in self.operational_failures()? {
+        let failures = self.operational_failures()?;
+        for failure in &failures {
             if failure.status != "pending"
                 || failure.requested_at_unix_ms > as_of
                 || person.is_some_and(|person| person != failure.reviewer)
@@ -1176,14 +1214,14 @@ impl Store {
             // Diagnostic history stays immutable; current work/runtime state decides whether
             // this episode still needs an owner. This changes no canonical timing fold.
             let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake(&failure, as_of)? else {
+                let Some(context) = self.current_exhausted_work_wake(failure, as_of)? else {
                     continue;
                 };
                 Some(context)
             } else {
                 None
             };
-            let mut item = attention_item_from_failure(failure);
+            let mut item = attention_item_from_failure(failure.clone());
             item.kind = "fault".into();
             if f["condition"] == MISSING_AGENT_CONDITION {
                 item.mission_run = Some(source.clone());
@@ -1211,7 +1249,7 @@ impl Store {
             }
             items.push(item);
         }
-        Ok(items)
+        Ok((items, failures))
     }
 
     fn current_exhausted_work_wake(
@@ -1597,5 +1635,32 @@ impl Store {
             expected_subject: None,
             idempotency_key: Some(native_prompt_answer_key(&claim)),
         })
+    }
+}
+
+#[cfg(test)]
+mod person_steps_plan_tests {
+    use super::*;
+
+    #[test]
+    fn the_person_step_read_is_a_search_of_the_assignee_index_not_a_scan() {
+        let store = Store::open_memory("alder").unwrap();
+        let connection = store.readers.get();
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {PERSON_STEPS_QUERY}"))
+            .unwrap()
+            .query_map([None::<String>], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|line| line.starts_with("SEARCH step_runs") && line.contains("step_runs_assignee_index")),
+            "the person-step read must search step_runs_assignee_index: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line.starts_with("SCAN step_runs")),
+            "the person-step read must not scan step_runs: {plan:?}"
+        );
     }
 }

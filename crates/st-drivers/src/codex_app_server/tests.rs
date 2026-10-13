@@ -3196,6 +3196,7 @@ fn expected_resume_waits_for_tui_loaded_thread_and_binds_from_control_response()
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: false,
                 preloaded: None,
@@ -3218,6 +3219,7 @@ fn expected_resume_waits_for_tui_loaded_thread_and_binds_from_control_response()
             sandbox: Some(sandbox),
             model: None,
             effort: None,
+                    permissions: None,
         }) if policy == "never" && sandbox == "danger-full-access"
     ));
     assert!(matches!(
@@ -3310,6 +3312,7 @@ fn declared_resume_policy_preloads_before_the_tui_can_load_read_only() {
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: true,
                 preloaded: Some(preloaded_tx),
@@ -3422,6 +3425,7 @@ fn rejected_declared_resume_settings_fail_without_downgrading_the_policy() {
                     sandbox: Some("danger-full-access".into()),
                     model: None,
                     effort: None,
+                    permissions: None,
                 }),
                 preload: false,
                 preloaded: None,
@@ -3550,6 +3554,7 @@ fn successful_resume_with_wrong_model_or_effort_fails_before_binding() {
                         sandbox: Some("danger-full-access".into()),
                         model: Some("gpt-6.1-sol".into()),
                         effort: Some("high".into()),
+                    permissions: None,
                     }),
                     preload: false,
                     preloaded: None,
@@ -6749,6 +6754,7 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
             sandbox: Some("workspace-write".into()),
             model: Some("gpt-test".into()),
             effort: None,
+                    permissions: None,
         }
     );
     assert_eq!(
@@ -6827,6 +6833,7 @@ fn automatic_remote_resume_omits_permission_overrides_but_fresh_launch_is_exact(
             sandbox: Some("danger-full-access".into()),
             model: Some("gpt-5.6-sol".into()),
             effort: Some("xhigh".into()),
+            permissions: None,
         })
     );
     let request = control_resume_request("thread-prior", prepared.resume_permissions.as_ref());
@@ -8340,4 +8347,111 @@ fn native_codex_login_recovery_requires_a_successful_current_thread_turn() {
             .provider_auth,
         None
     );
+}
+
+#[test]
+fn managed_codex_policy_preserves_authored_permissions_and_projects_auto_on_resume() {
+    use crate::access::AccessMode;
+    let socket = Some("/run/example/st.sock");
+    let workspace = Path::new("/work/example");
+    let plain = vec!["codex".into(), "--model".into(), "gpt-example".into(), "boot".into()];
+    let bypass = managed_codex_argv(AccessMode::Bypass, socket, workspace, plain.clone()).unwrap();
+    assert!(bypass.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    assert!(bypass.contains(&"--dangerously-bypass-hook-trust".into()));
+    assert!(bypass.ends_with(&plain[1..]));
+    let auto = managed_codex_argv(AccessMode::Auto, socket, workspace, plain).unwrap();
+    assert!(!auto.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    // The remote TUI drops the named profile's network table; only the legacy key reaches the
+    // thread, and without it a seat's claim gets EPERM on the daemon socket.
+    let has_config = |value: &str| auto.windows(2).any(|pair| pair[0] == "-c" && pair[1] == value);
+    assert!(has_config("sandbox_workspace_write.network_access=true"));
+    assert!(has_config("web_search=\"live\""));
+    assert!(!bypass.iter().any(|arg| arg.starts_with("sandbox_workspace_write")));
+    let profile = auto.iter().find(|value| value.starts_with("permissions.st-managed=")).unwrap();
+    let parsed: toml::Value = toml::from_str(profile).unwrap();
+    assert_eq!(parsed["permissions"]["st-managed"]["workspace_roots"]["/work/example"].as_bool(), Some(true));
+    assert_eq!(parsed["permissions"]["st-managed"]["network"]["unix_sockets"]["/run/example/st.sock"].as_str(), Some("allow"));
+    let resumed = prepare_controlled_launch_args("unix:///control.sock", &auto[1..], Some("prior")).unwrap();
+    // Codex 0.160.1 refuses a remote resume whose argv carries any permission config, so the
+    // resumed TUI keeps the non-permission options only; the app server holds the permission ones.
+    let tui_config: Vec<&str> = resumed
+        .tui_args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert!(tui_config.iter().all(|value| !is_permission_config(value)), "{tui_config:?}");
+    assert!(tui_config.contains(&"web_search=\"live\""), "{tui_config:?}");
+    assert_eq!(&resumed.tui_args[..3], ["--remote", "unix:///control.sock", "resume"].map(String::from));
+    assert!(resumed.tui_args.contains(&"prior".to_string()));
+    for key in ["permissions.st-managed=", "default_permissions=", "approvals_reviewer=", "sandbox_workspace_write.network_access="] {
+        assert!(resumed.server_args.iter().any(|arg| arg.starts_with(key)), "the app server keeps {key}");
+    }
+    let overrides = resumed.resume_permissions.unwrap();
+    assert_eq!(overrides.permissions.as_deref(), Some("st-managed"));
+    assert_eq!(overrides.approval_policy.as_deref(), Some("on-request"));
+    assert_eq!(overrides.approvals_reviewer.as_deref(), Some("auto_review"));
+    assert!(overrides.sandbox.is_none());
+    let request = control_resume_request("prior", Some(&overrides));
+    assert_eq!(request["params"]["permissions"], "st-managed");
+    let accepted = json!({"result":{"approvalPolicy":"on-request", "approvalsReviewer":"auto_review", "activePermissionProfile":{"id":"st-managed"}, "model":"gpt-example"}});
+    assert!(resume_permission_overrides_applied(&accepted, &overrides));
+    assert!(!resume_permission_overrides_applied(&json!({"result":{}}), &overrides));
+    for authored in [
+        vec!["--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"],
+        vec!["-s", "workspace-write"], vec!["-sworkspace-write"],
+        vec!["--config=default_permissions=custom"], vec!["-capproval_policy=never"],
+        vec!["-c", "sandbox_mode=read-only"],
+    ] {
+        let mut argv = vec!["codex".to_owned()];
+        argv.extend(authored.into_iter().map(str::to_owned));
+        argv.push("boot".into());
+        let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, argv.clone()).unwrap();
+        assert!(merged.ends_with(&argv[1..]));
+        assert!(!merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+        assert_eq!(merged.iter().filter(|arg| arg.as_str() == "--dangerously-bypass-hook-trust").count(), 1);
+    }
+    let prompt = vec!["codex".into(), "--".into(), "--dangerously-bypass-approvals-and-sandbox".into()];
+    let merged = managed_codex_argv(AccessMode::Auto, socket, workspace, prompt).unwrap();
+    assert!(merged.iter().any(|arg| arg.starts_with("permissions.st-managed=")));
+}
+
+#[test]
+fn an_authored_permission_config_leaves_the_resume_argv_and_is_projected_through_thread_resume() {
+    // The remote TUI refuses permission config on a resume, with or without a managed profile, so
+    // an authored `-c` permission entry used to fail a resume too. It now leaves the TUI argv, and
+    // the typed thread/resume carries what it can express; `sandbox_workspace_write.*` and
+    // permission profile tables stay on the app server only.
+    let authored: Vec<String> = [
+        "--model", "gpt-example", "-c", "sandbox_mode=\"read-only\"", "--config=approval_policy=never",
+        "-c", "sandbox_workspace_write.network_access=true", "-c", "web_search=\"live\"", "boot",
+    ]
+    .map(String::from)
+    .to_vec();
+    let resumed = prepare_controlled_launch_args("unix:///control.sock", &authored, Some("prior")).unwrap();
+    let joined = resumed.tui_args.join(" ");
+    for gone in ["sandbox_mode", "approval_policy", "sandbox_workspace_write"] {
+        assert!(!joined.contains(gone), "{gone} must leave the resume argv: {joined}");
+    }
+    assert!(joined.contains("web_search=\"live\"") && joined.contains("--model gpt-example"), "{joined}");
+    let overrides = resumed.resume_permissions.unwrap();
+    assert_eq!(overrides.sandbox.as_deref(), Some("read-only"));
+    assert_eq!(overrides.approval_policy.as_deref(), Some("never"));
+    for kept in ["sandbox_mode=", "approval_policy=never", "sandbox_workspace_write.network_access=true"] {
+        assert!(resumed.server_args.iter().any(|arg| arg.contains(kept)), "the app server keeps {kept}");
+    }
+}
+
+#[test]
+fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
+    use crate::access::AccessMode;
+    let workspace = Path::new("/work/example");
+    let plain = vec!["codex".into(), "boot".into()];
+    let bypass = managed_codex_argv(AccessMode::Bypass, None, workspace, plain.clone()).unwrap();
+    assert!(bypass.contains(&"--dangerously-bypass-approvals-and-sandbox".into()));
+    let authored = vec!["codex".into(), "--dangerously-bypass-approvals-and-sandbox".into(), "boot".into()];
+    let preserved = managed_codex_argv(AccessMode::Auto, None, workspace, authored.clone()).unwrap();
+    assert!(preserved.ends_with(&authored[1..]));
+    let error = managed_codex_argv(AccessMode::Auto, None, workspace, plain).unwrap_err();
+    assert!(error.to_string().contains("ST3_ENDPOINT"));
 }

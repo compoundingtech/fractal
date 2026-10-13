@@ -13,7 +13,7 @@ const server = await createServer({
   server: { middlewareMode: true },
 })
 after(() => server.close())
-const { Transcript } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
+const { Transcript, LiveActivity } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
 const { EmbraceRuntimeProvider } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
 
 const now = Date.parse('2026-01-15T12:30:00Z')
@@ -27,4 +27,16 @@ for (const turns of [[], [turn]]) test(`Transcript server-renders ${turns.length
   let markup
   assert.doesNotThrow(() => { markup = renderToStaticMarkup(element) })
   assert.match(markup, /Row projection/)
+})
+
+test('live activity shares compact header durations and host-supplied waiting state', () => {
+  for (const [elapsed, duration] of [[12000, '12s'], [60000, '1m'], [185000, '3m 05s'], [3720000, '1h 02m'], [14820000, '4h 07m'], [16027000, '4h 27m']]) {
+    for (const tag of ['Working', 'WaitingForAnswer']) {
+      const markup = renderToStaticMarkup(React.createElement(LiveActivity, { state: { _tag: tag }, startedAt: new Date(now - elapsed).toISOString(), now }))
+      assert.ok(markup.includes(tag === 'Working' ? `Working for ${duration}` : `Waiting for your answer · ${duration}`))
+    }
+  }
+  const noStart = renderToStaticMarkup(React.createElement(LiveActivity, { state: { _tag: 'WaitingForAnswer' }, now }))
+  assert.ok(noStart.includes('Waiting for your answer'))
+  assert.ok(!noStart.includes('Working'))
 })

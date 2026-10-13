@@ -1,4 +1,7 @@
 import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type St3Client, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/st3-client';
+import type { InventoryName } from '@smalltalk/st3-views';
+import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
+import type { HeartbeatSocketFactory } from './collectionSocket';
 import type { ConversationHeader, HeaderField } from '@smalltalk/st3-views';
 import { TERMINAL_RESTARTED, withFreshTerminalFence, type Foreground, type TerminalFollowHandlers } from './terminalControls';
 
@@ -46,18 +49,14 @@ export type ConversationFrame = { replace: boolean; items: TimelineEntry[]; hasM
 export type ConversationHandlers = {
   /** `replace` carries the newest page; otherwise the entries changed since the last frame. */
   onEntries: (frame: ConversationFrame) => void;
-  /** A problem to show; an empty string clears it. */
-  onIssue: (issue: string) => void;
+  /** A problem to show; an empty string clears it. `stopped`: st refused for good, so nothing
+   * asks again until the person follows the conversation again. */
+  onIssue: (issue: string, stopped?: boolean) => void;
 };
 
-type Client = Pick<St3Client, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'> & Partial<Pick<St3Client, 'capabilities'>>;
-/** How often a live socket is checked, and how long one check may take. */
-const PROBE_EVERY_MS = 10_000, PROBE_WAIT_MS = 5_000, QUIET_BEFORE_PROBE_MS = 10_000;
-
-/** Whether st is asked anything: not while frames arrive, only once the stream has been quiet. */
-export function shouldProbe(lastFrameAt: number, now: number): boolean {
-  return now - lastFrameAt >= QUIET_BEFORE_PROBE_MS;
-}
+type Client = Pick<St3Client, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'>;
+// Three missed eight-second protocol heartbeats bound a blackholed connection.
+export const HEARTBEAT_WAIT_MS = 24_000;
 type Follow = { close(): void };
 
 function errorCode(error: unknown): string | undefined {
@@ -123,9 +122,8 @@ export class Feed {
   private missionUsers = 0;
   private missionsLeave: ReturnType<typeof setTimeout> | undefined;
   private readonly missionsGraceMs: number;
-  private probe: ReturnType<typeof setInterval> | undefined;
-  /** When a frame last arrived on the open socket. */
-  private lastFrameAt = Date.now();
+  private heartbeat: ReturnType<typeof setTimeout> | undefined;
+  private readonly inventory: InventoryFeed;
   private readonly unsubscribe: () => void;
   private readonly client: Client;
   private readonly handlers: FeedHandlers;
@@ -133,7 +131,8 @@ export class Feed {
   private readonly newActionId: () => string;
   private readonly retryDelaysMs: readonly number[];
 
-  constructor(client: Client, handlers: FeedHandlers, foreground: Foreground, newActionId: () => string, retryDelaysMs: readonly number[] = RETRY_DELAYS_MS, reportAfterMs = 1000, followMissions = true, missionsGraceMs = 30_000) {
+  constructor(client: Client, handlers: FeedHandlers, foreground: Foreground, newActionId: () => string, retryDelaysMs: readonly number[] = RETRY_DELAYS_MS, reportAfterMs = 1000, followMissions = true, missionsGraceMs = 30_000, private readonly socket?: HeartbeatSocketFactory) {
+    this.inventory = new InventoryFeed(missionsGraceMs);
     this.reportAfterMs = reportAfterMs;
     this.missionsGraceMs = missionsGraceMs;
     this.missions = followMissions;
@@ -160,6 +159,7 @@ export class Feed {
     if (this.closed) return;
     clearTimeout(this.missionsLeave);
     this.terminal?.close();
+    this.inventory.close();
     this.closed = true;
     this.suspend();
     this.unsubscribe();
@@ -224,7 +224,9 @@ export class Feed {
     this.stream = undefined;
     this.live = false;
     this.windows = {};
-    this.stopProbing();
+    clearTimeout(this.heartbeat);
+    this.heartbeat = undefined;
+    this.inventory.suspend();
     for (const retry of Object.values(this.retries)) clearTimeout(retry?.timer);
     this.retries = {};
     for (const report of Object.values(this.reports)) clearTimeout(report);
@@ -233,29 +235,22 @@ export class Feed {
     open?.close();
   }
 
-  /**
-   * A socket can stay open and silent while st is wedged or the network blackholed it, and the
-   * app would say live with old data. Nothing is asked of st while the stream speaks: any frame
-   * is proof of life. Only once it has been quiet for 10 s is st asked something small; a slow
-   * answer is asked again at once, and only two misses in a row drop the socket.
-   */
-  private startProbing(): void {
-    const capabilities = this.client.capabilities?.bind(this.client);
-    if (this.probe || !capabilities) return;
-    const current = this.attempt;
-    const once = () => Promise.race([capabilities().then(() => true, () => false), new Promise<boolean>(resolve => setTimeout(() => resolve(false), PROBE_WAIT_MS))]);
-    this.probe = setInterval(() => {
-      if (!shouldProbe(this.lastFrameAt, Date.now())) return;
-      void (async () => {
-        if (await once() || await once()) return;
-        if (current === this.attempt && !this.closed) this.dropped(new Error('st stopped answering'));
-      })();
-    }, PROBE_EVERY_MS);
+  /** A received frame or native protocol ping resets the deadline without sending a read. */
+  private heard(): void {
+    if (!this.socket) return; // Node fakes or Expo Go do not expose protocol control frames.
+    clearTimeout(this.heartbeat);
+    this.heartbeat = setTimeout(() => this.dropped(new Error('st stopped answering')), HEARTBEAT_WAIT_MS);
   }
 
-  private stopProbing(): void {
-    clearInterval(this.probe);
-    this.probe = undefined;
+  setInventoryGranted(granted: boolean): void { this.inventory.setGranted(granted); }
+  watchInventory<K extends InventoryName>(name: K, handlers: InventoryHandlers<K>, hours?: 24 | 168 | 720): () => void {
+    return this.inventory.watch(name, handlers, hours);
+  }
+  refreshInventories(names?: readonly InventoryName[]): void { this.inventory.refresh(names); }
+  /** Explicit pull to refresh asks the held base windows for fresh snapshots too. */
+  refresh(): void {
+    for (const name of Object.keys(FEED_WINDOWS) as FeedWindow[]) this.subscribeWindow(name);
+    this.inventory.refresh();
   }
 
   /** Ask again for a window st stopped sending, after a wait that grows; say so the first time only. */
@@ -279,17 +274,24 @@ export class Feed {
 
   private async connect(): Promise<void> {
     this.suspend();
+    this.inventory.setGranted(false);
     const current = this.attempt;
     const stale = () => this.closed || current !== this.attempt;
     this.handlers.onConnection(this.failures ? 'reconnecting' : 'connecting');
     try {
       const opened = await this.client.collectionStream({
-        onFrame: frame => { if (!stale()) { this.lastFrameAt = Date.now(); this.frame(frame); } },
+        ...(this.socket ? { socket: (url, protocols, headers) => {
+          const socket = this.socket!(url, protocols, headers);
+          socket.onping = () => { if (!stale()) this.heard(); };
+          return socket;
+        } } : {}),
+        onFrame: frame => { if (!stale()) { this.heard(); this.frame(frame); } },
         onEnd: error => { if (!stale()) this.dropped(error ?? new Error('The collections socket closed.')); },
       });
       if (stale()) { opened.close(); return; }
-      this.lastFrameAt = Date.now();
       this.stream = opened;
+      this.heard();
+      this.inventory.open(opened);
       for (const name of Object.keys(FEED_WINDOWS) as FeedWindow[]) if (name !== 'missions' || this.missions) this.subscribeWindow(name);
       if (this.conversation) opened.subscribeConversation(CONVERSATION, this.conversation.target);
       if (this.glasses) { this.glasses.window = undefined; opened.subscribeGlasses(GLASSES); }
@@ -339,11 +341,7 @@ export class Feed {
   }
 
   private dropped(error: unknown): void {
-    this.stream = undefined;
-    this.live = false;
-    this.windows = {};
-    this.stopProbing();
-    this.terminal?.socketLost();
+    this.suspend();
     if (!this.foreground.active) return;
     const delay = this.retryDelaysMs[Math.min(this.failures, this.retryDelaysMs.length - 1)];
     this.failures++;
@@ -352,6 +350,7 @@ export class Feed {
   }
 
   private frame(frame: CollectionFrame): void {
+    if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;
@@ -381,7 +380,7 @@ export class Feed {
       this.loaded(name);
       if (frame.kind === 'snapshot') {
         this.failures = 0;
-        if (!this.live) { this.live = true; this.handlers.onConnection('live'); this.startProbing(); }
+        if (!this.live) { this.live = true; this.handlers.onConnection('live'); }
       }
       const items = next.items.filter(item => item.kind === KINDS[name]) as FeedLists[typeof name];
       this.handlers.onWindow(name, items, next.hasMore, next.snapshot);
@@ -417,7 +416,7 @@ export class Feed {
         // once and stop, as stui does.
         if (!conversationMayClear(frame.code)) {
           clearTimeout(follow.timer);
-          follow.handlers.onIssue(plainMessage(frame.code, frame.message));
+          follow.handlers.onIssue(plainMessage(frame.code, frame.message), true);
           return;
         }
         // The subscription ended. Whatever stopped it may clear (a busy store moved under the

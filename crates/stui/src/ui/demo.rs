@@ -63,12 +63,14 @@ pub fn world() -> World {
         "This codex process was found running on lark, but st cannot tell which session file it writes, so there is no conversation to show. Start it through st to see it here.",
     )));
     World {
+        inventory_supported: None, inventory_partial: Vec::new(),
         person: s("person/robin"),
         host: s("lark"),
         link: Link::Live,
         diverged: Vec::new(),
         stale: Vec::new(),
         missions_followed: true,
+        settled: true,
         active_missions: None,
         attention: Load::Ready(attention()),
         agents: Load::Ready(agents()),
@@ -137,12 +139,14 @@ pub fn world() -> World {
 /// The same world before anything has loaded, so the first second is honest.
 pub fn loading() -> World {
     World {
+        inventory_supported: None, inventory_partial: Vec::new(),
         person: s("person/robin"),
         host: s("lark"),
         link: Link::Connecting,
         diverged: Vec::new(),
         stale: Vec::new(),
         missions_followed: true,
+        settled: true,
         active_missions: None,
         attention: Load::Loading,
         agents: Load::Loading,

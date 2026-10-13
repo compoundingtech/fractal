@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { API_VERSION, ClientError, St3Client, isTransient, notApplied, outcomeUnknown, plainError, retryTransient, type Arrangement, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
+import { API_VERSION, ClientError, St3Client, isTransient, notApplied, outcomeUnknown, plainError, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/st3-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, type DeviceKey, type Unsigned } from '@smalltalk/st3-views';
 import app from './app.json';
 import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
@@ -15,6 +15,7 @@ import { rememberBounded } from './boundedCache';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
 import { Feed } from './feed';
+import { nativeCollectionSocket } from './modules/st-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, type Context } from './observations';
 import { buildFabricDefault, decodeFabricTarget, encodeFabricTarget, fabricGatewayId, fabricTargetFromText, isFabricGatewayId, type FabricTarget } from './fabricTarget';
@@ -25,6 +26,8 @@ import { gatewayFetch } from './gatewayFetch';
 import { normalizeGatewayUrl } from './gatewayUrl';
 import { tabOrder, type Tab } from './tabs';
 import type { SidebarResource } from './sidebarView';
+import { readSidebarResources } from './sidebarResources';
+import { sidebarArrangement, uuid7 } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
 
@@ -36,7 +39,7 @@ export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 
-const URL_KEY = 'st3.gateway.url', ORDER_KEY = 'st3.tabs.order', CREDENTIAL_KEY = 'st3.device.credential';
+const URL_KEY = 'st3.gateway.url', ORDER_KEY = 'st3.tabs.order.resources-v1', CREDENTIAL_KEY = 'st3.device.credential';
 // The enrolled signing key's public half, the person it signs as and its grant chain (the private
 // half stays in the native module).
 const SIGNING_KEY = 'st3.device.signing';
@@ -45,8 +48,6 @@ const SIGNING_KEY = 'st3.device.signing';
 const PROFILE_KEY = 'st3.device.profile';
 type PhoneSigning = DeviceKey & { handle?: string };
 type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string };
-// Glasses are an experiment (mission fleet/stui/glass): off unless the person turns them on here.
-const GLASSES_KEY = 'st3.experiments.glasses';
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
 // The carrier: the saved gateway (default) or fabric, an opt-in; the saved fabric target; and whether
@@ -121,16 +122,17 @@ function useAppStore(proof?: FabricProfile) {
   const [missionsLoaded, setMissionsLoaded] = useState(false);
   const [error, setError] = useState(''), [pairingIssue, setPairingIssue] = useState(''), [busy, setBusy] = useState(false);
   const [historicalSessions, setHistoricalSessions] = useState<SessionView[]>([]);
-  // The Agents tab shows a list or a tree, as stui's `t` toggles. Debug links can set it, and ask
-  // the visible screen to scroll for screenshots.
+  // The Agents list shows a list or a tree, as stui's `t` toggles.
   const [treeView, setTreeView] = useState(false);
-  // Spaces are how stui works, so the tab is on unless this phone turned it off.
-  const [glassesOn, setGlassesOn] = useState(true);
   const [simpleOn, setSimpleOn] = useState(true);
   const [arrangements, setArrangements] = useState<Arrangement[]>([]), [arrangementsIssue, setArrangementsIssue] = useState('');
   const [sidebarTerminals, setSidebarTerminals] = useState<Runtime[]>([]), [sidebarTerminalsIssue, setSidebarTerminalsIssue] = useState('');
   const [glasses, setGlasses] = useState<Glass[]>([]), [glassesIssue, setGlassesIssue] = useState('');
   const [scrollRequest, setScrollRequest] = useState<{ y: number; at: number } | null>(null);
+  const [sidebarResources, setSidebarResources] = useState<ResourceObservation[]>([]), [sidebarResourcesIssue, setSidebarResourcesIssue] = useState('');
+  const sidebarResourcesRead = useRef<{ focused?: string; promise: Promise<void> } | null>(null);
+  const sidebarCreation = useRef<{ subject: string; created: boolean } | null>(null);
+  const sidebarWriting = useRef(false);
   const sidebarSeen = useRef(new Map<string, SidebarResource>());
   const cachedActor = useRef(''), cacheSavedAt = useRef(0), cacheGeneration = useRef(0);
   const conversationCache = useRef(new Map<string, Conversation<TimelineEntry>>()), draftCache = useRef(new Map<string, string>());
@@ -244,12 +246,17 @@ function useAppStore(proof?: FabricProfile) {
     const gateway = paired?.url ?? (u.status === 'fulfilled' ? u.value : null);
     const bearer = paired?.credential ?? (c.status === 'fulfilled' ? c.value : null);
     if (gateway) { setUrl(gateway); setUrlDraft(gateway); }
-    // A stored order may use earlier tab names; they still count.
+    // Only the current four-tab order is read; old phone preferences are retired.
     if (o.status === 'fulfilled' && o.value) { try { setOrder(tabOrder(JSON.parse(o.value))); } catch { /* use default */ } }
     if (bearer) {
       if (gateway && p.status === 'fulfilled') {
         const cache = hydrateProjectionForPairedDevice(p.value, gateway, true);
-        if (cache) { setData(cache.data); setTruncated(Object.fromEntries(cache.truncated.map(key => [key, true]))); setHasSynced(true); setStatus('connecting'); cachedActor.current = cache.actor; cacheSavedAt.current = cache.savedAt; setCachedHostId(cache.hostId); }
+        if (cache) {
+          setData(cache.data); setGlasses(cache.workspace.glasses); setArrangements(cache.workspace.arrangements);
+          setMissionsLoaded(cache.data.missions.length > 0); setTruncated(Object.fromEntries(cache.truncated.map(key => [key, true])));
+          setHasSynced(true); setStatus('connecting'); setCachedHostId(cache.hostId);
+          cachedActor.current = cache.actor; cacheSavedAt.current = cache.savedAt;
+        }
       }
       setCredential(bearer);
     }
@@ -263,23 +270,24 @@ function useAppStore(proof?: FabricProfile) {
   }, [proof?.url, proof?.credential]);
 
   function clearCaches() {
-    sidebarSeen.current.clear();
+    sidebarSeen.current.clear(); sidebarCreation.current = null;
     cachedActor.current = ''; cacheSavedAt.current = 0;
     conversationCache.current.clear(); draftCache.current.clear(); missionDetailCache.current.clear();
-    setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]);
+    setGlasses([]); setGlassesIssue(''); setArrangements([]); setArrangementsIssue(''); setSidebarTerminals([]); setSidebarResources([]); setSidebarResourcesIssue(''); sidebarResourcesRead.current = null;
     setData(emptyData); setTruncated({}); setHasSynced(false); setCachedHostId(''); setSnapshot(null);
   }
   async function clearCachedProjection() { cacheGeneration.current++; clearCaches(); if (!proof) await AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
 
   // Capabilities once per connection: limits, the session's actor, and what it may control.
-  const loadCapabilities = useCallback(async () => {
+  const loadCapabilities = useCallback(async (current: () => boolean) => {
     if (!client) return;
     try {
       const capability = await client.capabilities();
+      if (!current()) return;
       if (cachedActor.current && cachedActor.current !== capability.value.session_actor) { clearCaches(); if (!proofRef.current) void AsyncStorage.removeItem(PROJECTION_CACHE_KEY).catch(() => {}); }
       cachedActor.current = capability.value.session_actor;
       setCaps(capability.value);
-    } catch (e) { if (e instanceof ClientError && e.status >= 400 && e.status < 500) setError(errorText(e)); }
+    } catch (e) { if (current()) setError(errorText(e)); }
   }, [client]);
 
   // One collections socket per paired gateway and credential keeps attention, missions, and agents
@@ -287,7 +295,9 @@ function useAppStore(proof?: FabricProfile) {
   useEffect(() => {
     if (!client || !credential) { if (!credential) setStatus('setup'); return; }
     const generation = cacheGeneration.current;
-    const current = () => generation === cacheGeneration.current;
+    let active = true;
+    let connection = 0;
+    const current = () => active && generation === cacheGeneration.current;
     attentionLive.current = false;
     if (!proofRef.current && timers.current.connect === null) timers.current.connect = observations.begin('ios-connect');
     const opened = new Feed(client, {
@@ -325,21 +335,26 @@ function useAppStore(proof?: FabricProfile) {
             if (state === 'reconnecting' && held.everLive && held.recover === null) held.recover = observations.begin('ios-recover');
           }
         }
-        if (state === 'live') { setError(''); void loadCapabilities(); carrier.feedLive(); feedMisses.current = 0; }
+        if (state !== 'live') { connection++; setCaps(null); }
+        if (state === 'live') {
+          const epoch = connection;
+          setError(''); void loadCapabilities(() => current() && epoch === connection);
+          carrier.feedLive(); feedMisses.current = 0;
+        }
         // The bridge's own connection failing twice running (one dropped socket the feed mends itself):
         // a refusal ends the trial, anything else is redialed.
         else if (state === 'reconnecting' && routeRef.current.kind === 'fabric' && ++feedMisses.current >= 2) void carrier.feedFailed();
       },
       onWindowError: (name, message) => { if (current()) setLoadErrors(previous => ({ ...previous, [name]: message })); },
-      // The missions window is followed only while a missions screen shows: what it held is out of date.
-      onWindowStopped: name => { if (current() && name === 'missions') { setData(previous => ({ ...previous, missions: [] })); setMissionsLoaded(false); } },
+      // Releasing a subscription keeps its last rows for navigation and offline use.
+      // The next focused mission screen follows again and replaces them with a snapshot.
       onConversationFrame: (rows, replace) => { if (current()) proofRef.current?.record('conversation', { rows, replace }); },
       onTiming: (target, ms) => { if (current() && !proofRef.current) observations.observe(target, ms); },
-    }, foreground.current, actionId, undefined, undefined, false);
+    }, foreground.current, actionId, undefined, undefined, false, undefined, nativeCollectionSocket);
     // Paired: connecting from here on, even while the app waits to be active before it dials.
     setStatus(previous => previous === 'setup' ? 'connecting' : previous);
     setFeed(opened);
-    return () => { opened.close(); setFeed(held => held === opened ? null : held); };
+    return () => { active = false; opened.close(); setFeed(held => held === opened ? null : held); };
   }, [client, credential, loadCapabilities, observations, carrier]);
   // No client yet: either nothing is paired, fabric is opening, or neither route can be used.
   useEffect(() => {
@@ -356,18 +371,21 @@ function useAppStore(proof?: FabricProfile) {
     return () => subscription.remove();
   }, []);
 
-  // Glasses: followed on the feed's socket while the experiment is on and the gateway grants them.
-  useEffect(() => { void AsyncStorage.getItem(GLASSES_KEY).then(value => setGlassesOn(value !== '0')).catch(() => {}); }, []);
+  const inventoryGranted = caps === null ? undefined : caps.capabilities.some(capability => capability.id === 'inventory-collections' && capability.version >= 1 && capability.state === 'granted');
+  useEffect(() => { feed?.setInventoryGranted(inventoryGranted === true); }, [feed, inventoryGranted]);
+
+  // Spaces: followed on the feed's socket when the gateway grants them.
   useEffect(() => { void AsyncStorage.getItem(SIMPLE_KEY).then(value => setSimpleOn(value !== '0')).catch(() => {}); }, []);
   const arrangementPerson = caps?.session_actor.match(/^person\/[^/]+/)?.[0];
   const arrangementsGranted = caps?.capabilities.some(capability => capability.id === 'arrangements' && capability.version >= 1 && capability.state === 'granted') ?? false;
   useEffect(() => {
-    if (!feed || !arrangementsGranted || !arrangementPerson) { setArrangements([]); setArrangementsIssue(''); return; }
+    if (!feed || !arrangementsGranted || !arrangementPerson) return;
     const follow = feed.followArrangements(arrangementPerson, { onArrangements: setArrangements, onIssue: setArrangementsIssue });
     return () => follow.close();
   }, [feed, arrangementPerson, arrangementsGranted]);
   const loadSidebarTerminals = useCallback(async () => {
     if (!client) return;
+    if (inventoryGranted !== false) return;
     const generation = cacheGeneration.current;
     try {
       const result = await listCollectionPages(options => client.terminalsList({ ...options, history: false }), 200);
@@ -375,30 +393,54 @@ function useAppStore(proof?: FabricProfile) {
       setSidebarTerminals(result.pages.flatMap(page => page.value.items.filter((item): item is Runtime => item.kind === 'runtime' && !!item.terminal_id)));
       setSidebarTerminalsIssue(result.truncated ? 'More terminals exist beyond this window.' : '');
     } catch (error) { if (generation === cacheGeneration.current) setSidebarTerminalsIssue(errorText(error)); }
-  }, [client]);
+  }, [client, inventoryGranted]);
+  const watchSidebarTerminals = useCallback(() => {
+    if (!feed || inventoryGranted !== true) return () => {};
+    return feed.watchInventory('terminals', {
+      onRows: (rows, hasMore) => { setSidebarTerminals(rows.filter(row => !!row.terminal_id)); setSidebarTerminalsIssue(hasMore ? 'More terminals exist beyond this window.' : ''); },
+      onIssue: setSidebarTerminalsIssue,
+    });
+  }, [feed, inventoryGranted]);
+  const loadSidebarResources = useCallback((focused?: string): Promise<void> => {
+    if (!client || status !== 'online') return Promise.resolve();
+    const generation = cacheGeneration.current;
+    if (sidebarResourcesRead.current) {
+      if (!focused || focused === sidebarResourcesRead.current.focused) return sidebarResourcesRead.current.promise;
+      return sidebarResourcesRead.current.promise.then(() => { if (generation === cacheGeneration.current) return loadSidebarResources(focused); });
+    }
+    const pending = readSidebarResources((filters, options) => client.resourcesList(filters, options), focused).then(result => {
+      if (generation !== cacheGeneration.current) return;
+      setSidebarResources(result.rows); setSidebarResourcesIssue(result.truncated ? 'More graph resources exist beyond this window.' : '');
+    }).catch(error => { if (generation === cacheGeneration.current) setSidebarResourcesIssue(`Resources not available on this connection: ${errorText(error)}`); })
+      .finally(() => { if (sidebarResourcesRead.current?.promise === pending) sidebarResourcesRead.current = null; });
+    sidebarResourcesRead.current = { focused, promise: pending };
+    return pending;
+  }, [client, status]);
   // Version 1 glasses are splits of tab groups; an earlier member's glasses are a shape this app no longer reads.
   const glassesGranted = caps?.capabilities.some(capability => capability.id === 'glasses' && capability.version >= 1 && capability.state === 'granted') ?? false;
   useEffect(() => {
-    if (!feed || !glassesOn || !glassesGranted) { setGlasses([]); return; }
+    if (!feed || !glassesGranted) return;
     const follow = feed.followGlasses({ onGlasses: setGlasses, onIssue: setGlassesIssue });
     return () => follow.close();
-  }, [feed, glassesOn, glassesGranted]);
+  }, [feed, glassesGranted]);
   // Keep the last data for an offline start, saved at most every 10 s while it changes.
   useEffect(() => {
     if (proof || !hasSynced || !snapshot || !caps) return;
     const timer = setTimeout(() => {
       cacheSavedAt.current = Date.now();
       const truncatedKeys = (Object.keys(truncated) as Array<keyof Data>).filter(key => truncated[key]);
-      const encoded = encodeProjectionCache(url, caps.session_actor, snapshot.host_id, snapshot.store_index, { ...data, attention: data.attention.filter(item => !item.closedElsewhere) }, cacheSavedAt.current, truncatedKeys);
+      const encoded = encodeProjectionCache(url, caps.session_actor, snapshot.host_id, snapshot.store_index, { ...data, attention: data.attention.filter(item => !item.closedElsewhere) }, cacheSavedAt.current, truncatedKeys, { glasses, arrangements });
       if (encoded) void AsyncStorage.setItem(PROJECTION_CACHE_KEY, encoded).catch(() => { cacheSavedAt.current = 0; });
     }, Math.max(0, cacheSavedAt.current + 10_000 - Date.now()));
     return () => clearTimeout(timer);
-  }, [caps, data, hasSynced, snapshot, truncated, url]);
+  }, [caps, data, glasses, arrangements, hasSynced, snapshot, truncated, url]);
 
-  // Launches, machines, devices, and sessions have no window: a screen loads them when it opens,
-  // and again after an action there. A list that fails is named; the others still show.
+  // Launches and older daemons retain their HTTP reads. Granted inventory windows carry
+  // action updates themselves, so an action does not reread them.
   const loadLists = useCallback(async (keys: readonly OnDemand[]) => {
     if (!client || !keys.length) return;
+    keys = keys.filter(key => key === 'launches' || inventoryGranted === false);
+    if (!keys.length) return;
     const generation = cacheGeneration.current;
     const limit = Math.min(capsRef.current?.limits.max_page_items ?? 30, 30);
     const read = (key: OnDemand): Promise<{ rows: Data[OnDemand]; truncated: boolean }> => {
@@ -417,7 +459,20 @@ function useAppStore(proof?: FabricProfile) {
         setLoadErrors(previous => { if (!(key in previous)) return previous; const rest = { ...previous }; delete rest[key]; return rest; });
       } else if (!isSnapshotChurn(result.reason)) setLoadErrors(previous => ({ ...previous, [key]: errorText(result.reason) }));
     });
-  }, [client]);
+  }, [client, inventoryGranted]);
+
+  const watchLists = useCallback((keys: readonly OnDemand[]) => {
+    if (inventoryGranted !== true || !feed) return () => {};
+    const stops = keys.filter(key => key !== 'launches').map(key => feed.watchInventory(key as 'machines' | 'devices' | 'sessions', {
+      onRows: (rows, hasMore, at) => {
+        setData(previous => ({ ...previous, [key]: rows }));
+        setTruncated(previous => ({ ...previous, [key]: hasMore }));
+        setSnapshot(at);
+      },
+      onIssue: issue => setLoadErrors(previous => { const next = { ...previous }; if (issue) next[key] = issue; else delete next[key]; return next; }),
+    }));
+    return () => { for (const stop of stops) stop(); };
+  }, [feed, inventoryGranted]);
 
   /** A fence on a snapshot read just now: one read seconds ago has nearly always moved on a busy host. */
   async function fence(revisions: Record<string, string> = {}) {
@@ -545,6 +600,21 @@ function useAppStore(proof?: FabricProfile) {
       setCredential(null); setCaps(null); setPairDraft(null); setPairingIssue(profile?.personRootFingerprint ? '' : REPAIR_WARNING); setHistoricalSessions([]); setStatus('setup');
     },
     /** Complete a person step; `answer` is a structured request's named answer, by id. */
+    async editSidebar(operations: ArrangementOperation[]): Promise<boolean> {
+      if (!client || status !== 'online' || !arrangementPerson || !arrangementsGranted || sidebarWriting.current) return false;
+      const existing = sidebarArrangement(arrangements);
+      const draft = sidebarCreation.current ?? { subject: `arrangement/${arrangementPerson}/${uuid7(Date.now(), Crypto.getRandomBytes(10))}`, created: false };
+      if (!existing) sidebarCreation.current = draft;
+      const creating = !existing && !draft.created;
+      const parameters = { subject: existing?.id ?? draft.subject, owner: arrangementPerson, operations: creating ? [{ op: 'create' as const, name: 'Sidebar' }, ...operations] : operations };
+      const id = actionId();
+      sidebarWriting.current = true;
+      try {
+        const done = await runAction(async () => client.arrangementEdit({ id, idempotency_key: id, fence: await fence(), parameters }));
+        if (done && creating) draft.created = true;
+        return done;
+      } finally { sidebarWriting.current = false; }
+    },
     async done(item: Attention, summary: string, answer?: string) {
       if (!client) return false;
       acted.current.add(item.id);
@@ -758,10 +828,7 @@ function useAppStore(proof?: FabricProfile) {
       setSimpleOn(on);
       if (!proof) void AsyncStorage.setItem(SIMPLE_KEY, on ? '1' : '0').catch(() => {});
     },
-    setGlassesOn(on: boolean) {
-      setGlassesOn(on);
-      if (!proof) void AsyncStorage.setItem(GLASSES_KEY, on ? '1' : '0').catch(() => {});
-    },
+
   };
 
   const knownHostId = snapshot?.host_id ?? cachedHostId;
@@ -770,13 +837,13 @@ function useAppStore(proof?: FabricProfile) {
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
 
   return {
-    order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
+    actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, client,
-    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, actions,
+    gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),
-    glassesOn, glassesGranted, glasses, glassesIssue, simpleOn,
+    glassesGranted, glasses, glassesIssue, simpleOn,
     carrierInfo: { choice: carrierChoice, built: fabricBuilt, target: fabricTarget, fallback: fallbackOn, route: selected.route, routeText: routeLabel(selected.route), pending: selected.pending, issue: selected.issue, fabric: fabricSnapshot, node: fabricNode, path: fabricPath },
-    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals,
+    sidebarSeen, arrangements, arrangementsIssue, sidebarTerminals, sidebarTerminalsIssue, loadSidebarTerminals, watchSidebarTerminals, sidebarResources, sidebarResourcesIssue, loadSidebarResources,
   };
 }
 

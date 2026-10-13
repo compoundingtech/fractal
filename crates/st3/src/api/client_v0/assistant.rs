@@ -279,7 +279,8 @@ fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         .collect::<Option<BTreeSet<_>>>().ok_or_else(|| forbidden("assistant scopes invalid"))?;
     Ok(ClientSession { actor: source["session_actor"].as_str()
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: PRINCIPAL.into(),
-        pairing_grant: Some(granted.subject.clone()), transport, custom_forms:false,
+        pairing_grant: Some(granted.subject.clone()),
+        grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
         conversation_blocks:false, local_peer:false, scopes })
 }
 
@@ -487,6 +488,16 @@ mod tests {
         assert!(!serde_json::to_string(&paired["grant"]).unwrap().contains("credential"));
         assert_eq!(paired["grant"]["consent_evidence"],"axe:igubz7");
         assert!(state.store.claims_for_kind_at("principal.key-granted",None,true,10).unwrap().claims.is_empty());
+        assert!(capabilities(&state,&session).iter()
+            .filter(|capability| capability["id"].as_str().is_some_and(|id| id.starts_with("message.")))
+            .all(|capability| capability["state"] != "granted"));
+        let response=super::super::super::router_for_transport(state.clone(),ClientTransportBoundary::Unix)
+            .oneshot(Request::builder().uri("/v1/client/capabilities")
+                .header(AUTHORIZATION,format!("Bearer {}",paired["credential"].as_str().unwrap()))
+                .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::FORBIDDEN);
+        let body=axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+        assert!(!String::from_utf8(body.to_vec()).unwrap().contains("max_message_bytes"));
     }
     #[tokio::test]
     async fn assistant_revocation_and_expiry_survive_restart() {

@@ -976,7 +976,12 @@ fn send_answer_tx(
     let person = response.body["fields"]["acted_for"]
         .as_str()
         .unwrap_or_else(|| response.actor.as_deref().unwrap_or("the person"));
-    let mut content = format!("{person} answered `{}`: {title}\n\n", ask.subject);
+    let verb = if answer.is_some_and(|answer| answer["outcome"] == "dismissed") {
+        "dismissed"
+    } else {
+        "answered"
+    };
+    let mut content = format!("{person} {verb} `{}`: {title}\n\n", ask.subject);
     if response.body["fields"].get("acted_for").is_some() {
         content.push_str(&format!(
             "Recorded by {} for {person}.\n\n",
@@ -1049,23 +1054,30 @@ pub(super) fn project_minimal_run(
         .map_err(internal)?;
     }
     tx.execute("INSERT OR IGNORE INTO mission_definitions(mission_id,revision,state,claim_id) VALUES(?1,?2,'ready',?3)", params![mission.id, mission.revision, claim.id]).map_err(internal)?;
-    // A run-tree rebuild retains this definition too. Canonicalize its source only for
-    // the same revision; this does not elect another revision or change definition state.
-    let definition_source: Option<String> = tx
+    // A run-tree rebuild retains this definition too, and a full replay keeps the canonically
+    // first claim's. Independent daemons can write different revisions of one internal mission:
+    // each words an ended ask's reason from its own view. So the canonically first claim gives
+    // the revision as well as the source, over a definition another minimal run wrote; this
+    // does not change definition state, and a published definition, of any revision, stays.
+    let definition_source: Option<(String, bool)> = tx
         .query_row(
-            "SELECT claim_id FROM mission_definitions WHERE mission_id=?1 AND revision=?2",
-            params![mission.id, mission.revision],
-            |row| row.get(0),
+            "SELECT claim_id, EXISTS(SELECT 1 FROM claims
+                 WHERE claims.id=mission_definitions.claim_id
+                 AND claims.kind IN ('work.person-asked','mission-run.created'))
+             FROM mission_definitions WHERE mission_id=?1",
+            [&mission.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(internal)?;
-    if let Some(previous) = definition_source
+    if let Some((previous, replaceable)) = definition_source
+        && replaceable
         && previous != claim.id
         && canonical::claim_key(tx, &claim.id).map_err(internal)?
             < canonical::claim_key(tx, &previous).map_err(internal)?
     {
         tx.execute(
-            "UPDATE mission_definitions SET claim_id=?3 WHERE mission_id=?1 AND revision=?2",
+            "UPDATE mission_definitions SET revision=?2, claim_id=?3 WHERE mission_id=?1",
             params![mission.id, mission.revision, claim.id],
         )
         .map_err(internal)?;
@@ -1540,6 +1552,7 @@ mission "person-work" state="ready" {{
                     &moved.subject,
                     "claim",
                     &crate::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some("agent/alder.asker".into()),
                         incarnation: Some("asker-one".into()),
                         summary: None,
@@ -2374,6 +2387,7 @@ mission "writer-load" state="ready" {
                         &worker.subject,
                         "renew",
                         &WorkRequest {
+                            wait_ms: None,
                             actor: Some("agent/birch.worker".into()),
                             incarnation: Some("worker-one".into()),
                             summary: None,
@@ -2709,6 +2723,7 @@ mission "writer-load" state="ready" {
                 &origin.subject,
                 "release",
                 &WorkRequest {
+                    wait_ms: None,
                     actor: Some(input.actor.clone()),
                     incarnation: input.incarnation.clone(),
                     summary: None,
