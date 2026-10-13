@@ -49,14 +49,32 @@ export interface AgentMessageProps {
 /** Dotted harness identifiers preserve the parent/child relation without inventing labels.
  * Without `tooltip` the path is one non-wrapping run. With `tooltip` (message headers) the run is one focus stop
  * and the only header item that narrows. Narrowing order: parent segments truncate to three characters, then
- * ancestors collapse from the root into one '…', and the leaf truncates only once every ancestor is collapsed
- * ('Work… › Review', '… › Mirror › Review'). Visually hidden text keeps collapsed ancestors and the joining dots,
- * so the name carries the full identity; the kit tooltip shows it on hover, keyboard focus and touch tap. */
+ * ancestors collapse from the root into one '…' (also whenever a parent would show fewer than two letters), and the
+ * leaf truncates only once every ancestor is collapsed ('Work… › Review', '… › Mirror › Review'). Visually hidden
+ * text keeps collapsed ancestors and the joining dots, so the name carries the full identity; the kit tooltip shows
+ * it on hover, keyboard focus and touch tap. */
 export const AgentIdHierarchy = ({ id, tooltip = false, onFoldChange }: { readonly id: string; readonly tooltip?: boolean; readonly onFoldChange?: (folded: boolean) => void }) => {
   if (!id.includes('.')) return <span data-agent-id={id} {...stylex.props(styles.agentPlain)}>{id}</span>
   const parts = id.split('.')
   if (!tooltip) return <span data-agent-id={id}><span aria-hidden="true" {...stylex.props(styles.agentPath)}>{parts.map((part, index) => <React.Fragment key={index}>{index > 0 ? <Icon name="chevron-right" scale="disclosure" /> : null}{part}</React.Fragment>)}</span><VisuallyHidden>{id}</VisuallyHidden></span>
   return <AgentIdTrigger key={id} id={id} parts={parts} onFoldChange={onFoldChange} />
+}
+
+/** Width a truncated parent needs to show two letters before its ellipsis; narrower, it is folded into '…'. */
+function legibleWidth(segment: HTMLElement) {
+  const text = segment.firstChild
+  if (text === null || text.nodeType !== Node.TEXT_NODE || (text.textContent ?? '').length < 2) return 0
+  const document = segment.ownerDocument
+  const probe = document.createElement('span')
+  probe.textContent = '…'
+  Object.assign(probe.style, { position: 'absolute', visibility: 'hidden', whiteSpace: 'nowrap', font: getComputedStyle(segment).font })
+  document.body.append(probe)
+  const ellipsis = probe.getBoundingClientRect().width
+  probe.remove()
+  const range = document.createRange()
+  range.setStart(text, 0)
+  range.setEnd(text, 2)
+  return range.getBoundingClientRect().width + ellipsis
 }
 
 /** React Aria closes tooltips on scroll, so a keyboard focus that scrolls its trigger into view would close the
@@ -93,7 +111,9 @@ const AgentIdTrigger = ({ id, parts, onFoldChange }: { readonly id: string; read
   }, [])
   React.useLayoutEffect(() => {
     const run = trigger.current
-    if (run !== null && collapsed < leaf && run.scrollWidth > run.clientWidth) setCollapsed(collapsed + 1)
+    if (run === null || collapsed >= leaf) return
+    const stub = Array.from(run.querySelectorAll<HTMLElement>('[data-agent-segment="parent"]')).some(segment => segment.scrollWidth > segment.clientWidth && segment.clientWidth < legibleWidth(segment))
+    if (stub || run.scrollWidth > run.clientWidth) setCollapsed(collapsed + 1)
   }, [collapsed, fit, leaf])
   // The header drops its channel while ancestors are folded: the channel yields before any identity segment.
   const folded = collapsed > 0
@@ -158,9 +178,21 @@ export const AgentMessage = ({ variant = { _tag: 'Incoming' }, headerMeta, heade
   const [folded, setFolded] = React.useState({ counterpart: false, recipient: false })
   const onCounterpartFold = React.useCallback((value: boolean) => setFolded(state => state.counterpart === value ? state : { ...state, counterpart: value }), [])
   const onRecipientFold = React.useCallback((value: boolean) => setFolded(state => state.recipient === value ? state : { ...state, recipient: value }), [])
+  // The channel takes only leftover space; it shows whole or not at all, never as a '·…' stub.
+  const [channel, setChannel] = React.useState<HTMLSpanElement | null>(null)
+  const [channelFits, setChannelFits] = React.useState(true)
+  React.useLayoutEffect(() => {
+    if (channel === null) return
+    const text = channel.firstElementChild!
+    const measure = () => setChannelFits(text.getBoundingClientRect().width <= channel.getBoundingClientRect().width + 0.5)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(channel)
+    return () => observer.disconnect()
+  }, [channel])
   return <MessageFrame variant={variant} frameStyles={frameStyles} label={variant._tag === 'Outgoing' ? `Message to ${to ?? ''}` : `Message from ${from}`} subject={subject} header={<>
     {headerGlyph?._tag !== 'Hidden' ? <span aria-hidden="true" data-message-glyph {...stylex.props(styles.direction)}><Icon name={headerGlyph?._tag === 'Icon' ? headerGlyph.name : variant._tag === 'Human' ? 'person' : 'message'} scale="status" /></span> : null}
-    <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta, styles.fixed)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span>{counterpart !== undefined ? <strong {...stylex.props(styles.sender, styles.senderSlot)}><AgentIdHierarchy id={counterpart} tooltip onFoldChange={onCounterpartFold} /></strong> : null}{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta, styles.senderSlot)}><span {...stylex.props(styles.fixed)}> → </span><AgentIdHierarchy id={to} tooltip onFoldChange={onRecipientFold} /></span> : null}{via !== undefined && !folded.counterpart && !folded.recipient ? <span data-message-channel {...stylex.props(styles.meta, styles.channel)}> · {({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span> : null}</span>
+    <span {...stylex.props(styles.counterpart)}><span {...stylex.props(styles.meta, styles.fixed)}>{variant._tag === 'Outgoing' ? 'To' : 'From'} </span>{counterpart !== undefined ? <strong {...stylex.props(styles.sender, styles.senderSlot)}><AgentIdHierarchy id={counterpart} tooltip onFoldChange={onCounterpartFold} /></strong> : null}{variant._tag === 'Incoming' && to !== undefined ? <span {...stylex.props(styles.meta, styles.senderSlot)}><span {...stylex.props(styles.fixed)}> → </span><AgentIdHierarchy id={to} tooltip onFoldChange={onRecipientFold} /></span> : null}{via !== undefined && !folded.counterpart && !folded.recipient ? <span ref={setChannel} data-message-channel data-channel-hidden={channelFits ? undefined : ''} {...stylex.props(styles.meta, styles.channel, !channelFits && styles.channelHidden)}><span> · {({ Irc: 'IRC', SmallTalk: 'Small Talk', FromParent: 'from parent', Teammate: 'teammate', InterAgent: 'inter-agent' } as const)[via._tag]}</span></span> : null}</span>
     {replyTo !== undefined ? onOpenReply !== undefined ? <Button {...stylex.props(styles.headerAction)} onPress={() => onOpenReply(replyTo)}>Reply to <AgentIdHierarchy id={replyTo} /></Button> : <Tooltip label={`Reply to ${replyTo}`}><Button aria-label={`Reply to ${replyTo}`} {...stylex.props(styles.agentTrigger, styles.meta)}><Icon name="arrow-left" scale="status" /></Button></Tooltip> : null}
     {delivery?._tag === 'BroadcastCopy' ? <span {...stylex.props(styles.chip)}>broadcast · {delivery.recipients} seats</span> : arrivedWhileWorking ? <span {...stylex.props(styles.chip)}>arrived while working</span> : null}
     {headerMeta !== undefined ? headerMeta : onCopy !== undefined ? <Button aria-label="Copy message" {...stylex.props(styles.headerAction, styles.copy)} onPress={onCopy}><Icon name="copy" scale="status" /></Button> : id !== undefined && onCopyId !== undefined ? <Button aria-label={`Copy id`} {...stylex.props(styles.headerAction, styles.copy)} onPress={() => onCopyId(id)}><Icon name="copy" scale="status" /></Button> : null}
@@ -253,11 +285,12 @@ const styles = stylex.create({
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md, minWidth: 0 },
   // The header row is a flex line, not an ellipsis box: an ellipsis cannot enter the atomic identity button, so it
   // would clip it. Header metadata keeps its width; within the sender line the channel yields first (it only takes
-  // leftover space), then the identity run narrows in its own order (see AgentIdHierarchy).
+  // leftover space and shows whole or not at all), then the identity run narrows in its own order (see AgentIdHierarchy).
   counterpart: { flex: '1 1 auto', minWidth: 0, display: 'flex', alignItems: 'center', gap: s.xs, overflow: 'hidden', whiteSpace: 'nowrap' },
   fixed: { flex: '0 0 auto' },
   senderSlot: { flex: '0 1 auto', minWidth: 0, display: 'flex', alignItems: 'center', gap: s.xs },
-  channel: { flexGrow: 1, flexShrink: 1, width: 0, minWidth: 0, maxWidth: 'max-content', overflow: 'hidden', textOverflow: 'ellipsis' },
+  channel: { flexGrow: 1, flexShrink: 1, width: 0, minWidth: 0, maxWidth: 'max-content', overflow: 'hidden', whiteSpace: 'nowrap' },
+  channelHidden: { visibility: 'hidden' },
   agentPlain: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   agentPath: { display: 'inline-flex', alignItems: 'center', flexWrap: 'nowrap', whiteSpace: 'nowrap', verticalAlign: 'top', maxWidth: '100%' },
   agentSlot: { display: 'flex', minWidth: 0 },
