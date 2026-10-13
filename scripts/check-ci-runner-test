@@ -64,8 +64,8 @@ def check(name, pages, expected=None, api=True, **overrides):
                     (line.split('=', 1) for line in output.read_text().splitlines())}
         expected = expected if isinstance(expected, dict) else ({'ci1': [expected]} if expected else {})
         assert selected == expected, (name, selected, expected)
-        if 'idle visible to runner read token' in summary.read_text():
-            assert 'idle visible to runner read token' in result.stdout, (name, 'census must be retained in ordinary job logs')
+        if 'common pool group3:' in summary.read_text():
+            assert 'common pool group3:' in result.stdout, (name, 'census must be retained in ordinary job logs')
         assert calls.exists() == api, (name, "unexpected API call")
         assert (any("**" + label[0].split("-")[0] + "**" in summary.read_text() for label in expected.values()) if expected else "**Namespace**" in summary.read_text()), name
         print(f"passed: {name}")
@@ -122,24 +122,25 @@ for token, pages, response in [('', [], ''), ('fixture', [], 'not JSON'),
     check('merge owns priority regardless of idle/API metadata', pages, 'ci1-priority',
           api=bool(token), EVENT='merge_group', GH_TOKEN=token, API_RESPONSE=response)
 
-# Both pools share one census; identity, rather than labels/pages, counts capacity.
-check("ci2 idle while ci1 busy", [{'runners': [runner(busy=True), runner('ci2')]}], 'ci2')
-check("larger idle pool is preferred", [{'runners': [runner(), runner('ci2'), runner('ci2')]}],
-      {'ci1': ['ci2'], 'ci1_secondary': ['ci1'], 'ci1_mail': ['ci2']})
-check("both pools supply different consumer slots", [{'runners': [runner(), runner('ci2')]}],
-      {'ci1': ['ci1'], 'ci1_secondary': ['ci2']})
-check("merge selects idle ci2 priority", [{'runners': [runner('ci1-priority', busy=True), runner('ci2-priority')]}],
-      'ci2-priority', EVENT='merge_group')
-check("release selects idle ci2 priority", [{'runners': [runner('ci1-priority', busy=True), runner('ci2-priority')]}],
-      'ci2-priority', EVENT='push', MODE='priority')
-dual = runner('ci2'); dual['labels'].append({'name': 'ci2-priority'})
+# Group 3 roles, not physical-host names, decide eligibility.
+ci2_worker = runner('ci1'); ci2_worker['name'] = 'ci2-1'
+check("idle ci2 uses common general role", [{'runners': [runner(busy=True), ci2_worker]}], 'ci1')
+check("host-target label alone is not a pool role", [{'runners': [runner('ci-host-ci2')]}])
+check("unmigrated ci2 labels do not pretend to be common capacity", [{'runners': [runner('ci2')]}])
+check("both hosts supply distinct common slots", [{'runners': [runner(), ci2_worker, runner()]}],
+      {'ci1': ['ci1'], 'ci1_secondary': ['ci1'], 'ci1_mail': ['ci1']})
+ci2_priority = runner('ci1-priority'); ci2_priority['name'] = 'ci2-5'
+check("merge chooses the common priority role on either host", [{'runners': [ci2_priority]}],
+      'ci1-priority', EVENT='merge_group')
+check("release chooses the same common priority role", [{'runners': [ci2_priority]}],
+      'ci1-priority', EVENT='push', MODE='priority')
+dual = runner('ci1'); dual['labels'].append({'name': 'ci1-priority'})
 check("priority dual-labelled worker cannot serve two jobs", [{'runners': [dual]}],
-      'ci2-priority', PR_LABELS='["ci-priority"]')
-check("duplicate pages do not create another slot", [{'runners': [dual]}, {'runners': [dual]}],
-      'ci2', PR_LABELS='[]')
+      'ci1-priority', PR_LABELS='["ci-priority"]')
+check("duplicate pages do not create another slot", [{'runners': [dual]}, {'runners': [dual]}], 'ci1')
 conflict = dict(dual, busy=True)
 check("conflicting runner identity fails closed", [{'runners': [dual, conflict]}])
-check("ci2 fork cannot use the pool census", [{'runners': [runner('ci2')]}],
+check("fork cannot use common pool metadata", [{'runners': [ci2_worker]}],
       api=False, HEAD_REPOSITORY='fork/project')
 
 # Supporting PR jobs must never spend ordinary work on priority/merge capacity.
@@ -231,7 +232,7 @@ def route(job, event, profile='', picked='', merge_ci1='', merge_picked='', part
 for job in ('linux-test-build', 'linux-clippy', 'linux-fleet-compat', 'isolation-vm', 'linux-tests', 'linux-tests-shard-2', 'mail-redelivery-canaries'):
     for switch in ('', 'off', 'on'):
         for profile in ('', 'queue-reserved'):
-            assert route(job, 'merge_group', profile, '["ci2-priority"]', merge_ci1=switch) == ['ci2-priority']
+            assert route(job, 'merge_group', profile, '["ci1-priority"]', merge_ci1=switch) == ['ci1-priority']
             assert route(job, 'merge_group', profile, '', merge_ci1=switch) == ['ci1-priority'], (job, 'merge must never overflow to Namespace')
     for event in ('pull_request', 'workflow_dispatch'):
         ordinary = route(job, event)

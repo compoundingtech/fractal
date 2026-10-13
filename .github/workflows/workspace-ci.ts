@@ -41,8 +41,8 @@ export const linuxActionlintConfig = {
   selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, 'ci1-priority', 'ci2', 'ci2-merge', 'ci2-priority'],
 } as const
 
-/** Merge groups choose an owned priority pool, retaining ci1 when census is unavailable.
- * Trusted PRs may use idle general runners or the explicit ci-priority lane.
+/** Merge groups use the shared owned priority role; the scheduler chooses the host.
+ * Trusted PRs may use distinct idle general workers in group3 or the ci-priority lane.
  * Fork PR code never reaches a self-hosted runner. CI1_RUNNERS controls PR picking only.
  */
 export const pickRunnerJobId = 'pick-runner'

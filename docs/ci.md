@@ -5,7 +5,7 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle ci1/ci2 runners with Namespace overflow; required merge stages use the chosen pool’s priority label;
+(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
 public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
@@ -63,9 +63,9 @@ use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
 
-Required merge-group Rust, test, canary and VM jobs use `ci1-priority` or `ci2-priority`.
-A GitHub-hosted picker prefers the pool with more idle priority runners; if its runner census is
-unavailable, the existing ci1 priority lane remains selected. The PR opt-in variable never disables merge picking.
+Required merge-group Rust, test, canary and VM jobs use `ci1-priority` on either physical host.
+A GitHub-hosted picker reads the common group3 role census; unavailable metadata retains the
+existing priority role. GitHub chooses the physical host. The PR opt-in variable never disables merge picking.
 They wait for owned capacity and never overflow to Namespace.
 Main, tag and manual Linux releases use the same owned priority lane; release PR validation
 uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac releases and
@@ -549,7 +549,7 @@ fall back to hosted or fleet runners.
 
 ### ci1 and ci2: owned pools, with PR overflow to Namespace
 
-All required merge-group stages share the picker’s `ci1-priority` or `ci2-priority` selection,
+All required merge-group stages share the picker’s `ci1-priority` on either physical host selection,
 independent of `CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
 the host controller must retain its release/merge-first classification and bounded reservations.
 `CI_MERGE_CI1` and `CI_MERGE_NAMESPACE_PROFILE` no longer redirect required merge jobs.
@@ -563,22 +563,23 @@ hosted queue observer warns once when an owned job has no assigned runner for fi
 minutes after its actual workflow dependencies complete. It preserves current work; it does
 not repair offline runners or guarantee starts. Watch the first merge after this lands.
 
-For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker over both pools.
-Trusted `ci-priority` PRs select the pool with more idle priority workers. Ordinary primary,
-second-shard and mail slots prefer the pool with more idle general workers, counting each runner
-ID once and consuming distinct slots. A runner carrying both general and priority labels cannot
-be offered twice. Fork PRs never query the token or use either host. Main/tag/manual Linux release
-jobs use the same priority-pool choice; release PR builds stay on Namespace and Mac builds stay
-on GitHub-hosted macOS. Workflow names and required contexts are unchanged.
+For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker over the shared
+runner group3 (existing name `ci1`). Both physical hosts share `ci1`, `ci1-merge` and
+`ci1-priority` as role labels; `ci-host-ci1` / `ci-host-ci2` are only for deliberate host
+selection. The picker chooses a role, and GitHub assigns any eligible idle worker on either host.
+Ordinary primary, second-shard and mail slots consume distinct idle general runner IDs; a
+priority/general dual-labelled worker cannot be offered twice. Fork PRs never query the token
+or use self-hosted capacity. Main/tag/manual Linux releases use the common priority role;
+release PR builds stay on Namespace and Mac builds stay on GitHub-hosted macOS.
 
-The existing `CI1_RUNNERS_READ_TOKEN` must read organization self-hosted runner metadata for both
-pools. The picker summary records ci1/ci2 online and idle counts from that credential’s actual
-census; a registration-token read is not proof of this secret’s scope. A successful ci2 census
-and an actual ci2 job assignment are required before claiming live capacity. The private controller
-uses each host’s configured labels, runner names and numeric group ID; source review is separate
-from Operations’ installation and first-pass qualification. The snapshot is not an atomic reservation:
-concurrent selections can still queue. All partitions, canaries and failure/skip handling remain required.
-No speedup is claimed from source tests.
+The existing `CI1_RUNNERS_READ_TOKEN` already saw all six ci2 runners in a real hosted census
+before migration; the common-group census and an actual ci2 job assignment must qualify the
+migration. Temporary role-equivalent `ci2` aliases preserve frozen legacy cohorts, not host
+selection. One controller writer owns the shared group and both hosts' reservations. Its
+source-qualified current-job scope must be installed before Operations moves ci2 into group3:
+a one-cohort restriction can otherwise exclude a ready PR despite a matching idle member.
+A metadata snapshot is not an atomic reservation. All partitions, canaries and failure/skip
+handling remain required; source controls and extra workers do not establish wait p90.
 
 On ci1 each runner is ephemeral: it takes one job, runs it as its own user in a fresh work directory
 with its own `/tmp`, and nothing the job started outlives it. The runner names a Cargo home in
