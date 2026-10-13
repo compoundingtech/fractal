@@ -16789,10 +16789,13 @@ async fn refresh_agent_trace(
     }
     let mut source_incarnation = source_incarnation;
     let mut observed = observed;
-    // At most two snapshots per call: the initial transaction and one coalesced
-    // drain. Further requests remain durable for the next driver tick/writer;
-    // capture never waits for another writer or drains without a bound.
-    for _ in 0..2 {
+    // Drain to quiescence rather than stopping at a fixed pass count. Each
+    // snapshot covers every request queued before its authoritative work read.
+    // After the last request, at most one further current-incarnation snapshot
+    // remains (a stale observation may first require a guard-only pass).
+    // Contenders never wait: either they own the lock or this owner drains their
+    // request. Checking after unlock closes the final-check/unlock handoff race.
+    loop {
         let lock = match lock_agent_trace(path).await {
             Ok(lock) => lock,
             Err(error) => {
@@ -26194,17 +26197,25 @@ mod tests {
 
     #[tokio::test]
     async fn agent_trace_completion_queued_behind_an_older_snapshot_finishes_idle() {
-        check_agent_trace_completion_race(false).await;
+        check_agent_trace_lifecycle_race(TraceRace::CompleteAfterFirstRead).await;
     }
 
     #[tokio::test]
     async fn agent_trace_stale_observation_does_not_consume_queued_completion() {
-        check_agent_trace_completion_race(true).await;
+        check_agent_trace_lifecycle_race(TraceRace::CompleteBeforeStaleObservation).await;
     }
 
-    async fn check_agent_trace_completion_race(stale_observation: bool) {
+    #[tokio::test]
+    async fn agent_trace_release_after_the_second_snapshot_finishes_idle() {
+        check_agent_trace_lifecycle_race(TraceRace::ReleaseAfterSecondRead).await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum TraceRace { CompleteAfterFirstRead, CompleteBeforeStaleObservation, ReleaseAfterSecondRead }
+
+    async fn check_agent_trace_lifecycle_race(race: TraceRace) {
         use axum::{Json, Router, extract::OriginalUri};
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
         use st3::agent_trace::{Runtime, issuer};
         let subject = "agent/example/seat";
         let step = json!({
@@ -26218,7 +26229,13 @@ mod tests {
             "created_at_unix_ms":0,"updated_at_unix_ms":0,
         });
         let held = Arc::new(AtomicBool::new(true));
-        let first_read = Arc::new(AtomicBool::new(!stale_observation));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let pause_read = match race {
+            TraceRace::CompleteAfterFirstRead => Some(0),
+            TraceRace::CompleteBeforeStaleObservation => None,
+            TraceRace::ReleaseAfterSecondRead => Some(1),
+        };
+        let read_count = reads.clone();
         let snapshot_read = Arc::new(tokio::sync::Notify::new());
         let resume = Arc::new(tokio::sync::Notify::new());
         let app = Router::new().fallback({
@@ -26227,7 +26244,7 @@ mod tests {
             let resume = resume.clone();
             move |OriginalUri(uri): OriginalUri| {
                 let held = held.clone();
-                let first_read = first_read.clone();
+                let reads = reads.clone();
                 let snapshot_read = snapshot_read.clone();
                 let resume = resume.clone();
                 let step = step.clone();
@@ -26235,7 +26252,7 @@ mod tests {
                     let value = match uri.path() {
                         "/v1/work" => {
                             let snapshot = if held.load(Ordering::SeqCst) { json!([step]) } else { json!([]) };
-                            if first_read.swap(false, Ordering::SeqCst) {
+                            if Some(reads.fetch_add(1, Ordering::SeqCst)) == pause_read {
                                 snapshot_read.notify_one();
                                 resume.notified().await;
                             }
@@ -26246,6 +26263,12 @@ mod tests {
                             let mut completed = step;
                             completed["status"] = json!("verifying");
                             completed
+                        }
+                        path if path.starts_with("/v1/work/release/") => {
+                            held.store(false, Ordering::SeqCst);
+                            let mut released = step;
+                            released["status"] = json!("ready");
+                            released
                         }
                         "/v1/status" => json!({"store_index":0,"pending_actions":[],"subjects":[{
                             "subject":subject,"conflicts":[],"claims":[],"reachability":"local",
@@ -26275,7 +26298,7 @@ mod tests {
             "where":{},
         })).unwrap();
         issuer::write_atomic(&path, &runtime).unwrap();
-        if stale_observation {
+        if matches!(race, TraceRace::CompleteBeforeStaleObservation) {
             let committed: StepRunView = client.post("/v1/work/complete/fixture", &json!({})).await.unwrap();
             assert_eq!(committed.status, "verifying");
             // Queue completion behind a writer, then let the predecessor
@@ -26299,11 +26322,17 @@ mod tests {
             let writer = tokio::spawn({
                 let client = client.clone();
                 let path = path.clone();
-                async move { refresh_agent_trace(&client, subject, &path, Some("current"), None).await }
+                let incarnation = if matches!(race, TraceRace::ReleaseAfterSecondRead) {
+                    "previous"
+                } else { "current" };
+                async move { refresh_agent_trace(&client, subject, &path, Some(incarnation), None).await }
             });
             snapshot_read.notified().await;
-            let committed: StepRunView = client.post("/v1/work/complete/fixture", &json!({})).await.unwrap();
-            assert_eq!(committed.status, "verifying");
+            let (endpoint, status) = if matches!(race, TraceRace::ReleaseAfterSecondRead) {
+                ("/v1/work/release/fixture", "ready")
+            } else { ("/v1/work/complete/fixture", "verifying") };
+            let committed: StepRunView = client.post(endpoint, &json!({})).await.unwrap();
+            assert_eq!(committed.status, status);
             refresh_agent_trace(&client, subject, &path, None, None).await;
             assert!(issuer::refresh_requested(&path).unwrap());
             resume.notify_one();
@@ -26314,6 +26343,10 @@ mod tests {
         assert!(final_runtime.how.issuance.is_none());
         assert!(final_runtime.how.model.is_none(), "a predecessor model must not be replayed");
         assert!(!issuer::refresh_requested(&path).unwrap());
+        if matches!(race, TraceRace::ReleaseAfterSecondRead) {
+            assert_eq!(read_count.load(Ordering::SeqCst), 3,
+                "the owner must take a fresh snapshot beyond the former two-pass limit");
+        }
         server.abort();
     }
 
