@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Rollback follows the previously classified storage and runtime-state restoration procedure; rejection evidence adds no separate migration."
+    "detail": "The separately classified database and runtime-state restoration procedure applies; this change adds no separate migration."
   }
 }

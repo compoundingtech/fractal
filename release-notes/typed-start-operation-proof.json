@@ -23,10 +23,10 @@
   },
   "manual": {
     "status": "none",
-    "detail": "Consumers must verify the exact operation/request/runtime/incarnation bindings as well as the explicit proof status. Existing unbound legacy records remain Unknown. The old never-published PTY operator escalation and producer-contract decision still apply."
+    "detail": "Consumers must verify exact operation/request/runtime/incarnation bindings along with the writer proof status. This integration obligation introduces no new operator command."
   },
   "recovery": {
     "status": "none",
-    "detail": "Rollback follows the previously classified storage and runtime-state restoration procedure; rejection evidence adds no separate migration."
+    "detail": "The separately classified database and runtime-state restoration procedure applies; this change adds no separate migration."
   }
 }

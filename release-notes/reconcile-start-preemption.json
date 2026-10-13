@@ -21,7 +21,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Agent detail responses add pending-operation, running/revoked-running and unresolved/revoked-unresolved fields; agents show displays START, START JOBS and START OPEN. Native exec generation records retain an optional launch-operation identifier. Existing PTY tags carry the operation. Strict prevention of late PTY publication remains unresolved and requires a coordinated producer contract; this slice performs exact-operation, incarnation-fenced cleanup when a late runtime is observed. Returned launches with missing or mismatched operation/incarnation evidence remain Unknown and retain admission until exact verification or positive producer closure. Native rejection before producer or child creation carries exact-operation closure evidence; errors after creation are not interpreted as closure."
+    "detail": "Agent detail responses add pending-operation, running/revoked-running and unresolved/revoked-unresolved fields; agents show displays START, START JOBS and START OPEN. Native exec generation records retain an optional launch-operation identifier. Existing PTY tags carry the operation. Returned launches with missing or mismatched operation/incarnation evidence remain Unknown and retain admission until exact verification or positive producer closure. Strict prevention of late PTY publication requires the separately reviewed producer cancellation contract."
   },
   "downtime": {
     "status": "unknown",
@@ -29,11 +29,11 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Inspect START OPEN after upgrade when a start was interrupted or revoked. Ordinary launch failure or absent runtime observation does not prove producer closure, so an uncertain operation retains admission and its evidence until exact closure or operation-owned retirement is verified. Do not clear the ledger to force a retry. See docs/seat-lifecycle.md."
+    "detail": "Inspect START OPEN after upgrade when a start was interrupted or revoked. Do not clear the ledger to force a retry; only exact verification, positive producer closure or operation-owned retirement releases admission."
   },
   "recovery": {
     "status": "changed",
-    "detail": "Roll forward with the version-19 store preserved. Swap-back requires verified closure of pending producers and operation-owned runtimes, preservation of the upgraded ledger for investigation, and restoration of a consistent pre-upgrade database with its compatible binary. Reinstalling an older binary or downgrading the storage header does not undo the migration. Operations must review this procedure before rollout. A used ledger missing either immutable format cut is refused; preserve its store and original boundary evidence for forward recovery instead of capturing a later cut. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary."
+    "detail": "Preserve the version-19 database and roll forward. Older binaries reject the upgraded header; downgrading it does not undo the migration. Database swap-back requires a consistent pre-upgrade snapshot and compatible binary, subject to the separately classified runtime-state restoration prerequisites. A used ledger missing either immutable format cut is refused; preserve its store and original boundary evidence for forward recovery instead of capturing a later cut. Unreleased earlier version-19 PR-head stores are not supported upgrade sources for this boundary."
   },
   "commits": [
     "a8a49480a2360e2ab8e1f6bea5f1620e727c7442",
