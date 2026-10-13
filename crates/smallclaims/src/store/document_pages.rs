@@ -70,12 +70,20 @@ fn query(
         sql.push_str(&format!(" AND d.hash=({LATEST})"));
     }
     if after {
-        sql.push_str(
+        // A named page's name equals its bound TEXT parameter on the BINARY column.
+        // Compare that constant to the cursor directly, avoiding an OR over the indexed
+        // name. Unnamed pages still compare each actual document name to the cursor.
+        sql.push_str(if named {
+            " AND (?1 COLLATE BINARY>?3 OR (?1 COLLATE BINARY=?3 AND EXISTS (
+            SELECT 1 FROM documents cursor_document
+            WHERE cursor_document.name=?3 AND cursor_document.created_index=?4
+              AND cursor_document.binding_key>d.binding_key)))"
+        } else {
             " AND (d.name>?3 OR (d.name=?3 AND EXISTS (
             SELECT 1 FROM documents cursor_document
             WHERE cursor_document.name=?3 AND cursor_document.created_index=?4
-              AND cursor_document.binding_key>d.binding_key)))",
-        );
+              AND cursor_document.binding_key>d.binding_key)))"
+        });
     }
     // Fixed slot 7 keeps the binding arity fixed even when earlier slots are unused. Values
     // are always bound: the statement cache has a finite set of shapes, not one per prefix.

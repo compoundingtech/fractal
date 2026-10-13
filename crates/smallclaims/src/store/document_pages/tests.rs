@@ -384,10 +384,16 @@ fn plans(
                 after.map(|v| v.1),
                 10
             ],
-            |row| row.get(3),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .unwrap()
-        .collect::<rusqlite::Result<Vec<String>>>()
+        .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     let new = conn
         .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
@@ -402,15 +408,24 @@ fn plans(
                 upper,
                 10
             ],
-            |row| row.get(3),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
         )
         .unwrap()
-        .collect::<rusqlite::Result<Vec<String>>>()
+        .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     println!(
         "document-page OLD={old:?} NEW={new:?} name={name:?} prefix={prefix:?} history={history} cursor={after:?}"
     );
-    (old, new)
+    (
+        old.into_iter().map(|(_, _, detail)| detail).collect(),
+        new.into_iter().map(|(_, _, detail)| detail).collect(),
+    )
 }
 
 fn assert_plans(store: &Store) {
