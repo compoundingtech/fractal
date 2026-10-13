@@ -479,9 +479,6 @@ fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
         idempotency_key: key.into(),
     };
     store
-        .work_action(&carried.subject, "claim", &claim(ACTOR, "carry-claim"))
-        .unwrap();
-    store
         .work_action(&handed.subject, "claim", &claim(ACTOR, "handoff-claim"))
         .unwrap();
     for (from, to, key) in [(ACTOR, PEER, "to-peer"), (PEER, ACTOR, "to-worker")] {
@@ -532,6 +529,11 @@ fn batched_work_metadata_keeps_seeded_real_handoff_carry_and_supersession() {
             .iter()
             .any(|line| line.contains("Handoff from"))
     );
+    // The ordinary admission rule permits only one independent claim per agent.
+    // Both transfers have released the handed step before this separate carry claim.
+    store
+        .work_action(&carried.subject, "claim", &claim(ACTOR, "carry-claim"))
+        .unwrap();
     // Explicit draining control: a claimed step remains while its adjacent ready step leaves.
     let original_phase: String = store
         .readers
@@ -717,7 +719,7 @@ fn handoff_to_peer(store: &Store, subject: &str) {
 }
 
 #[test]
-fn batched_work_support_keeps_handoff_attempt_clock_ack_and_retracted_inputs() {
+fn batched_work_support_keeps_handoff_attempt_clock_and_orphan_ack_inputs() {
     const PEER: &str = "agent/alder.peer";
     let store = fixture(2);
     declare_handoff_actors(&store);
@@ -815,17 +817,25 @@ fn batched_work_support_keeps_handoff_attempt_clock_ack_and_retracted_inputs() {
             .iter()
             .any(|row| row.0)
     );
-    store
-        .connection
-        .write()
-        .execute("DELETE FROM claims WHERE id=?1", [&release.id])
+    // An orphan acknowledgment is admitted as a reader fixture on the OTHER step,
+    // which never had a release. Keep the genuine transfer and its receipt references.
+    let other = initial.iter().find(|v| &v.subject != subject).unwrap();
+    store.connection.batched(|tx| -> Result<()> {
+        append_claim_tx(tx, "alder", &other.subject, "work.progress", Some(PEER),
+            &json!({"fields":{"attempt":other.attempt,"handoff_acknowledged":"message/no-transfer"}}), &[], None)?;
+        Ok(())
+    }).unwrap().unwrap();
+    let orphan_ack = parity(&store, ACTOR, at + 1);
+    let untouched = orphan_ack
+        .iter()
+        .find(|v| v.subject == other.subject)
         .unwrap();
-    let orphan_ack = parity(&store, PEER, at + 1);
+    assert!(!support(&store.readers.get(), std::slice::from_ref(untouched)).unwrap()[0].0);
     assert!(
-        support(&store.readers.get(), &orphan_ack)
-            .unwrap()
+        untouched
+            .constraints
             .iter()
-            .all(|row| !row.0)
+            .all(|s| !s.contains("Handoff from"))
     );
 }
 
