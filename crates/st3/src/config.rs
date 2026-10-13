@@ -666,23 +666,35 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 /// Refuse a work root that would make agents start in the home folder itself or in a folder
-/// macOS guards with a permission prompt.
+/// macOS guards with a permission prompt. Symlinks are followed where the path exists, so a
+/// linked `~/Documents` is caught; a path that does not exist yet is compared as written.
 fn check_work_root(root: &Path) -> Result<()> {
+    let Ok(home) = home_dir() else {
+        anyhow::ensure!(
+            root.is_absolute(),
+            "work_root must be an absolute path, not {}",
+            root.display()
+        );
+        return Ok(());
+    };
+    check_work_root_in(root, &home)
+}
+
+fn check_work_root_in(root: &Path, home: &Path) -> Result<()> {
     anyhow::ensure!(
         root.is_absolute(),
         "work_root must be an absolute path, not {}",
         root.display()
     );
-    let Ok(home) = home_dir() else {
-        return Ok(());
-    };
+    let resolve = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let (root, home) = (resolve(root), resolve(home));
     anyhow::ensure!(
         root != home,
         "work_root cannot be the home folder; name a folder inside it"
     );
     for protected in PROTECTED_HOME_FOLDERS {
         anyhow::ensure!(
-            !root.starts_with(home.join(protected)),
+            !root.starts_with(resolve(&home.join(protected))),
             "work_root cannot be inside {protected}: macOS asks permission before a program lists it"
         );
     }
@@ -790,6 +802,21 @@ mod tests {
             assert!(error.to_string().contains(guarded), "{error}");
         }
         assert!(config(&format!("{home}/Smalltalk")).validate().is_ok());
+    }
+
+    #[test]
+    fn a_linked_guarded_folder_is_still_refused() {
+        let home = tempdir().unwrap();
+        let elsewhere = tempdir().unwrap();
+        fs::create_dir(elsewhere.path().join("projects")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), home.path().join("Documents")).unwrap();
+        // Through the link, and straight at the folder the link points to.
+        let through = home.path().join("Documents/projects");
+        assert!(super::check_work_root_in(&through, home.path()).is_err());
+        let direct = elsewhere.path().join("projects");
+        assert!(super::check_work_root_in(&direct, home.path()).is_err());
+        assert!(super::check_work_root_in(&home.path().join("Smalltalk"), home.path()).is_ok());
+        assert!(super::check_work_root_in(home.path(), home.path()).is_err());
     }
 
     #[test]
