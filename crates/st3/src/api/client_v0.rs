@@ -1077,7 +1077,12 @@ async fn open_conversation_subscription(
     permits: ConversationAdmissionPermits,
 ) -> Result<(String, Option<String>), ApiError> {
     let subscription_store = state.store.clone();
+    let profile = crate::profile::current();
+    let queued = profile.as_ref().map(|op| op.wall_span("conversation/owner-read-queue"));
     super::read_deadline::store_read(&subscription_store, move || {
+        drop(queued);
+        let _entered = crate::profile::enter(profile.as_ref());
+        let _resolution = crate::profile::span("conversation/owner-read");
         let _permits = permits;
         crate::performance::task("conversation/admission", || {
             let target = request.conversation.as_deref().unwrap_or_default();
@@ -1205,7 +1210,11 @@ async fn conversation_open_value(
     }
     let (state, session, session_id) = (state.clone(), session.clone(), session_id.to_owned());
     let admission_store = state.store.clone();
+    let profile = crate::profile::current();
+    let queued = profile.as_ref().map(|op| op.wall_span("conversation/first-page-read-queue"));
     super::read_deadline::store_read(&admission_store, move || {
+        drop(queued);
+        let _entered = crate::profile::enter(profile.as_ref());
         let _open = crate::profile::span("conversation/local-open");
         conversation_open_local_marked(&state, &session, &session_id)
             .map(|(start, page, mark)| (start, page, Some(mark)))
@@ -1979,9 +1988,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 let profile = first_frames.get(&id).and_then(|first| first.profile.clone());
                 if !conversation_profile_work(profile.as_ref(), "conversation/serialization-send",
                     first_frame_work(first_span, send_collection(&mut socket, frame))).await { return; }
-                if data {
-                    if let Some(first) = first_frames.get_mut(&id) { first.delivered(); }
-                }
+                if data && let Some(first) = first_frames.get_mut(&id) { first.delivered(); }
                 if data || !conversations.0.contains_key(&id) { first_frames.remove(&id); }
                 continue;
             }

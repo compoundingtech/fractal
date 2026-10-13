@@ -9,6 +9,19 @@ use std::time::Instant;
 async fn conversation_first_frame_profile_lifecycle() {
     crate::profile::init_from_env();
     assert!(crate::profile::enabled());
+    let poll_profile = crate::profile::Op::start("profile-poll-fixture", None).unwrap();
+    {
+        let mut pending = std::pin::pin!(conversation_profile_work(
+            Some(&poll_profile), "test/poll", async {
+                assert!(crate::profile::current().is_some());
+                std::future::pending::<()>().await;
+            },
+        ));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(pending.as_mut().poll(&mut context).is_pending());
+        assert!(crate::profile::current().is_none(), "ownership must end before suspension");
+    }
+    poll_profile.finish();
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::test_state_named(root.path(), "profile-fixture");
     state.store.append_claim(&ClaimInput {
@@ -56,10 +69,13 @@ async fn conversation_first_frame_profile_lifecycle() {
     for name in ["conversation/first-frame-total", "conversation/admission-queue",
         "conversation/owner-resolution", "conversation/first-page",
         "conversation/frame-preparation", "conversation/serialization-send",
-        "conversation/serialization", "conversation/send"] {
+        "conversation/serialization", "conversation/send",
+        "conversation/owner-read", "conversation/owner-read-queue",
+        "conversation/local-open", "conversation/first-page-read-queue"] {
         assert!(spans.iter().any(|span| span["name"] == name), "missing {name}: {spans:?}");
     }
-    for name in ["conversation/admission-queue", "conversation/owner-resolution", "conversation/first-page", "conversation/send"] {
+    for name in ["conversation/admission-queue", "conversation/owner-resolution", "conversation/first-page",
+        "conversation/send", "conversation/owner-read-queue", "conversation/first-page-read-queue"] {
         let span = spans.iter().find(|span| span["name"] == name).unwrap();
         assert_eq!(span["cpu_ms"], 0.0);
         assert_eq!(span["sql_ms"], 0.0);
