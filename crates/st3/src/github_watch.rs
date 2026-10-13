@@ -398,8 +398,9 @@ pub fn watch_events(
     if let Some(now) = state(facts).filter(|state| state == "pass" || state == "fail")
         && (head(prior) != head(facts)
             || state(prior).as_deref() != Some(now.as_str())
-            || prior.pointer("/required_checks/execution")
-                != facts.pointer("/required_checks/execution"))
+            || (prior.pointer("/required_checks/execution").is_some()
+                && prior.pointer("/required_checks/execution")
+                    != facts.pointer("/required_checks/execution")))
     {
         events.push(WatchEvent::Checks(
             facts.get("required_checks").cloned().unwrap_or(Value::Null),
@@ -1041,6 +1042,23 @@ mod tests {
             "draft":false, "required_checks":{"state":state, "source":"rules", "checks":["build"],
                 "failed":[], "execution":{"workflows":[[15368,77,execution,execution,1]]}}})
         };
+        // Rollout adds execution facts without reannouncing every existing terminal PR.
+        for state in ["pass", "fail"] {
+            let current = facts(10, state);
+            let mut legacy = current.clone();
+            legacy["required_checks"]
+                .as_object_mut()
+                .unwrap()
+                .remove("execution");
+            assert!(watch_events(&watch(), Some(&legacy), &json!({}), &current).is_empty());
+            let mut new_head = current.clone();
+            new_head["head_sha"] = json!("new");
+            assert!(
+                watch_events(&watch(), Some(&legacy), &json!({}), &new_head)
+                    .iter()
+                    .any(|event| matches!(event, WatchEvent::Checks(_)))
+            );
+        }
         let previous = facts(10, "pass");
         let pending = facts(20, "pending");
         assert!(watch_events(&watch(), Some(&previous), &json!({}), &pending).is_empty());

@@ -48,8 +48,11 @@ pub(crate) const RECENT_COMMENTS: usize = 20;
 /// The most pages of a hundred items one REST listing reads in one poll.
 const LISTING_PAGES: usize = 10;
 
-/// The most open pull requests the GraphQL read pages through, a hundred at a time.
-const PULL_REQUEST_PAGES: usize = 10;
+/// Bound the review/check execution subtree per request. The 100-PR query
+/// exceeded GitHub's execution deadline with workflow metadata; page twenty at
+/// a time, preserving the existing total bound of 1,000 open pull requests.
+const PULL_REQUEST_PAGE_SIZE: usize = 20;
+const PULL_REQUEST_PAGES: usize = 1000 / PULL_REQUEST_PAGE_SIZE;
 
 /// The most mentions one item keeps, newest first.
 const ITEM_MENTIONS: usize = 50;
@@ -582,7 +585,7 @@ fn listed_comment(comment: &Value, fields: &BTreeSet<String>) -> Option<Item> {
 
 const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, first: 100, after: $after) {
+    pullRequests(states: OPEN, first: 20, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id number title url isDraft headRefOid headRefName baseRefName createdAt
@@ -716,7 +719,7 @@ struct WorkflowExecution {
     run: u64,
     attempt: u64,
     created_at: i64,
-    pull_request: bool,
+    event: String,
     facts: Value,
 }
 
@@ -732,13 +735,13 @@ impl WorkflowExecution {
             created_at: chrono::DateTime::parse_from_rfc3339(suite.get("createdAt")?.as_str()?)
                 .ok()?
                 .timestamp_millis(),
-            pull_request: run.get("event").and_then(Value::as_str) == Some("pull_request"),
+            event: run.get("event")?.as_str()?.to_owned(),
             facts: suite.clone(),
         })
     }
 
-    fn key(&self) -> (Option<u64>, u64) {
-        (self.app, self.workflow)
+    fn key(&self) -> (Option<u64>, u64, String) {
+        (self.app, self.workflow, self.event.clone())
     }
     fn order(&self) -> (i64, u64, u64) {
         (self.created_at, self.suite, self.attempt)
@@ -763,7 +766,7 @@ fn required_checks_for_pull_request(
                 .map(|at| at.timestamp_millis())
         })
         .flatten();
-    let mut latest = BTreeMap::<(Option<u64>, u64), WorkflowExecution>::new();
+    let mut latest = BTreeMap::<(Option<u64>, u64, String), WorkflowExecution>::new();
     let suites = node
         .pointer("/commits/nodes/0/commit/checkSuites/nodes")
         .and_then(Value::as_array)
@@ -819,7 +822,7 @@ fn required_checks_for_pull_request(
         {
             continue;
         }
-        let stale_skip = execution.pull_request
+        let stale_skip = execution.event == "pull_request"
             && ready_since.is_some_and(|ready| execution.created_at < ready)
             && context
                 .get("conclusion")
@@ -867,6 +870,7 @@ fn required_checks_for_pull_request(
                 execution.suite,
                 execution.run,
                 execution.attempt,
+                execution.event,
             ))
         })
         .collect::<std::collections::BTreeSet<_>>();
@@ -1644,7 +1648,7 @@ async fn open_pull_requests(
         anyhow::ensure!(
             page < PULL_REQUEST_PAGES,
             "the repository has more than {} open pull requests",
-            PULL_REQUEST_PAGES * 100
+            PULL_REQUEST_PAGES * PULL_REQUEST_PAGE_SIZE
         );
         let data = if emit_pulls {
             github_graphql(
@@ -1660,6 +1664,7 @@ async fn open_pull_requests(
         };
         let ids = identities
             .iter()
+            .take(1000) // Preserve the prior ten 100-identity resolution pages per read.
             .skip(page * 100)
             .take(100)
             .collect::<Vec<_>>();
@@ -1676,7 +1681,7 @@ async fn open_pull_requests(
                     .cloned(),
             );
         }
-        identities_read = identities.len().min((page + 1) * 100);
+        identities_read = identities.len().min((page + 1) * 100).min(1000);
         if !emit_pulls {
             break;
         }
@@ -1864,6 +1869,7 @@ mod tests {
         links: Arc<Mutex<HashMap<String, String>>>,
         refused: Arc<Mutex<HashMap<String, String>>>,
         graphql: Arc<Mutex<String>>,
+        graphql_pages: Arc<Mutex<HashMap<String, String>>>,
         reject_combined_details: Arc<Mutex<bool>>,
         graphql_requests: Arc<Mutex<Vec<Value>>>,
         requests: Arc<Mutex<Vec<String>>>,
@@ -1933,6 +1939,8 @@ mod tests {
                             let combined = query["query"].as_str().is_some_and(|query| {
                                 query.contains("pullRequests(") && query.contains("nodes(ids:")
                             });
+                            let page_body = query["variables"]["after"].as_str()
+                                .and_then(|after| server.graphql_pages.lock().unwrap().get(after).cloned());
                             server.graphql_requests.lock().unwrap().push(query);
                             if combined && *server.reject_combined_details.lock().unwrap() {
                                 respond(
@@ -1941,7 +1949,8 @@ mod tests {
                                     r#"{"errors":[{"message":"Something went wrong while executing your query"}]}"#,
                                 )
                             } else {
-                                respond("200 OK", None, &server.graphql.lock().unwrap())
+                                let body = page_body.unwrap_or_else(|| server.graphql.lock().unwrap().clone());
+                                respond("200 OK", None, &body)
                             }
                         } else {
                             let path = target.split(' ').nth(1).unwrap().to_owned();
@@ -2476,6 +2485,87 @@ mod tests {
             item(&closed.facts, "issues", 1)["moved_to"],
             "resource/github/acme/greenhouse/issue/77"
         );
+    }
+
+    #[tokio::test]
+    async fn open_pull_request_execution_pages_keep_all_items_and_the_total_bound() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden/rules/branches/main", json!([]));
+        let first = (1..=20)
+            .map(|number| open_pull(number, "head", "SUCCESS"))
+            .collect::<Vec<_>>();
+        github.open_pull_requests(json!(first));
+        {
+            let mut response: Value =
+                serde_json::from_str(&github.graphql.lock().unwrap()).unwrap();
+            response["data"]["repository"]["pullRequests"]["pageInfo"] =
+                json!({"hasNextPage":true, "endCursor":"page-two"});
+            *github.graphql.lock().unwrap() = response.to_string();
+        }
+        github.graphql_pages.lock().unwrap().insert(
+            "page-two".into(),
+            json!({"data":{"repository":{"pullRequests":{
+                "nodes":[open_pull(21, "head", "SUCCESS")],
+                "pageInfo":{"hasNextPage":false, "endCursor":null}
+            }}}})
+            .to_string(),
+        );
+        let result = open_pull_requests(
+            &reqwest::Client::new(),
+            &base,
+            &GithubAuth::test("fixture-auth"),
+            Duration::ZERO,
+            "acme/garden",
+            ("acme", "garden"),
+            false,
+            false,
+            &BTreeSet::new(),
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.open.len(), 21);
+        assert_eq!(result.open.last().unwrap()["number"], 21);
+        let queries = github.graphql_requests.lock().unwrap().clone();
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0]["variables"]["after"].is_null());
+        assert_eq!(queries[1]["variables"]["after"], "page-two");
+        assert!(queries.iter().all(|query| {
+            query["query"]
+                .as_str()
+                .unwrap()
+                .contains("pullRequests(states: OPEN, first: 20, after: $after)")
+        }));
+        // A server that keeps offering another page must still stop at 1,000 PRs.
+        github.graphql_pages.lock().unwrap().clear();
+        let (overflow, overflow_base) = FakeGithub::start().await;
+        *overflow.graphql.lock().unwrap() = json!({"data":{"repository":{"pullRequests":{
+            "nodes":[], "pageInfo":{"hasNextPage":true,"endCursor":"again"}
+        }}}})
+        .to_string();
+        let error = open_pull_requests(
+            &reqwest::Client::new(),
+            &overflow_base,
+            &GithubAuth::test("fixture-auth"),
+            Duration::ZERO,
+            "acme/garden",
+            ("acme", "garden"),
+            false,
+            false,
+            &BTreeSet::new(),
+            true,
+            &[],
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("more than 1000 open pull requests")
+        );
+        assert_eq!(overflow.graphql_requests.lock().unwrap().len(), 50);
     }
 
     #[tokio::test]
@@ -3087,6 +3177,37 @@ mod tests {
             }
         }
         assert_eq!(aggregate(&pull, &wrong_app)["state"], "pending");
+    }
+
+    #[test]
+    fn required_checks_do_not_supersede_pull_request_suites_with_other_events() {
+        let rules = [RequiredCheck {
+            context: "build".into(),
+            app: Some(15368),
+        }];
+        let ready = workflow_suite(20, "2026-10-13T10:00:02Z");
+        let checks = [workflow_check("build", Some("SUCCESS"), &ready)];
+        let mut pull = json!({"isDraft":false, "createdAt":"2026-10-13T09:00:00Z",
+            "commits":{"nodes":[{"commit":{"checkSuites":{"nodes":[ready]}}}]}});
+        let expected = required_checks_for_pull_request(&pull, &checks, Some(&rules));
+        for event in ["push", "workflow_dispatch"] {
+            let mut unrelated = workflow_suite(30, "2026-10-13T10:01:00Z");
+            unrelated["workflowRun"]["event"] = json!(event);
+            pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] =
+                json!([ready, unrelated]);
+            assert_eq!(
+                required_checks_for_pull_request(&pull, &checks, Some(&rules)),
+                expected,
+                "a later {event} suite cannot replace the pull_request execution"
+            );
+        }
+        let next_pr = workflow_suite(40, "2026-10-13T10:02:00Z");
+        pull["commits"]["nodes"][0]["commit"]["checkSuites"]["nodes"] = json!([ready, next_pr]);
+        assert_eq!(
+            required_checks_for_pull_request(&pull, &checks, Some(&rules))["state"],
+            "pending",
+            "a later pull_request suite still supersedes old jobs"
+        );
     }
 
     #[test]
