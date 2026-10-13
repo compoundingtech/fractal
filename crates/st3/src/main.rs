@@ -121,6 +121,7 @@ enum Command {
     Ui(stui::Args),
     /// Validate and publish KDL files containing seats, missions and schedules.
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
+    /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
     /// Inspect owned sets and their source publication receipts.
     Sets {
@@ -1850,12 +1851,14 @@ enum MissionViewCommand {
     /// A final step assigned to the author, depending on the last real step, reaches the
     /// author once when work is done. Review gates mark decisions only a person can make.
     /// Preview with --dry-run before publication; it runs no exec gates unless --check is set.
-    /// Actual publication normally runs gates once and refuses broken answers, allowing valid
-    /// "not yet" answers. See st skill for goals, evidence, review and feedback loops.
+    /// Actual publication checks mission and step scripts and refuses broken answers, allowing
+    /// valid "not yet" answers. Loop until scripts are not checked; they run after each round.
+    /// See st skill for goals, evidence, review and feedback loops.
     Publish(MissionPublishArgs),
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
-    /// Run each exec gate in a mission file once, now, the way a run would, and report its
-    /// answer: pass (exit 0), not yet (exit 1), broken (anything else), or unchecked.
+    /// Check mission and step exec gates once and report pass (exit 0), not yet (exit 1),
+    /// broken (anything else), or unchecked. Loop until scripts are not checked;
+    /// they run after each round.
     Check(MissionCheckArgs),
     /// Start one run from the current ready mission revision.
     ///
@@ -1920,7 +1923,7 @@ struct MissionPublishArgs {
     /// KDL file to publish; use `-` to read standard input.
     file: PathBuf,
     /// Print the resolved publication preview without applying or running exec gates.
-    /// Add --check to run the gates during the preview.
+    /// Add --check to run mission and step gates during the preview; until scripts run after rounds.
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
     /// Preview against this exact store index.
@@ -1930,13 +1933,13 @@ struct MissionPublishArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
-    /// The workspace a run would use, where publish first checks each exec gate.
+    /// The workspace a run would use, where publish checks mission and step exec gates.
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
-    /// Publish without first running each exec gate once to refuse a broken one.
+    /// Publish without checking mission and step exec gates for broken commands.
     #[arg(long)]
     no_gate_check: bool,
-    /// Run exec gates even during a dry run.
+    /// Check mission and step exec gates during a dry run. Until scripts run after each round.
     #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
     /// Mission input values for exec gate checks.
@@ -3306,7 +3309,8 @@ struct ApplyArgs {
     /// Print the resolved preview without publishing or running exec gates (unless --check).
     #[arg(long, visible_alias = "preview")]
     dry_run: bool,
-    /// Run exec gates even during a dry run, as `st missions check` does.
+    /// Check mission and step exec gates during a dry run, as `st missions check` does.
+    /// Loop until scripts are not checked; they run after each round.
     #[arg(long, visible_alias = "check-gates", conflicts_with = "no_gate_check")]
     check: bool,
     /// The workspace a run would use, for exec gate checks.
@@ -3315,7 +3319,7 @@ struct ApplyArgs {
     /// Mission input values for exec gate checks.
     #[arg(long = "input", value_parser = parse_input)]
     inputs: Vec<(String, String)>,
-    /// Publish without checking exec gates for broken commands.
+    /// Publish without checking mission and step exec gates for broken commands.
     #[arg(long)]
     no_gate_check: bool,
     /// Preview against this exact store index (plain files only).
@@ -7347,7 +7351,7 @@ async fn publish_mission_intent(
     print_value(&value, json_output)
 }
 
-/// Run each exec gate once before a publication and refuse it when one is broken.
+/// Check mission and step exec gates before publication, listing loop until scripts as unchecked.
 async fn check_before_publish(
     client: &Client,
     intent: &IntentInput,
@@ -7434,8 +7438,8 @@ async fn check_mission_file(
     Ok(())
 }
 
-/// Run each exec gate of `intent` once on the daemon and wait for every answer, handing each one
-/// to `report` as it arrives. `None` when the daemon predates gate checks.
+/// Check the exec gates of `intent` on the daemon and wait for every answer, including deferred
+/// loop until scripts, handing each one to `report` as it arrives. `None` for older daemons.
 async fn run_gate_check(
     client: &Client,
     intent: &IntentInput,
