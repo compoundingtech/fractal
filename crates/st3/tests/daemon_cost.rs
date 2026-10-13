@@ -914,6 +914,7 @@ const PROBES: &[Probe] = &[
         |store, fixture, attempt| {
             let (agent, step, incarnation) = &fixture.subjects.held[0];
             let request = st3::model::WorkRequest {
+                wait_ms: None,
                 actor: Some(agent.clone()),
                 incarnation: Some(incarnation.clone()),
                 summary: None,
@@ -2508,6 +2509,7 @@ fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
                     &work.subject,
                     "claim",
                     &st3::model::WorkRequest {
+                        wait_ms: None,
                         actor: Some(actor.clone()),
                         incarnation: Some(incarnation.clone()),
                         summary: None,
