@@ -123,14 +123,34 @@ export const scanIdentities = (path: string, text: string): Finding[] =>
       .map((match) => ({ path, line: index + 1, rule: `identity outside the namespace: ${match[0]}` })),
   )
 
+/** Decode keys and values before checking capabilities, including nested fields and JSON escapes. */
+const scanRecordingCapabilities = (path: string, text: string): Finding[] => {
+  const scanDocument = (document: string, line: number): Finding[] => {
+    let liveCapability = false
+    try {
+      JSON.parse(document, (key: string, value: unknown) => {
+        if ((key === 'capability' || key === 'stream_capability') && (typeof value !== 'string' || !/^capability#[1-9]\d*$/u.test(value))) {
+          liveCapability = true
+        }
+        return value
+      })
+    } catch {
+      return [{ path, line, rule: 'invalid recording JSON' }]
+    }
+    return liveCapability ? [{ path, line, rule: 'live terminal capability' }] : []
+  }
+  // JSONL diagnostics identify the row; a multi-line JSON document is reported at its start.
+  return path.endsWith('.jsonl')
+    ? text.split('\n').flatMap((document, index) => document.trim() === '' ? [] : scanDocument(document, index + 1))
+    : scanDocument(text, 1)
+}
+
 /** Raw captures contain registered scratch identities; only nonfunctional capability tokens are public. */
 export const scanRecordingContent = (path: string, text: string): Finding[] => [
   ...scanContent(path, text),
-  ...text.split('\n').flatMap((line, index) => [
-    ...(/\/tmp\/|st3-scenario-|nix-shell\./u.test(line) ? [{ path, line: index + 1, rule: 'scratch path' }] : []),
-    ...([...line.matchAll(/"(?:stream_capability|capability)"\s*:\s*"([^"]*)"/gu)].some((match) => !/^capability#[1-9]\d*$/u.test(match[1]!))
-      ? [{ path, line: index + 1, rule: 'live terminal capability' }] : []),
-  ]),
+  ...text.split('\n').flatMap((line, index) =>
+    /\/tmp\/|st3-scenario-|nix-shell\./u.test(line) ? [{ path, line: index + 1, rule: 'scratch path' }] : []),
+  ...scanRecordingCapabilities(path, text),
 ]
 
 export const scanVocabulary = (path: string, text: string): Finding[] =>

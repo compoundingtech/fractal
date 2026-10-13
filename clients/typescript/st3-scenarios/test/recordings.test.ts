@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { decodeRecording, decodeScript, normalizeRecording, type JsonObject, type JsonValue, type RecordingRow, type RecordingScript } from '../scripts/recordings.ts'
 
@@ -26,6 +27,68 @@ describe('recording schema-directed N (batch 2)', () => {
     expect(JSON.stringify(value)).toContain('"sequence":4561')
     expect(JSON.stringify(value)).toContain('"revision":3')
     expect(normalizeRecording(script, normalized, anchor)).toEqual(normalized)
+  })
+  it('rebases nullable schema instants exactly once and preserves null', () => {
+    const capture = rows()
+    const page = obj(obj(obj(capture[1]!.value.body).value).page)
+    page.cursor_expires_at = '2026-10-13T03:07:43.034999Z'
+    const normalized = normalizeRecording(script, capture, anchor)
+    expect(obj(obj(obj(normalized[1]!.value.body).value).page).cursor_expires_at).toBe('2026-01-01T00:00:00.000Z')
+    expect(normalizeRecording(script, normalized, anchor)).toEqual(normalized)
+    page.cursor_expires_at = null
+    expect(obj(obj(obj(normalizeRecording(script, capture, anchor)[1]!.value.body).value).page).cursor_expires_at).toBeNull()
+  })
+  it('maps annotated participant references and rejects unmapped references at their pointers', () => {
+    const capture = rows()
+    const items = capture[2]!.value.items
+    if (!Array.isArray(items)) throw new Error('expected test entries')
+    const entry = obj(items[0])
+    entry.type = 'message'
+    entry.body = { message_id: 'message/raw', from: 'person/raw', to: 'step/raw' }
+    const mappedScript: RecordingScript = { ...script, id_map: { ...script.id_map, 'message/raw': 'message/proof', 'person/raw': 'person/ada', 'step/raw': 'step/proof' } }
+    const normalized = normalizeRecording(mappedScript, capture, anchor)
+    const outputItems = normalized[2]!.value.items
+    if (!Array.isArray(outputItems)) throw new Error('expected test entries')
+    expect(obj(outputItems[0]).body).toEqual({ message_id: 'message/proof', from: 'person/ada', to: 'step/proof' })
+    expect(normalizeRecording(mappedScript, normalized, anchor)).toEqual(normalized)
+    for (const field of ['from', 'to']) {
+      const original = obj(entry.body)[field]
+      obj(entry.body)[field] = 'person/unregistered'
+      expect(() => normalizeRecording(mappedScript, capture, anchor)).toThrow(`/2/value/items/0/body/${field}: unknown identity person/unregistered`)
+      obj(entry.body)[field] = original!
+    }
+  })
+  it('maps annotated actor references including nullable union branches and rejects unmapped actors', () => {
+    const capture = rows()
+    obj(capture[1]!.value.body).value = {
+      id: 'mission/raw', kind: 'mission', revision: 'r1', updated_at: '2026-10-13T03:07:43.034999Z',
+      title: 'Proof', state: 'running', mission_revision: 'r1', runs: [], run_generations: {},
+      run_details: [{
+        id: 'mission-run/raw', requester: 'daemon/raw', status: 'running', phase: 'work',
+        progress: { done: 0, total: 1 }, must_act: 'agent', state_since: '2026-10-13T03:07:43.034999Z',
+        current_steps: [{ id: 'step-run/raw', title: null, state: 'claimed', since: '2026-10-13T03:07:43.034999Z', assignee: 'person/raw', claimant: null }],
+      }],
+    }
+    const mappedScript: RecordingScript = { ...script, id_map: { ...script.id_map, 'mission/raw': 'mission/proof', 'mission-run/raw': 'mission-run/proof', 'step-run/raw': 'step-run/proof', 'daemon/raw': 'daemon/proof', 'person/raw': 'person/ada' } }
+    const run = (captureRows: readonly RecordingRow[]): JsonObject => {
+      const details = obj(obj(captureRows[1]!.value.body).value).run_details
+      if (!Array.isArray(details)) throw new Error('expected test run details')
+      return obj(details[0])
+    }
+    const normalized = normalizeRecording(mappedScript, capture, anchor)
+    expect(run(normalized).requester).toBe('daemon/proof')
+    const steps = run(normalized).current_steps
+    if (!Array.isArray(steps)) throw new Error('expected test steps')
+    expect(obj(steps[0]).assignee).toBe('person/ada')
+    expect(obj(steps[0]).claimant).toBeNull()
+    expect(normalizeRecording(mappedScript, normalized, anchor)).toEqual(normalized)
+    run(capture).requester = 'daemon/unregistered'
+    expect(() => normalizeRecording(mappedScript, capture, anchor)).toThrow('/1/value/body/value/run_details/0/requester: unknown identity daemon/unregistered')
+    run(capture).requester = 'daemon/raw'
+    const rawSteps = run(capture).current_steps
+    if (!Array.isArray(rawSteps)) throw new Error('expected test steps')
+    obj(rawSteps[0]).assignee = 'person/unregistered'
+    expect(() => normalizeRecording(mappedScript, capture, anchor)).toThrow('/1/value/body/value/run_details/0/current_steps/0/assignee: unknown identity person/unregistered')
   })
   it('fails unknown identity at the exact schema pointer', () => {
     const capture = rows()
@@ -82,5 +145,14 @@ describe('recording schema-directed N (batch 2)', () => {
     const capture = rows()
     expect(decodeRecording(JSON.stringify(capture))).toEqual(capture)
     expect(decodeRecording(capture.map((row) => JSON.stringify(row)).join('\n'))).toEqual(capture)
+  })
+  it('decodes the committed recording script through the shared strict contract', () => {
+    const committed: unknown = JSON.parse(readFileSync(new URL('../recordings/fleet-mid-refactor-proof.script.json', import.meta.url), 'utf8'))
+    expect(decodeScript(committed).format_version).toBe(1)
+    expect(Object.keys(decodeScript(committed).id_map).length).toBeGreaterThan(0)
+  })
+  it('rejects unknown script and turn fields from the shared schema property lists', () => {
+    expect(() => decodeScript({ ...script, unexpected: true })).toThrow('/unexpected: unexpected field')
+    expect(() => decodeScript({ ...script, turns: [{ prompt: 'proof', answer: 'proof', timestamp: '2026-01-01T00:00:00Z', unexpected: true }] })).toThrow('/turns/0/unexpected: unexpected field')
   })
 })

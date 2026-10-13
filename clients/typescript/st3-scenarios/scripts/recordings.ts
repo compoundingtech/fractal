@@ -48,9 +48,13 @@ const instant = (value: JsonValue | undefined, pointer: string): number => {
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/u.test(s) || !Number.isFinite(Date.parse(s))) fail(pointer, 'invalid instant')
   return Date.parse(s)
 }
+const scriptSchema = object(json(JSON.parse(readFileSync(new URL('./recording-script.schema.json', import.meta.url), 'utf8')), ''))
+const scriptKeys = Object.keys(object(scriptSchema.properties))
+const turnKeys = Object.keys(object(object(object(object(scriptSchema.properties).turns).items).properties))
+
 export const decodeScript = (input: unknown): RecordingScript => {
   const s = object(json(input, ''), '')
-  keys(s, ['format_version', 'world', 'agent', 'host', 'person', 'workspace', 'turns', 'reads', 'id_map'], '')
+  keys(s, scriptKeys, '')
   if (s.format_version !== 1) fail('/format_version', 'unsupported version')
   const ids = object(s.id_map, '/id_map')
   const id_map: Record<string, string> = {}
@@ -58,7 +62,7 @@ export const decodeScript = (input: unknown): RecordingScript => {
   return { format_version: 1, world: text(s.world, '/world'), agent: text(s.agent, '/agent'), host: text(s.host, '/host'), person: text(s.person, '/person'), workspace: text(s.workspace, '/workspace'), id_map,
     turns: array(s.turns, '/turns').map((value, index) => {
       const t = object(value, `/turns/${index}`)
-      keys(t, ['prompt', 'answer', 'timestamp', 'command'], `/turns/${index}`)
+      keys(t, turnKeys, `/turns/${index}`)
       instant(t.timestamp, `/turns/${index}/timestamp`)
       return { prompt: text(t.prompt), answer: text(t.answer), timestamp: text(t.timestamp), ...(t.command === undefined ? {} : { command: text(t.command) }) }
     }), reads: array(s.reads, '/reads').map((value, i) => text(value, `/reads/${i}`)) }
@@ -179,40 +183,38 @@ export const normalizeRecording = (script: RecordingScript, rows: readonly Recor
   // allOf/conditional schema paths can declare the same leaf more than once.
   const transformed = new Set<string>()
   const walk = (raw: JsonObject, value: JsonValue, pointer: string, key = ''): JsonValue => {
-    if (value === null || typeof value !== 'object') {
-      if (transformed.has(pointer)) return value
-      transformed.add(pointer)
-    }
+    if ((value === null || typeof value !== 'object') && transformed.has(pointer)) return value
+    const leaf = (result: JsonValue): JsonValue => { transformed.add(pointer); return result }
+    const s = resolve(raw)
     const ref = typeof raw.$ref === 'string' ? raw.$ref.split('/').at(-1) : undefined
     if (value !== null && typeof value === 'string') {
-      if (ref === 'Timestamp') return new Date(instant(value, pointer) + shift).toISOString()
+      if (s['x-st-codec'] === 'timestamp') return leaf(new Date(instant(value, pointer) + shift).toISOString())
       if (ref === 'SnapshotId' || key === 'snapshot_id') {
         const snapshot = snapshots.get(value)
-        if (snapshot) return `snapshot/${identity(snapshot.host, `${pointer}/host`)}/${typeof snapshot.store === 'number' ? storeMap.get(snapshot.store) : snapshot.store}`
+        if (snapshot) return leaf(`snapshot/${identity(snapshot.host, `${pointer}/host`)}/${typeof snapshot.store === 'number' ? storeMap.get(snapshot.store) : snapshot.store}`)
         return fail(pointer, `unknown snapshot ${value}`)
       }
-      if (ref === 'RequestId' || key === 'request_id') return token('request', value)
-      if (key === 'operation_id') return token('operation', value)
-      if (key === 'attachment_id' || (ref === 'Id' && value.startsWith('terminal-attachment/'))) return token('attachment', value)
-      if (key === 'stream_capability' || key === 'capability') return token('capability', value)
-      if (key === 'runtime_incarnation' || key === 'incarnation') return token('incarnation', value)
-      if (key === 'next_cursor' || key === 'cursor' && typeof value === 'string') return token('cursor', value)
+      if (ref === 'RequestId' || key === 'request_id') return leaf(token('request', value))
+      if (key === 'operation_id') return leaf(token('operation', value))
+      if (key === 'attachment_id' || (ref === 'Id' && value.startsWith('terminal-attachment/'))) return leaf(token('attachment', value))
+      if (key === 'stream_capability' || key === 'capability') return leaf(token('capability', value))
+      if (key === 'runtime_incarnation' || key === 'incarnation') return leaf(token('incarnation', value))
+      if (key === 'next_cursor' || key === 'cursor') return leaf(token('cursor', value))
       if (key === 'stream_url') {
         const url = new URL(value, 'http://scenario.invalid')
         for (const [from, to] of Object.entries(script.id_map)) url.pathname = url.pathname.replaceAll(encodeURIComponent(from), encodeURIComponent(to))
         const incarnation = url.searchParams.get('incarnation')
         if (incarnation !== null) url.searchParams.set('incarnation', token('incarnation', incarnation))
-        return `${url.pathname}${url.search}`
+        return leaf(`${url.pathname}${url.search}`)
       }
-      if (ref?.endsWith('Id') && ref !== 'SubscriptionId' || key === 'message_id' || key === 'reply_to') {
-        if (/^(?:attachment|operation)#[1-9]\d*$/u.test(value)) return value
-        return identity(value, pointer)
+      if (s['x-st-ref'] !== undefined || key === 'message_id' || key === 'reply_to') {
+        if (/^(?:attachment|operation)#[1-9]\d*$/u.test(value)) return leaf(value)
+        return leaf(identity(value, pointer))
       }
     }
-    if (key === 'store_index' && typeof value === 'number') return storeMap.get(value) ?? fail(pointer, 'unknown store')
-    const s = resolve(raw)
+    if (key === 'store_index' && typeof value === 'number') return leaf(storeMap.get(value) ?? fail(pointer, 'unknown store'))
     if (!matches(s, value) && !(key === 'store_index' && typeof value === 'string')) fail(pointer, 'malformed schema value')
-    if (s['x-st-codec'] === 'epoch-ms' && typeof value === 'number') return Math.trunc(value + shift)
+    if (s['x-st-codec'] === 'epoch-ms' && typeof value === 'number') return leaf(Math.trunc(value + shift))
     let result = value
     for (const branchKey of ['allOf', 'oneOf', 'anyOf']) {
       const branches = s[branchKey]

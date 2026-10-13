@@ -178,13 +178,46 @@ describe('privacy gate', () => {
     expect(scanRecordingContent('recordings/x.json', JSON.stringify({ cwd: '/' + 'tmp/recorder-owned' })).map(({ rule }) => rule)).toContain('scratch path')
   })
 
+  it('rejects planted capabilities under Unicode-escaped keys in nested JSON and JSONL rows', () => {
+    for (const key of ['capability', 'stream_capability']) {
+      const escapedKey = key.replace('capability', '\\u0063apability')
+      const leak = `{"${escapedKey}": "${'live-'}scratch-secret"}`
+      expect(scanRecordingContent('recordings/x.json', `{\n  "nested": [${leak}]\n}`)).toEqual([
+        { path: 'recordings/x.json', line: 1, rule: 'live terminal capability' },
+      ])
+      expect(scanRecordingContent('recordings/x.jsonl', `{"capability":"capability#1"}\n{"value":[${leak}]}\n`)).toEqual([
+        { path: 'recordings/x.jsonl', line: 2, rule: 'live terminal capability' },
+      ])
+      expect(scanRecordingContent('recordings/x.json', `{"${escapedKey}": "\\u0063apability#1"}`)).toEqual([])
+    }
+  })
+
+  it('rejects capability values other than decoded numbered tokens', () => {
+    for (const key of ['capability', 'stream_capability']) {
+      for (const value of ['', 'capability#0', 'capability#01', 'capability#1-extra', null, 1, {}, []]) {
+        expect(scanRecordingContent('recordings/x.json', JSON.stringify({ [key]: value }))).toEqual([
+          { path: 'recordings/x.json', line: 1, rule: 'live terminal capability' },
+        ])
+      }
+    }
+  })
+
+  it('fails closed when recording JSON cannot be decoded', () => {
+    expect(scanRecordingContent('recordings/x.json', '{"capability":')).toEqual([
+      { path: 'recordings/x.json', line: 1, rule: 'invalid recording JSON' },
+    ])
+    expect(scanRecordingContent('recordings/x.jsonl', '{}\n{"capability":\n')).toEqual([
+      { path: 'recordings/x.jsonl', line: 2, rule: 'invalid recording JSON' },
+    ])
+  })
+
   it('applies recording hygiene to raw, script and normalized package inputs', () => {
     const root = mkdtempSync(join(tmpdir(), 'st3-scenarios-recording-scan-'))
     scratch.push(root)
     expect(spawnSync('git', ['init', '-q'], { cwd: root }).status).toBe(0)
     for (const dir of ['fixtures', 'pkg/recordings', 'pkg/src/vocabulary']) mkdirSync(join(root, dir), { recursive: true })
     for (const suffix of ['script.json', 'recording.jsonl', 'normalized.json']) {
-      writeFileSync(join(root, 'pkg/recordings/proof.' + suffix), JSON.stringify({ capability: 'live-' + 'scratch-secret' }))
+      writeFileSync(join(root, 'pkg/recordings/proof.' + suffix), `{"nested":[{"stream_\\u0063apability":"${'live-'}scratch-secret"}]}`)
     }
     const findings = scanTree({ fixturesDir: join(root, 'fixtures'), packageRoot: join(root, 'pkg'), vocabularyDir: join(root, 'pkg/src/vocabulary') })
     expect(findings.filter(({ rule }) => rule === 'live terminal capability')).toHaveLength(3)

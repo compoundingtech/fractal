@@ -435,6 +435,11 @@ under `gate-slot --class heavy`, with `-- --ignored --nocapture`. Set
 `ST3_SCENARIO_SCRIPT` and `ST3_SCENARIO_OUTPUT` to absolute paths; the output must not
 already exist. Re-record into a new candidate, then review it before replacing the committed
 input. The recorder accepts no caller-owned endpoint or state directory.
+Each command-bearing turn has its own projected-screen revision fence and a harness-emitted
+per-turn completion marker after stdout. Earlier or intermediate screen changes cannot
+satisfy the current turn's barrier. All recorder subprocesses, including curl and PTY
+cleanup, use the scratch environment; curl disables configuration loading with first-argument
+`-q`, and generated shell literals quote inherited paths as data.
 
 The implementation composes three existing patterns, not a pre-existing recorder API:
 `crates/st3/tests/terminal_binding.rs` supplies scratch ownership and teardown scaffolding;
@@ -445,11 +450,15 @@ in `crates/st3/src/api/client_v0.rs` supplies the real PTY/projector and termina
 
 ### Recording formats
 
+`scripts/recording-script.schema.json` is the authoritative field contract for both the
+Rust recorder and TypeScript decoder (including required fields and unknown-field rejection).
 Version 1 scripts contain `format_version: 1`, `world`, the selected cast `agent`, `host`,
-`person`, and public `workspace`, ordered `turns` (`prompt`, `answer`, native `timestamp`,
-optional shell `command`), and ordered HTTP GET `reads`. This single-agent proof format is
-extended with an explicit version change before recording multi-agent scripts. Native
-timestamps can describe historical past; they do not slow or scale the receive clock.
+`person`, public `workspace`, the explicit scratch-to-cast `id_map`, ordered `turns`
+(`prompt`, `answer`, native `timestamp`, optional shell `command`), and ordered HTTP GET
+`reads`. This single-agent proof format is extended with an explicit version change before
+recording multi-agent scripts. Native timestamps can describe historical past; they do not
+slow or scale the receive clock. Recording privacy scanning decodes JSON/JSONL before checking
+capability field names and values, including Unicode-escaped keys.
 
 Version 1 raw JSONL rows contain `ordinal` (zero-based, strictly increasing), `socket_id`
 (stable per connection, null outside sockets), `receive_ms` (monotonic elapsed milliseconds
