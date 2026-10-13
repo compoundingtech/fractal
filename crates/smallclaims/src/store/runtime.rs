@@ -62,6 +62,12 @@ pub trait Runtime: Send + Sync {
     /// Create the runtime's tables and its indexes on the claim log, once the graph's exist.
     fn create_schema(&self, connection: &Connection) -> Result<()>;
 
+    /// Install a runtime for a store that had no user objects when opening began.
+    /// Runtimes may batch fresh DDL here; existing and incomplete stores use create_schema.
+    fn create_schema_for_fresh_store(&self, connection: &Connection) -> Result<()> {
+        self.create_schema(connection)
+    }
+
     /// Bring the runtime's projections up to date as the store opens: a store in shared memory
     /// is new, and a store on disk may need a replay after an upgrade.
     fn open_projections(&self, transaction: &Transaction<'_>, shared_memory: bool) -> Result<()>;

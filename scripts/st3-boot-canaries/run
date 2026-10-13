@@ -1022,6 +1022,18 @@ def run(args, root, evidence):
                         if "--dangerously-bypass-approvals-and-sandbox" not in argv or "--dangerously-bypass-hook-trust" not in argv:
                             fail("plain Codex did not receive bypass defaults")
                     if mode == "auto":
+                        # Codex refuses permission config on a remote resume ("Permission overrides
+                        # are not supported when resuming a remote task"), so a resumed TUI carries
+                        # none and its app server holds the profile; a fresh TUI carries it too.
+                        resumed = "resume" in argv
+                        if resumed:
+                            if any(value.startswith(("default_permissions=", "permissions.", "approvals_reviewer=", "sandbox_workspace_write"))
+                                   for value in argv if value != "-c"):
+                                fail("a resumed Codex TUI carried permission config, which Codex refuses")
+                            holders = [server["argv"] for server in starts if server.get("argv", [])[:1] == ["app-server"]]
+                            if not holders:
+                                fail("the resumed seat's app server was not recorded")
+                            argv = holders[-1]
                         if 'default_permissions="st-managed"' not in argv or "--dangerously-bypass-approvals-and-sandbox" in argv:
                             fail("auto Codex did not receive the named workspace profile")
                         profile = next((value for value in argv if value.startswith("permissions.st-managed=")), "")

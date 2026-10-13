@@ -183,6 +183,13 @@ is revalidated before counting, including private person selection. Read failure
 send the existing `resync`/`error` frames, never inferred zero counts. Clients keep compatibility
 behavior on older daemons. The source may move to the shared IVM reactor later
 without changing this contract.
+A daemon serves these counts from published rows. What no person changes (missions,
+working agents, machines) is computed once for every selection, at one cut, and again
+when the cut, the roster or the 30-second clock period changes. Each selection counts
+its alerts from the published attention rows, the same rows its
+attention window shows. The row carries the shared counts' cut. A window that opens a
+new selection is served at once. Before the first publication, the window gets a
+retryable `summary-not-ready` resync.
 Equal count membership produces no upsert, including agent progress/usage
 updates and another person's attention changes. Core list/filter/get behavior
 is unchanged. Summary freshness is carried by its snapshot fence; equal counts
