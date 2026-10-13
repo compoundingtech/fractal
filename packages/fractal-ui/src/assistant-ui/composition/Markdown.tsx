@@ -38,6 +38,8 @@ type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'tone'>
 const EMPTY_REFERENCES: ReferenceOptions = {}
 const ReferenceContext = React.createContext<ReferenceOptions>(EMPTY_REFERENCES)
 const MutedTone = React.createContext(false)
+/** True inside a list item, where loose blocks use the shared sibling rhythm. */
+const InListItem = React.createContext(false)
 /** Paragraphs keep the caret on their final line; every other terminal block gets an inline fallback. */
 function markStreamingTail() {
   return (tree: Root) => {
@@ -83,7 +85,7 @@ function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'>
 
 function Paragraph({ children, node }: React.ComponentProps<'p'> & ExtraProps) {
   const live = node?.properties['data-streaming-tail'] === true
-  return <p data-streaming-tail={live || undefined} {...stylex.props(styles.paragraph, styles.prose, live && styles.streamingTail)}><InlineText>{children}</InlineText></p>
+  return <p data-streaming-tail={live || undefined} {...stylex.props(styles.paragraph, styles.prose, React.useContext(InListItem) && styles.itemBlock, live && styles.streamingTail)}><InlineText>{children}</InlineText></p>
 }
 
 function renderReference(path: string, options: ReferenceOptions): React.ReactNode | undefined {
@@ -162,7 +164,7 @@ const CodeBlock = React.memo(function CodeBlock({ code, language }: { code: stri
     }
   }
   const copiedCurrentCode = copy.tag === 'copied' && copy.code === code
-  return <div data-testid="markdown-code-block" data-language={language || 'text'} data-wrap={wrap} data-copy-state={copy.tag} {...stylex.props(styles.codeBlock)}>
+  return <div data-testid="markdown-code-block" data-language={language || 'text'} data-wrap={wrap} data-copy-state={copy.tag} {...stylex.props(styles.codeBlock, React.useContext(InListItem) && styles.itemBlock)}>
     <div {...stylex.props(styles.codeToolbar)}>
       <span data-testid="markdown-code-language" {...stylex.props(styles.codeLanguage)}>{language || 'text'}</span>
       <Button aria-label="Wrap code" aria-pressed={wrap} onPress={() => setWrap(value => !value)} {...stylex.props(styles.codeButton, wrap && styles.codeButtonSelected)}>Wrap</Button>
@@ -185,11 +187,18 @@ function CodeFence({ node }: React.ComponentProps<'pre'> & ExtraProps) {
 const heading = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') => function Heading({ children }: React.ComponentProps<'h3'>) {
   return <Tag {...stylex.props(styles.heading, styles.prose)}><InlineText>{children}</InlineText></Tag>
 }
+/** Nested lists get the indent, rail and open marker. */
+const ListDepth = React.createContext(0)
 function MarkdownStrong({ children }: React.ComponentProps<'strong'>) {
   return <strong {...stylex.props(styles.strong, React.useContext(MutedTone) && styles.strongMuted)}><InlineText>{children}</InlineText></strong>
 }
 function MarkdownQuote({ children }: React.ComponentProps<'blockquote'>) {
-  return <blockquote {...stylex.props(styles.blockquote)}><MutedTone.Provider value>{children}</MutedTone.Provider></blockquote>
+  return <blockquote {...stylex.props(styles.blockquote, React.useContext(InListItem) && styles.itemBlock)}><InListItem.Provider value={false}><MutedTone.Provider value>{children}</MutedTone.Provider></InListItem.Provider></blockquote>
+}
+function MarkdownList({ ordered, start, children }: { readonly ordered: boolean; readonly start?: number; readonly children?: React.ReactNode }) {
+  const depth = React.useContext(ListDepth)
+  const props = { 'data-list-depth': depth, ...stylex.props(styles.list, styles.prose, ordered ? styles.orderedList : styles.unorderedList, depth > 0 && styles.nestedList, depth > 0 && !ordered && styles.nestedUnordered) }
+  return <ListDepth.Provider value={depth + 1}>{ordered ? <ol start={start} {...props}>{children}</ol> : <ul {...props}>{children}</ul>}</ListDepth.Provider>
 }
 const MARKDOWN_COMPONENTS: Components = {
   h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
@@ -197,9 +206,9 @@ const MARKDOWN_COMPONENTS: Components = {
   span: ({ children, node }) => <span data-streaming-tail={node?.properties['data-streaming-tail'] || undefined} aria-hidden={node?.properties['aria-hidden'] === true || undefined} {...stylex.props(node?.properties['data-streaming-tail'] === true && styles.streamingTail)}>{children}</span>,
   strong: MarkdownStrong,
   em: ({ children }) => <em {...stylex.props(styles.emphasis)}><InlineText>{children}</InlineText></em>,
-  ul: ({ children }) => <ul {...stylex.props(styles.list, styles.prose, styles.unorderedList)}>{children}</ul>,
-  ol: ({ children, start }) => <ol start={start} {...stylex.props(styles.list, styles.prose, styles.orderedList)}>{children}</ol>,
-  li: ({ children }) => <li {...stylex.props(styles.listItem)}><InlineText>{children}</InlineText></li>,
+  ul: ({ children }) => <MarkdownList ordered={false}>{children}</MarkdownList>,
+  ol: ({ children, start }) => <MarkdownList ordered start={start}>{children}</MarkdownList>,
+  li: ({ children }) => <li {...stylex.props(styles.listItem)}><InListItem.Provider value><InlineText>{children}</InlineText></InListItem.Provider></li>,
   a: MarkdownLink,
   code: InlineCode,
   img: DeferredImage,
@@ -306,18 +315,21 @@ export function completeStreamingTail(source: string): string {
 }
 
 const styles = stylex.create({
-  // Tone changes only prose ink; the shared Markdown layout stays at the kit baseline.
-  markdown: { display: 'flow-root', minWidth: 0, maxWidth: '100%', color: textColor.fgSoft },
+  // Shared stack prerequisite: flush blocks separated by one 8px gap on every kit Markdown surface.
+  markdown: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0, maxWidth: '100%', color: textColor.fgSoft },
   muted: { color: textColor.fgMuted },
   foreground: { color: textColor.fg },
   image: { maxWidth: '100%', height: 'auto' },
   imagePlaceholder: { display: 'inline-flex', alignItems: 'center', gap: s.sm, padding: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, color: textColor.fgSoft, backgroundColor: surface.controlFill, fontSize: t.metaSize },
   imageAction: { borderWidth: 0, padding: s.xs, backgroundColor: surface.transparent, color: status.runningFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
   prose: { maxWidth: g.proseMax, fontSize: t.bodySize, lineHeight: t.bodyLeading },
-  heading: { margin: 0, marginBlockStart: s.xxl, marginBlockEnd: s.md, fontSize: t.headingSize, lineHeight: t.headingLeading, fontWeight: t.weightSemibold, color: textColor.fg },
-  list: { margin: 0, marginBlockEnd: s.proseGap, paddingInlineStart: s.xxl, listStylePosition: 'outside' },
+  heading: { margin: 0, fontSize: t.headingSize, lineHeight: t.headingLeading, fontWeight: t.weightSemibold, color: textColor.fg },
+  list: { margin: 0, paddingInlineStart: g.textColumn, listStylePosition: 'outside' },
   unorderedList: { listStyleType: 'disc' }, orderedList: { listStyleType: 'decimal' },
-  listItem: { display: 'list-item', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },
+  nestedList: { marginBlockStart: s.xs2, paddingInlineStart: s.xxl, borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.rail },
+  nestedUnordered: { listStyleType: 'circle' },
+  listItem: { display: 'list-item', marginBlockStart: { default: s.xs2, ':first-child': 0 }, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', '::marker': { color: textColor.fgMuted } },
+  itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
   syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
@@ -326,8 +338,8 @@ const styles = stylex.create({
   syntaxLiteral: { color: status.attention },
   syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
   syntaxDeleted: { color: status.dangerFg },
-  blockquote: { margin: 0, marginBlockEnd: s.proseGap, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong, color: textColor.fgMuted },
-  tableScroll: { maxWidth: '100%', overflowX: 'auto', marginBlockEnd: s.proseGap, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
+  tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },
   cell: { paddingInline: s.md, paddingBlock: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, verticalAlign: 'top' },
   tableHeading: { backgroundColor: surface.raised, fontWeight: t.weightSemibold, color: textColor.fg },
@@ -339,9 +351,9 @@ const styles = stylex.create({
   codePre: { margin: 0, padding: s.md, overflowX: 'auto', whiteSpace: 'pre', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   codeWrapped: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
   copyStatus: { display: 'block', paddingInline: s.md, paddingBlock: s.xs, color: status.dangerFg, fontSize: t.metaSize, lineHeight: t.metaLeading },
-  codeBlock: { minWidth: 0, maxWidth: '100%', margin: 0, marginBlockEnd: s.proseGap, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, overflow: 'hidden' },
+  codeBlock: { minWidth: 0, maxWidth: '100%', margin: 0, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, overflow: 'hidden' },
   codeText: { fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, color: textColor.fgSoft },
-  paragraph: { margin: 0, marginBlockEnd: s.proseGap, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', overflowWrap: 'anywhere' },
+  paragraph: { margin: 0, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', overflowWrap: 'anywhere' },
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
   link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
