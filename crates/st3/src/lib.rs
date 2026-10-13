@@ -11,6 +11,8 @@ pub mod archive;
 pub mod backup;
 pub mod blobs;
 pub mod boot;
+/// Git-backed change metadata and exact-OID atomic state transitions.
+pub mod changes;
 pub(crate) mod checkout;
 pub mod claude_channel;
 pub mod client;
@@ -92,6 +94,9 @@ pub mod seat_queue;
 /// Runs any CLI with credentials no seat can read, through a gateway the sekrets user owns.
 pub mod sekrets;
 pub mod service;
+/// First-run configuration and human-only daemon startup.
+pub mod setup;
+pub mod onboarding;
 /// The st agent skill bundled in this binary and installed for each harness.
 pub mod skill;
 pub mod slo;
@@ -114,3 +119,5 @@ pub use model::{NormalizedIntent, St3Error};
 
 /// Shared authentication and transport for daemon GitHub callers.
 mod github_http;
+
+pub mod evidence_url;

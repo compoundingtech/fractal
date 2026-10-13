@@ -389,6 +389,7 @@ pub(crate) mod tests {
     #[test]
     fn seat_label_appends_launcher_persona_short_without_space_and_strips_controls() {
         let seat = DesiredSubject {
+            accountable: None,
             subject: "agent/eval.worker".into(),
             kind: "agent".into(),
             desired: json!({"display_name":"Qu\u{1b}]0;x\u{7}artz"}),

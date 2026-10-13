@@ -85,6 +85,7 @@ pub(crate) struct Sidebar {
     pub arrangements: Vec<st3_client::Arrangement>,
     pub terminals: Vec<ResourceRow>,
     pub terminals_has_more: bool,
+    inventory_partial: Vec<String>,
     pub observations: Vec<st3_client::ResourceObservation>,
     pub observations_has_more: bool,
     pub observations_issue: Option<String>,
@@ -317,6 +318,8 @@ impl Sidebar {
         }
     }
     pub fn observe(&mut self, world: &World) {
+        self.inventory_partial = world.inventory_partial.iter()
+            .filter(|name| ["machines", "sessions"].contains(&name.as_str())).cloned().collect();
         // Retain missing subjects until the person explicitly clears them; never prune by age.
         let before = self.seen.clone();
         for row in self.seen.values_mut() {
@@ -406,6 +409,9 @@ impl Sidebar {
             })
         };
         let mut rows = Vec::new();
+        for name in &self.inventory_partial {
+            rows.push(Row::Notice(format!("More {name} exist beyond this inventory window.")));
+        }
         if let Some(issue) = &self.observations_issue {
             rows.push(Row::Notice(format!("Resources: {issue}")));
         }
