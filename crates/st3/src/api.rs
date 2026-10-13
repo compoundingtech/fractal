@@ -1062,6 +1062,7 @@ async fn response_envelope_unbounded(
             .body(Body::empty())
             .expect("the incoming request has a valid method and URI");
         *auth_request.headers_mut() = request.headers().clone();
+        *auth_request.extensions_mut() = request.extensions().clone();
         let auth_state = state.clone();
         let transport = transport.as_str();
         let auth_profile = profile.clone();
@@ -6655,7 +6656,8 @@ async fn guard_bound_request(
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
     };
-    if request.method() == axum::http::Method::GET {
+    if request.method() == axum::http::Method::GET
+        && !client_v0::administrative_get(&request) {
         return Ok(request);
     }
     // Free mode lets an agent do what its person may do, but always as itself: a harness never

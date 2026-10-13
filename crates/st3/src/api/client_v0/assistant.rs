@@ -49,7 +49,7 @@ fn owning_person(state: &AppState) -> Result<&str, ApiError> {
 pub(super) fn trusted_issuer<'a>(state: &'a AppState, session: &ClientSession) -> Result<&'a str, ApiError> {
     let issuer = owning_person(state)?;
     if session.transport != "unix" || session.actor != issuer
-        || session.authority_actor != issuer || session.pairing_grant.is_some() {
+        || session.authority_actor != issuer || session.pairing_grant.is_some() || session.local_peer {
         return Err(forbidden("assistant grants require the configured owning person through trusted-local Unix"));
     }
     Ok(issuer)
@@ -280,7 +280,7 @@ fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     Ok(ClientSession { actor: source["session_actor"].as_str()
         .ok_or_else(|| forbidden("assistant actor absent"))?.into(), authority_actor: PRINCIPAL.into(),
         pairing_grant: Some(granted.subject.clone()), transport, custom_forms:false,
-        conversation_blocks:false, scopes })
+        conversation_blocks:false, local_peer:false, scopes })
 }
 
 // A grants no data surface until B's separately approved, proof-bearing endpoints exist.
@@ -394,6 +394,63 @@ mod tests {
             "code":challenge["code"],"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
         complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
                  &request, "fabric-loopback").await.unwrap().unwrap().0
+    }
+    #[tokio::test]
+    async fn assistant_owner_reads_reject_forged_bound_unix_and_local_peers() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let grant = paired(&state).await;
+        let app = super::super::super::router_for_transport(state, ClientTransportBoundary::Unix);
+        let inspection = format!("/v1/client/assistant/grants/{}", urlencoding::encode(grant["grant"]["id"].as_str().unwrap()));
+        for path in [inspection.as_str(), "/v1/client/devices"] {
+            for peer in 0..3 {
+                let mut request = Request::builder().uri(path)
+                    .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
+                match peer {
+                    0 => { request.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into())); }
+                    1 => { request.extensions_mut().insert(super::super::super::LocalPeer {
+                        pid: 7, ancestor: Some("agent/test".into()),
+                    }); }
+                    _ => { request.extensions_mut().insert(super::super::super::NativeDeliveryPeer {
+                        agent: "agent/test".into(), transport: "omp-channel", pid: 7,
+                    }); }
+                }
+                assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN, "{path}");
+            }
+            let response = app.clone().oneshot(Request::builder().uri(path)
+                .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(String::from_utf8(body.to_vec()).unwrap().contains(grant["grant"]["id"].as_str().unwrap()));
+        }
+        let mut read = Request::builder().uri("/v1/client/agents")
+            .header(LOCAL_PERSON_HEADER, "agent/test").body(Body::empty()).unwrap();
+        read.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into()));
+        assert_eq!(app.oneshot(read).await.unwrap().status(), StatusCode::OK);
+    }
+    #[tokio::test]
+    async fn assistant_grant_administration_rejects_paired_person_over_unix() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let grant = paired(&state).await;
+        let credential = "paired-owner-test-credential";
+        state.store.append_claim(&ClaimInput {
+            subject: "custom/client/paired-owner".into(),
+            kind: "custom.client.pairing-completed".into(), actor: Some(ISSUER.into()),
+            fields: serde_json::from_value(json!({
+                "credential_hash": credential_digest(credential),
+                "session_actor": "person/operator/session/phone", "person_id": ISSUER,
+                "scopes": ALL_SCOPES, "expires_at_unix_ms": u64::MAX,
+            })).unwrap(), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let app = super::super::super::router_for_transport(state, ClientTransportBoundary::Unix);
+        let path = format!("/v1/client/assistant/grants/{}", urlencoding::encode(grant["grant"]["id"].as_str().unwrap()));
+        for (method, suffix) in [("GET", ""), ("POST", "/revoke")] {
+            let response = app.clone().oneshot(Request::builder().method(method).uri(format!("{path}{suffix}"))
+                .header(AUTHORIZATION, format!("Bearer {credential}"))
+                .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method}");
+        }
     }
     #[tokio::test]
     async fn assistant_issuance_rejects_remote_agents_and_non_owner() {

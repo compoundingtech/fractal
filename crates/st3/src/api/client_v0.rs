@@ -2349,6 +2349,8 @@ pub(super) struct ClientSession {
     /// person and device key share an actor, so only this subject names the exact grant.
     pub(super) pairing_grant: Option<String>,
     pub(super) transport: &'static str,
+    /// Server-established harness or local peer provenance, never a client header.
+    pub(super) local_peer: bool,
     pub(super) custom_forms: bool,
     pub(super) conversation_blocks: bool,
     scopes: std::collections::BTreeSet<String>,
@@ -2362,6 +2364,7 @@ impl ClientSession {
             authority_actor: authority_actor.into(),
             pairing_grant: None,
             transport,
+            local_peer: false,
             custom_forms: true,
             conversation_blocks: false,
             scopes: std::collections::BTreeSet::new(),
@@ -2384,6 +2387,7 @@ impl ClientSession {
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
                 transport: "unix",
+                local_peer: false,
                 custom_forms,
                 conversation_blocks: false,
                 scopes: ["read.projections", "terminal.read"]
@@ -2399,6 +2403,7 @@ impl ClientSession {
             authority_actor: person.into(),
             pairing_grant: None,
             transport: "unix",
+            local_peer: false,
             custom_forms,
             conversation_blocks: false,
             scopes: ALL_SCOPES.iter().map(|scope| (*scope).to_owned()).collect(),
@@ -2411,6 +2416,7 @@ impl ClientSession {
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
             transport: "fabric-loopback",
+            local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
             scopes: std::collections::BTreeSet::new(),
@@ -2518,6 +2524,13 @@ fn credential_digest(credential: &str) -> String {
     hex::encode(Sha256::digest(credential.as_bytes()))
 }
 
+/// Administrative reads must not inherit the general agent projection-read exemption.
+pub(super) fn administrative_get(request: &Request<Body>) -> bool {
+    request.method() == axum::http::Method::GET
+        && (request.uri().path().starts_with("/v1/client/assistant/grants/")
+            || request.uri().path() == "/v1/client/devices")
+}
+
 pub(super) fn authenticate(
     state: &AppState,
     request: &Request<Body>,
@@ -2546,6 +2559,13 @@ pub(super) fn authenticate(
                 .get(LOCAL_PERSON_HEADER)
                 .and_then(|value| value.to_str().ok());
             let mut session = ClientSession::local(person)?;
+            session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
+                || request.extensions().get::<super::LocalPeer>()
+                    .is_some_and(|peer| peer.ancestor.is_some())
+                || request.extensions().get::<super::NativeDeliveryPeer>().is_some();
+            if session.local_peer && administrative_get(request) {
+                return Err(forbidden("local harnesses and peers cannot inspect owner administration"));
+            }
             session.custom_forms = custom_forms;
             session.conversation_blocks = conversation_blocks;
             return Ok(session);
@@ -2636,6 +2656,7 @@ fn paired_client_session(
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
         transport,
+        local_peer: false,
         custom_forms,
         conversation_blocks: false,
         scopes,
@@ -21355,6 +21376,7 @@ mission "example/zero-run" state="ready" {
             authority_actor: "person/alex".into(),
             pairing_grant: None,
             transport: "paired",
+            local_peer: false,
             custom_forms: false,
             conversation_blocks: false,
             scopes: ["terminal.read".into()].into_iter().collect(),
