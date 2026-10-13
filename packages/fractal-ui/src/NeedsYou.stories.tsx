@@ -111,10 +111,11 @@ export const Inbox: Story = {
       await expect(getComputedStyle(summary).webkitLineClamp).toBe('2')
       await expect(summary.getBoundingClientRect().height).toBeLessThanOrEqual(parseFloat(getComputedStyle(summary).lineHeight) * 2 + 1)
     }
-    await expect(within(inbox).queryByText('Host body · ask-release-2')).toBeNull()
+    await expect(within(inbox).getByText('Host body · ask-release-2')).not.toBeVisible()
     await userEvent.click(entries[1]!.querySelector('summary')!)
     await expect(entries[1]).toHaveAttribute('open')
     await expect(within(entries[1]!).getByText('Host body · ask-release-2')).toBeVisible()
+    await expect(within(entries[0]!).getByText('Host body · ask-release-1')).not.toBeVisible()
     await userEvent.click(within(entries[1]!).getByRole('button', { name: 'Show in thread' }))
     await expect(onShowInThread).toHaveBeenCalledWith('ask-release-2')
     await userEvent.click(within(entries[1]!).getByRole('button', { name: 'Open terminal' }))
