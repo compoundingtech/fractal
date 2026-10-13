@@ -5,7 +5,7 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle ci1 runners with Namespace overflow; required merge stages use ci1-priority;
+(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
 public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
@@ -28,6 +28,16 @@ existing PR concurrency group and cancels obsolete ready-head work while skippin
 Keep a PR draft while iterating and testing locally, then mark its final head ready for Intake.
 A later push to a ready PR still validates the replacement head and cancels its superseded run;
 this policy reduces iteration demand, rather than enforcing a lifetime one-run limit.
+A stacked PR can retain workflow files from an older base that lacks these job guards.
+`Draft CI admission` therefore observes requested PR workflows using main's `workflow_run`
+code. It reads the target run and current PR metadata, rechecks readiness before requesting
+cancellation, and never checks out PR code or downloads its artifacts. Ready PRs and
+merge-group/main/manual runs are preserved. Its token has only Actions write and PR read.
+Cancellation is asynchronous: the request summary is not terminal cancellation proof,
+and scheduling can start a legacy job before the observer runs. The one-day observation
+records actual build/test job starts as well as accepted requests and final cancellations.
+GitHub does not emit the requested activity for reruns; do not rerun drafts.
+
 GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run is the
 final safety gate and runs every required stage regardless of PR draft payload. Do not arm
 auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
@@ -63,16 +73,23 @@ use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
 
-Required merge-group Rust, test, canary and VM jobs use `ci1-priority` unconditionally,
-even if the picker is disabled, the status token is absent or all local runners are busy.
+Required merge-group Rust, test, canary and VM jobs use `ci1-priority` on either physical host.
+A GitHub-hosted picker reads the common group3 role census; unavailable metadata retains the
+existing priority role. GitHub chooses the physical host. The PR opt-in variable never disables merge picking.
 They wait for owned capacity and never overflow to Namespace.
 Main, tag and manual Linux releases use the same owned priority lane; release PR validation
 uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac releases and
 installer checks use standard GitHub-hosted `macos-15` (ARM64); Linux installer/assembly/publish
 use GitHub-hosted Ubuntu. Operations found no owned macOS runner, so Mac placement is explicitly
 hosted rather than a claim of owned Mac capacity. Release jobs no longer need Namespace outside
-PR validation. The `main` release concurrency group preserves an active build while replacing
-its older pending successor; independent tag/manual identities remain intact. Required PR checks
+PR validation. Linux release jobs put the flake-pinned C compiler on PATH before installer tests
+and Cargo: self-hosted runners do not inherit Ubuntu's host toolchain. Target linking
+still uses the pinned Zig/glibc-baseline wrapper. The `main` release concurrency group
+preserves an active run, including a build waiting for a runner. New pushes replace
+only its pending successor, so the newest pending source starts after the active run
+finishes. PR release validation replaces its own obsolete head; independent tag/manual
+identities remain intact. A cancelled pending run is not evidence of active-run
+cancellation; the run-level concurrency state distinguishes them. Required PR checks
 use priority 2, and optional benchmarks, main upkeep and manual Workspace work use
 priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
 and daily publishing use GitHub-hosted `ubuntu-latest`: these jobs verify or publish
@@ -148,6 +165,14 @@ Queue time is measured separately from execution time. Already queued jobs retai
 from their immutable workflow revision and finish naturally; this change does not rerun them.
 Optional jobs remain subject to capacity after required checks. See Namespace's
 [job ordering and priority controls](https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering).
+
+CI's default Nix shell explicitly appends `$CARGO_HOME/bin` to `PATH` after
+its pinned tools. Cargo otherwise searches that directory first
+for external subcommands, so a runner's rustup `cargo-clippy` proxy can shadow
+Nix Clippy even inside `nix develop`. The explicit late entry makes Cargo honor
+the shell's order for Clippy and nextest, without changing Cargo's cache home or
+configuring an unpinned rustup default. The Linux guard tests this lookup with
+real Cargo and benign stand-in commands; it compiles no Rust.
 
 `scripts/ci-linux STAGE` runs one stage:
 
@@ -478,8 +503,14 @@ workflow-level path filters. `linux-gate` does not depend on them.
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
-  execution job; build output is not cached. App, UI kit, Storybook, browser and
-  performance lanes join the script with the packages that add them.
+  execution job; build output is not cached. The config's `fractalCssAssets` plugin
+  (`apps/fractal-web/scripts/vite-css-assets.mjs`) fails every production build that
+  emits a stylesheet without rules, or a chunk that loads a font file no `@font-face`
+  in its loaded stylesheets declares. The preceding CSS asset guard lane builds
+  fixtures that must trip both failures, and controls (quoted URLs with parentheses,
+  faces declared by the entry's stylesheet) that must pass.
+  App, UI kit, Storybook, browser and performance lanes join the script with the
+  packages that add them.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.
@@ -532,10 +563,10 @@ the profile has no capacity, jobs queue with no matching runner. A queued requir
 a pass. Apart from the ci1 choice below, which is made once per run before any job starts, do not
 fall back to hosted or fleet runners.
 
-### ci1: our own runners, with PR overflow to Namespace
+### ci1 and ci2: owned pools, with PR overflow to Namespace
 
-All required merge-group stages select `ci1-priority`, without consulting idle counts or
-`CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
+All required merge-group stages share the picker’s `ci1-priority` on either physical host selection,
+independent of `CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
 the host controller must retain its release/merge-first classification and bounded reservations.
 `CI_MERGE_CI1` and `CI_MERGE_NAMESPACE_PROFILE` no longer redirect required merge jobs.
 Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
@@ -548,14 +579,23 @@ hosted queue observer warns once when an owned job has no assigned runner for fi
 minutes after its actual workflow dependencies complete. It preserves current work; it does
 not repair offline runners or guarantee starts. Watch the first merge after this lands.
 
-For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker. Trusted `ci-priority`
-PRs select that label for their producer and primary consumer. Ordinary trusted PRs may use an
-idle general `ci1` slot; second-shard and mail outputs account separately for remaining slots.
-Supporting PR jobs retain Namespace. Missing status or insufficient general capacity keeps
-ordinary PRs on Namespace. Fork PR code never runs on self-hosted capacity or receives the
-runner-status token. The token is `CI1_RUNNERS_READ_TOKEN`, read-only runner metadata.
-The picker takes a snapshot, not an atomic reservation; concurrent selections can still queue.
-Required collectors retain failure/skip handling and all partitions/canaries remain selected.
+For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker over the shared
+runner group3 (existing name `ci1`). Both physical hosts share `ci1`, `ci1-merge` and
+`ci1-priority` as role labels; `ci-host-ci1` / `ci-host-ci2` are only for deliberate host
+selection. The picker chooses a role, and GitHub assigns any eligible idle worker on either host.
+Ordinary primary, second-shard and mail slots consume distinct idle general runner IDs; a
+priority/general dual-labelled worker cannot be offered twice. Fork PRs never query the token
+or use self-hosted capacity. Main/tag/manual Linux releases use the common priority role;
+release PR builds stay on Namespace and Mac builds stay on GitHub-hosted macOS.
+
+The existing `CI1_RUNNERS_READ_TOKEN` already saw all six ci2 runners in a real hosted census
+before migration; the common-group census and an actual ci2 job assignment must qualify the
+migration. Temporary role-equivalent `ci2` aliases preserve frozen legacy cohorts, not host
+selection. One controller writer owns the shared group and both hosts' reservations. Its
+source-qualified current-job scope must be installed before Operations moves ci2 into group3:
+a one-cohort restriction can otherwise exclude a ready PR despite a matching idle member.
+A metadata snapshot is not an atomic reservation. All partitions, canaries and failure/skip
+handling remain required; source controls and extra workers do not establish wait p90.
 
 On ci1 each runner is ephemeral: it takes one job, runs it as its own user in a fresh work directory
 with its own `/tmp`, and nothing the job started outlives it. The runner names a Cargo home in
@@ -990,7 +1030,7 @@ gh run rerun RUN_ID
 ```
 
 A queued Namespace job is never a pass. Do not fall back to another runner by hand; only
-`pick-runner` chooses between ci1 and Namespace, before a run's jobs start.
+`pick-runner` chooses between ci1, ci2 and Namespace, before a run's jobs start.
 
 ## Inspect a failure
 
@@ -1011,7 +1051,7 @@ configuration, not proof of CI p90 <20 minutes, runner wait <5 minutes or queue-
 p90 <45 minutes.
 
 The 2026-10-12 standing rule supersedes whole/partial Namespace merge overflow:
-required merge stages wait on `ci1-priority` regardless of the old override variables.
+required merge stages wait on the selected owned priority pool regardless of the old override variables.
 No job migrates after it starts. If a selected local job waits, qualify the named live runner
 and registration; preserve running work and do not reopen an isolated worker or blind-retry.
 

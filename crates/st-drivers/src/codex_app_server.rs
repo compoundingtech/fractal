@@ -2847,7 +2847,12 @@ pub fn run_controlled_paths(
 }
 
 /// Defaults apply only at the st3 launch entry point, before fresh/resume policy projection.
-fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
+fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, workspace: &Path, argv: Vec<String>) -> Result<Vec<String>> {
+    managed_codex_argv_asking(mode, crate::access::codex_asks(), endpoint, workspace, argv)
+}
+
+/// `asks` is an unticked "Let Codex work without asking": Codex keeps its own approval defaults.
+fn managed_codex_argv_asking(mode: crate::access::AccessMode, asks: bool, endpoint: Option<&str>, workspace: &Path, mut argv: Vec<String>) -> Result<Vec<String>> {
     let boundary = interactive_root_prefix_end(&argv[1..])?;
     let authored = &argv[1..1 + boundary];
     let mut explicit_permissions = false;
@@ -2864,6 +2869,8 @@ fn managed_codex_argv(mode: crate::access::AccessMode, endpoint: Option<&str>, w
         { explicit_permissions = true; }
         index += if matches!(arg, "-c" | "--config" | "--enable" | "--disable" | "--remote-auth-token-env" | "-m" | "--model" | "--local-provider" | "-p" | "--profile" | "-s" | "--sandbox" | "-C" | "--cd" | "--add-dir" | "-a" | "--ask-for-approval") { 2 } else { 1 };
     }
+    // An unticked "Let Codex work without asking" leaves Codex's own approval defaults in place.
+    explicit_permissions |= asks;
     let socket = if mode == crate::access::AccessMode::Auto && !explicit_permissions {
         let endpoint = endpoint.context("managed auto Codex needs ST3_ENDPOINT")?;
         Some(Path::new(endpoint.strip_prefix("unix://").unwrap_or(endpoint)))

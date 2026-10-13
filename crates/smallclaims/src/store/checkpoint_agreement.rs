@@ -441,6 +441,10 @@ pub struct CheckpointStatusView {
     pub participants: BTreeSet<String>,
     pub excused: BTreeSet<String>,
     pub left: BTreeSet<String>,
+    /// Each participant's revision advertised at its last daemon start, when available.
+    /// Display metadata only; this may differ from the build named by a checkpoint seal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub machine_version: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1197,6 +1201,7 @@ impl Store {
             excused: excused_writers_for_rules(&claims, &self.runtime.checkpoint_rules_digest()),
             participants,
             left,
+            machine_version: BTreeMap::new(),
         })
     }
 

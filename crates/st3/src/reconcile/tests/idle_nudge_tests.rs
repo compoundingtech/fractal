@@ -80,6 +80,7 @@ impl Idle {
                 step,
                 "progress",
                 &crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(SEAT.into()),
                     incarnation: Some("seat-one".into()),
                     summary: Some(summary.into()),

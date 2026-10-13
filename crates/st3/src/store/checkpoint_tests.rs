@@ -1837,12 +1837,21 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     let [after_trim, without_trim] =
         [&trimmed, &untrimmed].map(|store| store.checkpoint_sealed_set(second).unwrap());
     assert_eq!(sealed_digest(&after_trim), sealed_digest(&without_trim));
-    // A seal reads only the identities, and they give the same digest as the whole set.
+    // A seal reads only the identities, and they give the same digest as the whole set at
+    // every page size, though the trimmed node's identities alternate between its envelopes
+    // and its tombstones.
     for (store, set) in [(&trimmed, &after_trim), (&untrimmed, &without_trim)] {
         assert_eq!(
             store.checkpoint_sealed_identities(second, None).unwrap(),
             SealedIdentities::of(set)
         );
+        for page in [1, 2, 3, 5] {
+            assert_eq!(
+                store.checkpoint_sealed_identities_paged(second, None, page).unwrap(),
+                SealedIdentities::of(set),
+                "identities differ at page {page}"
+            );
+        }
     }
     assert_eq!(after_trim.envelope_tombstones.len(), plan.envelopes.len());
     assert!(after_trim.claims.len() < without_trim.claims.len());
@@ -1850,6 +1859,55 @@ fn a_trimmed_node_seals_and_digests_like_an_untrimmed_one() {
     assert!(after_trim.claims.is_empty(), "{:?}", after_trim.claims);
     assert_eq!(after_trim.drop_digest, plan.drop_digest);
     assert_eq!(without_trim.drop_digest, plan.drop_digest);
+}
+
+/// While a trim records its tombstones, a dropped envelope is both a row and a tombstone. A seal
+/// counts its identity once, at every page size.
+#[test]
+fn a_seal_counts_an_envelope_once_while_its_tombstone_is_recording() {
+    let store = Store::open_memory("alder").unwrap();
+    write_history(&store);
+    let first = now_ms() + 1_000;
+    let before = store.checkpoint_sealed_identities(first, None).unwrap();
+    let plan = plan_drops(&store.checkpoint_sealed_set(first).unwrap());
+    assert!(!plan.envelopes.is_empty());
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        record_checkpoint_tombstones_tx(&transaction, &checkpoint_name(first), &plan.envelopes, &plan.claims)
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    for page in [1, 2, 3, 64] {
+        assert_eq!(store.checkpoint_sealed_identities_paged(first, None, page).unwrap(), before, "page {page}");
+    }
+}
+
+/// Each identity page seeks the identity key and reads it in order: no table scan and no sort,
+/// so a page costs its rows, wherever it starts.
+#[test]
+fn seal_identity_pages_seek_the_identity_key() {
+    let store = Store::open_memory("alder").unwrap();
+    let connection = store.readers.get();
+    for (sql, parameters) in [
+        (SEALED_IDENTITY_ENVELOPES_SQL, 6),
+        (SEALED_IDENTITY_TOMBSTONES_SQL, 5),
+    ] {
+        let mut values: Vec<rusqlite::types::Value> =
+            vec![0_i64.into(), "alder".to_owned().into(), 1_i64.into(), "hash".to_owned().into()];
+        values.extend(std::iter::repeat_n(rusqlite::types::Value::from(64_i64), parameters - 4));
+        let plan: Vec<String> = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(rusqlite::params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let outer = &plan[0];
+        assert!(outer.starts_with("SEARCH") && outer.contains("INDEX"), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.starts_with("SCAN")), "{plan:?}");
+    }
 }
 
 /// Nearly every claim cites the claim before it on its subject. A walk from a runtime's

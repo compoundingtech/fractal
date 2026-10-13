@@ -1401,11 +1401,17 @@ fn observe_payload(
         // Responses are read from the transcript at Stop, so the account is read here too: the
         // one this Claude config is signed in to when its responses are recorded.
         timeline.set_account(crate::account::claude_account_cached(agent_dir));
-        if let Some(home) = var("HOME") {
+        // The transcripts live in the config directory the session runs on, which a seat on a
+        // declared account's login sets itself.
+        let claude_config = var("CLAUDE_CONFIG_DIR")
+            .filter(|directory| !directory.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| var("HOME").map(|home| Path::new(&home).join(".claude")));
+        if let Some(claude_config) = claude_config {
             if let Err(error) = crate::harness_timeline::observe_claude_stop_transcript(
                 &mut timeline,
                 &payload,
-                Path::new(&home),
+                &claude_config,
             ) {
                 tracing::warn!("st claude-observe: native answer publication failed: {error:#}");
             }

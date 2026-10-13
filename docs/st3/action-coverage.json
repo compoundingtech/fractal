@@ -2232,6 +2232,14 @@
       "verification": "shared API restart case"
     },
     {
+      "command": "st work resume",
+      "description": "Start the execution clock again after `work wait`",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st work retry",
       "description": "Retry one failed step; this reopens its failed run when that step was the only failure",
       "tests": [
@@ -2310,6 +2318,14 @@
       "description": "Bring a person information they asked for. Nothing waits on it; it clears once read",
       "tests": [
         "crates/st3/tests/action_coverage.rs::cli_person_asks_updates_done_cancel_and_retired_attention_survive_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st work wait",
+      "description": "Stop the execution clock while claimed work waits for something outside this seat",
+      "tests": [
+        "crates/st3/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
