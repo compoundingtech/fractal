@@ -14,7 +14,7 @@ const CallDetailRenderer = React.createContext<WorkLogCallDetailRenderer | undef
 const CallPresentation = React.createContext({ preview: false, interactive: true })
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
 /** Host-owned facts and actions; incomplete, running and failed work never folds. */
-export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail = false, interactiveCalls = true, hideLiveRow = false, expandedBody, ariaLabel = 'Work log', onRetry, onOpenOutput }: {
+export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail = false, interactiveCalls = true, hideLiveRow = false, expandedBody, summaryAnchorId, summaryMemberIds, ariaLabel = 'Work log', onRetry, onOpenOutput }: {
   readonly turn: WorkLogTurn
   readonly listStyle?: stylex.StyleXStyles
   readonly renderCallDetail?: WorkLogCallDetailRenderer
@@ -22,6 +22,10 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   readonly interactiveCalls?: boolean
   readonly hideLiveRow?: boolean
   readonly expandedBody?: React.ReactNode
+  /** Host-owned identity for the summary row, independent of folding and mounted calls. */
+  readonly summaryAnchorId?: string
+  /** Source leaves owned by this work log, for restoring its summary across leading-turn backfill. */
+  readonly summaryMemberIds?: readonly string[]
   readonly ariaLabel?: string
   readonly onRetry?: () => void
   readonly onOpenOutput?: (call: WorkLogCall) => void
@@ -40,7 +44,7 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   const summaryContent = <><span {...stylex.props(styles.summaryLabel)}>{summary}</span>{Number.isFinite(started) && <time dateTime={new Date(started).toISOString()} {...stylex.props(styles.time)}>{timeFormat.format(started)}</time>}</>
   return <CallDetailRenderer.Provider value={renderCallDetail}><CallPresentation.Provider value={{ preview: previewCallDetail, interactive: interactiveCalls }}><section aria-label={ariaLabel} data-testid="work-log">
     {turn.running && !hideLiveRow && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.live)}><Icon name="spinner" spinning /><span>Working</span></div>}
-    {interactiveCalls ? <Button isDisabled={!settled} aria-expanded={!settled || open} onPress={() => setOpen(value => !value)} {...stylex.props(styles.summary, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)}><span {...stylex.props(styles.chevron, (!settled || open) && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span></span>{summaryContent}</Button> : <div {...stylex.props(styles.summary, styles.staticCall, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)} />{summaryContent}</div>}
+    {interactiveCalls ? <Button data-scroll-anchor-id={summaryAnchorId} data-scroll-anchor-members={summaryMemberIds === undefined ? undefined : JSON.stringify(summaryMemberIds)} isDisabled={!settled} aria-expanded={!settled || open} onPress={() => setOpen(value => !value)} {...stylex.props(styles.summary, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)}><span {...stylex.props(styles.chevron, (!settled || open) && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span></span>{summaryContent}</Button> : <div data-scroll-anchor-id={summaryAnchorId} data-scroll-anchor-members={summaryMemberIds === undefined ? undefined : JSON.stringify(summaryMemberIds)} {...stylex.props(styles.summary, styles.staticCall, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)} />{summaryContent}</div>}
     {(!interactiveCalls || !settled || open) && <div data-testid="work-log-children" {...stylex.props(styles.children)}><div {...stylex.props(styles.list, listStyle)}>{turn.calls.map(call => <TimelineCall key={call.id} call={call} />)}{expandedBody}</div></div>}
     {failed && <ErrorOverlay id={`work-failure-${turn.calls[0]?.id ?? 'turn'}`} title={failedCommand === undefined ? 'Run failed.' : 'Command did not complete'} detail={errorReason(failedCall?.detail ?? turn.failureNote ?? '')} rawDetail={detail} command={failedCall === undefined ? failedCommandSource(turn.failureNote ?? '') : readableCommand(failedCall)} onRetry={onRetry} onOpenOutput={failedCall === undefined || onOpenOutput === undefined ? undefined : () => onOpenOutput(failedCall)} />}
     {turn.interrupted && <div {...stylex.props(styles.promoted)}><Icon name="stop" size={14} /><span>Run interrupted.</span></div>}

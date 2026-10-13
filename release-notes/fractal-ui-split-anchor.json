@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "fractal-ui restores a saved reading position to the captured member's current turn when older history renames or splits a leading turn, even if the old turn id still exists",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, columns, indexes or triggers."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Only packages/fractal-ui changes; no protocol, harness or CLI change. ScrollAnchor's Reading variant gains an optional member, and WorkLogV1 gains optional summaryAnchorId and summaryMemberIds. Anchors saved without a member keep restoring by entry; hosts that omit the WorkLogV1 props render no new attributes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}
