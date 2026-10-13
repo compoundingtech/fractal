@@ -317,7 +317,7 @@ export const CatchingUp: Story = { args: { state: 'catching-up' }, play: async (
 export const CatchingUpLight: Story = { ...CatchingUp, args: { state: 'catching-up', scheme: 'light' } }
 export const Reconnecting: Story = { args: { state: 'reconnecting' } }
 /** A host that owns the reconnect notice in its shell hides the inline sync line; the inline default keeps it. */
-export const ReconnectingShellNotice: Story = { args: { state: 'reconnecting' }, render: args => <main {...stylex.props(styles.all, ...baselineTheme, args.scheme === 'light' && lightTheme)}>{(['inline', 'shell'] as const).map(presentation => <section key={presentation} data-sync-presentation={presentation} {...stylex.props(styles.frame)}><RuntimeTranscript data={cases.reconnecting} onRetry={() => {}} syncPresentation={presentation} /></section>)}</main>, play: async ({ canvasElement }) => {
+export const ReconnectingShellNotice: Story = { args: { state: 'reconnecting' }, render: args => <main {...stylex.props(styles.all, ...baselineTheme, args.scheme === 'light' && lightTheme)}>{(['inline', 'shell'] as const).map(presentation => <section key={presentation}><h2>{presentation} sync notice</h2><section aria-label={`${presentation} sync notice example`} data-sync-presentation={presentation} {...stylex.props(styles.frame)}><RuntimeTranscript data={cases.reconnecting} onRetry={() => {}} syncPresentation={presentation} /></section></section>)}</main>, play: async ({ canvasElement }) => {
   const inline = canvasElement.querySelector<HTMLElement>('[data-sync-presentation="inline"]')!
   const shell = canvasElement.querySelector<HTMLElement>('[data-sync-presentation="shell"]')!
   await within(shell).findAllByTestId('transcript-turn')

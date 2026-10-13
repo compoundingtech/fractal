@@ -10,8 +10,8 @@ const storyNow = Date.UTC(2026, 9, 8, 12, 0, 0)
 const statuses: readonly AgentStatus[] = ['working', 'waiting', 'idle']
 /** The same last observed status, once live and once retained while the host reconnects. */
 function RetainedStatus() {
-  return <main {...stylex.props(styles.root)}>{(['live', 'stale'] as const).map(freshness => <section key={freshness} data-status-freshness={freshness} {...stylex.props(styles.column)}>
-    {statuses.map(status => <SidebarStatus key={status} status={status} statusSince={storyNow - 90_000} now={storyNow} freshness={freshness} />)}
+  return <main {...stylex.props(styles.root)}>{(['live', 'stale'] as const).map(freshness => <section key={freshness} aria-label={`${freshness} status glyphs`} data-status-freshness={freshness} {...stylex.props(styles.column)}>
+    {statuses.map(status => <SidebarStatus key={status} status={status} statusSince={storyNow - 90_000} now={storyNow} freshness={freshness} iconOnly />)}
   </section>)}</main>
 }
 const meta = { title: 'Fractal UI/Sidebar/Status', component: RetainedStatus, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof RetainedStatus>
