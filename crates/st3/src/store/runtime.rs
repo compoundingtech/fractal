@@ -197,6 +197,7 @@ impl Runtime for SmalltalkRuntime {
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(&RUNTIME_ID_INDEX)?;
         connection.execute_batch(arrangements::SCHEMA)?;
+        connection.execute_batch(git_changes::SCHEMA)?;
         usage_period::create_schema(connection)?;
         migrate_local_usage_seen(connection)?;
         backfill_message_index(connection)?;

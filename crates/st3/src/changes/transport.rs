@@ -767,8 +767,8 @@ pub fn validate_advertisement(advertisement: &Advertisement, revision: &Revision
     let prefix = format!("{PREFIX}{}/", revision.record.change_id);
     let actual: BTreeMap<_, _> = advertisement
         .refs
-        .iter()
-        .filter(|(name, _)| name.starts_with(&prefix))
+        .range(prefix.clone()..)
+        .take_while(|(name, _)| name.starts_with(&prefix))
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect();
     ensure!(expected == actual, "remote change marker conflict");
