@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Remove the two README-only tombstones for retired loop evals.",
+  "replay": {
+    "status": "none",
+    "detail": "Delete two documentation-only directories with no eval KDL, fixtures, scripts or test callers. The supported sequential-until loop and explicit mission/queue grammar remain unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Delete two documentation-only directories with no eval KDL, fixtures, scripts or test callers. The supported sequential-until loop and explicit mission/queue grammar remain unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Delete two documentation-only directories with no eval KDL, fixtures, scripts or test callers. The supported sequential-until loop and explicit mission/queue grammar remain unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Delete two documentation-only directories with no eval KDL, fixtures, scripts or test callers. The supported sequential-until loop and explicit mission/queue grammar remain unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Delete two documentation-only directories with no eval KDL, fixtures, scripts or test callers. The supported sequential-until loop and explicit mission/queue grammar remain unchanged."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Delete two documentation-only directories with no eval KDL, fixtures, scripts or test callers. The supported sequential-until loop and explicit mission/queue grammar remain unchanged."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Delete two documentation-only directories with no eval KDL, fixtures, scripts or test callers. The supported sequential-until loop and explicit mission/queue grammar remain unchanged."
+  }
+}
