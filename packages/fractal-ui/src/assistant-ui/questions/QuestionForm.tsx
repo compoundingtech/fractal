@@ -12,7 +12,6 @@ export const OTHER_LABEL = 'Other (type your own)'
 
 type FocusTarget = { readonly _tag: 'options' } | { readonly _tag: 'option'; readonly index: number } | { readonly _tag: 'other' }
 interface FocusRequest { readonly questionId: string; readonly target: FocusTarget }
-type StyleArg = Parameters<typeof stylex.props>[number]
 
 const EMPTY_DRAFT: AnswerDraft = { selected: [] }
 const OPTIONS_TARGET: FocusTarget = { _tag: 'options' }
@@ -25,7 +24,6 @@ const filled = (value: string | undefined) => {
   return trimmed === undefined || trimmed === '' ? undefined : trimmed
 }
 const usesCheckboxes = (question: QuestionView) => question.kind === 'multi'
-const className = (...styles: StyleArg[]) => stylex.props(...styles).className ?? ''
 const clock = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
 
 /** A question counts as answered once it has a chosen option or non-empty typed text. */
@@ -304,7 +302,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
         <TabList aria-label="Questions" {...stylex.props(styles.tabList, stacked && styles.tabListStacked)}>
           {questions.map((question, index) => {
             const answered = isQuestionAnswered(question, draftFor(answers, question.id))
-            return <Tab key={question.id} id={question.id} className={({ isSelected, isFocusVisible }) => className(styles.tab, stacked && styles.tabStacked, isSelected && styles.tabSelected, isFocusVisible && styles.focusRing)}>
+            return <Tab key={question.id} id={question.id} className={({ isSelected, isFocusVisible }) => stylex.props(styles.tab, stacked && styles.tabStacked, isSelected && styles.tabSelected, isFocusVisible && styles.focusRing).className ?? ''}>
               <span {...stylex.props(styles.tabLabel, stacked && styles.tabLabelStacked)}>{question.header ?? `Question ${index + 1}`}</span>
               <span data-question-tab-marker={answered ? 'answered' : 'open'} {...stylex.props(styles.marker, answered && styles.markerAnswered)}>{answered && <Icon name="check" size={12} />}</span>
               {answered && <VisuallyHidden>, answered</VisuallyHidden>}
@@ -394,7 +392,7 @@ function QuestionPanel({ question, draft, showHeader, stacked, isDisabled, isRea
     const index = Number((event.target as HTMLElement).closest<HTMLElement>('[data-option-index]')?.dataset['optionIndex'])
     if (Number.isInteger(index) && index < question.options.length) onPreview(index)
   }
-  const rowClass = ({ isSelected, isFocusVisible }: { isSelected: boolean; isFocusVisible: boolean }) => className(styles.option, isSelected && styles.optionSelected, isFocusVisible && styles.focusRing, (isReadOnly || isDisabled) && styles.optionInert)
+  const rowClass = ({ isSelected, isFocusVisible }: { isSelected: boolean; isFocusVisible: boolean }) => stylex.props(styles.option, isSelected && styles.optionSelected, isFocusVisible && styles.focusRing, (isReadOnly || isDisabled) && styles.optionInert).className ?? ''
   const content = (row: { option: OptionView; index: number }, isSelected: boolean) => <OptionContent option={row.option} index={row.index} isSelected={isSelected} multi={usesCheckboxes(question)} />
 
   const control = question.kind === 'text'
