@@ -157,7 +157,12 @@ impl Store {
                 launch_id: None,
                 variant_id: None,
                 message_id: None,
-                answers: if answerable(&harness) {
+                // A subagent's call is not in the seat's conversation, where a client shows the
+                // call beside an allow: st offers only deny for it, never an allow of a call the
+                // person cannot see.
+                answers: if answerable(&harness) && subagent_prompt(&harness) {
+                    vec!["deny".into()]
+                } else if answerable(&harness) {
                     vec!["allow".into(), "deny".into()]
                 } else {
                     Vec::new()
@@ -173,6 +178,11 @@ impl Store {
                     )
                 } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
                     "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
+                } else if answerable(&harness) && subagent_prompt(&harness) {
+                    format!(
+                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in stui), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
+                        prompt.trim_start_matches(st_drivers::claude_prompts::SUBAGENT_PREFIX)
+                    )
                 } else if answerable(&harness) {
                     format!(
                         "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered."
@@ -1484,6 +1494,15 @@ fn codex_approval_words(reason: &str) -> &'static str {
     }
 }
 
+/// Whether the prompt `harness` reports is a Claude subagent's: its call is not in the seat's
+/// conversation, so st answers it only with deny.
+fn subagent_prompt(harness: &Value) -> bool {
+    harness["driver"] == "claude"
+        && harness["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with(st_drivers::claude_prompts::SUBAGENT_PREFIX))
+}
+
 /// The idempotency key of the person's answer to the native prompt `observation` opened.
 fn native_prompt_answer_key(observation: &str) -> String {
     format!("native-prompt-answer:{observation}")
@@ -1648,6 +1667,12 @@ impl Store {
             return Err(St3Error::new(
                 "stale-fence",
                 "that prompt can only be answered in the seat's terminal",
+            ));
+        }
+        if answer == "allow" && subagent_prompt(&harness) {
+            return Err(St3Error::new(
+                "invalid-answer",
+                "a subagent's call is not shown in the seat's conversation: deny it here, or allow it in the terminal",
             ));
         }
         let incarnation = harness["incarnation_id"].as_str().unwrap_or_default();
