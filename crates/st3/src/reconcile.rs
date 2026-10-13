@@ -11852,9 +11852,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             if desired.kind != "agent" || deferred_gate != Some(subject.as_str()) {
                 return true;
             }
-            // Re-derive admission after restart or revision from persisted step state.
-            // Once admitted, the desired seat survives release and retry until run cleanup.
-            run.steps.iter().any(|step| {
+            // A selected owned seat proves prior admission even while retry puts its step
+            // back in pending. Re-own it before predecessor retirement on a revision;
+            // otherwise that retirement would stop the seat and strand the next attempt.
+            // Explicit stops remain authoritative below.
+            selected.get(subject).is_some_and(|current| {
+                current.kind == "agent"
+                    && current.owner_run.as_deref() == Some(run.subject.as_str())
+            }) || run.steps.iter().any(|step| {
                 step.step == "gate"
                     && (matches!(
                         step.status.as_str(),

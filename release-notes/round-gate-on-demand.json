@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Daemon restart and compatible revision derive gate admission from durable step state, including a ready gate with no desired seat. Existing claim/release/retry and cleanup paths retain ownership. Returning to an older build restores eager materialization without changing identities or rewriting claims."
+    "detail": "Daemon restart and compatible revision derive gate admission from durable step state, including a ready gate with no desired seat. Existing claim/release/retry and cleanup paths retain ownership. Returning to an older build restores eager materialization without changing identities or rewriting claims. A selected owned gate declaration also proves prior admission during a pending retry, so a compatible revision re-owns it before predecessor retirement."
   }
 }

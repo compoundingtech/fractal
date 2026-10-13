@@ -334,6 +334,55 @@ fn gate_on_demand_release_and_failed_retry_keep_the_seat() {
 }
 
 #[test]
+fn gate_on_demand_revision_during_pending_retry_keeps_admitted_seat() {
+    let mut fixture = Fixture::new(SOURCE);
+    fixture.finish_build();
+    fixture.action("gate", "claim", "claim-gate");
+    fixture.action("gate", "fail", "fail-gate");
+    fixture
+        .store
+        .retry_step(
+            &fixture.step("gate").subject,
+            "Review again after the backoff.",
+            60_000,
+        )
+        .unwrap();
+    assert_eq!(fixture.step("gate").status, "pending");
+    fixture.revise("mid-retry");
+    fixture.restart();
+    assert_eq!(fixture.step("gate").status, "pending");
+    assert_eq!(fixture.step("gate").attempt, 2);
+    let gate = format!("agent/{}/gate", fixture.round.id);
+    let desired = fixture
+        .store
+        .desired_subjects_named(&[gate])
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(desired.kind, "agent");
+    assert_eq!(
+        desired.owner_generation,
+        Some(
+            fixture
+                .store
+                .mission_run(&fixture.round.id)
+                .unwrap()
+                .unwrap()
+                .generation
+        )
+    );
+    assert_eq!(fixture.gate_starts(), 1);
+    assert!(fixture.runtime.stops.lock().unwrap().is_empty());
+    fixture
+        .store
+        .set_step_state(&fixture.step("gate").subject, "ready", None)
+        .unwrap();
+    fixture.settle();
+    fixture.action("gate", "claim", "claim-after-revision");
+    assert_eq!(fixture.gate_starts(), 1);
+}
+
+#[test]
 fn gate_on_demand_cancelled_build_leaves_no_gate_or_stop_declaration() {
     let fixture = Fixture::new(SOURCE);
     fixture

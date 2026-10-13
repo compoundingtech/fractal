@@ -480,7 +480,9 @@ assigned agent declared directly inside `round`, and no other step assigns or of
 work to that agent, st makes the agent desired only after the step's dependencies and
 baseline predicates pass. The seat remains available through claims, releases and retries,
 and ordinary child-run cleanup removes it. A daemon restart or compatible revision
-derives admission from persisted step state. A round ending before admission creates
+derives admission from persisted step state and the current owned declaration. An
+already admitted seat is re-owned even during a pending retry, before a revision
+retires its predecessor generation. A round ending before admission creates
 neither a gate seat nor a stop declaration for it.
 
 This is a rule for the literal step name `gate`, not a DSL marker or an `until` exit
