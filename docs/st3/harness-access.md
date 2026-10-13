@@ -51,8 +51,16 @@ daemon socket. With networking off, even the named socket is refused. A control 
 learns the rule. And Codex's `domains` allowlist is not enforced by `codex sandbox`, so egress is
 not narrowed to git, gh and registries.
 
-The live eval `evals/st3/codex-minimal-access` is paid and run by hand; no CI gate proves the real
-launch path. The argv test and the sandbox tests are the CI evidence.
+A resumed thread keeps the same access. Codex 0.160.1 refuses any permission config on a remote
+resume ("Permission overrides are not supported when resuming a remote task"), so the resume argv
+omits the profile's `-c` entries (and an authored `-c` entry for the same keys): the app server holds them and `thread/resume` selects the profile and carries the approval policy, reviewer, sandbox, model and effort; `sandbox_workspace_write.*` stays on the app server only.
+Before this, a plain-declaration Codex seat that restarted on an auto install had its TUI exit and the
+driver started a new thread instead of resuming (the old rollout stayed on disk, unreferenced).
+
+The live eval `evals/st3/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
+restart between two turns, checking the thread id, the daemon socket, the network and the refused
+write) are paid and run by hand; no CI gate proves the real launch path. The argv tests and the
+sandbox tests are the CI evidence.
 
 Codex's workspace profile allows reads and temporary-directory writes according to
 its built-in rules. On Linux, enabling networking also permits other Unix sockets:

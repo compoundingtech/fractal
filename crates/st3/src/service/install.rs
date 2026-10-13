@@ -1,5 +1,7 @@
 //! Service installation with an injectable command boundary: tests never use host services.
 
+use crate::cli_println as println;
+
 use super::*;
 use std::process::Output;
 #[cfg(any(target_os = "macos", test))]
