@@ -4313,11 +4313,6 @@ dependencies = [
  "clap_complete",
  "kdl",
  "libc",
- "notify",
- "opentelemetry",
- "opentelemetry-appender-tracing",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "parking_lot",
  "serde",
  "serde_json",
@@ -4328,12 +4323,7 @@ dependencies = [
  "st2-resource-providers",
  "st2-resource-wasip2",
  "tempfile",
- "toml 0.9.12+spec-1.1.0",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "tungstenite 0.30.0",
- "wat",
 ]
 
 [[package]]
