@@ -1787,7 +1787,11 @@ Cancellation also cancels active descendant mission runs. Each descendant uses i
 
 The terminal state is `cancelled` after successful final work. A final failure makes the run failed.
 
-After final work, st enters cleanup and stops every runtime owned by the mission run. A seat is never stopped while it holds a message nobody has read or work in a run outside this one. The run still finishes. The seat keeps its stop declaration, st checks it again every ten seconds, and it stops once the message is read and the other work ends. A person's own stop is not delayed.
+After final work, st enters cleanup and stops every runtime owned by the mission run. A run-owned stop waits while the seat holds a message nobody has read or work in another run. The final stop step and the run may complete while that retention keeps the driver and its children running. The stop declaration stays; st checks the retention again at most a minute later, and stops the runtime once the mail is read or archived and the other work ends. Cleanup selects the run's owned runtimes; it does not select standing seats or person-assigned work.
+
+When the owner run is terminal and a live seat's stop has been deferred for at least 15 minutes, st raises a fault naming the retention reason and how to end it. The reporting age is bound to the stop declaration and runtime incarnation and survives daemon restarts and unrelated harness diagnostics. Older diagnostics without those fences begin their reporting age when the upgraded daemon first reconciles them. Inspect the fault with `st agents show agent/orchid/review/worker --all`: terminal-owner seats belong to history, so ordinary roster lists omit them. The fault clears when retention ends, the runtime stops, or its declaration or incarnation changes.
+
+The 15-minute age reports a retained process; it does not terminate one. Read or archive the retained mail, or complete or hand off work in the other run, to release the pending stop. An explicit `st agents stop agent/orchid/review/worker --as ACTOR` uses the ordinary stop path and ends the driver and children even when mail or work remains. Use the actual operator identity for `ACTOR`.
 
 A final step that stops a seat completes once the stop asks nothing more of it: the seat is stopped, absent, never observed, already being stopped, or kept for the reasons above. A kept seat does not hold the step to its timeout, so the step never fails a run whose work succeeded. The deferral records a `stop-deferred` warning diagnostic on the seat.
 

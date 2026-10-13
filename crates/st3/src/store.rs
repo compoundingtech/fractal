@@ -30,6 +30,7 @@ pub mod git_changes;
 pub(crate) mod message_subscriptions;
 mod rollouts;
 mod seat_status;
+mod stop_deferral;
 mod card_fold;
 #[cfg(test)]
 mod card_fold_tests;
