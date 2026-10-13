@@ -761,40 +761,25 @@ mod tests {
             std::env::var_os("APPLY_RESTART_CENSUS_SCRATCH").expect("private matching fixture");
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("foreground.db");
-        let mut connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .unwrap();
-        let uri = format!("file:{}?mode=ro", std::path::Path::new(&source).display());
-        connection
-            .execute("ATTACH DATABASE ?1 AS census", [uri])
-            .unwrap();
-        let schemas = connection.prepare("SELECT sql FROM census.sqlite_schema WHERE type IN ('table','index')
-            AND sql IS NOT NULL AND tbl_name IN ('claims','batches','replica_records','local_observations','projection_digest_repaired_claims')
-            ORDER BY type='index'").unwrap().query_map([],|row|row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        for sql in schemas {
-            connection.execute_batch(&sql).unwrap();
-        }
-        let tx = connection.transaction().unwrap();
-        for table in [
-            "claims",
-            "batches",
-            "replica_records",
-            "local_observations",
-            "projection_digest_repaired_claims",
-        ] {
-            tx.execute_batch(&format!(
-                "INSERT INTO main.{table} SELECT * FROM census.{table}"
-            ))
-            .unwrap();
-        }
-        tx.commit().unwrap();
-        connection.execute_batch("DETACH DATABASE census").unwrap();
-        // The matching-row fixture copies source tables without the source's metadata.
-        // Mark their current schema before exercising the normal full Store open.
-        connection.pragma_update(None, "user_version", 18).unwrap();
-        drop(connection);
         let store = Arc::new(Store::open(&path, "node").unwrap());
+        let frozen = std::env::var("APPLY_RESTART_CENSUS_SOURCE").expect("immutable frozen source URI");
+        assert!(frozen.contains("mode=ro") && frozen.contains("immutable=1"));
+        {
+            let mut writer=store.connection.write();
+            let uri=format!("file:{}?mode=ro",std::path::Path::new(&source).display());
+            writer.execute("ATTACH DATABASE ?1 AS matching",[uri]).unwrap();
+            writer.execute("ATTACH DATABASE ?1 AS frozen",[frozen]).unwrap();
+            let tx=writer.transaction().unwrap();
+            // Exact matching source rows, using the native target schema and original
+            // metadata. No full production copy; fixture preparation is outside latency.
+            tx.execute_batch("INSERT INTO main.batches SELECT * FROM frozen.batches WHERE id IN (SELECT id FROM matching.batches);
+                INSERT INTO main.claims SELECT * FROM frozen.claims WHERE id IN (SELECT id FROM matching.claims);
+                INSERT INTO main.replica_records SELECT * FROM frozen.replica_records WHERE claim_id IN (SELECT claim_id FROM matching.replica_records);
+                INSERT INTO main.local_observations SELECT * FROM frozen.local_observations WHERE id IN (SELECT id FROM matching.local_observations);").unwrap();
+            reset(&tx).unwrap();
+            tx.commit().unwrap();
+            writer.execute_batch("DETACH DATABASE matching; DETACH DATABASE frozen").unwrap();
+        }
         assert!(!store.publication_evidence_ready().unwrap());
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_done = done.clone();
