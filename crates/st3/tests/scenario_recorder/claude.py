@@ -53,7 +53,7 @@ def hook(event, **payload):
 
 
 def append(role, content):
-    # Version 2 receives its effective native stamp at release. Version 1 keeps write-wall time.
+    # Version 2 receives its effective native stamp at release; version 1 uses the authored turn stamp.
     timestamp = current_timestamp or datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     global record_index
     record_id = uuid.uuid5(uuid.NAMESPACE_URL, f"st3-scenario/{session}/{record_index}")
@@ -86,6 +86,8 @@ for index, turn in enumerate(script["turns"]):
     if script["format_version"] == 2:
         current_timestamp = (root / f"timestamp-{index}").read_text()
         datetime.fromisoformat(current_timestamp.replace("Z", "+00:00"))
+    else:
+        current_timestamp = turn["timestamp"]
     hook("UserPromptSubmit", prompt=turn["prompt"], permission_mode="default")
     append("user", turn["prompt"])
     command = turn.get("command")
