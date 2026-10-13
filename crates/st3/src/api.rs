@@ -8934,6 +8934,25 @@ async fn backup_export(State(state): State<AppState>) -> Result<Response, ApiErr
         .into_response())
 }
 
+/// Count completed summary store calls, including errors, without charging nested CPU.
+/// These wall times overlap the export route. JSON serialization, worker decode and CPU
+/// are outside this measurement; do not add these durations to the enclosing route.
+fn record_replication_summary<T>(authority_guard: bool, work: impl FnOnce() -> T) -> T {
+    let label = if authority_guard {
+        "replication/authority-guard"
+    } else {
+        "replication/summary"
+    };
+    let started = Instant::now();
+    let result = work();
+    crate::performance::record_request(label, None, started.elapsed());
+    result
+}
+
+#[cfg(test)]
+#[path = "api/replication_guard_tests.rs"]
+mod replication_guard_tests;
+
 async fn replication_export(
     State(state): State<AppState>,
     Json(request): Json<ReplicationExportRequest>,
@@ -8948,7 +8967,9 @@ async fn replication_export(
     let store = state.store.clone();
     blocking_store(move || {
         let exchange = if request.summary_only {
-            store.export_replication_summary(&request.fleet_id)?
+            record_replication_summary(request.authority_guard, || {
+                store.export_replication_summary(&request.fleet_id)
+            })?
         } else {
             store.export_replication_exchange_answering(
                 &request.fleet_id,
