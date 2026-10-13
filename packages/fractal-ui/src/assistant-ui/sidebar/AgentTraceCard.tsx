@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria-components'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { borderVars as border, geometryNumbers, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { compactTime, type SidebarAgentRow as Row } from './model'
 import { Icon } from '../composition/Icons'
 import { absenceNote, type AgentTrace, type ContextHistory, type SpendPoint, type SpendTotals, type TokenSplit, type TraceSubagent } from './trace-model'
@@ -15,6 +15,11 @@ const plural = (count: number, word: string) => `${count} ${word}${count === 1 ?
 const chart = { width: 328, histogram: 48, spend: 40 } as const
 
 export type AgentTraceCardProps = { readonly row: Row; readonly trace: AgentTrace; readonly now: number }
+/** The card sits right of its row when the viewport has room for it, otherwise below the row (narrow windows), so it never runs off-screen. */
+export function traceCardPlacement(anchor: HTMLElement | null): 'right' | 'bottom start' {
+  if (anchor === null) return 'right'
+  return anchor.getBoundingClientRect().right + geometryNumbers.tooltipOffset + geometryNumbers.panelMin + geometryNumbers.tooltipOffset <= window.innerWidth ? 'right' : 'bottom start'
+}
 
 /** Peak, marks and idle gaps of a context history; shared by the visible head and the chart label. */
 function contextStats(history: ContextHistory) {
@@ -238,7 +243,7 @@ const styles = stylex.create({
   legendItem: { display: 'inline-flex', alignItems: 'center', gap: s.xs },
   pending: { borderRadius: r.sm, backgroundColor: surface.rowActive },
   pendingBar: { height: g.progressMd },
-  facts: { display: 'grid', gridTemplateColumns: g.descriptionColumns, columnGap: s.lg, rowGap: s.xs, margin: s.zero, paddingTop: s.md, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
+  facts: { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', columnGap: s.lg, rowGap: s.xs, margin: s.zero, paddingTop: s.md, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
   factLabel: { margin: s.zero, color: ink.fgMuted },
   factValue: { margin: s.zero, minWidth: 0, color: ink.fg },
   table: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) max-content max-content max-content', columnGap: s.lg },

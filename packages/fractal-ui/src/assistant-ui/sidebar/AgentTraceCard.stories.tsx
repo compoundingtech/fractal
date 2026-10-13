@@ -103,6 +103,13 @@ async function openCard(canvasElement: HTMLElement, via: 'hover' | 'focus'): Pro
 async function assertCard(card: HTMLElement, row: Row) {
   await expect(card.closest('[role="tooltip"]')).not.toBeNull()
   await expect(card.getBoundingClientRect().width).toBeLessThanOrEqual(Math.min(360, window.innerWidth) + 0.5)
+  // The card never runs off-screen: right of the row at 1440, below it at 440.
+  const rect = card.getBoundingClientRect()
+  await expect(rect.left).toBeGreaterThanOrEqual(0)
+  await expect(rect.right).toBeLessThanOrEqual(window.innerWidth)
+  const rowRect = document.querySelector('[data-testid="taste-agent-row"]')!.getBoundingClientRect()
+  if (window.innerWidth >= 1000) await expect(rect.left).toBeGreaterThanOrEqual(rowRect.right)
+  else await expect(rect.top).toBeGreaterThanOrEqual(rowRect.bottom)
   await expect(card.querySelectorAll('[title]')).toHaveLength(0)
   await expect(card.textContent).not.toMatch(/unknown/i)
   await expect(card.textContent).not.toMatch(/\$0\.00/)
