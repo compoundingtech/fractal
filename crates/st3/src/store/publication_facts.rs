@@ -790,6 +790,9 @@ mod tests {
         }
         tx.commit().unwrap();
         connection.execute_batch("DETACH DATABASE census").unwrap();
+        // The matching-row fixture copies source tables without the source's metadata.
+        // Mark their current schema before exercising the normal full Store open.
+        connection.pragma_update(None, "user_version", 18).unwrap();
         drop(connection);
         let store = Arc::new(Store::open(&path, "node").unwrap());
         assert!(!store.publication_evidence_ready().unwrap());
