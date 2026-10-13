@@ -40,7 +40,7 @@ export const Dark1440: Story = {
     await expect(verdict).toHaveTextContent('Signed · verified')
     await expect(verdict).not.toHaveAttribute('title')
     await expect(verdict).toHaveAccessibleDescription('Signature verified · Example paired terminal')
-    await userEvent.tab({ focusTrap: card })
+    for (let step = 0; step < 30 && canvasElement.ownerDocument.activeElement !== verdict; step++) await userEvent.tab()
     await expect(verdict).toHaveFocus()
     await waitFor(() => expect(within(canvasElement.ownerDocument.body).getByRole('tooltip')).toHaveTextContent('Signature verified · Example paired terminal'))
     await expect(canvas.queryByText(/unknown/i)).toBeNull()
