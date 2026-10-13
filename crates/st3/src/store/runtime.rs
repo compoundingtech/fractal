@@ -59,6 +59,13 @@ pub struct SmalltalkRuntime {
     pub(crate) agent_roster_published: tokio::sync::watch::Sender<u64>,
     /// Every other collection's published view revisions, for the same rereads.
     pub(crate) published_views: published_views::PublishedViews,
+    /// The attention list a daemon's refresher publishes for collection windows.
+    pub(crate) attention_list: super::attention_list::AttentionList,
+    /// Every person's glasses and arrangements, published by the same refresher.
+    pub(crate) glass_list: super::owner_lists::OwnerList,
+    pub(crate) arrangement_list: super::owner_lists::OwnerList,
+    /// Each selected person's summary row, published by the same refresher.
+    pub(crate) summary_list: super::summary_list::SummaryList,
     /// The current missions list, while a refresher keeps it published.
     pub(crate) published_missions: published_list::PublishedList<mission_list::MissionRows>,
     /// The current work list, while a refresher keeps it published.
@@ -398,6 +405,10 @@ impl Runtime for SmalltalkRuntime {
             .clear();
         *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
         self.agent_roster_published.send_modify(|revision| *revision += 1);
+        self.attention_list.forget();
+        self.glass_list.forget();
+        self.arrangement_list.forget();
+        self.summary_list.forget();
         // Projections replaced without a new claim: the lists fold from nothing, dropping any
         // fold under way, before the windows that read them are told to reread.
         self.published_missions.forget();
