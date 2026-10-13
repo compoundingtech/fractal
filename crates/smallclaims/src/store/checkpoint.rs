@@ -863,6 +863,35 @@ pub fn sealed_records_page_sql() -> String {
     )
 }
 
+/// One page of `replica_envelopes` in identity order after the key (?2, ?3, ?4), for a seal.
+/// As in `checkpoint_sealed_set_through`: an envelope is before the cut ?1 when it and every
+/// claim admitted from it, less repaired originals, are dated before the cut, and it is at or
+/// below the seal row ?5. That is a column, not a condition, so a page reads ?6 rows however
+/// many fail it.
+pub const SEALED_IDENTITY_ENVELOPES_SQL: &str = "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash,
+        envelopes.rowid <= ?5
+        AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?1
+        AND NOT EXISTS (
+            SELECT 1 FROM replica_records AS records
+            JOIN claims ON claims.id=records.claim_id
+            WHERE records.writer=envelopes.writer
+              AND records.sequence=envelopes.sequence
+              AND records.envelope_hash=envelopes.envelope_hash
+              AND records.state<>'repaired'
+              AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?1)
+     FROM replica_envelopes AS envelopes
+     WHERE (envelopes.writer, envelopes.sequence, envelopes.envelope_hash) > (?2, ?3, ?4)
+     ORDER BY envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+     LIMIT ?6";
+
+/// One page of `checkpoint_envelopes` in identity order after the key (?2, ?3, ?4), with whether
+/// each is dated before the cut ?1, at most ?5 rows.
+pub const SEALED_IDENTITY_TOMBSTONES_SQL: &str = "SELECT writer, sequence, envelope_hash, accepted_at_unix_ms < ?1
+     FROM checkpoint_envelopes
+     WHERE (writer, sequence, envelope_hash) > (?2, ?3, ?4)
+     ORDER BY writer, sequence, envelope_hash
+     LIMIT ?5";
+
 #[derive(Debug)]
 struct CheckpointCaptureChanged;
 
@@ -1248,10 +1277,14 @@ impl Store {
         self.checkpoint_sealed_identities_paged(cut_unix_ms, through_rowid, SEALED_ENVELOPE_PAGE)
     }
 
-    /// `checkpoint_sealed_identities`, reading `envelope_page` envelopes per read, each on a read
-    /// of its own so the WAL can be checkpointed between pages (see
-    /// `checkpoint_sealed_set_paged`). It read the whole set in one transaction before, which
-    /// held the WAL pinned for 35 seconds on a large store.
+    /// `checkpoint_sealed_identities`, reading at most `envelope_page` rows of each identity table
+    /// per read. The digest is over identities in key order, and both `replica_envelopes` and
+    /// `checkpoint_envelopes` are keyed by identity, so the pass walks the two keys together and
+    /// digests each identity as it passes: it holds one page, not the set (#2492). Each read
+    /// takes the next page of both tables in one snapshot and consumes the key range both pages
+    /// cover, so a trim moving an identity from an envelope to its tombstone between reads can
+    /// neither drop nor repeat it. Reads are separate snapshots, so the WAL can be checkpointed
+    /// between them; one read of the whole set held the WAL pinned for 35 seconds.
     pub fn checkpoint_sealed_identities_paged(
         &self,
         cut_unix_ms: u128,
@@ -1259,6 +1292,8 @@ impl Store {
         envelope_page: i64,
     ) -> Result<SealedIdentities> {
         self.runtime.checkpoint_preflight()?;
+        anyhow::ensure!(envelope_page > 0, "checkpoint page sizes must be positive");
+        let page = envelope_page.min(SEALED_ENVELOPE_PAGE);
         self.seal_local_batches()?;
         let seal_rowid: i64 = {
             let connection = self.readers.get();
@@ -1270,64 +1305,77 @@ impl Store {
             through_rowid.map_or(high, |through| through.min(high))
         };
         let cut = i64::try_from(cut_unix_ms)?;
-        // As in `checkpoint_sealed_set_through`: an envelope is before the cut when it and every
-        // claim admitted from it, less repaired originals, are dated before the cut.
-        let mut identities = BTreeSet::new();
-        let mut after = 0_i64;
-        while after < seal_rowid {
-            let upto = after.saturating_add(envelope_page).min(seal_rowid);
-            let connection = self.readers.get();
-            let page = connection
-                .prepare_cached(
-                    "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
-                     FROM replica_envelopes AS envelopes
-                     WHERE envelopes.rowid > ?3 AND envelopes.rowid <= ?2
-                       AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?1
-                       AND NOT EXISTS (
-                           SELECT 1 FROM replica_records AS records
-                           JOIN claims ON claims.id=records.claim_id
-                           WHERE records.writer=envelopes.writer
-                             AND records.sequence=envelopes.sequence
-                             AND records.envelope_hash=envelopes.envelope_hash
-                             AND records.state<>'repaired'
-                             AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?1)",
-                )?
-                .query_map(params![cut, upto, after], |row| {
-                    Ok(EnvelopeKey {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            identities.extend(page);
-            after = upto;
-        }
-        {
-            let connection = self.readers.get();
-            let tombstones = connection
-                .prepare_cached(
-                    "SELECT writer, sequence, envelope_hash FROM checkpoint_envelopes
-                     WHERE accepted_at_unix_ms < ?1",
-                )?
-                .query_map(params![cut], |row| {
-                    Ok(EnvelopeKey {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            identities.extend(tombstones);
-        }
+        let identity = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(EnvelopeKey, bool)> {
+            Ok((
+                EnvelopeKey {
+                    writer: row.get(0)?,
+                    sequence: row.get(1)?,
+                    envelope_hash: row.get(2)?,
+                },
+                row.get(3)?,
+            ))
+        };
         let mut digest = Sha256::new();
         digest.update(b"st3-checkpoint-sealed-v1\0");
-        for key in &identities {
-            update_identity_digest(&mut digest, &key.writer, key.sequence, &key.envelope_hash);
+        let mut count = 0_usize;
+        // The last key consumed. Every identity sorts after the first one: sequences are never
+        // negative.
+        let mut after = (String::new(), -1_i64, String::new());
+        loop {
+            let (envelopes, tombstones) = self.read_snapshot(|_| {
+                let connection = self.readers.get();
+                let envelopes = connection
+                    .prepare_cached(SEALED_IDENTITY_ENVELOPES_SQL)?
+                    .query_map(
+                        params![cut, after.0, after.1, after.2, seal_rowid, page],
+                        identity,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let tombstones = connection
+                    .prepare_cached(SEALED_IDENTITY_TOMBSTONES_SQL)?
+                    .query_map(params![cut, after.0, after.1, after.2, page], identity)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((envelopes, tombstones))
+            })?;
+            // A full page may end before the other table's page does; keys past the smaller
+            // full page's last key wait for the next read, which sees both tables at once again.
+            let full = |rows: &[(EnvelopeKey, bool)]| {
+                (rows.len() == page as usize).then(|| rows.last().map(|(key, _)| key.clone())).flatten()
+            };
+            let bound = [full(&envelopes), full(&tombstones)].into_iter().flatten().min();
+            let within = |key: &EnvelopeKey| bound.as_ref().is_none_or(|bound| key <= bound);
+            let mut envelopes = envelopes.into_iter().filter(|(key, _)| within(key)).peekable();
+            let mut tombstones = tombstones.into_iter().filter(|(key, _)| within(key)).peekable();
+            loop {
+                let (key, included) = match (envelopes.peek(), tombstones.peek()) {
+                    (None, None) => break,
+                    (Some(_), None) => envelopes.next().expect("peeked"),
+                    (None, Some(_)) => tombstones.next().expect("peeked"),
+                    (Some((envelope, _)), Some((tombstone, _))) => match envelope.cmp(tombstone) {
+                        std::cmp::Ordering::Less => envelopes.next().expect("peeked"),
+                        std::cmp::Ordering::Greater => tombstones.next().expect("peeked"),
+                        std::cmp::Ordering::Equal => {
+                            let (key, envelope) = envelopes.next().expect("peeked");
+                            let (_, tombstone) = tombstones.next().expect("peeked");
+                            (key, envelope || tombstone)
+                        }
+                    },
+                };
+                if included {
+                    update_identity_digest(&mut digest, &key.writer, key.sequence, &key.envelope_hash);
+                    count += 1;
+                }
+            }
+            match bound {
+                Some(bound) => {
+                    after = (bound.writer, i64::try_from(bound.sequence)?, bound.envelope_hash);
+                }
+                None => break,
+            }
         }
         Ok(SealedIdentities {
             digest: hex::encode(digest.finalize()),
-            count: identities.len(),
+            count,
             seal_rowid,
         })
     }
