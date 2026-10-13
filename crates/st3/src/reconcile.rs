@@ -26718,12 +26718,18 @@ mission "orchid/timeout" state="ready" timeout="1ms" {
         .await
         .unwrap_or_else(|error| {
             let current = beside_the_loop(|| store.mission_run(&run.id)).unwrap();
-            let pending = beside_the_loop(|| store.pending_runtime_starts()).unwrap();
-            let starts = pending.iter().map(|operation| (
-                operation.subject.as_str(), operation.finished, operation.applied,
-                operation.cleanup_verified, operation.revoked_by.as_deref(),
-                operation.result.as_ref().map(|result| &result["verification"]),
-            )).collect::<Vec<_>>();
+            let pending = beside_the_loop(|| store.pending_runtime_starts());
+            let starts = pending
+                .iter()
+                .map(|operation| (
+                    operation.subject.as_str(),
+                    operation.finished,
+                    operation.applied,
+                    operation.cleanup_verified,
+                    operation.revoked_by.as_deref(),
+                    operation.result.as_ref().map(|result| &result["verification"]),
+                ))
+                .collect::<Vec<_>>();
             let drops = reconciler.runtime_observation_drops.lock().unwrap().clone();
             panic!("one cancellation wake did not finish cleanup: {error}; task_finished={}; run={}/{}; starts={starts:?}; drops={drops:?}",
                 task.is_finished(), current.status, current.phase);
