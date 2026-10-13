@@ -191,7 +191,7 @@ impl AgentControl {
     pub fn verb(self) -> &'static str {
         match self {
             AgentControl::Restart => "Restart",
-            AgentControl::Retire => "Retire",
+            AgentControl::Retire => "Stop",
             AgentControl::Start => "Start",
             AgentControl::Suspend => "Suspend",
             AgentControl::Resume => "Resume",
@@ -5331,6 +5331,8 @@ impl Ui {
 
     /// A key from an agent's actions menu. What changes the seat asks y first; Esc keeps it.
     fn agent_action(&mut self, agent: String, key: char) {
+        if self.world.agents.items().iter().find(|candidate| candidate.id == agent)
+            .is_some_and(|candidate| !screens::agent_actions(candidate).iter().any(|action| action.key == key)) { return; }
         let name = self
             .world
             .agents

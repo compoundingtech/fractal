@@ -3,6 +3,7 @@ mod trace_principal;
 mod accountable_tests;
 pub mod custom;
 pub mod declarations;
+pub mod retirements;
 pub mod directive_notes;
 pub(crate) mod observer_subscription_detail;
 mod glass_heads;
@@ -3354,7 +3355,7 @@ impl Store {
                 // All registered agent claims can affect the subject's actual reduction or
                 // undeclared fallback revision, even kinds not shown as individual fields.
                 delta.queues |= kind == "agent.queue.moved";
-                delta.membership |= matches!(kind.as_str(), "intent.desired" | "runtime.observed");
+                delta.membership |= matches!(kind.as_str(), "intent.desired" | "runtime.observed" | "agent.retired");
                 delta.subjects.insert(subject);
                 continue;
             }
@@ -10299,6 +10300,7 @@ impl Store {
                 let intent = owned_plan.as_ref().map_or(intent, |p| &p.intent);
                 let expected = owned_plan.as_ref().map_or(expected, |p| &p.preview.expected_subjects);
                 for desired in intent.subjects.values() {
+                    retirements::refuse_declaration(transaction, desired)?;
                     crate::terminal_binding::validate_declaration(desired, actor)?;
                     st3_schema::accountable::validate_claim(&desired.subject, "intent.desired",
                         &serde_json::to_value(desired).map_err(internal)?, actor)
@@ -20183,8 +20185,16 @@ fn desired_row_at(
     let Some(at_index) = at_index else {
         return current_desired_row(connection, subject);
     };
-    if owned_sets::owner(connection, subject, Some(at_index)).map_err(anyhow::Error::new)?.is_some() {
-        return owned_sets::desired_at(connection, subject, at_index);
+    if owned_sets::owner(connection, subject, Some(at_index))
+        .map_err(anyhow::Error::new)?
+        .is_some()
+    {
+        return retirements::overlay_row(
+            connection,
+            subject,
+            Some(at_index),
+            owned_sets::desired_at(connection, subject, at_index)?,
+        );
     }
     let mut statement = connection.prepare_cached(&canonical_sql(
         "SELECT id, body, predecessors FROM claims
@@ -20205,7 +20215,12 @@ fn desired_row_at(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    select_desired_row(rows)
+    retirements::overlay_row(
+        connection,
+        subject,
+        Some(at_index),
+        select_desired_row(rows)?,
+    )
 }
 
 /// The selected declaration of a subject's `(id, body, predecessors)` declaration claims in
@@ -22343,6 +22358,48 @@ pub(crate) fn append_claim_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    // Daemon notifications already inside a larger transaction use the same admission seam
+    // as API sends. Replication inserts authenticated history through its separate import path.
+    if kind == retirements::KIND {
+        return Err(anyhow::Error::new(retirements::writer_required()));
+    }
+    let admission = |connection: &Connection| {
+        retirements::admit_recipient(
+            connection,
+            body.pointer("/fields/to").and_then(Value::as_str),
+        )
+    };
+    let context = ClaimCommitContext {
+        admission: (kind == "message.sent").then_some(&admission as &ClaimAdmission<'_>),
+        signature: None,
+        ..Default::default()
+    };
+    if let Some(admission) = context.admission {
+        admission(transaction).map_err(anyhow::Error::new)?;
+    }
+    append_admitted_claim_tx(
+        transaction,
+        origin,
+        subject,
+        kind,
+        actor,
+        body,
+        predecessors,
+        forced_batch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_admitted_claim_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    body: &Value,
+    predecessors: &[String],
+    forced_batch: Option<&str>,
+) -> Result<ClaimRecord> {
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
@@ -22400,6 +22457,9 @@ pub(crate) fn append_claim_tx(
     }
     if matches!(kind, "glass.upserted" | "glass.deleted") {
         glass_heads::flush(transaction)?;
+    }
+    if kind == retirements::KIND {
+        retirements::project_subject(transaction, subject).map_err(anyhow::Error::new)?;
     }
     if kind == st3_schema::directive_notes::KIND {
         directive_notes::flush(transaction)?;
@@ -26392,11 +26452,11 @@ mod fleet_admission_tests {
 
     const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
-    fn key() -> Arc<MemberKey> {
+    pub(super) fn key() -> Arc<MemberKey> {
         Arc::new(MemberKey::generate().unwrap().0)
     }
 
-    fn node(name: &str, key: Option<&Arc<MemberKey>>, anchor: Option<&Arc<MemberKey>>) -> Store {
+    pub(super) fn node(name: &str, key: Option<&Arc<MemberKey>>, anchor: Option<&Arc<MemberKey>>) -> Store {
         let store = Store::open_memory(name).unwrap();
         store.bind_fleet(FLEET).unwrap();
         if let Some(anchor) = anchor {
@@ -26431,7 +26491,7 @@ mod fleet_admission_tests {
         )
     }
 
-    fn admit(by: &Store, name: &str, member: &MemberKey, via: &str, floor: Option<u64>) {
+    pub(super) fn admit(by: &Store, name: &str, member: &MemberKey, via: &str, floor: Option<u64>) {
         let mut fields = json!({
             "fleet_id": FLEET,
             "member_key": member.public(),
@@ -26456,7 +26516,7 @@ mod fleet_admission_tests {
     }
 
     /// One exchange from `from` to `to`, then admission and projection on `to`.
-    fn sync(from: &Store, to: &Store) -> ReplicationAdmission {
+    pub(super) fn sync(from: &Store, to: &Store) -> ReplicationAdmission {
         let exchange = from
             .export_replication_exchange_answering(
                 FLEET,
@@ -28835,6 +28895,15 @@ fn classify_replicated_claim_with_registry(
             ),
         ));
     }
+    if claim.kind == retirements::KIND
+        && (fields.get("owner_host").and_then(Value::as_str) != Some(claim.origin.as_str())
+            || fields.get("retired_by").and_then(Value::as_str) != claim.actor.as_deref())
+    {
+        return Err(St3Error::new(
+            "invalid-replicated-claim",
+            "terminal retirement must name its writing owner and actor",
+        ));
+    }
     crate::terminal_binding::validate_claim(&claim.kind, &claim.body, claim.actor.as_deref())?;
     st3_schema::accountable::validate_claim(&claim.subject, &claim.kind, &claim.body, claim.actor.as_deref())
         .map_err(|e| St3Error::new(e.code, e.message))?;
@@ -28964,6 +29033,7 @@ fn replay_projects_kind(kind: &str) -> bool {
     matches!(
         kind,
         "intent.desired"
+            | "agent.retired"
             | "owned-set.revised"
             | "doc.bound"
             | "mission.published"
@@ -29008,7 +29078,8 @@ fn mark_dirty(dirty: &mut BTreeSet<Aggregate>, aggregate: Aggregate, reason: &st
 /// Whether claims of `kind` belong to a mission run tree.
 fn run_tree_kind(kind: &str) -> bool {
     replay_projects_kind(kind)
-        && !matches!(kind, "intent.desired" | "owned-set.revised" | "doc.bound" | "mission.published")
+        && !matches!(kind, "intent.desired" | "agent.retired"
+                | "owned-set.revised" | "doc.bound" | "mission.published")
         && !kind.starts_with("planning-session.")
 }
 
@@ -29018,7 +29089,7 @@ fn aggregate_of_tx(
     claim: &ClaimRecord,
 ) -> Result<Option<Aggregate>, St3Error> {
     Ok(match claim.kind.as_str() {
-        "intent.desired" => Some(Aggregate::Desired(claim.subject.clone())),
+        "intent.desired" | "agent.retired" => Some(Aggregate::Desired(claim.subject.clone())),
         "doc.bound" => Some(Aggregate::Document(claim.subject.clone())),
         "mission.published" => Some(Aggregate::Mission(claim.subject.clone())),
         _ => run_tree_of_tx(transaction, &claim.subject)?.map(Aggregate::RunTree),
@@ -29452,6 +29523,9 @@ fn rebuild_base_aggregate_tx(
             }
         })?;
     }
+    if let Aggregate::Desired(subject) = aggregate {
+        retirements::project_subject(transaction, subject)?;
+    }
     Ok(())
 }
 
@@ -29621,6 +29695,7 @@ fn try_project_simple_replication_tx(
             && !matches!(
                 claim.kind.as_str(),
                 "intent.desired"
+                    | "agent.retired"
                     | "work.person-asked"
                     | "work.person-done"
                     | "work.person-cancelled"
@@ -29920,6 +29995,7 @@ fn try_project_simple_replication_tx(
             continue;
         }
         match claim.kind.as_str() {
+            "agent.retired" => retirements::project_subject(transaction, &claim.subject)?,
             "intent.desired" => {
                 let desired = serde_json::from_value::<DesiredSubject>(claim.body.clone())
                     .map_err(|error| {
@@ -58516,6 +58592,8 @@ impl Store {
                         {
                             select_replicated_desired(&transaction, claim, &desired)?;
                         }
+                    } else if effective && claim.kind == retirements::KIND {
+                        retirements::project_subject(&transaction, &claim.subject)?;
                     } else if effective && claim.kind == "doc.bound" {
                         select_replicated_document(&transaction, claim, index)?;
                     } else if effective && claim.kind == "mission.published" {
@@ -58661,6 +58739,8 @@ type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), St3Error> + Sync + '
 struct ClaimCommitContext<'a> {
     admission: Option<&'a ClaimAdmission<'a>>,
     signature: Option<&'a str>,
+    // Only retire_agent supplies the declaration, owner and rollout admission together.
+    retirement_writer: bool,
 }
 
 fn append_claim_with_commit_context(
@@ -58672,6 +58752,21 @@ fn append_claim_with_commit_context(
     observer_completion: Option<(&str, &str, &(dyn Fn() -> bool + Sync))>,
     context: ClaimCommitContext<'_>,
 ) -> Result<(ClaimRecord, bool), St3Error> {
+    let admission = |connection: &Connection| {
+        if input.kind == retirements::KIND && !context.retirement_writer {
+            return Err(retirements::writer_required());
+        }
+        if let Some(admission) = context.admission {
+            admission(connection)?;
+        }
+        if input.kind == "message.sent" {
+            retirements::admit_recipient(
+                connection,
+                input.fields.get("to").and_then(Value::as_str),
+            )?;
+        }
+        Ok(())
+    };
     validate_claim_input(input)?;
     if local_retention(&input.kind)
         || (input.actor.is_none() && system_local_retention(&input.kind))
@@ -58686,7 +58781,6 @@ fn append_claim_with_commit_context(
     // batch commits.
     graph.connection
         .batched(|transaction| -> Result<(ClaimRecord, bool), St3Error> {
-            if let Some(admission) = context.admission { admission(transaction)?; }
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }
@@ -58744,6 +58838,9 @@ fn append_claim_with_commit_context(
             if let Some((operation_id, request_digest)) = &operation {
                 checkpointed_operation_outcome(transaction, operation_id, request_digest)?;
             }
+            // Replays and key/body mismatches settle before lifecycle admission. A new send
+            // and retirement serialize here, in the same savepoint as their durable claims.
+            admission(transaction)?;
             if let Some(expected_subjects) = expected_subjects {
                 for (subject, expected) in expected_subjects {
                     // Layout edits merge, but retiring a folded duplicate must not lose
@@ -58924,7 +59021,7 @@ fn append_claim_with_commit_context(
                         json!({ "id": operation_id, "request_digest": request_digest }),
                     );
             }
-            let record = append_claim_tx(
+            let record = append_admitted_claim_tx(
                 transaction,
                 &graph.origin,
                 &input.subject,

@@ -386,7 +386,10 @@ pub(crate) struct ApiError {
 impl ApiError {
     fn bad(error: St3Error) -> Self {
         let status = match error.code {
-            "stale-subject"
+            "recipient-retired"
+            | "lifecycle-unavailable"
+            | "retirement-upgrade-required"
+            | "stale-subject"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -460,11 +463,12 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "code": self.code, "message": self.message, "details": self.details })),
-        )
-            .into_response()
+        let mut body =
+            json!({ "code": self.code, "message": self.message, "details": self.details });
+        if let Some(applied) = body["details"].get("applied").cloned() {
+            body["applied"] = applied;
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -1289,7 +1293,7 @@ async fn response_envelope_unbounded(
             // handlers just to decorate its response.
             state.store.index().unwrap_or_default()
         };
-        let envelope = if observation_report && status.is_success() {
+        let mut envelope = if observation_report && status.is_success() {
             // Local diagnostic acceptance, never a graph snapshot fence or action receipt.
             json!({"api_version": CLIENT_API_VERSION, "request_id": request_id, "value": raw})
         } else if client_request && status.is_success() {
@@ -1320,6 +1324,11 @@ async fn response_envelope_unbounded(
                 "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
             })
         };
+        if !status.is_success()
+            && let Some(applied) = raw.get("applied")
+        {
+            envelope["applied"] = applied.clone();
+        }
         let body = serde_json::to_vec(&envelope).unwrap_or_else(|_| b"{}".to_vec());
         (envelope, body)
     };
@@ -1667,7 +1676,7 @@ fn client_host_id(node: &str) -> String {
 }
 
 fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> Value {
-    json!({
+    let mut envelope = json!({
         "api_version": CLIENT_API_VERSION,
         "error_version": "st3.client.error.v0",
         "request_id": request_id,
@@ -1675,7 +1684,11 @@ fn client_error_envelope(status: StatusCode, raw: &Value, request_id: &str) -> V
         "message": raw.get("message").and_then(Value::as_str).unwrap_or("the request failed"),
         "retryable": client_error_retryable(status, raw.get("code").and_then(Value::as_str)),
         "details": raw.get("details").cloned().unwrap_or_else(|| json!({})),
-    })
+    });
+    if let Some(applied) = raw.get("applied") {
+        envelope["applied"] = applied.clone();
+    }
+    envelope
 }
 
 fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
@@ -1714,7 +1727,10 @@ fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
 
 fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
-        "not-found"
+        "recipient-retired"
+        | "lifecycle-unavailable"
+        | "retirement-upgrade-required"
+        | "not-found"
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
@@ -3291,6 +3307,9 @@ fn client_agent_cards_presented(
                 Some("snapshotting" | "fencing-source" | "transferring" | "restoring") if state == "stopped" => "suspended",
                 _ => state,
             };
+            let state = if subject.desired.as_ref().is_some_and(|desired| desired.get("retirement").is_some()) {
+                "retired"
+            } else { state };
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);

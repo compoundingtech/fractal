@@ -355,6 +355,7 @@ pub enum AgentState {
     Idle,
     Starting,
     Stopped,
+    Retired,
     Unknown,
 }
 

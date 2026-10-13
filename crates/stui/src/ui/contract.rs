@@ -103,6 +103,7 @@ pub fn words() -> Value {
         AgentState::Idle,
         AgentState::Starting,
         AgentState::Stopped,
+        AgentState::Retired,
         AgentState::Unknown,
     ]
     .iter()

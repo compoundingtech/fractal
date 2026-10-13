@@ -73,7 +73,7 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
         AgentState::Compacting => ("◐", theme::SAPPHIRE),
         AgentState::Idle => ("●", theme::IDLE),
         AgentState::Starting => ("◌", theme::WAITING),
-        AgentState::Stopped => ("○", theme::QUIET),
+        AgentState::Stopped | AgentState::Retired => ("○", theme::QUIET),
         AgentState::Unknown => ("?", theme::QUIET),
     }
 }
@@ -88,6 +88,7 @@ pub fn agent_word(state: AgentState) -> &'static str {
         AgentState::Idle => "idle",
         AgentState::Starting => "starting",
         AgentState::Stopped => "stopped",
+        AgentState::Retired => "retired",
         AgentState::Unknown => "not managed",
     }
 }
@@ -1488,6 +1489,7 @@ fn agent_group(agent: &Agent) -> &'static str {
         AgentState::Working | AgentState::Compacting => "working",
         AgentState::Idle | AgentState::Starting => "idle",
         AgentState::Stopped | AgentState::Unknown => "stopped",
+        AgentState::Retired => "retired",
     }
 }
 
@@ -2708,15 +2710,16 @@ pub struct AgentAction {
 pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
     let row = |key, label, what| AgentAction { key, label, what };
     let mut rows = Vec::new();
-    let running = !matches!(agent.state, AgentState::Stopped | AgentState::Unknown);
+    let retired = agent.state == AgentState::Retired;
+    let running = !matches!(agent.state, AgentState::Stopped | AgentState::Retired | AgentState::Unknown);
     if agent.state == AgentState::Working {
         rows.push(row('i', "Interrupt", "stop its current turn, as Esc does in its own screen"));
     }
     if running {
         rows.push(row('r', "Restart", "a new process for the same seat, on its declaration"));
         rows.push(row('p', "Suspend", "stop at a quiet moment, keeping its session to resume"));
-        rows.push(row('x', "Retire", "stop it and take it off the lists; start brings it back"));
-    } else {
+        rows.push(row('x', "Stop", "stop its process; start brings it back"));
+    } else if !retired {
         rows.push(row('s', "Start", "start it again on its declaration"));
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }

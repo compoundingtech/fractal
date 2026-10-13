@@ -135,6 +135,7 @@ pub(super) fn agent_state(
     reachability: &str,
 ) -> String {
     match state {
+        "retired" => "Retired — this agent identity is permanent history.".into(),
         "running" => "Ready — the agent is running.".into(),
         "failed" => format!(
             "Could not start — {}.",
@@ -166,6 +167,7 @@ pub(super) fn agent_state(
 
 pub(super) fn agent_next_steps(subject: &str, actor: &str, state: &str) -> String {
     let subject = shell_argument(subject);
+    if state.starts_with("Retired") { return next_steps(state, &[("Show history", format!("st agents show {subject}"))]); }
     let attach_actor = if actor.starts_with("person/") {
         format!(" --as {}", shell_argument(actor))
     } else {
