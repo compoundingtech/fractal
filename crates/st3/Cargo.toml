@@ -127,3 +127,8 @@ path = "tests/api_accept.rs"
 [[test]]
 name = "gate_teardown"
 path = "tests/gate_teardown.rs"
+
+# Its counting allocator is process-wide, so it runs alone in its own binary.
+[[test]]
+name = "checkpoint_memory"
+path = "tests/checkpoint_memory.rs"
