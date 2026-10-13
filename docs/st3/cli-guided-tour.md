@@ -522,11 +522,13 @@ st blobs get --help
 st conversations send --help
 ```
 
-`put` keeps a PNG, JPEG, GIF or WebP image of at most 10 MiB on this member and prints
-`blob/<sha256>`. `conversations send --attach FILE` uploads and attaches in one step, and
+`put` keeps an image on this member and prints `blob/<sha256>`. Like `conversations send
+--attach FILE`, which uploads and attaches in one step, it renders an SVG to PNG, converts a BMP,
+and scales an image over 10 MiB down to fit; `--media-type` uploads the bytes exactly instead.
 `conversations read` lists each attachment with the `blobs get` command that reads it. Exercise
-`get` with the `--message` that carries the image. Check that an image over 10 MiB, a text file
-named `.png`, and a fifth attachment are refused in words.
+`get` with the `--message` that carries the image. Check that a large screenshot is scaled and
+says so, that an SVG marking up a screenshot beside it arrives as a PNG, and that a HEIC photo, a
+text file named `.png`, and a fifth attachment are refused in words.
 
 ### 18. `diagnostic` — an agent's authorized harness-failure path
 
