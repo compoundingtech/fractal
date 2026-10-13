@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Transcript work rows keep the host's semantic tool kind (read, search, run, change, subagent, web, decision, todo, wait, message, schedule, terminal input, skill, eval) as data-tool-kind, with scoped targets: a run shows its readable command's first nonempty line before cwd, a search shows its term within its path, a delegation its task names. Orphan results stay unclassified. Recorded semantic results without text remain inspectable behind the existing raw input/output disclosure; skipped calls read Skipped without failure ink, and settled summaries count sent messages.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No persisted schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire change. fractal-ui WorkKind renames edit to change and adds the semantic kinds above plus unknown; kindFor receives the native tool item as an optional second argument. ToolCall items and results accept optional view, metadata and skipped facts; WorkLogCall adds optional toolName, callId, input, mediaType and skipped; WorkLogTurn adds messagesSent. Hosts that return edit must return change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}

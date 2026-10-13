@@ -46,3 +46,19 @@ test('live activity shares compact header durations and host-supplied waiting st
   assert.ok(noStart.includes('Waiting for your answer'))
   assert.ok(!noStart.includes('Working'))
 })
+
+test('semantic rows expose their host kind, skipped calls say so without failure ink, and sent messages join the summary', async () => {
+  const { WorkLogV1 } = await server.ssrLoadModule('/src/assistant-ui/taste/WorkLogV1.tsx')
+  const startedAt = '2026-01-15T12:00:00Z'
+  const calls = [
+    { id: 'call/search', kind: 'search', title: 'grep', argsSummary: 'visibleRows in src/', status: 'success', startedAt },
+    { id: 'call/message', kind: 'message', title: 'write', argsSummary: 'agent://sample-peer', status: 'success', startedAt },
+    { id: 'call/skipped', kind: 'run', title: 'bash', argsSummary: 'pnpm test', status: 'error', skipped: true, startedAt },
+  ]
+  const markup = renderToStaticMarkup(React.createElement(WorkLogV1, { turn: { calls, foldable: false, running: false, failed: false, interrupted: false, durationMs: undefined } }))
+  for (const kind of ['search', 'message', 'run']) assert.match(markup, new RegExp(`data-tool-kind="${kind}"`))
+  assert.match(markup, />Skipped</)
+  assert.doesNotMatch(markup, />Failed</)
+  const settled = renderToStaticMarkup(React.createElement(WorkLogV1, { turn: { calls: calls.slice(0, 2), running: false, failed: false, interrupted: false, durationMs: 2000, foldable: true, commands: 0, messagesSent: 2 } }))
+  assert.match(settled, /Worked for 2s · 2 messages sent/)
+})

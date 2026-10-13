@@ -22,7 +22,7 @@ const work: WorkLogTurn = { running: true, failed: false, interrupted: false, du
   { id: 'critique/read', kind: 'read', title: 'Read selected resource', status: 'success', startedAt: at, endedAt: '2026-01-15T12:00:02Z', detail: 'The selected resource has a stable identity.' },
   { id: 'critique/run', kind: 'run', title: 'Check a longer command label with complete arguments', argsSummary: 'printf ready', status: 'success', startedAt: at, endedAt: '2026-01-15T12:00:12Z', detail: 'ready' },
   { id: 'critique/cancelled', kind: 'read', title: 'Compare every retained workspace snapshot', status: 'interrupted', startedAt: at, endedAt: '2026-01-15T12:59:59Z' },
-  { id: 'critique/failed', kind: 'edit', title: 'Apply the reviewed migration to every retained workspace snapshot and verify each resulting identity before release', status: 'error', startedAt: at, endedAt: '2026-01-16T11:59:00Z', detail: 'The retained workspace snapshot changed during review.' },
+  { id: 'critique/failed', kind: 'change', title: 'Apply the reviewed migration to every retained workspace snapshot and verify each resulting identity before release', status: 'error', startedAt: at, endedAt: '2026-01-16T11:59:00Z', detail: 'The retained workspace snapshot changed during review.' },
   { id: 'critique/wait', kind: 'read', title: 'Await the next observation', status: 'running', startedAt: at },
 ] }
 const hint = 'Messages can be sent once this conversation loads.'

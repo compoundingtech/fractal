@@ -23,8 +23,8 @@ const calls: readonly WorkLogCall[] = [
   { id: 'fold/read-plan', kind: 'read', title: 'Read release plan', argsSummary: 'docs/release-plan.md', status: 'success', startedAt: at, endedAt: ended(400), detail: 'Three checks run in order.' },
   { id: 'fold/list', kind: 'run', title: 'List snapshots', argsSummary: 'ls snapshots', status: 'success', startedAt: at, endedAt: ended(9000), detail: 'alpha\nbeta\ngamma' },
   { id: 'fold/compare', kind: 'run', title: 'Compare identities', argsSummary: 'diff alpha.json beta.json', status: 'success', startedAt: at, endedAt: ended(145000), detail: 'No differences.' },
-  { id: 'fold/edit', kind: 'edit', title: 'Edit summary', argsSummary: 'notes/summary.md', status: 'success', startedAt: at, endedAt: ended(3720000), detail: 'Summary updated.' },
-  { id: 'fold/failed', kind: 'edit', title: failedTitle, status: 'error', startedAt: at, endedAt: ended(86340000), detail: 'The retained snapshot changed during review.' },
+  { id: 'fold/edit', kind: 'change', title: 'Edit summary', argsSummary: 'notes/summary.md', status: 'success', startedAt: at, endedAt: ended(3720000), detail: 'Summary updated.' },
+  { id: 'fold/failed', kind: 'change', title: failedTitle, status: 'error', startedAt: at, endedAt: ended(86340000), detail: 'The retained snapshot changed during review.' },
   { id: 'fold/hash', kind: 'run', title: 'Hash manifest', argsSummary: 'sha256sum manifest.json', status: 'success', startedAt: at, endedAt: ended(2000), detail: 'ok manifest.json' },
   { id: 'fold/cancelled', kind: 'read', title: cancelledTitle, status: 'interrupted', startedAt: at, endedAt: ended(3599000) },
   { id: 'fold/scan', kind: 'read', title: 'Search release notes', argsSummary: 'identity', status: 'success', startedAt: at, endedAt: ended(12000), detail: 'Two matches.' },
@@ -33,7 +33,7 @@ const calls: readonly WorkLogCall[] = [
   { id: 'fold/tag', kind: 'run', title: 'Tag release', argsSummary: 'git tag --list', status: 'success', startedAt: at, endedAt: ended(1000), detail: 'Tag listed.' },
   { id: 'fold/pack', kind: 'run', title: 'Pack archive', argsSummary: 'tar -czf release.tgz dist', status: 'success', startedAt: at, endedAt: ended(18000), detail: 'Archive written.' },
   { id: 'fold/notes', kind: 'read', title: 'Read changelog', argsSummary: 'CHANGELOG.md', status: 'success', startedAt: at, endedAt: ended(700), detail: 'Four entries.' },
-  { id: 'fold/draft', kind: 'edit', title: 'Draft announcement', argsSummary: 'notes/announce.md', status: 'success', startedAt: at, endedAt: ended(5000), detail: 'Draft saved.' },
+  { id: 'fold/draft', kind: 'change', title: 'Draft announcement', argsSummary: 'notes/announce.md', status: 'success', startedAt: at, endedAt: ended(5000), detail: 'Draft saved.' },
   { id: 'fold/wait', kind: 'read', title: 'Await the next observation', status: 'running', startedAt: at },
 ]
 const work: WorkLogTurn = { calls, running: true, failed: false, interrupted: false, durationMs: undefined, startedAt: at }

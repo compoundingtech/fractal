@@ -4,8 +4,20 @@ import type { WorkKind, WorkLogCall } from './work-log.ts'
 /** Presentation only: the host remains responsible for classifying tools. */
 export const workKindPresentation: Readonly<Record<WorkKind, { readonly verb: string; readonly icon: IconName }>> = {
   read: { verb: 'Read', icon: 'folder' },
+  search: { verb: 'Search', icon: 'search' },
   run: { verb: 'Run command', icon: 'drawer' },
-  edit: { verb: 'Change files', icon: 'pencil' },
+  change: { verb: 'Change files', icon: 'pencil' },
+  subagent: { verb: 'Delegate work', icon: 'swap' },
+  web: { verb: 'Browse web', icon: 'search' },
+  decision: { verb: 'Ask for a decision', icon: 'message' },
+  todo: { verb: 'Update plan', icon: 'check' },
+  wait: { verb: 'Wait for results', icon: 'clock' },
+  message: { verb: 'Send message', icon: 'send' },
+  schedule: { verb: 'Schedule work', icon: 'clock' },
+  'terminal-input': { verb: 'Send terminal input', icon: 'drawer' },
+  skill: { verb: 'Use skill', icon: 'folder' },
+  eval: { verb: 'Evaluate code', icon: 'drawer' },
+  unknown: { verb: 'System event', icon: 'gear' },
 }
 
 export interface WorkServicePresentation {

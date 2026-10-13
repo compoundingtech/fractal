@@ -6,7 +6,7 @@ import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/mo
 import { EmbraceVirtualScrollViewport, type VirtualViewportHandle, type VirtualViewportHistory } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
-import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
+import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, workLogOutputText, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
 import { SyncLine } from '../st3-views/SyncLine'
 import { syncLine } from '../st3-views/sync-line'
 import type { SyncStatus } from '../st3-views/sync-status'
@@ -155,11 +155,12 @@ function RunCopy({ text, visible }: { readonly text: string; readonly visible: b
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. */
 export function ToolDetailPreview({ call, onOpen }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void }) {
   const [rawOpen, setRawOpen] = React.useState(false)
-  const output = call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')
+  const recorded = workLogOutputText(call)
+  const output = recorded ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')
   const lines = output.split('\n')
   const remaining = Math.max(0, lines.length - Number(output.endsWith('\n')) - 4)
   const command = readableCommand(call)
-  const showOutput = (call.detail ?? '') !== '' || call.rawInput === undefined
+  const showOutput = recorded !== undefined || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
     <p>{call.summary ?? call.title} · {call.status}</p>
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}

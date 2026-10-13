@@ -4,7 +4,7 @@ import { createServer } from 'vite'
 
 const server = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true } })
 after(() => server.close())
-const { errorReason, failedCommandSource, readableCommand, workLogTurnFromItems, formatWorkDuration } = await server.ssrLoadModule('/src/assistant-ui/taste/work-log.ts')
+const { errorReason, failedCommandSource, readableCommand, workLogTurnFromItems, formatWorkDuration, workLogOutputText } = await server.ssrLoadModule('/src/assistant-ui/taste/work-log.ts')
 const { workServicePresentation } = await server.ssrLoadModule('/src/assistant-ui/taste/work-row-presentation.ts')
 
 test('readiness uses recorded service facts, not command success or timeout alone', () => {
@@ -157,4 +157,49 @@ test('duration boundaries preserve floored seconds and compact hour/minute prope
       }
     }
   }
+})
+
+test('scoped targets retain search terms and path aliases without replacing run source', () => {
+  const inputs = [{ pattern: 'visibleRows', path: 'src/' }, { file_path: 'src/rows.ts' }, { target: 'Review selection' }, { cwd: 'packages/rows', command: 'pnpm test' }, { tasks: [{ name: 'ReviewRows', task: 'Review the rows.' }, { name: 'ReviewSelection', task: 'Review selection.' }] }]
+  const turn = workLogTurnFromItems(inputs.map((input, index) => ({ _tag: 'ToolCall', id: `scope/${index}`, callId: `scope/${index}`, name: index === 3 ? 'run' : 'read', input, status: 'success', callSeen: true, at })), { kindFor: name => name === 'run' ? 'run' : 'search', running: false, failed: false, interrupted: false })
+  assert.deepEqual(turn.calls.map(call => call.argsSummary), ['visibleRows in src/', 'src/rows.ts', 'Review selection', 'pnpm test', 'ReviewRows, ReviewSelection'])
+  assert.equal(turn.calls[3].command, 'pnpm test')
+})
+
+test('run row targets use the same readable command source, or a shortened cwd when command is absent', () => {
+  const inputs = [{ cwd: '/workspace/sample/packages/rows', code: '\nnode check.mjs\nconsole.log("done")' }, { cwd: '/workspace/sample/packages/rows' }]
+  const turn = workLogTurnFromItems(inputs.map((input, index) => ({ _tag: 'ToolCall', id: `run/${index}`, callId: `run/${index}`, name: 'run', input, status: 'running', callSeen: true, at })), { kindFor: () => 'run', running: true, failed: false, interrupted: false })
+  assert.equal(turn.calls[0].argsSummary, readableCommand(turn.calls[0]).split('\n').find(line => line.trim().length > 0))
+  assert.equal(turn.calls[1].argsSummary, 'packages/rows')
+})
+
+test('orphan results stay unknown and the host classifies observed calls from the native item', () => {
+  const seen = []
+  const items = [
+    { _tag: 'ToolCall', id: 'native/orphan', callId: 'native/orphan', name: 'edit', input: { path: 'src/rows.ts' }, status: 'success', result: { content: 'done', isError: false, at }, callSeen: false, at },
+    { _tag: 'ToolCall', id: 'native/write', callId: 'native/write', name: 'write', input: { path: 'agent://sample-peer' }, view: { type: 'write' }, status: 'success', result: { content: '', view: { type: 'message' }, metadata: { recipient: 'sample-peer' }, isError: false, at }, callSeen: true, at },
+    { _tag: 'ToolCall', id: 'native/skipped', callId: 'native/skipped', name: 'write', input: { path: 'agent://sample-peer' }, status: 'success', skipped: true, callSeen: true, at },
+    { _tag: 'ToolCall', id: 'native/run', callId: 'native/run', name: 'bash', input: { command: 'pnpm test' }, status: 'success', skipped: true, callSeen: true, at },
+  ]
+  const turn = workLogTurnFromItems(items, { kindFor: (name, call) => { seen.push(call?.id); return name === 'bash' ? 'run' : 'message' }, running: false, failed: false, interrupted: false, completeHistory: true })
+  assert.deepEqual(turn.calls.map(call => call.kind), ['unknown', 'message', 'message', 'run'])
+  // The orphan was never classified: its invocation was not observed.
+  assert.ok(!seen.includes('native/orphan'))
+  assert.deepEqual(turn.calls[1].view, { type: 'message' })
+  assert.deepEqual(turn.calls[1].metadata, { recipient: 'sample-peer' })
+  assert.equal(turn.calls[1].toolName, 'write')
+  assert.equal(turn.calls[1].callId, 'native/write')
+  assert.deepEqual(turn.calls[1].input, { path: 'agent://sample-peer' })
+  assert.equal(turn.calls[2].skipped, true)
+  assert.equal(turn.calls[1].skipped, undefined)
+  // Skipped calls neither count as commands nor as sent messages.
+  assert.equal(turn.commands, 0)
+  assert.equal(turn.messagesSent, 1)
+})
+
+test('semantic results without readable text remain inspectable as the recorded value', () => {
+  const call = content => workLogTurnFromItems([{ _tag: 'ToolCall', id: 'semantic/result', callId: 'semantic/result', name: 'todo', input: {}, status: 'success', result: { content, isError: false, at }, callSeen: true, at }], { kindFor: () => 'todo', running: false, failed: false, interrupted: false }).calls[0]
+  assert.equal(workLogOutputText(call('Plan updated.')), 'Plan updated.')
+  assert.equal(workLogOutputText(call({ items: [{ done: true }] })), JSON.stringify({ items: [{ done: true }] }, null, 2))
+  for (const empty of ['', undefined, null]) assert.equal(workLogOutputText(call(empty)), undefined)
 })
