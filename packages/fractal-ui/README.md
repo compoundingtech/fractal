@@ -31,6 +31,7 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
+- **Fractal UI / Explore / ProgressSpinners**: four progress spinners (S1 Lucide loader-circle, S2 a 270° ring on a track, S3 a three-dot pulse, S4 TUI braille frames) in the sidebar agent row, the thread header status, a running work row and the composer send. Pickers stored in URL args select the spinner, the size (12/14/16), the host width (440/1440) and the motion (animated or reduced), each with Compare; a toggle switches the scheme. `ExplorationProbe` asserts that motion is transform-only and that no spinner shifts a text baseline; an injected negative control fails each assertion inside the passing play.
 
 ## Families
 
