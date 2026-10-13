@@ -289,7 +289,7 @@ mission "trace-check" state="ready" {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let committed: st3::model::StepRunView = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(committed.subject, step);
-        assert_eq!(committed.status, if action == "claim" { "claimed" } else { "completed" });
+        assert_eq!(committed.status, if action == "claim" { "claimed" } else { "verifying" });
         if broken_trace {
             assert!(String::from_utf8_lossy(&output.stderr).contains("agent_trace_omitted"));
             assert!(path.is_dir(), "a failed trace must not replace unrelated directory contents");

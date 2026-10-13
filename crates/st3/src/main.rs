@@ -25702,7 +25702,7 @@ mod tests {
                     }),
                     _ => panic!("unexpected trace request: {uri}"),
                 };
-                Json(value)
+                Json(json!({"api_version":"st3.v1","value":value}))
             }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -25720,6 +25720,9 @@ mod tests {
         assert_eq!(renewals.load(Ordering::SeqCst), 1);
         assert!(!unavailable.exists());
         fs::create_dir(&path).unwrap();
+        st_drivers::harness_events::enable(root.path(), "current").unwrap();
+        st_drivers::harness_state::claim(root.path(), "example/seat", "omp", "provider").unwrap();
+        let sequence = st_drivers::harness_events::pending(root.path(), 100).unwrap()[0].sequence;
         let observed = st_drivers::harness_context::Observed {
             harness: st_drivers::harness_context::Harness::Omp,
             used_tokens: Some(1), window_tokens: Some(100), used_percent: Some(1.0),
@@ -25729,13 +25732,15 @@ mod tests {
             last_compaction_trigger: None, observed_at_ms: 0, age_ms: 0, stale: false,
         };
         let publisher = ObservationClient {
-            client: &client, event: Some(("current", 1, root.path(), None)),
+            client: &client, event: Some(("current", sequence, root.path(), None)),
         };
         let mut fingerprint = None;
         publish_harness_usage(&publisher, subject, "omp", "current", &observed, &mut fingerprint)
             .await.unwrap();
         assert!(fingerprint.is_some(), "usage publication must still complete");
         assert_eq!(renewals.load(Ordering::SeqCst), 2);
+        st_drivers::harness_events::acknowledge(root.path(), sequence).unwrap();
+        assert!(st_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
         for declared in [None, Some("agent/not-a-human")] {
             let principal = st3::agent_trace::issuer::resolve_principal(None, declared);
             assert!(principal.is_none());

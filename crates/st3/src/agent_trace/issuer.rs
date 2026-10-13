@@ -435,7 +435,7 @@ mod tests {
             ("provider/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789", None),
             ("invalid provider/model", None),
             ("", None),
-            ("anthropic/claude-sonnet-4", Some("invalid-effort")),
+            ("anthropic/claude-sonnet-4", Some("invalid\neffort")),
         ] {
             let mut facts = facts();
             facts.model_route = Some(route.into());
@@ -457,7 +457,7 @@ mod tests {
             ("provider/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789", None),
             ("invalid provider/model", None),
             ("", None),
-            ("anthropic/claude-sonnet-4", Some("invalid-effort")),
+            ("anthropic/claude-sonnet-4", Some("invalid\neffort")),
         ] {
             let mut runtime = initial.clone();
             update_model(&mut runtime, route, effort);
