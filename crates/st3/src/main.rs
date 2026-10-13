@@ -3033,6 +3033,7 @@ enum AgentsCommand {
     /// groups; docs/st3/priority.md says what else keeps running there.
     Stop(AgentStopArgs),
     /// Restart a top-level or mission seat, preserving its declaration; wait for a new incarnation.
+    /// A self-restart during a turn returns pending until the harness is idle and quiescent.
     Restart(AgentRestartArgs),
     /// Acknowledge an interrupted seed attempt and its warning; never gate launch or rearm seed.
     AcknowledgeSeed(AgentAcknowledgeSeedArgs),
@@ -3640,6 +3641,9 @@ struct AgentRestartArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
+    /// Interrupt immediately, including when restarting yourself during a turn.
+    #[arg(long)]
+    now: bool,
     /// How long to wait for a new running incarnation.
     #[arg(long, default_value = "10m")]
     timeout: String,
@@ -13448,10 +13452,19 @@ async fn run_agents(
                     &json!({
                         "subject": subject,
                         "actor": args.actor,
+                        "now": args.now,
                         "idempotency_key": uuid::Uuid::now_v7().to_string(),
                     }),
                 )
                 .await?;
+            if request.body["fields"]["action"] == "restart-when-idle" {
+                return if json_output {
+                    print_value(&request, true)
+                } else {
+                    println!("Restart pending for {subject}: waiting for the turn to end and the harness to be idle and quiescent");
+                    Ok(())
+                };
+            }
             let previous = request.body["fields"]["incarnation_id"]
                 .as_str()
                 .unwrap_or("");
