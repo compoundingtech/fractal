@@ -157,7 +157,11 @@ export const LayoutCWidths: Story = {
     await expect(metrics).toHaveTextContent('7d $9.3')
     await expect(expanded!.querySelector('[data-row-field="context-percent"]')).toHaveTextContent('Context 18%')
     await expect(expanded!.querySelector('[data-row-field="last-activity"]')).not.toBeNull()
-    await expect(expanded!.querySelector('[data-row-column="time"]')).toBeNull()
+    // Expanded rows move every metric to line two; the time column keeps only the hover quick Open host.
+    await expect(expanded!.querySelector('[data-row-column="time"] [data-row-field]')).toBeNull()
+    await userEvent.hover(expanded!)
+    await expect(await within(expanded!).findByRole('button', { name: 'Open Sample session' })).toBeVisible()
+    await userEvent.unhover(expanded!)
     await expect(rowDescription(within(expanded!).getByRole('button', { name: /^Sample session/ }))).toContain('24h API-equivalent spend including subagents: $1.84')
     // Unreported windows and occupancy are omitted, never rendered as a placeholder or zero.
     const unknownMetrics = expandedUnknown!.querySelector('[data-row-column="metrics"]')!
