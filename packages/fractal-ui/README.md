@@ -339,21 +339,25 @@ All displayed content is newly written synthetic data. The terminal is a read-on
 
 This note records provenance practice. It is not legal clearance or an independent originality certification.
 
-## Quota priority exploration
+## Quota sidebar footer
 
-`Fractal UI/Explore/QuotaPriority` has one live `Exploration` and a separate
-passing `QuotaPriorityProbe`. Pickers share URL args: `D` chooses truncate,
-hide or a secondary-only `+N` popover; `T` chooses the real ARIA table with
-or without headers; `G` chooses token gaps 8/12/16; `W` chooses 200/240/320;
-`B` keeps the meter bar (B1, primary slot sized for `1w ▬ 100%`) or drops it
-below 320 so the account keeps more characters (B2).
-The scheme toggle selects light/dark, and Compare shows all three D policies
-at the current T/G/W/B. A host-width control retains 1440/900 previews.
-Account, primary usage and its untruncated reset stay visible at every width.
-Thirteen synthetic accounts include a long identifier, exhausted usage, a
+`@smalltalk/fractal-ui/quota-footer` exports `QuotaSidebarFooter`, quota as the
+last child of a column-flex sidebar. Each account is one 22px line in the
+caller's priority order: account, primary reading, reset, the secondary window
+from 20rem, then `+N` for the remaining windows in a React Aria popover. Below
+20rem the secondary folds into `+N` and bars drop before the account is cut;
+readings, reset and `+N` are never cut. Columns share subgrid tracks 8px apart
+and screen readers get the column headers.
+
+A React Aria disclosure starts expanded only when every row fits in half the
+sidebar's height without scrolling; otherwise it starts collapsed, and its
+trigger names the most pressing reading. Until the user toggles it, the
+default follows sidebar resizes; afterwards the user's choice holds. Expanded
+rows scroll within half the sidebar. Account names open the caller's usage
+details; their full evidence is a tooltip on hover and focus and their
+accessible description.
+
+`Fractal UI/Quota Sidebar Footer` covers a tall sidebar that starts expanded, a
+short one that starts collapsed, sidebar widths 208/256/320/360 and both schemes,
+with thirteen synthetic accounts including a long identifier, exhausted usage, a
 stale row and a failed read.
-Rows use the production 22px row token and shared grid tracks via subgrid.
-The probe drives real controls and checks column alignment, token gaps,
-one-line geometry, unclipped readings, priority-prefix visibility and
-secondary-only counts after rerenders. Production `UsageMeterReading` and
-`UsageMeterRowDetail` are reused; production table policy is unchanged.

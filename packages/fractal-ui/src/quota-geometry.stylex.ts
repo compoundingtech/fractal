@@ -114,4 +114,11 @@ export const quotaGeometry = stylex.defineVars({
   meterStoryNarrowWidth: '240px',
   drawerSmallWidth: '240px',
   drawerMediumWidth: '320px',
+  /** Sidebar quota footer: the account takes what remains; readings, reset and +N size to their widest row, so they are never cut. */
+  footerWideTracks: 'minmax(0, 1fr) max-content max-content max-content max-content',
+  footerNarrowTracks: 'minmax(0, 1fr) max-content max-content max-content',
+  footerBarWidth: '16px',
+  footerStoryShortHeight: '360px',
+  footerStoryTallHeight: '760px',
+  footerStoryWideWidth: '360px',
 })

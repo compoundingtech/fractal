@@ -26,8 +26,8 @@ export type UsageMeterTableComponentProps = UsageMeterTableProps & {
   readonly toolbarTarget?: HTMLElement | null
 }
 
-/** Container width at which the comparison column is shown; mirrors the `@container (width < 20rem)` styles. */
-const comparisonMinRem = 20
+/** Container width at which the comparison column is shown (here and in the sidebar quota footer); mirrors the `@container (width < 20rem)` styles. */
+export const comparisonMinRem = 20
 
 const columns: readonly { readonly id: UsageMeterSortKey; readonly label: string; readonly narrowLabel?: string }[] = [
   { id: 'account', label: 'Account' },
@@ -41,14 +41,21 @@ const resetEvidence = (row: UsageMeterRow): string =>
   `Reset ${row.reset}${row.resetAt === undefined ? '' : ` · ${row.resetAt}`} · ${row.resetCount === undefined ? 'Reset count Unreported' : `${row.resetCount} reported resets`}`
 
 /**
+ * The reading where the full text does not fit: the percentage, nothing for fractionless exhaustion (the alert glyph
+ * carries it), or — for Unreported. The full text stays in the caller's disclosure.
+ */
+export const compactMeterReading = (meter: UsageMeterCell): string | undefined =>
+  meter.tone === 'unknown' ? '—' : meter.fraction !== undefined ? `${Math.round(meter.fraction * 100)}%` : meter.tone === 'exhausted' ? undefined : meter.text
+
+/**
  * Detail meters have room for label and reading; compact cells carry both in full in one focusable disclosure. Below
- * 40rem the cell shows the reading as a percentage, the exhaustion glyph, or — for Unreported, so the reading is never
- * cut: the bar yields to its minimum first, then the window label.
+ * 40rem the cell shows the compact reading, so the reading is never cut: the bar yields to its minimum first, then the
+ * window label.
  */
 const Meter = ({ meter, stale, compact = false }: { readonly meter: UsageMeterCell; readonly stale: boolean; readonly compact?: boolean }) => {
   const danger = meter.tone === 'critical' || meter.tone === 'exhausted'
   const toneInk = [meter.tone === 'warning' && styles.warningText, danger && styles.dangerText, stale && styles.staleText]
-  const short = meter.tone === 'unknown' ? '—' : meter.fraction !== undefined ? `${Math.round(meter.fraction * 100)}%` : meter.tone === 'exhausted' ? undefined : meter.text
+  const short = compactMeterReading(meter)
   const label = <span data-usage-meter-window {...stylex.props(styles.windowLabel, compact && styles.compactWindow)}>{meter.label}</span>
   const reading = <span {...stylex.props(styles.meterReading)}>
     {meter.fraction !== undefined && meter.tone !== 'unknown' && <span aria-hidden="true" data-usage-meter-bar {...stylex.props(styles.track, stale && styles.staleBar, compact && styles.compactTrack)}>

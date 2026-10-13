@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/kit.tsx",
     "./usage-meter": "./src/UsageMeterTable.tsx",
+    "./quota-footer": "./src/QuotaSidebarFooter.tsx",
     "./quota-design": "./src/quota-design.ts",
     "./tokens.css": "./src/tokens.css",
     "./assistant-ui": "./src/assistant-ui/index.ts",

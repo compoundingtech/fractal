@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The Fractal UI kit adds a sidebar footer for quota: one line per account in priority order, the secondary window from 20rem, and a disclosure that starts collapsed when the rows would take more than half the sidebar.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Additive kit export @smalltalk/fractal-ui/quota-footer; the usage meter table is unchanged apart from exporting its compact reading and width threshold." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}
