@@ -35,9 +35,11 @@ export const transcriptSendFailureReason = (reason: string): KitSendFailureReaso
   return classified ?? sendFailureReasons.failed
 }
 
+type AppTextItem = Extract<ConversationItem, { readonly _tag: 'Text' }>
+
 /** Only failed Text sends require an adapter allocation; every other source item stays by reference. */
-const hasKitSendState = (item: ConversationItem): item is ConversationItem & KitConversationItem =>
-  item._tag !== 'Text' || item.sendState?._tag !== 'Failed'
+const hasKitSendState = (item: AppTextItem): item is AppTextItem & KitTextItem =>
+  item.sendState?._tag !== 'Failed'
 
 const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly role: 'user' } =>
   item._tag === 'Text' && item.role === 'user'
@@ -155,7 +157,7 @@ export const prepareTranscriptTurns = (
     const item: KitConversationItem = sourceItem._tag === 'UnknownEvent'
       ? { _tag: 'Notice', id: sourceItem.id, kind: 'event', text: 'An event this view cannot show yet.',
         ...(sourceItem.at === undefined ? {} : { at: sourceItem.at }) }
-      : hasKitSendState(sourceItem) ? sourceItem
+      : sourceItem._tag !== 'Text' || hasKitSendState(sourceItem) ? sourceItem
         : { ...sourceItem, sendState: sourceItem.sendState?._tag === 'Failed'
           ? { ...sourceItem.sendState, reason: transcriptSendFailureReason(sourceItem.sendState.reason),
             detail: sendFailureDetail(sourceItem.sendState.reason) }
