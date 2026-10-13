@@ -31,7 +31,7 @@ Stories:
 - **Fractal UI / Sync Line**: every observation across both schemes; `TransitionSequence` asserts fixed-height slots and CLS 0 across all transitions.
 - **Fractal UI / Transcript**: the locked U2·F3·Y3 transcript in dark and light: settled/expanded work, streamed answers, failed/interrupted/unknown work, loading, retained-history synchronization, answer metadata, unavailable conversations, the older-history boundary with and without a load action, pending and failed sends (including Pending→Sent identity) and the read-only empty state.
 - **Fractal UI / Sidebar/Agent Row**: compact hover-card facts, omitted unreported fields, the known-vs-none time cohort and the quick Open hover action.
-- **Fractal UI / Explore / Question form**: the interactive `QuestionForm` exploration. `Explore` has Scenario (S1 one question, S2 four tabbed questions, S3 multi-select with Other and a note), State (P pending, S submitted, E expired) and Width (W440, W1440) pickers. `OneQuestion`, `FourTabbed`, `MultiOtherNote` and `Expired` each have a 440 and a 1440 entry; their plays drive the keyboard flow and assert the submitted payload.
+- **Fractal UI / Explore / Question form**: the interactive `QuestionForm` exploration. `Explore` has Scenario (S1 one question, S2 four tabbed questions, S3 multi-select with Other and a note), State (P pending, S submitted, E expired, F failed, R read only) and Width (W440, W1440) pickers. `OneQuestion`, `FourTabbed`, `MultiOtherNote` and `Expired` each have a 440 and a 1440 entry; their plays drive the keyboard flow and assert the submitted payload.
 
 ## Families
 

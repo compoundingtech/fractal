@@ -63,5 +63,5 @@ export { EffortPicker, unknownEffort, messageEffort } from './embrace-composer/E
 export type { EffortControl } from './embrace-composer/EffortPicker.tsx'
 
 /** Interactive harness question form; the host owns the request state, transport and drafts. */
-export { QuestionForm } from './questions/QuestionForm.tsx'
+export { QuestionForm, type QuestionFormKitProps } from './questions/QuestionForm.tsx'
 export type { QuestionFormProps, QuestionRequestView, QuestionView, QuestionKind, QuestionState, QuestionVariant, OptionView, AnswerDraft, Answers, Preview as QuestionPreview } from './questions/model.ts'

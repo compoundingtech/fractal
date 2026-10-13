@@ -5,7 +5,11 @@ import { surfaceVars as surface, textVars as text, borderVars as border, accentV
 import { Button, IconButton, Tooltip } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
 import { Markdown } from '../composition/Markdown'
+import { compactTime } from '../sidebar/model'
 import type { AnswerDraft, Answers, OptionView, Preview, QuestionFormProps, QuestionState, QuestionView } from './model'
+
+/** The kit's props: the mirrored model's props plus the host clock (`now`, epoch milliseconds) for the "asked" age. */
+export type QuestionFormKitProps = QuestionFormProps & { readonly now: number }
 
 /** The automatic free-text row every `allowOther` question receives, worded as the omp ask tool words it. */
 export const OTHER_LABEL = 'Other (type your own)'
@@ -80,17 +84,6 @@ function Clock({ at, prefix }: { at: string; prefix: string }) {
   return <span {...stylex.props(styles.meta)}>{prefix} <time dateTime={at}>{clock.format(time)}</time></span>
 }
 
-/** Coarse age for the header ("3m ago") from the host clock; an unparseable time renders nothing rather than a guess. */
-function relativeAge(at: string, now: number): string | undefined {
-  const elapsed = now - Date.parse(at)
-  if (!Number.isFinite(elapsed)) return undefined
-  const minutes = Math.floor(Math.max(0, elapsed) / 60_000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`
-}
-
 const STATE_LABEL: Record<QuestionState['_tag'], string> = {
   pending: 'Waiting for you',
   submitting: 'Submitting',
@@ -110,7 +103,7 @@ const STATE_LABEL: Record<QuestionState['_tag'], string> = {
  * the request state, transport and clock (`now`, epoch milliseconds, for the "asked" age); drafts are
  * controlled when `draft` is passed. A question waiting for this user carries the attention hairline and glyph.
  */
-export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, onRetry, onOpenTerminal, onJump, draft, onDraftChange, autoFocus = false, now }: QuestionFormProps & { readonly now: number }) {
+export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, onRetry, onOpenTerminal, onJump, draft, onDraftChange, autoFocus = false, now }: QuestionFormKitProps) {
   const rootRef = React.useRef<HTMLElement>(null)
   const stacked = useStacked(rootRef)
   const titleId = React.useId()
@@ -128,7 +121,9 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
   const canAct = request.answerable && (state._tag === 'pending' || state._tag === 'failed')
   // Attention marks a question waiting on this user; settled and read-only requests stay neutral.
   const attention = interactive && request.answerable
-  const askedAge = relativeAge(request.askedAt, now)
+  // An unparseable ask time renders no age rather than a guess.
+  const askedAt = Date.parse(request.askedAt)
+  const askedAge = Number.isFinite(askedAt) ? `${compactTime({ at: askedAt, now })} ago` : undefined
   const answeredCount = questions.filter(question => isQuestionAnswered(question, draftFor(answers, question.id))).length
   const complete = questions.every(question => question.required === false || isQuestionAnswered(question, draftFor(answers, question.id)))
 
