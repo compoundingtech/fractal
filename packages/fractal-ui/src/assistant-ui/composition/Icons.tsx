@@ -8,7 +8,7 @@ export type IconName =
   | 'attach' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle'
-  | 'question' | 'arrow-left'
+  | 'person' | 'question' | 'arrow-left'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   search: <><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></>,
@@ -37,6 +37,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   whitespace: <><path d="M9 14V2h4M12 2v12M9 2H6a3 3 0 0 0 0 6h3" /><circle cx="3" cy="12" r=".6" fill="currentColor" /></>,
   'pull-request': <><circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="13" r="1.5" /><path d="M4 4.5v7M12 11.5V6a3 3 0 0 0-3-3H7M9 1 7 3l2 2" /></>,
   'stop-circle': <><circle cx="8" cy="8" r="6" /><rect x="5" y="5" width="6" height="6" rx=".5" fill="currentColor" stroke="none" /></>,
+  person: <><circle cx="8" cy="5" r="2.5" /><path d="M2.5 14v-1a5.5 5.5 0 0 1 11 0v1" /></>,
   question: <><circle cx="8" cy="8" r="6" /><path d="M6.5 5.5a1.6 1.6 0 1 1 2.4 1.4C8.2 7.3 8 7.7 8 8.5M8 11h.01" /></>,
   'arrow-left': <path d="M13.5 8h-11M7 3.5 2.5 8 7 12.5" />,
 }
