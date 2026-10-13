@@ -286,7 +286,7 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
     </div>
     {interactive ? <>
       {questions.length > 1 ? <Tabs
-        selectedKey={activeId ?? null}
+        selectedKey={activeId}
         onSelectionChange={key => setActiveId(String(key))}
         orientation={stacked ? 'vertical' : 'horizontal'}
         {...stylex.props(styles.tabs)}
@@ -428,7 +428,7 @@ function QuestionPanel({ question, draft, showHeader, showKeys, stacked, isDisab
         <PreviewBody preview={preview.preview} />
       </figure>}
     </div>
-    {question.allowNote && <div data-question-stop="note">
+    {question.allowNote && !isReadOnly && <div data-question-stop="note">
       <TextField value={draft.note ?? ''} onChange={onNote} isDisabled={isDisabled} isReadOnly={isReadOnly} {...stylex.props(styles.note)}>
         <Label {...stylex.props(styles.meta)}>Note</Label>
         <Input placeholder="Add a note for the agent (optional)" {...stylex.props(styles.input)} />

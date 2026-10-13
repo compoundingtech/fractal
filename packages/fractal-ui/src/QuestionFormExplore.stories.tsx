@@ -498,6 +498,7 @@ export const Explore: Story = {
     await userEvent.click(picker('State').getByRole('button', { name: 'R' }))
     await waitFor(() => expect(formIn(canvasElement).querySelector('[data-question-state-chip]')).toHaveTextContent(/^Read only$/))
     const readOnly = formIn(canvasElement)
+    await expect(within(readOnly).queryByRole('textbox', { name: 'Note' })).toBeNull()
     await expect(within(readOnly).queryByText('Waiting for you')).toBeNull()
     await expect(readOnly.querySelectorAll('[data-question-keycap]')).toHaveLength(0)
     await expect(readOnly.querySelectorAll('kbd')).toHaveLength(0)
