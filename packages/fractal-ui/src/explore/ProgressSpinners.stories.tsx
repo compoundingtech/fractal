@@ -22,7 +22,7 @@ type Size = typeof dimensions.Z[number]['id']
 type Width = typeof dimensions.W[number]['id']
 type Motion = typeof dimensions.M[number]['id']
 interface Args { spinner: SpinnerVariant; size: Size; width: Width; motion: Motion; compareS: boolean; compareZ: boolean; compareW: boolean; compareM: boolean; scheme: 'dark' | 'light'; probe: boolean }
-const defaults: Args = { spinner: 'S2', size: '14', width: '1440', motion: 'M1', compareS: false, compareZ: true, compareW: false, compareM: false, scheme: 'dark', probe: false }
+const defaults: Args = { spinner: 'S1', size: '14', width: '1440', motion: 'M1', compareS: false, compareZ: true, compareW: false, compareM: false, scheme: 'dark', probe: false }
 /** Synthetic fixture copy. */
 const fixture = { agent: 'north-studio', idleAgent: 'harbor-ops', elapsed: '2m', idleTime: '9:41', task: 'Rebase the release branch', command: 'pnpm --filter @smalltalk/fractal-ui typecheck', settledCommand: 'pnpm --filter @smalltalk/fractal-ui build-storybook', draft: 'Tighten the spinner sizes in the sidebar' }
 
@@ -82,10 +82,10 @@ function Explorer(args: Args & { readonly onChange: (patch: Partial<Args>) => vo
     {/* Resolved ink references for the play: spinners may only take fg, fgSoft or fgMuted. */}
     <span aria-hidden="true" {...stylex.props(styles.inkProbe)}><span data-ink="fg" {...stylex.props(styles.fgInk)} /><span data-ink="fgSoft" {...stylex.props(styles.softInk)} /><span data-ink="fgMuted" {...stylex.props(styles.mutedInk)} /></span>
     <h1 {...stylex.props(styles.title)}>Progress spinners</h1>
-    <p {...stylex.props(styles.explanation)}>Four spinners in the sidebar agent row, the thread header status, a running work row and the composer send. Motion is transform-only, and removing a spinner moves no text.</p>
+    <p {...stylex.props(styles.explanation)}>Four spinners in the sidebar agent row, the thread header status, a running work row and the composer send. Motion is transform-only, pauses off screen, and removing a spinner moves no text. S1 was picked and ships as the kit spinner (Fractal/Foundations/Spinner).</p>
     <div {...stylex.props(styles.pickers)}>
       <VariantPickerTable label="Variant pickers">
-        <VariantPicker label="Spinner" choices={dimensions.S} value={args.spinner} compare={args.compareS} note="Recommended: S2." onChange={spinner => args.onChange({ spinner: spinner as SpinnerVariant })} onCompare={compareS => args.onChange({ compareS })} />
+        <VariantPicker label="Spinner" choices={dimensions.S} value={args.spinner} compare={args.compareS} note="Picked: S1, shipped." onChange={spinner => args.onChange({ spinner: spinner as SpinnerVariant })} onCompare={compareS => args.onChange({ compareS })} />
         <VariantPicker label="Size" choices={dimensions.Z} value={args.size} compare={args.compareZ} onChange={size => args.onChange({ size: size as Size })} onCompare={compareZ => args.onChange({ compareZ })} />
         <VariantPicker label="Width" choices={dimensions.W} value={args.width} compare={args.compareW} onChange={width => args.onChange({ width: width as Width })} onCompare={compareW => args.onChange({ compareW })} />
         <VariantPicker label="Motion" choices={dimensions.M} value={args.motion} compare={args.compareM} onChange={motion => args.onChange({ motion: motion as Motion })} onCompare={compareM => args.onChange({ compareM })} />
@@ -101,8 +101,9 @@ function ProbeExplorer(initial: Args) {
   return <Explorer {...args} onChange={patch => setArgs(current => ({ ...current, ...patch }))} />
 }
 
+// TODO: remove this exploration (and src/explore/ProgressSpinner*, spinner-tokens) once the shipped S1 spinner has settled.
 const meta = {
-  title: 'Fractal UI/Explore/ProgressSpinners',
+  title: 'Fractal/Explore/ProgressSpinners',
   render: function Render() {
     const [args, updateArgs] = useArgs<Args>()
     return args.probe ? <ProbeExplorer {...args} /> : <Explorer {...args} onChange={updateArgs} />

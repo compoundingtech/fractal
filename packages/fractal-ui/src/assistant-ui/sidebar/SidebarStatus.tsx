@@ -3,6 +3,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { geometryVars as g, motionVars as m, spaceVars as s, statusVars as tone, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { compactTime, statuses, type AgentStatus } from './model'
+import { pauseOffscreen } from '../composition/pause-offscreen'
 
 export type GlyphVariant = 'SG-1' | 'SG-2' | 'SG-3'
 export type DiscRefinement = 'G1' | 'G2' | 'G3'
@@ -18,7 +19,8 @@ export interface SidebarStatusProps {
   readonly iconOnly?: boolean
 }
 const paths: Record<AgentStatus, React.ReactNode> = {
-  working: <><circle cx="10" cy="10" r="7" opacity=".4" /><path d="M10 3a7 7 0 0 1 7 7" /></>,
+  // Lucide loader-circle on the 20 grid, at Lucide's 2/24 stroke; it spins while working.
+  working: <path d="M17.5 10a7.5 7.5 0 1 1-5.183-7.133" strokeWidth={5 / 3} />,
   waiting: <><circle cx="10" cy="10" r="7" /><path d="M7.7 7.5a2.3 2.3 0 1 1 3.9 1.7c-1 .6-1.6 1.1-1.6 2.3M10 14h.01" /></>,
   idle: <path d="M16.5 11.5A7 7 0 0 1 8.5 3.5a7 7 0 1 0 8 8Z" />,
   pending: <path d="M6 3h8M6 17h8M7 3v3l6 8v3M13 3v3l-6 8v3" />,
@@ -35,8 +37,9 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
   const elapsed = statusSince !== undefined && now !== undefined ? compactTime({ at: statusSince, now }) : undefined
   const runningRing = variant === 'SG-1' && discRefinement === 'G2' && status === 'working'
   const shapeCue = variant === 'SG-1' && discRefinement === 'G3' && status !== 'working' && status !== 'idle'
+  const spinning = runningRing || (status === 'working' && variant !== 'SG-2')
   return <span title={`${statusLabel}. ${boundary}. Observation ${freshness}.`} {...stylex.props(styles.root, status === 'working' && styles.working, status === 'waiting' && styles.waiting, status === 'stale' && styles.stale)}>
-    <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation`} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon, runningRing && styles.iconRing, (runningRing || (status === 'working' && variant === 'SG-3')) && styles.spin)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{runningRing && <><circle cx="10" cy="10" r="7.5" opacity=".3" /><path d="M10 2.5a7.5 7.5 0 0 1 7.5 7.5" /></>}{shapeCue && paths[status]}</>}</svg>
+    <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation`} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" ref={spinning ? pauseOffscreen : undefined} {...stylex.props(styles.icon, runningRing && styles.iconRing, spinning && styles.spin)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' || (spinning && !runningRing) ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{runningRing && <><circle cx="10" cy="10" r="7.5" opacity=".3" /><path d="M10 2.5a7.5 7.5 0 0 1 7.5 7.5" /></>}{shapeCue && paths[status]}</>}</svg>
     {variant === 'SG-2' && !iconOnly && <span>{statusLabel}</span>}
     {/* Icon-only glyphs sit in a fixed icon column; visible text there would overrun the next column. */}
     {elapsed !== undefined && !iconOnly && <time dateTime={new Date(statusSince!).toISOString()} aria-label={`Elapsed in ${statusLabel}: ${elapsed}`}>{elapsed}</time>}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Running work in the sidebar agent row, the thread header status and the work block shows a Lucide loader-circle spinner that turns by transform only, stops under reduced motion and pauses off screen; the spinner exploration page no longer stalls.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "Visual change only: the running glyph's shape and its live-activity ring change; names, roles and labels are unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

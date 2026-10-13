@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
+import { pauseOffscreen } from './pause-offscreen'
 
 export type IconName =
   | 'search' | 'plus' | 'pencil' | 'gear' | 'swap' | 'clock'
@@ -28,7 +29,8 @@ const PATHS: Record<IconName, React.ReactNode> = {
   check: <path d="M3 8.5 6.5 12 13 4.5" />,
   x: <path d="M4 4l8 8M12 4l-8 8" />,
   alert: <><path d="M8 2 14.5 13.5H1.5z" /><path d="M8 6.5v3M8 11.5h.01" /></>,
-  spinner: <><path d="M8 1.5A6.5 6.5 0 1 1 1.5 8" /><path d="M8 4.5A3.5 3.5 0 1 0 11.5 8" /></>,
+  // Lucide loader-circle on the 16 grid, at Lucide's 2/24 stroke.
+  spinner: <path d="M14 8a6 6 0 1 1-4.146-5.707" strokeWidth={4 / 3} />,
   folder: <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.8h5A1.5 1.5 0 0 1 14 6.3v5.2a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" />,
   message: <path d="M2.5 4.5A2 2 0 0 1 4.5 2.5h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H7l-3 2.5v-2.5h-.5a2 2 0 0 1-1-2z" />,
   dot: <circle cx="8" cy="8" r="3" />,
@@ -52,6 +54,7 @@ export function Icon({ name, size, scale = 'normal', spinning = false, label }: 
     aria-hidden={label === undefined ? true : undefined}
     role={label === undefined ? undefined : 'img'}
     aria-label={label}
+    ref={spinning ? pauseOffscreen : undefined}
     {...stylex.props(styles.icon, scale === 'status' && styles.status, size !== undefined && styles.size(size), spinning && styles.spin)}
   >{PATHS[name]}</svg>
 }

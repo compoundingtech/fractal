@@ -176,7 +176,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
   const started = Date.parse(startedAt ?? '')
   const duration = Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
   const waiting = state._tag === 'WaitingForAnswer'
-  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><span aria-hidden="true" {...stylex.props(styles.liveRing, waiting && styles.waitingRing)} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{waiting ? `Waiting for your answer${duration === '' ? '' : ` · ${duration}`}` : `Working${duration === '' ? '' : ` for ${duration}`}`}</span></div>
+  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><Icon name="spinner" scale="status" spinning={!waiting} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{waiting ? `Waiting for your answer${duration === '' ? '' : ` · ${duration}`}` : `Working${duration === '' ? '' : ` for ${duration}`}`}</span></div>
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
@@ -255,7 +255,6 @@ export function Transcript({ turns, title, sync, now, observedAt, onOpenTool, on
   </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider>
 }
 const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
-const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
@@ -276,8 +275,6 @@ const styles = stylex.create({
   runningProgress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm, overflow: 'hidden', backgroundColor: surface.rowActive },
   runningSegment: { display: 'block', width: '25%', height: '100%', backgroundColor: accent.primary, animationName: runSweep, animationDuration: m.pulse, animationTimingFunction: m.linear, animationIterationCount: 'infinite', animationDirection: 'alternate', '@media (prefers-reduced-motion: reduce)': { animationName: 'none', transform: 'translateX(150%)' } },
   liveActivity: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.uiSize },
-  liveRing: { width: g.status, height: g.status, boxSizing: 'border-box', flexShrink: 0, borderRadius: r.full, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderTopColor: ink.fgMuted, animationName: liveSpin, animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
-  waitingRing: { animationName: 'none' },
   liveLabel: { color: ink.fgSoft },
   preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginBlock: s.sm, marginInlineStart: s.md, backgroundColor: surface.codeBg, borderRadius: r.sm, padding: s.md, gap: s.xs },
   output: { margin: 0, width: '100%', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.metaLeading, color: ink.fgSoft }, outputCode: { fontFamily: t.fontMono, fontSize: t.codeSize },
