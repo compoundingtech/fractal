@@ -76,6 +76,33 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
 }
 
 #[tokio::test]
+async fn assistant_approved_pages_decode_native_sync_through_typed_sdk() {
+    let fixture = fixture(SCOPES, true).await;
+    for diverged in [false, true] {
+        let now = client_now_ms();
+        let mut progress = smallclaims::store::PeerSyncProgress::default();
+        progress.observe(0, Some((9_000, 0)), now);
+        if diverged {
+            progress.graph_differs_since_unix_ms = Some(now - smallclaims::store::REPLICATION_DIVERGED_AFTER_MS);
+            progress.graph_compared_at_unix_ms = Some(now);
+        }
+        fixture.state.store.replication_sync.lock().unwrap().insert("birch".into(), progress);
+        for route in ["attention", "missions", "agents"] {
+            let payload = fixture.payload(route, "");
+            let header = fixture.header(&payload, &fixture.attestor);
+            let (status, value, _) = fixture.request(&format!("/v1/client/assistant/{route}"), Some(&header)).await;
+            assert_eq!(status, StatusCode::OK, "{route}: {value}");
+            assert_eq!(value["value"]["sync"]["state"], if diverged { "diverged" } else { "catching-up" });
+            match route {
+                "attention" => { let page: st3_client::Envelope<st3_client::AssistantAttentionPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
+                "missions" => { let page: st3_client::Envelope<st3_client::AssistantMissionPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
+                _ => { let page: st3_client::Envelope<st3_client::AssistantAgentPage> = serde_json::from_value(value).unwrap(); assert!(page.value.sync.is_some()); }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn assistant_all_six_reads_require_proof_even_on_native_router() {
     let fixture=fixture(SCOPES,true).await;
     for (route,_) in ROUTES {

@@ -2547,15 +2547,15 @@
     },
     "AssistantAttentionPage": {
       "type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"],
-      "properties": { "kind": { "const": "page" }, "collection": { "const": "assistant.attention" }, "filters": { "type": "object", "additionalProperties": false, "properties": {} }, "items": { "type": "array", "items": { "$ref": "#/$defs/AssistantAttentionItem" } }, "page": { "$ref": "#/$defs/PageInfo" } }
+      "properties": { "kind": { "const": "page" }, "collection": { "const": "assistant.attention" }, "filters": { "type": "object", "additionalProperties": false, "properties": {} }, "items": { "type": "array", "items": { "$ref": "#/$defs/AssistantAttentionItem" } }, "page": { "$ref": "#/$defs/PageInfo" }, "sync": { "$ref": "#/$defs/SyncNotice" } }
     },
     "AssistantMissionPage": {
       "type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"],
-      "properties": { "kind": { "const": "page" }, "collection": { "const": "assistant.missions" }, "filters": { "type": "object", "additionalProperties": false, "properties": {} }, "items": { "type": "array", "items": { "$ref": "#/$defs/AssistantMissionItem" } }, "page": { "$ref": "#/$defs/PageInfo" } }
+      "properties": { "kind": { "const": "page" }, "collection": { "const": "assistant.missions" }, "filters": { "type": "object", "additionalProperties": false, "properties": {} }, "items": { "type": "array", "items": { "$ref": "#/$defs/AssistantMissionItem" } }, "page": { "$ref": "#/$defs/PageInfo" }, "sync": { "$ref": "#/$defs/SyncNotice" } }
     },
     "AssistantAgentPage": {
       "type": "object", "additionalProperties": false, "required": ["kind", "collection", "filters", "items", "page"],
-      "properties": { "kind": { "const": "page" }, "collection": { "const": "assistant.agents" }, "filters": { "type": "object", "additionalProperties": false, "properties": {} }, "items": { "type": "array", "items": { "$ref": "#/$defs/AssistantAgentItem" } }, "page": { "$ref": "#/$defs/PageInfo" } }
+      "properties": { "kind": { "const": "page" }, "collection": { "const": "assistant.agents" }, "filters": { "type": "object", "additionalProperties": false, "properties": {} }, "items": { "type": "array", "items": { "$ref": "#/$defs/AssistantAgentItem" } }, "page": { "$ref": "#/$defs/PageInfo" }, "sync": { "$ref": "#/$defs/SyncNotice" } }
     },
     "AssistantContentRange": {
       "type": "object", "additionalProperties": false, "required": ["start", "end"],
