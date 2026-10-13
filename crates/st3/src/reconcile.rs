@@ -3406,6 +3406,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &attention_key,
                 "the same runtime incarnation became ready",
             )?;
+            self.deliver_session_start(&subject.subject, incarnation)?;
             return Ok(());
         }
 
@@ -3509,6 +3510,81 @@ impl<R: RuntimeControl> Reconciler<R> {
         if changed {
             self.signal_changed();
         }
+        Ok(())
+    }
+
+    /// Give a seat's new incarnation the handoff its last session left and the live state of its
+    /// work, as the first message it sees. A seat the reconciler meets for the first time keeps the
+    /// incarnation it is already running (a daemon that started after the seat, or an upgrade to
+    /// this behavior), and a brand-new seat has nothing to carry over, so neither is told anything.
+    fn deliver_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
+        let done = format!("session-start:{subject}:{incarnation}");
+        if self.store.operation_claim(&done)?.is_some() {
+            return Ok(());
+        }
+        let baseline = format!("session-start-baseline:{subject}");
+        let first_sight = self.store.operation_claim(&baseline)?.is_none();
+        let context = if first_sight {
+            None
+        } else {
+            Some(crate::handoff::gather(&self.store, subject)?)
+        };
+        let text = context
+            .as_ref()
+            .and_then(|context| crate::handoff::render(context, now_ms()));
+        let record = |decision: &str, key: String| -> Result<()> {
+            self.store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("key".into(), Value::String("session-start".into())),
+                    ("decision".into(), Value::String(decision.into())),
+                    (
+                        "reason".into(),
+                        Value::String(format!("incarnation {incarnation}")),
+                    ),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key),
+            })?;
+            Ok(())
+        };
+        if first_sight {
+            record("baseline", baseline)?;
+        }
+        let Some(text) = text else {
+            return record("nothing-to-carry", done);
+        };
+        let message_id = &hex::encode(sha2::Sha256::digest(done.as_bytes()))[..16];
+        self.store.append_claim(&ClaimInput {
+            subject: format!("message/{message_id}"),
+            kind: "message.sent".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("from".into(), Value::String("daemon/runtime".into())),
+                ("to".into(), Value::String(subject.into())),
+                ("content".into(), Value::String(text)),
+                ("status".into(), Value::String("sent".into())),
+                (
+                    "title".into(),
+                    Value::String("Session restarted: where you were".into()),
+                ),
+                ("in_reply_to".into(), Value::Null),
+                (
+                    "tags".into(),
+                    Value::Array(vec![Value::String(format!(
+                        "{}{incarnation}",
+                        crate::handoff::SESSION_START_TAG_PREFIX
+                    ))]),
+                ),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(done.clone()),
+        })?;
+        self.signal_changed();
         Ok(())
     }
 
@@ -36869,6 +36945,112 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_new_incarnation_is_first_sent_the_handoff_its_seat_left() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"codex\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        apply_source(&store, &source, "session-start");
+        let desired = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let member = desired.member.as_ref().unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let ready = |incarnation: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: desired.subject.clone(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: member_fields(member, "running", Some(incarnation), true),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("runtime-{incarnation}")),
+                })
+                .unwrap();
+            store
+                .append_claim(&harness_claim(&desired.subject, "ready", incarnation))
+                .unwrap();
+            let observation = RuntimeObservation {
+                runtime_id: member.runtime_id.clone(),
+                terminal: true,
+                status: "running".into(),
+                exit_code: None,
+                incarnation_id: Some(incarnation.into()),
+            };
+            reconciler
+                .reconcile_driver_readiness(&desired, member, &observation, now_ms())
+                .unwrap();
+        };
+        let inbox = || store.messages(Some(&desired.subject), true).unwrap();
+
+        // The first incarnation the reconciler meets is the one already running: it is told
+        // nothing, and neither is a seat with nothing to carry over.
+        store
+            .put_document(
+                "doc/agents/node.worker/handoff",
+                b"Branch agent/widget has PR 12 open; wait for review.",
+                &None,
+                "handoff-one",
+            )
+            .unwrap();
+        ready("worker-one");
+        assert!(inbox().is_empty());
+
+        // Its replacement is sent the handoff, once, as a message that wakes the seat.
+        ready("worker-two");
+        ready("worker-two");
+        let messages = inbox();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        let message = &messages[0];
+        assert_eq!(message.from, "daemon/runtime");
+        assert_eq!(message.title.as_deref(), Some("Session restarted: where you were"));
+        assert!(message.content.contains("Branch agent/widget has PR 12 open"));
+        assert!(message.content.contains("doc/agents/node.worker/handoff@"));
+        assert_eq!(
+            message.tags,
+            vec![format!("{}worker-two", crate::handoff::SESSION_START_TAG_PREFIX)]
+        );
+        assert!(!crate::silent::is_held(message));
+        assert!(crate::silent::always_wakes(&message.from, &message.tags));
+
+        // A seat that has written nothing and holds no work is sent nothing at all.
+        let quiet = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&quiet, &source, "session-start-quiet");
+        let quiet_desired = quiet
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .find(|subject| subject.subject == "agent/node.worker")
+            .unwrap();
+        let quiet_reconciler = Reconciler::new(
+            quiet.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for incarnation in ["quiet-one", "quiet-two"] {
+            quiet
+                .append_claim(&harness_claim(&quiet_desired.subject, "ready", incarnation))
+                .unwrap();
+            quiet_reconciler
+                .deliver_session_start(&quiet_desired.subject, incarnation)
+                .unwrap();
+        }
+        assert!(quiet.messages(Some(&quiet_desired.subject), true).unwrap().is_empty());
     }
 
     #[test]

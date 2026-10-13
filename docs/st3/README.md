@@ -43,6 +43,8 @@ Use these documents for implementation details:
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
+- [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
+  message a restarted seat is sent with that handoff and the live state of its work.
 - [Seats across deploys](seat-deploys.md) explains how a running seat's driver and channels follow
   a replaced st binary without ending the provider session, and how st reports a stale message path.
 - [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.

@@ -12075,6 +12075,17 @@ async fn put_document(
     bound: Option<axum::Extension<BoundAgent>>,
     Json(request): Json<DocumentPutRequest>,
 ) -> Result<Json<DocumentVersion>, ApiError> {
+    if let Some(bound) = bound.as_ref()
+        && !crate::handoff::may_write(&bound.0.0, &request.name)
+    {
+        return Err(ApiError::bad(St3Error::new(
+            "document-not-yours",
+            format!(
+                "`{}` belongs to another seat; a seat writes only doc/agents/… for itself",
+                request.name
+            ),
+        )));
+    }
     let response = state
         .store
         .put_document_as(
@@ -20049,6 +20060,53 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
         let error: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(error["code"], "foreign-agent-actor");
         assert!(!state.store.desired_subjects().unwrap().iter().any(|item| item.kind == "subscription"));
+    }
+
+    #[tokio::test]
+    async fn a_seat_writes_only_its_own_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let app = router(state.clone());
+        let write = |writer: Option<&'static str>, name: &str, key: &str| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/v1/documents")
+                .header("content-type", "application/json");
+            if let Some(writer) = writer {
+                request = request.extension(BoundAgent(writer.into()));
+            }
+            let body = serde_json::json!({
+                "name": name,
+                "bytes": b"Waiting on PR 12.".to_vec(),
+                "expected_document": null,
+                "idempotency_key": key,
+            });
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(request.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&body).unwrap())
+            }
+        };
+        let (status, written) =
+            write(Some("agent/garden/ash"), "doc/agents/garden/ash/handoff", "own").await;
+        assert_eq!(status, StatusCode::OK, "{written}");
+
+        let (status, refused) =
+            write(Some("agent/garden/birch"), "doc/agents/garden/ash/handoff", "other").await;
+        assert_ne!(status, StatusCode::OK, "{refused}");
+        assert_eq!(refused["code"], "document-not-yours");
+
+        // A seat's other documents and a person's writes are unaffected.
+        let (status, ordinary) = write(Some("agent/garden/birch"), "doc/garden/notes", "notes").await;
+        assert_eq!(status, StatusCode::OK, "{ordinary}");
+        let (status, person) =
+            write(None, "doc/agents/garden/ash/handoff", "person").await;
+        assert_eq!(status, StatusCode::OK, "{person}");
     }
 
     #[tokio::test]

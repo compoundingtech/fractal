@@ -154,6 +154,10 @@ mod tests {
             "`st service restart`",
             "confirm with `st doctor`",
             "it is not a security boundary",
+            "`\"$ST3_BIN\" agents handoff write --as \"$ST_AGENT\"`",
+            "only this seat writes its own",
+            "Session restarted: where you were",
+            "carry on from it without waiting to be told",
         ] {
             assert!(body.contains(usage), "{usage}");
         }
