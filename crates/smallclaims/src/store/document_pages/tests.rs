@@ -292,6 +292,23 @@ fn specialized_pages_match_old_full_metadata_filters_cursors_and_randomized_name
     let oldest = bind(&store, name, "cursor-first", 10_000, "cursor-first", None);
     let middle = bind(&store, name, "cursor-middle", 20_000, "cursor-middle", None);
     let newest = bind(&store, name, "cursor-newest", 30_000, "cursor-newest", None);
+    let below = bind(
+        &store,
+        "doc/a-cursor",
+        "cursor-below",
+        40_000,
+        "cursor-below",
+        None,
+    );
+    let above = bind(
+        &store,
+        "doc/z-cursor",
+        "cursor-above",
+        50_000,
+        "cursor-above",
+        None,
+    );
+    assert!(below.subject.as_str() < name && name < above.subject.as_str());
     for history in [false, true] {
         for limit in [0, 1, 2, 10] {
             for cursor in [&oldest, &middle, &newest] {
@@ -304,7 +321,52 @@ fn specialized_pages_match_old_full_metadata_filters_cursors_and_randomized_name
                     limit,
                 );
             }
+            // Each cursor name relation, paired with a real version's arrival index and
+            // a nonexistent index. The named-page constant comparison must preserve both.
+            for (cursor_name, index) in [
+                (below.subject.as_str(), below.store_index),
+                (name, middle.store_index),
+                (above.subject.as_str(), above.store_index),
+            ] {
+                for cursor_index in [index, 0] {
+                    parity(
+                        &store,
+                        Some(name),
+                        None,
+                        history,
+                        Some((cursor_name, cursor_index)),
+                        limit,
+                    );
+                }
+            }
         }
+        let before_page = read(
+            &store,
+            Some(name),
+            None,
+            history,
+            Some((&below.subject, below.store_index)),
+            10,
+        )
+        .unwrap();
+        assert_eq!(before_page.len(), if history { 3 } else { 1 });
+        assert!(
+            read(
+                &store,
+                Some(name),
+                None,
+                history,
+                Some((&above.subject, above.store_index)),
+                10
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            read(&store, Some(name), None, history, Some((name, 0)), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
     let page = read(
         &store,
