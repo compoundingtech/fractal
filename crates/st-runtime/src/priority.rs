@@ -351,10 +351,35 @@ pub fn report(observations: &[PtyObservation]) -> (&'static str, String) {
     let (status, message) = placement_report(observations);
     let seats = match configured() {
         SeatPriority::Background => {
-            "seats start below the daemon (`seat_priority = \"background\"`)"
+            // The launch resolves these through the login shell's PATH; the daemon's own PATH is
+            // the closest check this process can make.
+            let missing = if cfg!(target_os = "macos") {
+                (!Path::new(MACOS_TASKPOLICY).is_file()).then_some("taskpolicy")
+            } else {
+                let on_path = |program: &str| {
+                    std::env::var_os("PATH").is_some_and(|path| {
+                        std::env::split_paths(&path)
+                            .any(|directory| directory.join(program).is_file())
+                    })
+                };
+                (!on_path("nice")).then_some("nice")
+            };
+            match missing {
+                None => {
+                    "seats start below the daemon (`seat_priority = \"background\"`)".to_string()
+                }
+                Some(program) => {
+                    return (
+                        "warn",
+                        format!(
+                            "{message}; `seat_priority = \"background\"` but `{program}` is not found, so seats start at the daemon's priority"
+                        ),
+                    );
+                }
+            }
         }
         SeatPriority::Normal => {
-            "seats start at the daemon's priority (`seat_priority = \"normal\"`)"
+            "seats start at the daemon's priority (`seat_priority = \"normal\"`)".to_string()
         }
     };
     (status, format!("{message}; {seats}"))

@@ -19,7 +19,15 @@ changes it for a seat.
 | `background` (default) | `nice -n 10` and IO class best-effort, level 7 | `taskpolicy -c utility` |
 | `normal` | the daemon's own priority | the daemon's own priority |
 
-The daemon, the PTY servers and the `st` CLI keep normal priority. Nothing needs root, a new user or
+Only agent seats and what they start go to background: their harnesses, helpers, shells an agent
+opens, and gates. A terminal a person owns (`pty/person/NAME/ID`, such as a shell opened from the
+TUI or the phone) and anything else a person drives interactively always run at normal priority,
+whatever `seat_priority` and `ST_SEAT_PRIORITY` say. The daemon, the PTY servers and the `st` CLI
+keep normal priority.
+
+The prefix changes priority only. It does not change a seat's parent or lifetime: a seat's parent
+is its PTY server, not the daemon, so restarting the daemon leaves every seat and its children
+running, exactly as before. Nothing needs root, a new user or
 a delegated cgroup controller, so it works on a fresh user install. On Linux, `nice` is added to
 the daemon's own value, which is 0 under `st service install`. A harness that lowers its own
 priority further stays lower. The scope weights below divide the machine between cgroups; `nice`

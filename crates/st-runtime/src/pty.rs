@@ -2182,4 +2182,97 @@ exit 0
         session.runtime.stop(&session.id).unwrap();
         assert_gone_soon(replacement, "replacement harness");
     }
+
+    /// The installed `pty`, with or without systemd user scopes.
+    fn installed_pty() -> Option<PathBuf> {
+        let environment = BTreeMap::from([("PATH".into(), std::env::var("PATH").ok()?)]);
+        crate::resolve_executable("pty", &environment).ok()
+    }
+
+    fn parent_of(pid: u32) -> u32 {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        // The fields after the parenthesized name: state, then the parent.
+        let after_name = &stat[stat.rfind(')').unwrap() + 2..];
+        after_name
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn nice_of(pid: u32) -> i32 {
+        unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) }
+    }
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// A seat's parent is its PTY server, never the process that asked for it, so the priority
+    /// prefix leaves its lifetime alone: after the asking process is gone and a new one takes over
+    /// the registry, the background harness and what it started are still running.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_background_seat_and_its_children_outlive_the_process_that_started_them() {
+        let Some(pty) = installed_pty() else {
+            eprintln!("skipped: no pty binary");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("r");
+        let pid_file = root.path().join("harness.pid");
+        let child_file = root.path().join("child.pid");
+        let launch = Launch::Argv(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "echo $$ > '{}'; sleep 60 & echo $! > '{}'; wait",
+                pid_file.display(),
+                child_file.display()
+            ),
+        ]);
+        let environment = BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (crate::PRIORITY_ENV.into(), "background".into()),
+        ]);
+        let starter = PtyRuntime::new(registry.clone()).with_binary(pty.to_string_lossy());
+        starter
+            .spawn(
+                "background-survivor",
+                &launch,
+                root.path(),
+                &environment,
+                None,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+        let harness = read_pid(&pid_file);
+        let child = read_pid(&child_file);
+        let base = nice_of(std::process::id());
+        assert_eq!(nice_of(harness), (base + 10).min(19));
+        assert_eq!(nice_of(child), (base + 10).min(19));
+        let server = starter.session("background-survivor").unwrap().pid.unwrap() as u32;
+        assert_ne!(parent_of(harness), std::process::id());
+        assert_eq!(
+            nice_of(server),
+            base,
+            "the PTY server keeps normal priority"
+        );
+
+        // The daemon restarts: nothing of the old one remains, and a new one reads the registry.
+        drop(starter);
+        let restarted = PtyRuntime::new(registry).with_binary(pty.to_string_lossy());
+        let seat = restarted
+            .snapshot()
+            .unwrap()
+            .into_iter()
+            .find(|seat| seat.name == "background-survivor")
+            .unwrap();
+        assert_eq!(seat.status, "running");
+        assert!(alive(harness) && alive(child));
+
+        restarted.stop("background-survivor").unwrap();
+    }
 }
