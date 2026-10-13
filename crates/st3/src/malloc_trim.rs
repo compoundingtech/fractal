@@ -23,6 +23,15 @@ where
     }
 }
 
+fn trim_interval(seconds: u64) -> anyhow::Result<(Duration, tokio::time::Instant)> {
+    anyhow::ensure!(seconds > 0, "ST3_MALLOC_TRIM_INTERVAL_SECS must be positive");
+    let period = Duration::from_secs(seconds);
+    let first_tick = tokio::time::Instant::now()
+        .checked_add(period)
+        .context("ST3_MALLOC_TRIM_INTERVAL_SECS exceeds the timer range")?;
+    Ok((period, first_tick))
+}
+
 /// Start once, after daemon telemetry initializes. Zero threshold disables the worker.
 pub fn spawn() -> anyhow::Result<()> {
     let threshold = env_number("ST3_MALLOC_TRIM_THRESHOLD_BYTES", DEFAULT_THRESHOLD)?;
@@ -30,10 +39,7 @@ pub fn spawn() -> anyhow::Result<()> {
         return Ok(());
     }
     let seconds = env_number("ST3_MALLOC_TRIM_INTERVAL_SECS", DEFAULT_INTERVAL_SECS)?;
-    anyhow::ensure!(
-        seconds > 0,
-        "ST3_MALLOC_TRIM_INTERVAL_SECS must be positive"
-    );
+    let (period, first_tick) = trim_interval(seconds)?;
     let meter = opentelemetry::global::meter("st3");
     let duration = meter
         .f64_histogram("st.allocator.trim.duration")
@@ -46,8 +52,7 @@ pub fn spawn() -> anyhow::Result<()> {
         .with_unit("By")
         .build();
     tokio::spawn(async move {
-        let period = Duration::from_secs(seconds);
-        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        let mut interval = tokio::time::interval_at(first_tick, period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
@@ -131,6 +136,13 @@ mod tests {
         assert!(!should_trim(255, 256));
         assert!(!should_trim(256, 256));
         assert!(should_trim(257, 256));
+    }
+
+    #[test]
+    fn interval_rejects_zero_and_timer_overflow() {
+        assert!(trim_interval(0).is_err());
+        assert!(trim_interval(u64::MAX).is_err());
+        assert_eq!(trim_interval(30).unwrap().0, Duration::from_secs(30));
     }
 
     #[test]
