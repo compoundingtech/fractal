@@ -57219,6 +57219,124 @@ agent "third" {{ workspace {workspace:?}; harness "claude" {{ account "avery/two
         );
     }
 
+    /// Claude's question (AskUserQuestion) is answered from a client with the person's choices, as
+    /// positions (question to options chosen), or declined. Only positions are recorded; the hook
+    /// turns them into the call's own labels.
+    #[test]
+    fn a_claude_question_is_answered_with_its_choices() {
+        let store = Store::open_memory("node").unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let preview = store
+            .mission(
+                &intent,
+                IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &preview.subject_tokens, "question-seat", Some("person/avery"))
+            .unwrap();
+        let seat = "agent/node.worker";
+        let append = |kind: &str, fields: Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        let prompt = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+        append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
+        let asked = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"question", "reason":"AskUserQuestion",
+                "ownership_sequence":1, "transition_sequence":3}),
+        );
+        let shown = prompt().unwrap();
+        assert_eq!(shown.answers, vec!["answer".to_owned(), "deny".to_owned()]);
+        assert!(shown.title.ends_with("is waiting for an answer"));
+        assert!(shown.detail.starts_with("Claude asks you a question;"), "{}", shown.detail);
+        // A question is never allowed, and its choices name each question with a choice.
+        // Positions only: never the questions' or options' words, which are conversation content.
+        for wrong in ["allow", "{}", r#"{"0":[]}"#, r#"["Blue"]"#, r#"{"Which color?":"Blue"}"#, r#"{"0":[1,1]}"#, r#"{"0":"1"}"#] {
+            assert_eq!(
+                store
+                    .answer_native_prompt(seat, &asked.id, wrong, "person/avery")
+                    .unwrap_err()
+                    .code,
+                "invalid-answer",
+                "{wrong}"
+            );
+        }
+        let choices = r#"{"0":[1],"1":[0,2]}"#;
+        store
+            .answer_native_prompt(seat, &asked.id, choices, "person/avery")
+            .unwrap();
+        let NativePromptState::Answered { answer } = store.native_prompt_state(seat, 1, 3).unwrap()
+        else {
+            panic!("the question is answered");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&answer).unwrap(),
+            json!({"0": [1], "1": [0, 2]})
+        );
+        assert!(prompt().is_none());
+        // The next question is declined.
+        append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":null, "ask":null, "ownership_sequence":1, "transition_sequence":4}),
+        );
+        let next = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"question", "reason":"AskUserQuestion",
+                "ownership_sequence":1, "transition_sequence":5}),
+        );
+        store
+            .answer_native_prompt(seat, &next.id, "deny", "person/avery")
+            .unwrap();
+        assert_eq!(
+            store.native_prompt_state(seat, 1, 5).unwrap(),
+            NativePromptState::Answered {
+                answer: "deny".into()
+            }
+        );
+        // A permission is never answered with choices.
+        let permission = append(
+            "harness.observed",
+            json!({"state":"working", "driver":"claude", "incarnation_id":"one",
+                "blocked_on":"human", "ask":"permission", "reason":"Bash",
+                "ownership_sequence":1, "transition_sequence":6}),
+        );
+        assert_eq!(
+            store
+                .answer_native_prompt(seat, &permission.id, choices, "person/avery")
+                .unwrap_err()
+                .code,
+            "invalid-answer"
+        );
+    }
+
     /// A subagent asks while its parent's Task call is still open: the only call the seat's
     /// conversation shows unanswered is the parent's, so an allow offered beside it would let
     /// through a call the person never saw. st offers only deny for a subagent's prompt.
