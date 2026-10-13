@@ -7,6 +7,20 @@ It has two layers:
 - `.` (`kit.tsx`, `tokens.css`): token-driven component families. The workshop renders them in three switchable visual directions (**Folio**, **Relay**, **Orbit**), each with light and dark palettes and two densities.
 - `./assistant-ui` and its subpaths: the dark-first application surfaces the web app composes, built on assistant-ui 0.15.25. They cover the transcript, composer, tool calls and previews, the sidebar agent row and status glyph, the thread header, resizable splits, resource cards, the work log, the sync line and the workbench layout model, plus rich markdown with highlighted code, the thinking disclosure and the dismissible failure layer. Every surface is controlled: the host supplies data, clock and transport, and unknown values render as unknown.
 
+## Human-facing time
+
+Use `HumanTime` from `./human-time` for leaf-clock labels, and pure formatters from
+`./human-time/format` for clock-driven string projections. `kind="day"` represents
+date-only sources: today / yesterday / weekday within six calendar days / date.
+Its tooltip and accessible description contain only the exact date, never an invented
+time. Construct `YYYY-MM-DD` civil dates as local midnight (`new Date(date + 'T00:00:00')`),
+not by parsing the bare UTC date string; the instant and formatting zone must agree.
+`aria-label` is a name prefix; `HumanTime` appends the complete visible text, including
+visible prefix/suffix, exactly once. Callers must not repeat the formatted value.
+String projections must receive a ticking `now`; the host may intentionally pause an
+observation clock while disconnected so retained facts do not imply that fresh
+observations are arriving.
+
 ## Run
 
 ```sh
