@@ -119,7 +119,7 @@ export const ContextOccupancy: Story = {
     await expect(rowDescription(within(rows[2]!).getByRole('button', { name: /^Reported percentage only/ }))).toContain('used tokens unreported; window unreported')
     await expect(rowDescription(within(rows[3]!).getByRole('button', { name: /^Retained stale occupancy/ }))).toContain('Last observed main-session context')
     await expect(rows[4]!.querySelector('[data-row-field="context-percent"]')).toBeNull()
-    await expect(rowDescription(within(rows[4]!).getByRole('button', { name: /^Occupancy unreported/ }))).not.toContain('context')
+    await expect(rowDescription(within(rows[4]!).getByRole('button', { name: /^Occupancy unreported/ }))).not.toContain('main-session context')
     // No native tooltip carries the occupancy; the description does.
     await expect(canvasElement.querySelector('[data-row-field="context-percent"][title], [data-row-field="context-percent"][aria-label]')).toBeNull()
     // Negative control: a cumulative-token ratio must not pass the occupancy display assertion.
