@@ -10,6 +10,7 @@ import { createConversationTranscript, openableImageUrl, transcriptObservedAt, t
 import { composerSendBinding, type SendRefusal } from './composerSend.ts'
 import { spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LiveAgentTodos } from '../conversation/todos/AgentTodos.tsx'
+import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
@@ -135,6 +136,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />
     </div>
+    <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} />
     <LiveAgentTodos agentRef={agentRef} />
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     <div data-testid="conversation-composer-dock" style={{ flexShrink: 0, paddingBottom: spaceVars.lg }}>
