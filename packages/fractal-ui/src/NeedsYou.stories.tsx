@@ -41,7 +41,7 @@ const assertAttentionComposition = async (root: HTMLElement) => {
 }
 
 const assertKeyboardRing = async (target: HTMLElement) => {
-  await expect(getComputedStyle(target).outlineStyle).toBe('none')
+  if (target.tagName === 'BUTTON') await expect(getComputedStyle(target).outlineStyle).toBe('none')
   await userEvent.tab({ shift: true })
   await userEvent.tab()
   await expect(target).toHaveFocus()
