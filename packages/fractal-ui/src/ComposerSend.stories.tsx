@@ -298,6 +298,14 @@ async function moveMenuFocusTo(label: string) {
   await expect(document.activeElement?.textContent).toBe(label)
 }
 
+/** The open recipient menu: the only accessible menu, controlled by a recipient trigger. MenuTrigger may name it from the trigger. */
+const findRecipientMenu = () => waitFor(() => {
+  const menu = within(document.body).getByRole('menu')
+  expect(menu).toHaveAccessibleName(/recipient/i)
+  expect(document.querySelector(`[aria-controls="${menu.id}"]`)).toHaveAttribute('data-composer-recipient')
+  return menu
+})
+
 /** K1: the readout names the recipient and exposes ref and session; keyboard and pointer picks report once and keep each recipient's draft. */
 export const RecipientSelection: Story = {
   play: async ({ canvasElement }) => {
@@ -317,14 +325,15 @@ export const RecipientSelection: Story = {
     await expect(document.activeElement).toBe(typedTrigger)
     await userEvent.keyboard('{Enter}')
     await waitFor(() => expect(typedTrigger).toHaveAttribute('aria-expanded', 'true'))
-    const menu = await within(document.body).findByRole('menu', { name: 'Recipient' })
+    const menu = await findRecipientMenu()
+    await expect(menu.id).toBe(typedTrigger.getAttribute('aria-controls'))
     await expect(within(menu).getByRole('menuitemradio', { name: 'Review seat' })).toHaveAttribute('aria-checked', 'true')
     await userEvent.keyboard('{Escape}')
-    await waitFor(() => expect(within(document.body).queryByRole('menu', { name: 'Recipient' })).toBeNull())
+    await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
     await waitFor(() => expect(document.activeElement).toBe(within(review).getByRole('button', { name: 'To Review seat, change recipient' })))
     await expect(canvasElement.querySelector('[data-testid="fixture-recipient-changes"]')).toHaveTextContent('Recipient changes: none')
     await userEvent.keyboard('{Enter}')
-    await within(document.body).findByRole('menu', { name: 'Recipient' })
+    await findRecipientMenu()
     await moveMenuFocusTo('Build seat')
     await userEvent.keyboard('{Enter}')
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="fixture-recipient-changes"]')).toHaveTextContent('Recipient changes: agent/fixture-build'))
@@ -333,12 +342,12 @@ export const RecipientSelection: Story = {
     await expect(sentLines(canvasElement)).toEqual([])
     // Picking the current recipient again reports nothing.
     await userEvent.click(within(build).getByRole('button', { name: 'To Build seat, change recipient' }))
-    const again = await within(document.body).findByRole('menu', { name: 'Recipient' })
+    const again = await findRecipientMenu()
     await userEvent.click(within(again).getByRole('menuitemradio', { name: 'Build seat' }))
-    await waitFor(() => expect(within(document.body).queryByRole('menu', { name: 'Recipient' })).toBeNull())
+    await waitFor(() => expect(within(document.body).queryByRole('menu')).toBeNull())
     await expect(canvasElement.querySelector('[data-testid="fixture-recipient-changes"]')).toHaveTextContent('Recipient changes: agent/fixture-build')
     await userEvent.click(within(build).getByRole('button', { name: 'To Build seat, change recipient' }))
-    const back = await within(document.body).findByRole('menu', { name: 'Recipient' })
+    const back = await findRecipientMenu()
     await userEvent.click(within(back).getByRole('menuitemradio', { name: 'Review seat' }))
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="fixture-recipient-changes"]')).toHaveTextContent('Recipient changes: agent/fixture-build, agent/fixture-review'))
     await waitFor(() => expect(pane(canvasElement).dataset.recipientPane).toBe('agent/fixture-review'))

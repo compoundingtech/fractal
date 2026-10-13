@@ -191,10 +191,12 @@ export function ComposerImageTray({ images, maxCount, onRemoveImage, onRetryImag
 
 const styles = stylex.create({
   visuallyHidden: { position: 'absolute', width: g.hairline, height: g.hairline, padding: 0, margin: `calc(-1 * ${g.hairline})`, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
+  // Same box as the toolbar button this replaces, so footer density and pill/slab measurement are unchanged.
   iconButton: {
-    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: g.controlMd, minWidth: g.controlMd, flexShrink: 0,
-    borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.controlBorder, borderRadius: r.control,
-    backgroundColor: surface.controlFill, color: text.fg, paddingInline: s.xs, cursor: { default: 'pointer', ':disabled': 'not-allowed' }, opacity: { default: 1, ':disabled': 0.64 },
+    minHeight: g.controlMd, flexShrink: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.controlBorder,
+    borderRadius: r.control, backgroundColor: surface.controlFill, color: text.fg,
+    paddingBlock: s.xs, paddingInline: s.md, fontFamily: t.fontSans, fontSize: t.metaSize,
+    cursor: { default: 'pointer', ':disabled': 'not-allowed' }, opacity: { default: 1, ':disabled': 0.64 },
     ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
   },
   iconCompact: { paddingInline: s.xs },
