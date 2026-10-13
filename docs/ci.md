@@ -5,7 +5,7 @@
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
 exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
 does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle ci1 runners with Namespace overflow; required merge stages use ci1-priority;
+(which the queue skips), and fills missing main-scope caches. PR Rust stages use idle ci1/ci2 runners with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI, Performance and the
 public-content guard. Main upkeep, Performance and public checks keep only the latest main push;
@@ -63,8 +63,9 @@ use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
 
-Required merge-group Rust, test, canary and VM jobs use `ci1-priority` unconditionally,
-even if the picker is disabled, the status token is absent or all local runners are busy.
+Required merge-group Rust, test, canary and VM jobs use `ci1-priority` or `ci2-priority`.
+A GitHub-hosted picker prefers the pool with more idle priority runners; if its runner census is
+unavailable, the existing ci1 priority lane remains selected. The PR opt-in variable never disables merge picking.
 They wait for owned capacity and never overflow to Namespace.
 Main, tag and manual Linux releases use the same owned priority lane; release PR validation
 uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac releases and
@@ -546,10 +547,10 @@ the profile has no capacity, jobs queue with no matching runner. A queued requir
 a pass. Apart from the ci1 choice below, which is made once per run before any job starts, do not
 fall back to hosted or fleet runners.
 
-### ci1: our own runners, with PR overflow to Namespace
+### ci1 and ci2: owned pools, with PR overflow to Namespace
 
-All required merge-group stages select `ci1-priority`, without consulting idle counts or
-`CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
+All required merge-group stages share the picker’s `ci1-priority` or `ci2-priority` selection,
+independent of `CI1_RUNNERS`. This is the standing merge-first lane. Existing running work is not preempted;
 the host controller must retain its release/merge-first classification and bounded reservations.
 `CI_MERGE_CI1` and `CI_MERGE_NAMESPACE_PROFILE` no longer redirect required merge jobs.
 Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
@@ -562,14 +563,22 @@ hosted queue observer warns once when an owned job has no assigned runner for fi
 minutes after its actual workflow dependencies complete. It preserves current work; it does
 not repair offline runners or guarantee starts. Watch the first merge after this lands.
 
-For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker. Trusted `ci-priority`
-PRs select that label for their producer and primary consumer. Ordinary trusted PRs may use an
-idle general `ci1` slot; second-shard and mail outputs account separately for remaining slots.
-Supporting PR jobs retain Namespace. Missing status or insufficient general capacity keeps
-ordinary PRs on Namespace. Fork PR code never runs on self-hosted capacity or receives the
-runner-status token. The token is `CI1_RUNNERS_READ_TOKEN`, read-only runner metadata.
-The picker takes a snapshot, not an atomic reservation; concurrent selections can still queue.
-Required collectors retain failure/skip handling and all partitions/canaries remain selected.
+For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker over both pools.
+Trusted `ci-priority` PRs select the pool with more idle priority workers. Ordinary primary,
+second-shard and mail slots prefer the pool with more idle general workers, counting each runner
+ID once and consuming distinct slots. A runner carrying both general and priority labels cannot
+be offered twice. Fork PRs never query the token or use either host. Main/tag/manual Linux release
+jobs use the same priority-pool choice; release PR builds stay on Namespace and Mac builds stay
+on GitHub-hosted macOS. Workflow names and required contexts are unchanged.
+
+The existing `CI1_RUNNERS_READ_TOKEN` must read organization self-hosted runner metadata for both
+pools. The picker summary records ci1/ci2 online and idle counts from that credential’s actual
+census; a registration-token read is not proof of this secret’s scope. A successful ci2 census
+and an actual ci2 job assignment are required before claiming live capacity. The private controller
+uses each host’s configured labels, runner names and numeric group ID; source review is separate
+from Operations’ installation and first-pass qualification. The snapshot is not an atomic reservation:
+concurrent selections can still queue. All partitions, canaries and failure/skip handling remain required.
+No speedup is claimed from source tests.
 
 On ci1 each runner is ephemeral: it takes one job, runs it as its own user in a fresh work directory
 with its own `/tmp`, and nothing the job started outlives it. The runner names a Cargo home in
@@ -1004,7 +1013,7 @@ gh run rerun RUN_ID
 ```
 
 A queued Namespace job is never a pass. Do not fall back to another runner by hand; only
-`pick-runner` chooses between ci1 and Namespace, before a run's jobs start.
+`pick-runner` chooses between ci1, ci2 and Namespace, before a run's jobs start.
 
 ## Inspect a failure
 
@@ -1025,7 +1034,7 @@ configuration, not proof of CI p90 <20 minutes, runner wait <5 minutes or queue-
 p90 <45 minutes.
 
 The 2026-10-12 standing rule supersedes whole/partial Namespace merge overflow:
-required merge stages wait on `ci1-priority` regardless of the old override variables.
+required merge stages wait on the selected owned priority pool regardless of the old override variables.
 No job migrates after it starts. If a selected local job waits, qualify the named live runner
 and registration; preserve running work and do not reopen an isolated worker or blind-retry.
 
