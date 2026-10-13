@@ -58,9 +58,5 @@ fleet; start with one machine and add others when you need them.
 - [Guided CLI tour](docs/st3/cli-guided-tour.md)
 - [KDL lifecycle](docs/st3/kdl-lifecycle.md)
 
-The Fractal web conversation loads older messages through the native timeline cursor.
-Loaded rows remain available when a history read fails or a bounded live window refreshes;
-retry is explicit, and only a complete native page displays the conversation-start marker.
-
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.
 This repository also carries st2, the previous generation; see [its guide](README.st2.md).

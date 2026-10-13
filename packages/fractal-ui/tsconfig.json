@@ -10,7 +10,7 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "lib": [
-      "ES2023",
+      "ES2022",
       "DOM",
       "DOM.Iterable"
     ]
