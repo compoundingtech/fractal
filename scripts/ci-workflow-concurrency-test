@@ -84,6 +84,6 @@ for event, ref in [('push', 'refs/tags/v1.2.3'), ('workflow_dispatch', 'refs/hea
     assert first[0] != second[0] and not first[1] and not second[1]
 assert policy('release-smalltalk.yml', 'pull_request', 100, 42, ref='refs/pull/42/merge')[1]
 release = (ROOT / '.github/workflows/release-smalltalk.yml').read_text()
-assert release.index('nix build .#release-cc') < release.index('name: Test installer')
+assert release.index('nix build .#release-cc^out') < release.index('name: Test installer')
 assert 'packages.release-cc = pkgs.stdenv.cc;' in (ROOT / 'flake.nix').read_text()
 print('passed: newest pending main release retained; active, tag and pinned manual releases preserved; host compiler provided')

@@ -154,7 +154,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
           name: 'Provide the pinned Linux host C compiler',
           if: "runner.os == 'Linux'",
           run: `set -euo pipefail
-compiler=$(nix build .#release-cc --no-link --print-out-paths)
+compiler=$(nix build .#release-cc^out --no-link --print-out-paths)
 "$compiler/bin/cc" --version
 printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         },
