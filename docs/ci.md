@@ -64,7 +64,7 @@ unrelated unreleased main changes do not block a new PR's check. It does not dow
 or compile. Manual dispatch runs the safety tests without inventing a PR delta.
 
 The Linux gate runs four test partitions for merge groups and two for other events, plus Clippy and fleet compatibility on separate runners. The extra merge partitions use the common merge role on either host, including ci2-merge-1, or the same Namespace overflow choice. Each uses the one exact-source producer archive. Before shard 1 executes, actual nextest lists must prove the selected inventory is a disjoint, complete union of all four (or both) shards. The unchanged linux-gate requires genuine success from every applicable shard; skipped merge shards fail it. No test filter, retry cap, timeout or required context is changed.
-`linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, the four stage jobs and the named mail redelivery
+`linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, all applicable stage jobs and the named mail redelivery
 check, and passes only when every one succeeded (a skipped or cancelled stage fails it). The stage jobs use the shape label
 `nscloud-ubuntu-24.04-amd64-8x16-with-features`; `isolation-vm` uses
 `namespace-profile-linux-x86-64` when it overflows. `genie-freshness` and `typescript-client`
@@ -73,7 +73,7 @@ use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build
 until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
 limit of about five runners at once.
 
-Required merge-group Rust, test, canary and VM jobs use `ci1-priority` on either physical host.
+By default, required merge-group producers, the first two test shards, supporting Rust jobs, canaries and VM jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common `ci1-merge` role. An overflowed group uses its one selected Namespace profile for all these jobs.
 A GitHub-hosted picker reads the common group3 role census; unavailable metadata retains the
 existing priority role. GitHub chooses the physical host. The PR opt-in variable never disables merge picking.
 They wait for owned capacity and never overflow to Namespace.
