@@ -412,13 +412,15 @@ mod tests {
                         pid: 7, ancestor: Some("agent/test".into()),
                     }); }
                     _ => { request.extensions_mut().insert(super::super::super::NativeDeliveryPeer {
-                        agent: "agent/test".into(), transport: "omp-channel", pid: 7,
+                        agent: "agent/test".into(), transport: "omp-channel", pid: 7, archives_inbox: false,
                     }); }
                 }
                 assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN, "{path}");
             }
-            let response = app.clone().oneshot(Request::builder().uri(path)
-                .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap()).await.unwrap();
+            let mut owner_request = Request::builder().uri(path)
+                .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
+            owner_request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, ancestor: None });
+            let response = app.clone().oneshot(owner_request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert!(String::from_utf8(body.to_vec()).unwrap().contains(grant["grant"]["id"].as_str().unwrap()));
