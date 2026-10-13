@@ -1041,7 +1041,8 @@ export const AssistantAgentPage = /*#__PURE__*/ (() => Schema.Struct({
   "filters": Schema.Record(Schema.String, Schema.Never),
   "items": Schema.Array(AssistantAgentItem),
   "kind": Schema.Literal("page"),
-  "page": PageInfo
+  "page": PageInfo,
+  "sync": optionalKey(SyncNotice)
 }).annotate({ identifier: "AssistantAgentPage" }))()
 export type AssistantAgentPage = typeof AssistantAgentPage.Type
 export type AssistantAgentPageEncoded = typeof AssistantAgentPage.Encoded
@@ -1071,7 +1072,8 @@ export const AssistantAttentionPage = /*#__PURE__*/ (() => Schema.Struct({
   "filters": Schema.Record(Schema.String, Schema.Never),
   "items": Schema.Array(AssistantAttentionItem),
   "kind": Schema.Literal("page"),
-  "page": PageInfo
+  "page": PageInfo,
+  "sync": optionalKey(SyncNotice)
 }).annotate({ identifier: "AssistantAttentionPage" }))()
 export type AssistantAttentionPage = typeof AssistantAttentionPage.Type
 export type AssistantAttentionPageEncoded = typeof AssistantAttentionPage.Encoded
@@ -1249,7 +1251,8 @@ export const AssistantMissionPage = /*#__PURE__*/ (() => Schema.Struct({
   "filters": Schema.Record(Schema.String, Schema.Never),
   "items": Schema.Array(AssistantMissionItem),
   "kind": Schema.Literal("page"),
-  "page": PageInfo
+  "page": PageInfo,
+  "sync": optionalKey(SyncNotice)
 }).annotate({ identifier: "AssistantMissionPage" }))()
 export type AssistantMissionPage = typeof AssistantMissionPage.Type
 export type AssistantMissionPageEncoded = typeof AssistantMissionPage.Encoded
