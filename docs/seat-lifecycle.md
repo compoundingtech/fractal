@@ -272,8 +272,10 @@ The harness-ready stage means the requested incarnation reached readiness. A lat
 takes precedence, and a ready replacement cannot upgrade the first launch. A seat without
 the local receipt stays launched; attachment still checks the current runtime and incarnation.
 
-If the requested process exits before readiness, creation promptly returns that process's exit
-status, including zero, and a bounded startup output tail served from the requested host.
+If the requested process exits before readiness, creation promptly fails with a nonzero CLI
+status: the child's nonzero code, or 1 when the child exited zero. The message and JSON
+`error.exit_code` preserve the child's own optional code, alongside a bounded startup output
+tail served from the requested host.
 Startup text stays in local runtime receipts. Replicated diagnostics, step failures and crash-loop
 faults contain fixed failure text, and telemetry exports omit startup detail. Reads use the same
 signed fleet-peer transport as terminal screens, without a separate per-agent ownership check.
