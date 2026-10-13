@@ -2246,3 +2246,50 @@ agent "example/worker" {{
         None
     );
 }
+
+/// A seat writes its handoff and reads it back through the CLI; a later write replaces it and the
+/// first version stays in the document's history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seat_writes_and_reads_its_handoff_through_the_cli() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::new(false).await;
+    let socket = fixture.root.path().join("st3.sock");
+    let none = st(&socket, &["agents", "handoff", "show", &subject]).await;
+    assert!(!none.status.success());
+    assert!(String::from_utf8_lossy(&none.stderr).contains("has written no handoff"));
+
+    let file = fixture.root.path().join("handoff.md");
+    std::fs::write(&file, "PR 12 is open.\n").unwrap();
+    let written = succeeded(
+        &st(
+            &socket,
+            &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
+        )
+        .await,
+    );
+    assert!(written.starts_with("doc/agents/example/worker/handoff@"), "{written}");
+    assert_eq!(
+        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        "PR 12 is open.\n"
+    );
+
+    std::fs::write(&file, "PR 12 merged.\n").unwrap();
+    succeeded(
+        &st(
+            &socket,
+            &["agents", "handoff", "write", file.to_str().unwrap(), "--as", &subject],
+        )
+        .await,
+    );
+    assert_eq!(
+        succeeded(&st(&socket, &["agents", "handoff", "show", &subject]).await),
+        "PR 12 merged.\n"
+    );
+    let versions = fixture
+        .store
+        .list_documents(Some("doc/agents/example/worker/handoff"), true, 10)
+        .unwrap();
+    assert_eq!(versions.len(), 2, "{versions:?}");
+}

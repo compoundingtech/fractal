@@ -91,11 +91,11 @@ pub fn gather(store: &Store, agent: &str) -> Result<Context> {
     // A step whose last session ended is ready again for a new attempt, which has no progress
     // yet. The note the last session left on it is still the freshest word on where it was.
     for step in &mut work {
-        if step.progress_summary.is_none() {
-            if let Some((note, at)) = last_progress_note(store, &step.subject)? {
-                step.progress_summary = Some(note);
-                step.progress_at_unix_ms = Some(at);
-            }
+        if step.progress_summary.is_none()
+            && let Some((note, at)) = last_progress_note(store, &step.subject)?
+        {
+            step.progress_summary = Some(note);
+            step.progress_at_unix_ms = Some(at);
         }
     }
     // A step nobody has worked on is announced by its own ready-step message; this one is for the
