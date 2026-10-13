@@ -71,8 +71,14 @@ uses Namespace priority 2, preserving the self-hosted fork boundary. Native Mac 
 installer checks use standard GitHub-hosted `macos-15` (ARM64); Linux installer/assembly/publish
 use GitHub-hosted Ubuntu. Operations found no owned macOS runner, so Mac placement is explicitly
 hosted rather than a claim of owned Mac capacity. Release jobs no longer need Namespace outside
-PR validation. The `main` release concurrency group preserves an active build while replacing
-its older pending successor; independent tag/manual identities remain intact. Required PR checks
+PR validation. Linux release jobs put the flake-pinned C compiler on PATH before installer tests
+and Cargo: self-hosted runners do not inherit Ubuntu's host toolchain. Target linking
+still uses the pinned Zig/glibc-baseline wrapper. The `main` release concurrency group
+preserves an active run, including a build waiting for a runner. New pushes replace
+only its pending successor, so the newest pending source starts after the active run
+finishes. PR release validation replaces its own obsolete head; independent tag/manual
+identities remain intact. A cancelled pending run is not evidence of active-run
+cancellation; the run-level concurrency state distinguishes them. Required PR checks
 use priority 2, and optional benchmarks, main upkeep and manual Workspace work use
 priority 3. Release workflow PR validation uses priority 2. Assembly, tag publishing
 and daily publishing use GitHub-hosted `ubuntu-latest`: these jobs verify or publish

@@ -1,8 +1,8 @@
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig } from './workspace-ci.ts'
+import { linuxActionlintConfig, readOnlyBinaryCaches } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
-import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
+import { githubWorkflow, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import { readFileSync } from 'node:fs'
 
 const releaseRustVersion = readFileSync(new URL('../../scripts/release-rust-version', import.meta.url), 'utf8').trim()
@@ -149,6 +149,15 @@ export default githubWorkflow(readyPRJobs(auditCaches({
           }
         },
         buildSnapshotPrepare,
+        ...plainFlakeSetupSteps({ nix: { binaryCaches: readOnlyBinaryCaches } }).map(step => ({ ...step, if: "runner.os == 'Linux'" })),
+        {
+          name: 'Provide the pinned Linux host C compiler',
+          if: "runner.os == 'Linux'",
+          run: `set -euo pipefail
+compiler=$(nix build .#release-cc^out --no-link --print-out-paths)
+"$compiler/bin/cc" --version
+printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
+        },
         {
           "name": "Test installer",
           "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-smalltalk-test\npython3 scripts/release_notes_test.py\n"
