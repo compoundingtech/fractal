@@ -361,6 +361,14 @@ pub trait RuntimeControl: Send + Sync + 'static {
     fn start_operation_closed(&self, _member: &MemberSpec) -> Result<bool> {
         Ok(false)
     }
+    /// Stop the exact incarnation, returning true only after verifying its complete
+    /// retirement. A successful asynchronous signal is not retirement proof.
+    fn stop_with_retirement_proof(
+        &self, runtime_id: &str, terminal: bool, incarnation: &str,
+    ) -> Result<bool> {
+        self.stop(runtime_id, terminal, Some(incarnation))?;
+        Ok(false)
+    }
     /// Physical launch provenance, if the runtime persists it independently of daemon receipts.
     fn rollout_operation(&self, _runtime_id: &str, _incarnation: &str) -> Result<Option<String>> {
         Ok(None)
@@ -642,6 +650,16 @@ impl RuntimeControl for NativeRuntime {
         } else {
             self.exec.stop_if(runtime_id, expected_incarnation)
         }
+    }
+
+    fn stop_with_retirement_proof(
+        &self, runtime_id: &str, terminal: bool, incarnation: &str,
+    ) -> Result<bool> {
+        self.stop(runtime_id, terminal, Some(incarnation))?;
+        // Native PTY stop verifies the generation-fenced daemon/tree and ends
+        // its work scope before returning. Exec stop remains asynchronous; its
+        // persisted generation/group-exit proof is checked on observation.
+        Ok(terminal)
     }
 
     fn kill(
@@ -5502,6 +5520,35 @@ impl<R: RuntimeControl> Reconciler<R> {
         timeout_ms: u64,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
+        let operation = self.store.runtime_start_for(subject)?;
+        let retirement = if let (Some(operation), Some(incarnation)) = (&operation, incarnation) {
+            let member = &operation.body["member"];
+            operation.finished
+                && member["runtime_id"] == runtime_id
+                && member["terminal"] == terminal
+                && observation.is_some_and(|o| o.status == "running")
+                && match self.runtime.start_operation(runtime_id, terminal, incarnation) {
+                    Ok(provenance) => provenance.as_deref() == Some(operation.id.as_str()),
+                    Err(error) => {
+                        self.record_once(subject, "harness.diagnostic", BTreeMap::from([
+                            ("severity".into(), Value::from("error")),
+                            ("code".into(), Value::from("start-revocation-unverified")),
+                            ("reason".into(), Value::from(format!("retirement provenance is unreadable: {error:#}"))),
+                        ]))?;
+                        false
+                    }
+                }
+        } else { false };
+        self.reconcile_runtime_stop_inner(subject, runtime_id, terminal, incarnation,
+            timeout_ms, observation, operation.as_ref().filter(|_| retirement).map(|o| o.id.as_str()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_runtime_stop_inner(
+        &self, subject: &str, runtime_id: &str, terminal: bool,
+        incarnation: Option<&str>, timeout_ms: u64, observation: Option<&RuntimeObservation>,
+        retirement_operation: Option<&str>,
+    ) -> Result<bool> {
         self.revoke_start(subject)?;
         if observation.is_none() && self.store.runtime_start_for(subject)?.is_some() {
             // Absence during launch is not verified stop. Completion/observation wakes this path.
@@ -5620,7 +5667,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("stop:{subject}"),
                 deadline.min(now_ms().saturating_add(100)),
             );
-            if let Err(error) = self.runtime.stop(runtime_id, terminal, Some(incarnation)) {
+            let stopped = if retirement_operation.is_some() {
+                self.runtime.stop_with_retirement_proof(runtime_id, terminal, incarnation)
+            } else {
+                self.runtime.stop(runtime_id, terminal, Some(incarnation)).map(|()| false)
+            };
+            let verified = match stopped {
+                Ok(verified) => verified,
+                Err(error) => {
                 self.store.append_claim(&ClaimInput {
                     subject: subject.into(),
                     kind: "runtime.action.failed".into(),
@@ -5634,6 +5688,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     idempotency_key: Some(format!("terminate-failed:{subject}:{incarnation}")),
                 })?;
                 return Err(error);
+                }
+            };
+            if verified {
+                let operation = retirement_operation.context("retirement proof has no operation")?;
+                anyhow::ensure!(self.store.apply_runtime_start_retirement(operation, incarnation, &request.id)?,
+                    "native retirement proof did not match its operation/request");
+                self.start_changed(subject);
+                return Ok(true);
             }
             return Ok(false);
         };

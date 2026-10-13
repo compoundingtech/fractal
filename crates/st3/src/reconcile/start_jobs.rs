@@ -96,7 +96,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(true)
     }
 
-    fn start_changed(&self, subject: &str) {
+    pub(super) fn start_changed(&self, subject: &str) {
         self.incremental
             .touch(&format!("local-runtime-start:{subject}"));
         self.incremental.touch(subject);

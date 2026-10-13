@@ -413,6 +413,67 @@ impl Store {
         Ok(())
     }
 
+    /// Commit a positive, exact-incarnation physical retirement receipt and its
+    /// ledger proof together. This is never called for a signal-only stop.
+    pub(crate) fn apply_runtime_start_retirement(
+        &self,
+        id: &str,
+        incarnation: &str,
+        request: &str,
+    ) -> Result<bool> {
+        self.connection.batched(|tx| -> Result<bool> {
+            let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+            if !operation.finished || operation.revoked_by.is_none() || operation.cleanup_verified {
+                return Ok(false);
+            }
+            let Some(position) = request.strip_prefix(&format!("{LOCAL_OBSERVATION_ID_PREFIX}{}/", self.origin())) else {
+                return Ok(false);
+            };
+            let requested = tx.query_row(
+                "SELECT id,after_store_index,subject,kind,actor,body,observed_at_unix_ms FROM local_observations WHERE id=?1",
+                [position], |row| local_observation_from_row(self.origin(), row),
+            ).optional()?;
+            let Some(requested) = requested else { return Ok(false) };
+            let member = &operation.body["member"];
+            if requested.id != request || requested.subject != operation.subject || requested.kind != "runtime.action.requested"
+                || requested.body["fields"]["action"] != "terminate"
+                || requested.body["fields"]["runtime_id"] != member["runtime_id"]
+                || requested.body["fields"]["terminal"] != member["terminal"]
+                || requested.body["fields"]["incarnation_id"] != incarnation
+                || requested.body["fields"]["operation"].as_str().is_some_and(|bound| bound != id) {
+                return Ok(false);
+            }
+            let mut input = ClaimInput {
+                subject: operation.subject.clone(), kind: "runtime.action.succeeded".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("action".into(), Value::from("terminate")),
+                    ("operation".into(), Value::from(id)),
+                    ("runtime_id".into(), member["runtime_id"].clone()),
+                    ("terminal".into(), member["terminal"].clone()),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                    ("operation_status".into(), Value::from("retired")),
+                ]),
+                evidence: vec![request.into(), operation.body["start_request"].as_str().context("retirement has no launch request")?.into()],
+                expected_subject: None, idempotency_key: Some(format!("start-retirement:{id}:{incarnation}")),
+            };
+            if let Some(token) = operation.body["desired_token"].as_str() {
+                input.fields.insert("desired_token".into(), Value::from(token));
+            }
+            validate_local_observation(&input)?;
+            let receipt = insert_local_observation_tx(tx, self.origin(), &input, now_ms())?.0;
+            let mut result = operation.result.context("retired operation has no launch result")?;
+            result["incarnation"] = Value::from(incarnation);
+            result["verification"] = Value::from("operation-retired");
+            result["phase"] = Value::from("retired");
+            result["retirement_request"] = Value::from(request);
+            result["retirement_result"] = Value::from(receipt.id);
+            tx.execute("UPDATE local_runtime_starts SET cleanup_verified=1,result=?2 WHERE id=?1",
+                params![id, serde_json::to_string(&result)?])?;
+            release_evidence(tx, id)?;
+            Ok(true)
+        }).map_err(|error| anyhow::anyhow!("{error}"))?
+    }
+
     pub fn runtime_start_cleanup_verified(&self, id: &str) -> Result<()> {
         self.connection
             .batched(|tx| {
@@ -481,6 +542,108 @@ mod tests {
             )
             .unwrap();
         store.apply(&intent, &preview.subject_tokens, key).unwrap();
+    }
+
+    #[test]
+    fn retirement_proof_requires_the_exact_subject_operation_request_and_incarnation() {
+        let store = Store::open_memory("node").unwrap();
+        let subject = "agent/example/worker";
+        let mut admitted = operation("operation-a", subject, None);
+        admitted.body["member"] = json!({"runtime_id":"example.worker", "terminal":true});
+        assert_eq!(
+            store.admit_runtime_start(&mut admitted, 2).unwrap(),
+            RuntimeStartAdmission::Admitted
+        );
+        store
+            .finish_runtime_start(
+                &admitted.id,
+                &json!({"error":"producer returned", "producer_closed":false}),
+            )
+            .unwrap();
+        let request = |seat: &str, operation: &str, incarnation: &str, key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.action.requested".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("action".into(), Value::from("terminate")),
+                        ("operation".into(), Value::from(operation)),
+                        ("runtime_id".into(), Value::from("example.worker")),
+                        ("terminal".into(), Value::from(true)),
+                        ("incarnation_id".into(), Value::from(incarnation)),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: Some(key.into()),
+                })
+                .unwrap()
+        };
+        let correct = request(subject, &admitted.id, "incarnation-a", "correct-retirement");
+        store
+            .revoke_runtime_start(&admitted.id, &correct.id)
+            .unwrap();
+        store.runtime_start_applied(&admitted.id).unwrap();
+        let foreign_seat = request(
+            "agent/example/other",
+            &admitted.id,
+            "incarnation-a",
+            "foreign-seat",
+        );
+        let foreign_operation =
+            request(subject, "operation-b", "incarnation-a", "foreign-operation");
+        assert!(
+            !store
+                .apply_runtime_start_retirement(&admitted.id, "incarnation-a", &foreign_seat.id)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .apply_runtime_start_retirement(
+                    &admitted.id,
+                    "incarnation-a",
+                    &foreign_operation.id
+                )
+                .unwrap()
+        );
+        assert!(
+            !store
+                .apply_runtime_start_retirement(&admitted.id, "incarnation-b", &correct.id)
+                .unwrap()
+        );
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (1, 1));
+        assert!(
+            store
+                .observations_for(subject, "runtime.action.succeeded")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .apply_runtime_start_retirement(&admitted.id, "incarnation-a", &correct.id)
+                .unwrap()
+        );
+        assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (0, 0));
+        let result: String = store
+            .readers
+            .get()
+            .query_row(
+                "SELECT result FROM local_runtime_starts WHERE id=?1",
+                [&admitted.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let result: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["incarnation"], "incarnation-a");
+        assert_eq!(result["verification"], "operation-retired");
+        assert_eq!(result["retirement_request"], correct.id);
+        assert_eq!(
+            store
+                .observations_for(subject, "runtime.action.succeeded")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

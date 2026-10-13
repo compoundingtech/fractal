@@ -1235,11 +1235,11 @@ async fn native_returned_pty_error_retains_unknown_and_visible_open_count() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(card["runtime_start"]["operation_id"], operation.id);
-    assert_eq!(card["runtime_start"]["unresolved_jobs"], 1);
-    assert_eq!(card["runtime_start"]["revoked_unresolved_jobs"], 1);
-    assert_eq!(card["runtime_start"]["worker_running"], false);
-    assert_eq!(card["runtime_start"]["cleanup_verified"], false);
+    assert_eq!(card["value"]["runtime_start"]["operation_id"], operation.id);
+    assert_eq!(card["value"]["runtime_start"]["unresolved_jobs"], 1);
+    assert_eq!(card["value"]["runtime_start"]["revoked_unresolved_jobs"], 1);
+    assert_eq!(card["value"]["runtime_start"]["worker_running"], false);
+    assert_eq!(card["value"]["runtime_start"]["cleanup_verified"], false);
 }
 
 #[tokio::test]
@@ -1285,6 +1285,36 @@ async fn native_late_pty_publication_is_retired_by_exact_operation_and_incarnati
         fixture.store.unresolved_runtime_start_counts().unwrap(),
         (0, 0)
     );
+    let result: String = fixture
+        .store
+        .readers
+        .get()
+        .query_row(
+            "SELECT result FROM local_runtime_starts WHERE id=?1",
+            [&operation.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let result: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(result["verification"], "operation-retired");
+    assert_eq!(result["incarnation"], incarnation);
+    let retired = fixture
+        .store
+        .observations_for(&fixture.desired.subject, "runtime.action.succeeded")
+        .unwrap()
+        .into_iter()
+        .find(|claim| claim.id == result["retirement_result"])
+        .unwrap();
+    assert_eq!(retired.body["fields"]["operation"], operation.id);
+    assert_eq!(retired.body["fields"]["operation_status"], "retired");
+    assert_eq!(retired.body["fields"]["incarnation_id"], incarnation);
+    assert!(
+        retired.body["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == &result["retirement_request"])
+    );
     assert!(
         fixture
             .store
@@ -1300,6 +1330,52 @@ async fn native_late_pty_publication_is_retired_by_exact_operation_and_incarnati
             .observations_for(&fixture.desired.subject, "runtime.action.succeeded")
             .unwrap()
             .iter()
-            .any(|claim| claim.body["fields"]["operation"] == operation.id)
+            .any(|claim| claim.body["fields"]["action"] == "start"
+                && claim.body["fields"]["operation"] == operation.id)
     );
+}
+
+#[tokio::test]
+async fn unreadable_start_provenance_does_not_block_an_authorized_fenced_stop() {
+    let (_directory, store, runtime, reconciler, release, mut entered) = fixture(true, false);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        "unreadable-provenance-start",
+    );
+    runtime.verification_hidden.store(true, Ordering::Release);
+    assert!(launch(&reconciler, "agent/example/worker"));
+    tokio::time::timeout(Duration::from_secs(30), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    reconciler.reconcile_start_jobs().unwrap();
+    runtime.provenance_error.store(true, Ordering::Release);
+    apply_source(
+        &store,
+        "version 2\nstop \"agent/example/worker\"",
+        "unreadable-provenance-stop",
+    );
+    let observation = runtime.snapshot_ptys().unwrap().remove(0);
+    assert!(
+        !reconciler
+            .reconcile_runtime_stop(
+                "agent/example/worker",
+                &observation.runtime_id,
+                true,
+                observation.incarnation_id.as_deref(),
+                1000,
+                Some(&observation)
+            )
+            .unwrap()
+    );
+    assert_eq!(runtime.inner.stops.lock().unwrap().len(), 1);
+    let operation = store
+        .runtime_start_for("agent/example/worker")
+        .unwrap()
+        .unwrap();
+    assert!(operation.revoked_by.is_some() && !operation.cleanup_verified);
+    assert_eq!(store.unresolved_runtime_start_counts().unwrap(), (1, 1));
 }
