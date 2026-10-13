@@ -35,7 +35,7 @@ const styles = stylex.create({
   body: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   actions: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.md },
   glyph: { width: g.icon, height: g.icon, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: statusVars.attention },
-  button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineOffset: g.focusOffset, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accentVars.primary }, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, borderRadius: r.sm, backgroundColor: surfaceVars.rowActive, color: textVars.fg, cursor: 'pointer', outlineStyle: 'none', outlineOffset: g.focusOffset, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accentVars.primary }, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   dockButton: { display: 'flex', alignItems: 'center', gap: s.md, height: g.controlSm, minHeight: g.controlSm, maxWidth: '100%', boxSizing: 'border-box', paddingBlock: 0, fontWeight: t.weightMedium },
   dockLabel: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   dockAction: { flex: '0 0 auto' },
