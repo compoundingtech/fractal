@@ -21,6 +21,150 @@ const READER: &str = "agent/example/reader";
 const WORKER: &str = "agent/example/worker";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_git_change_reads_and_nonowner_sync_preserve_fallback_across_restart() {
+    if st3::test_support::supervise_test() {
+        return;
+    }
+    use st3::changes::config::{Config, Repository};
+    use st3::changes::service::Registry;
+    use st3::changes::{Record, Revision, State, TrailerStatus};
+
+    let mut daemon = Daemon::new().await;
+    let id = format!("I{}", "4".repeat(40));
+    let revision = Revision {
+        oid: "a".repeat(40),
+        record: Record {
+            schema_version: 1,
+            change_id: id.clone(),
+            generation: 1,
+            previous_record: None,
+            source_commit: "1".repeat(40),
+            source_tree: "2".repeat(40),
+            base_commit: "3".repeat(40),
+            trailer_status: TrailerStatus::Present,
+            state: State::Draft,
+            next: None,
+            depends_on: vec![],
+            actor: WORKER.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            claim: None,
+            mirror: None,
+        },
+    };
+    for _ in 0..2 {
+        // A disabled registry leaves every offered command with the PR fallback.
+        for args in [
+            vec![
+                "changes",
+                "list",
+                "--repository",
+                "fixture/garden",
+                "--offline",
+            ],
+            vec![
+                "changes",
+                "show",
+                &id,
+                "--repository",
+                "fixture/garden",
+                "--offline",
+            ],
+            vec!["changes", "sync", "--repository", "fixture/garden"],
+        ] {
+            let output = daemon.cli(PERSON, &args).await;
+            assert!(!output.status.success());
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(text.contains("use the PR path"), "{text}");
+        }
+        let configuration = Config {
+            enabled: true,
+            repositories: vec![Repository {
+                name: "fixture/garden".into(),
+                reader_node: "fixture-owner".into(),
+                transport_directory: daemon.root.path().join("never-opened.git"),
+                remote: "origin".into(),
+                remote_url: "https://github.com/fixture/garden.git".into(),
+                pilot_started_at: "2026-01-01T00:00:00Z".into(),
+                ..Default::default()
+            }],
+        };
+        daemon
+            .store()
+            .install_git_change_registry(Arc::new(Registry::new(&configuration, NODE).unwrap()))
+            .unwrap();
+        daemon
+            .store()
+            .index_git_change("fixture/garden", &revision)
+            .unwrap();
+        let index = daemon.store().index().unwrap();
+        let list = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &[
+                        "changes",
+                        "list",
+                        "--repository",
+                        "fixture/garden",
+                        "--offline",
+                        "--limit",
+                        "1",
+                    ],
+                )
+                .await,
+        );
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+        assert_eq!(list["items"][0]["change_id"], id);
+        assert_eq!(list["items"][0]["status"], "offline");
+        assert!(
+            list["observation"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("fixture-owner")
+        );
+        let detail = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &[
+                        "changes",
+                        "show",
+                        &id,
+                        "--repository",
+                        "fixture/garden",
+                        "--offline",
+                    ],
+                )
+                .await,
+        );
+        assert_eq!(
+            detail["item"]["last_indexed"]["revision"]["record"]["source_commit"],
+            revision.record.source_commit
+        );
+        let sync = cli_value(
+            daemon
+                .cli(
+                    PERSON,
+                    &["changes", "sync", "--repository", "fixture/garden"],
+                )
+                .await,
+        );
+        assert_eq!(sync["sync"]["status"], "unavailable");
+        assert_eq!(sync["sync"]["reader_node"], "fixture-owner");
+        for value in [&list, &detail, &sync] {
+            assert_eq!(value["fallback"], "pull_request");
+        }
+        assert_eq!(daemon.store().index().unwrap(), index);
+        daemon.restart().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_owned_seat_rollout_captures_fences_and_survives_restart() {
     if st3::test_support::supervise_test() {
         return;
