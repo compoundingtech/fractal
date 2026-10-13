@@ -60,6 +60,9 @@ struct OwnershipErrorLog {
     suppressed: u64,
 }
 const HARNESS_READINESS_DEADLINE_MS: u128 = 60_000;
+/// A new incarnation is told where its seat was only while it is new: one the daemon first finds
+/// running much later (a daemon that was down, an upgrade) already has its context.
+const SESSION_START_WINDOW_MS: u128 = 10 * 60 * 1000;
 const WORK_WAKE_RETRY_MS: u128 = 15_000;
 // A mechanical gate may run for minutes. Each poll reruns the entire host reconciliation
 // pass, including PTY snapshots. Ten seconds bounds result recognition without keeping a
@@ -866,6 +869,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Skip items nothing changed for, between periodic full passes. Off in test reconcilers,
     /// whose every pass checks what an incremental pass would have missed.
     skip_unneeded: bool,
+    /// The latest incarnation of each seat whose start has been looked at, so a pass does no work for
+    /// an incarnation it has already handled.
+    session_starts: Arc<Mutex<HashMap<String, String>>>,
     /// The wake each running step has armed for its timeout or lease expiry, by step subject.
     step_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
@@ -1028,6 +1034,7 @@ impl Reconciler<NativeRuntime> {
             incremental: Default::default(),
             strict_incremental: false,
             skip_unneeded: std::env::var("ST3_INCREMENTAL").as_deref() != Ok("off"),
+            session_starts: Arc::new(Mutex::new(HashMap::new())),
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -1114,6 +1121,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             incremental: Default::default(),
             strict_incremental: true,
             skip_unneeded: false,
+            session_starts: Arc::new(Mutex::new(HashMap::new())),
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
@@ -3514,48 +3522,46 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     /// Give a seat's new incarnation the handoff its last session left and the live state of its
-    /// work, as the first message it sees. A seat the reconciler meets for the first time keeps the
-    /// incarnation it is already running (a daemon that started after the seat, or an upgrade to
-    /// this behavior), and a brand-new seat has nothing to carry over, so neither is told anything.
+    /// work, as the first message it sees. Only an incarnation that replaced another, and that is
+    /// still new, is told anything: a seat's first incarnation has no predecessor, and one found
+    /// running long after it started already has its context. An incarnation is looked at once, so
+    /// a pass over a settled fleet reads and writes nothing for it.
     fn deliver_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
+        {
+            let mut seen = self
+                .session_starts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if seen.get(subject).map(String::as_str) == Some(incarnation) {
+                return Ok(());
+            }
+            seen.insert(subject.to_owned(), incarnation.to_owned());
+        }
+        let mut started = None;
+        let mut replaced = false;
+        for claim in self.store.claims_for(subject, Some("runtime.observed"))? {
+            if claim.body.pointer("/fields/status").and_then(Value::as_str) != Some("running") {
+                continue;
+            }
+            if claim_incarnation(&claim) == Some(incarnation) {
+                started.get_or_insert(claim.accepted_at_unix_ms);
+            } else {
+                replaced = true;
+            }
+        }
+        let now = now_ms();
+        if !replaced
+            || started.is_none_or(|started| now.saturating_sub(started) > SESSION_START_WINDOW_MS)
+        {
+            return Ok(());
+        }
         let done = format!("session-start:{subject}:{incarnation}");
         if self.store.operation_claim(&done)?.is_some() {
             return Ok(());
         }
-        let baseline = format!("session-start-baseline:{subject}");
-        let first_sight = self.store.operation_claim(&baseline)?.is_none();
-        let context = if first_sight {
-            None
-        } else {
-            Some(crate::handoff::gather(&self.store, subject)?)
-        };
-        let text = context
-            .as_ref()
-            .and_then(|context| crate::handoff::render(context, now_ms()));
-        let record = |decision: &str, key: String| -> Result<()> {
-            self.store.append_claim(&ClaimInput {
-                subject: subject.into(),
-                kind: "runtime.reconcile-decision".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("key".into(), Value::String("session-start".into())),
-                    ("decision".into(), Value::String(decision.into())),
-                    (
-                        "reason".into(),
-                        Value::String(format!("incarnation {incarnation}")),
-                    ),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(key),
-            })?;
-            Ok(())
-        };
-        if first_sight {
-            record("baseline", baseline)?;
-        }
-        let Some(text) = text else {
-            return record("nothing-to-carry", done);
+        let context = crate::handoff::gather(&self.store, subject)?;
+        let Some(text) = crate::handoff::render(&context, now) else {
+            return Ok(());
         };
         let message_id = &hex::encode(sha2::Sha256::digest(done.as_bytes()))[..16];
         self.store.append_claim(&ClaimInput {
@@ -3582,7 +3588,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             ]),
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: Some(done.clone()),
+            idempotency_key: Some(done),
         })?;
         self.signal_changed();
         Ok(())
@@ -36997,8 +37003,8 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         };
         let inbox = || store.messages(Some(&desired.subject), true).unwrap();
 
-        // The first incarnation the reconciler meets is the one already running: it is told
-        // nothing, and neither is a seat with nothing to carry over.
+        // A seat's first incarnation has no predecessor, so it is told nothing, and neither is a
+        // seat with nothing to carry over.
         store
             .put_document(
                 "doc/agents/node.worker/handoff",
@@ -37042,7 +37048,19 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             "node".into(),
             Arc::new(Notify::new()),
         );
+        let quiet_member = quiet_desired.member.as_ref().unwrap();
         for incarnation in ["quiet-one", "quiet-two"] {
+            quiet
+                .append_claim(&ClaimInput {
+                    subject: quiet_desired.subject.clone(),
+                    kind: "runtime.observed".into(),
+                    actor: None,
+                    fields: member_fields(quiet_member, "running", Some(incarnation), true),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("runtime-{incarnation}")),
+                })
+                .unwrap();
             quiet
                 .append_claim(&harness_claim(&quiet_desired.subject, "ready", incarnation))
                 .unwrap();

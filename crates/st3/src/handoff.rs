@@ -77,7 +77,7 @@ pub fn gather(store: &Store, agent: &str) -> Result<Context> {
         Some(name) => latest_handoff(store, &name)?,
         None => None,
     };
-    let work = store
+    let mut work = store
         .work_for_reconcile(agent)?
         .into_iter()
         .filter(|step| {
@@ -87,7 +87,20 @@ pub fn gather(store: &Store, agent: &str) -> Result<Context> {
             ) && (step.claimant.as_deref() == Some(agent)
                 || step.assigned_to.as_deref() == Some(agent))
         })
-        .collect();
+        .collect::<Vec<_>>();
+    // A step whose last session ended is ready again for a new attempt, which has no progress
+    // yet. The note the last session left on it is still the freshest word on where it was.
+    for step in &mut work {
+        if step.progress_summary.is_none() {
+            if let Some((note, at)) = last_progress_note(store, &step.subject)? {
+                step.progress_summary = Some(note);
+                step.progress_at_unix_ms = Some(at);
+            }
+        }
+    }
+    // A step nobody has worked on is announced by its own ready-step message; this one is for the
+    // work the last session was in the middle of.
+    work.retain(|step| step.status != "ready" || step.progress_summary.is_some());
     let mail = store
         .messages(Some(agent), false)?
         .into_iter()
@@ -104,6 +117,21 @@ pub fn gather(store: &Store, agent: &str) -> Result<Context> {
         work,
         mail,
     })
+}
+
+fn last_progress_note(store: &Store, step: &str) -> Result<Option<(String, u128)>> {
+    Ok(store
+        .claims_for(step, Some("work.progress"))?
+        .into_iter()
+        .rev()
+        .find_map(|claim| {
+            let fields = claim.body.get("fields").unwrap_or(&claim.body);
+            if fields.get("handoff_acknowledged").is_some() {
+                return None;
+            }
+            let note = fields.get("summary")?.as_str()?.trim();
+            (!note.is_empty()).then(|| (note.to_owned(), claim.accepted_at_unix_ms))
+        }))
 }
 
 fn latest_handoff(store: &Store, name: &str) -> Result<Option<Handoff>> {

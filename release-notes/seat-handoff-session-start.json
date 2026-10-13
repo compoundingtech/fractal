@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "New command st agents handoff write|show, a new reserved message tag prefix st3-session-start:, and a new first message to a seat whose new incarnation becomes ready and that has a handoff or unfinished steps. A seat the daemon meets for the first time is baselined and sent nothing, so running seats are not messaged on upgrade."
+    "detail": "New command st agents handoff write|show, a new reserved message tag prefix st3-session-start:, and a new first message to a seat whose new incarnation becomes ready and that has a handoff or unfinished steps. Only an incarnation that replaced another and started within the last ten minutes is told, so running seats are not messaged on upgrade; the daemon looks at each incarnation once and writes only when it sends."
   },
   "downtime": {
     "status": "none",

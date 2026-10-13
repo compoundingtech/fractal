@@ -40,16 +40,18 @@ When a seat's new incarnation becomes ready, the daemon sends it one message fro
 
 - the latest handoff, with its age and an immutable reference (a handoff over 16 KiB is cut and
   names the reference to read the rest);
-- each step the seat holds or is assigned that is not finished, with its goals and last progress note;
+- each unfinished step the seat holds or was working on, with its goals and last progress note (a ready step nobody has worked on is announced by its own ready-step message and is left out);
 - the seat's unread mail, by sender and title.
 
 The message carries the reserved tag `st3-session-start:INCARNATION`, so it always wakes the seat
 and no seat can send one. It is written once per incarnation: the record is the message's own
 idempotency key, so a daemon restart or a repeated pass sends nothing more.
 
-A seat with no handoff and no unfinished steps is sent nothing. The first incarnation the daemon
-meets for a seat is also sent nothing, because it is the one already running (a daemon that
-started after the seat, or the release that added this) or a new seat with nothing yet to carry.
+A seat with no handoff and no unfinished steps is sent nothing. Neither is a seat's first
+incarnation, which has no predecessor, nor one the daemon first finds running more than ten
+minutes after it started (a daemon that was down, or the release that added this): such a session
+already has its context, and an upgrade does not message every running seat. The daemon looks at
+each incarnation once and writes only when it sends, so a settled fleet costs nothing per pass.
 
 A session that continues the earlier conversation receives the message too. It says so: such a
 session already knows what it describes.
