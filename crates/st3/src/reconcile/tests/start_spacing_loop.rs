@@ -203,6 +203,7 @@ async fn quiescence_pass_counts(unrelated_writes: bool) -> Vec<usize> {
                             ("from".into(), Value::String("person/test".into())),
                             ("to".into(), Value::String("person/other".into())),
                             ("content".into(), Value::String("unrelated".into())),
+                            ("status".into(), Value::String("sent".into())),
                         ]),
                         evidence: vec![],
                         expected_subject: None,
