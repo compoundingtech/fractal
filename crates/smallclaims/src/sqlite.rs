@@ -20,6 +20,10 @@ mod transaction_finalizer;
 #[cfg(test)]
 mod managed_commit_counter_tests;
 mod writer_queue;
+mod writer_admission;
+pub use writer_admission::{MAX_WRITE_WORKERS, WritePermit, WriteWorkers, max_write_workers};
+#[cfg(any(test, feature = "test-support"))]
+pub use writer_admission::with_write_limit_for_test;
 
 #[cfg(test)]
 mod read_admission_tests;
@@ -327,6 +331,7 @@ pub struct WriterConnection {
     observers: Arc<CommitObservers>,
     finalizers: Arc<TransactionFinalizers>,
     background: Arc<writer_queue::BackgroundAdmission>,
+    workers: Arc<Semaphore>,
     handler_policy: Arc<Mutex<Option<Arc<writer_budget::OwnedHandlerPolicy>>>>,
     mutation_observer: Option<Arc<writer_observer::MutationState>>,
     /// Transactions the writer committed for batched writes, and the batched writes in them.
@@ -457,6 +462,7 @@ impl WriterConnection {
             observers,
             finalizers,
             background,
+            workers: Arc::new(Semaphore::new(writer_admission::constructor_write_limit())),
             handler_policy,
             mutation_observer,
             batches,

@@ -511,20 +511,20 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    spawn(work, true, None)
+    spawn(work, true, None, None)
 }
 
 #[track_caller]
-pub(super) fn spawn_handler<F, T>(roster: Option<tracing::Span>, work: F) -> impl Future<Output = Result<T, WorkError>>
+pub(super) fn spawn_handler<F, T>(roster: Option<tracing::Span>, writer: Option<Arc<super::Store>>, work: F) -> impl Future<Output = Result<T, WorkError>>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    spawn(move || with_handler(work), false, roster)
+    spawn(move || with_handler(work), false, roster, writer)
 }
 
 #[track_caller]
-fn spawn<F, T>(work: F, query: bool, roster: Option<tracing::Span>) -> impl Future<Output = Result<T, WorkError>>
+fn spawn<F, T>(work: F, query: bool, roster: Option<tracing::Span>, writer: Option<Arc<super::Store>>) -> impl Future<Output = Result<T, WorkError>>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -540,7 +540,8 @@ where
     let diagnostic = crate::relay_trace::current();
     let diagnostic_admission = diagnostic.clone();
     let diagnostic_dispatch = diagnostic.clone();
-    let store = STORE.with(|slot| slot.borrow().clone());
+    let store = writer.clone().or_else(|| STORE.with(|slot| slot.borrow().clone()));
+    let inherited = store.as_ref().and_then(|store| store.connection.current_write_permit());
     let multithread = matches!(
         tokio::runtime::Handle::current().runtime_flavor(),
         tokio::runtime::RuntimeFlavor::MultiThread
@@ -607,13 +608,17 @@ where
             })
         })
         };
-        if roster.is_some() {
+        let roster_work = || if roster.is_some() {
             crate::otel::roster_scope(|| {
                 crate::otel::roster_worker_started(roster_submitted);
                 roster_work()
             })
         } else {
             roster_work()
+        };
+        match inherited {
+            Some(permit) => permit.run(roster_work),
+            None => roster_work(),
         }
     };
     let start_queue = move || {
@@ -671,6 +676,16 @@ where
             tokio::task::spawn_blocking(move || run(Some(permit), diagnostic_queue))
                 .await
                 .map_err(WorkError::Join)?
+        }))
+    } else if let Some(store) = writer {
+        // Mutation admission precedes the blocking pool. Nested handler work shares this
+        // slot (inline on a multithread runtime, propagated to a current-thread child).
+        // As with existing writes, dropping the awaiting request does not cancel a mutation.
+        Task::Spawned(tokio::spawn(async move {
+            let permit = store.connection.admit_write().await;
+            let diagnostic_queue = start_queue();
+            tokio::task::spawn_blocking(move || permit.run(|| run(None, diagnostic_queue)))
+                .await.map_err(WorkError::Join)?
         }))
     } else {
         let diagnostic_queue = start_queue();
@@ -745,6 +760,111 @@ pub(super) fn error(error: &WorkError) -> Option<ApiError> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn writer_burst_keeps_reads_and_nested_acknowledgements_live() {
+        use axum::{Json, Router, middleware::from_fn_with_state, routing::{get, post}};
+        use tower::ServiceExt;
+        const LIMIT: usize = 2;
+        let root = tempfile::tempdir().unwrap();
+        let state = smallclaims::sqlite::with_write_limit_for_test(LIMIT, ||
+            super::super::tests::state(root.path()));
+        let writer = state.store.clone();
+        let reader = state.store.clone();
+        let hold = state.store.connection.write();
+        let (entered, mut entries) = tokio::sync::mpsc::unbounded_channel();
+        let started = Arc::new(AtomicUsize::new(0));
+        let count = started.clone();
+        let app = Router::new()
+            .route("/v1/writer-probe", post(move || {
+                let (writer, entered, count) = (writer.clone(), entered.clone(), count.clone());
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    entered.send(()).unwrap();
+                    let answer = spawn_blocking(move || {
+                        assert!(writer.connection.current_write_permit().is_some(),
+                            "nested callbacks retain the outer handler's capacity");
+                        tokio::runtime::Handle::current().block_on(async {});
+                        writer.connection.batched(|transaction| {
+                            transaction.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('write-probe','committed')", [])
+                        }).unwrap().unwrap();
+                        42
+                    }).await.unwrap();
+                    Json(json!({"answer":answer}))
+                }
+            }))
+            .route("/v1/read-probe", get(move || {
+                let reader = reader.clone();
+                async move {
+                    let answer = spawn_blocking(move ||
+                        reader.readers.get().query_row("SELECT 7", [], |row| row.get::<_, u64>(0)).unwrap()
+                    ).await.unwrap();
+                    Json(json!({"answer":answer}))
+                }
+            }))
+            .layer(from_fn_with_state(
+                (state.clone(), ClientTransportBoundary::Unix),
+                super::super::response_envelope,
+            ));
+        let mut requests = Vec::new();
+        for _ in 0..128 {
+            let app = app.clone();
+            requests.push(tokio::spawn(async move {
+                app.oneshot(request(Method::POST, "/v1/writer-probe")).await.unwrap()
+            }));
+        }
+        let saturated = tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..LIMIT { entries.recv().await.unwrap(); }
+        }).await;
+        let read = tokio::time::timeout(Duration::from_secs(5),
+            app.oneshot(request(Method::GET, "/v1/read-probe"))).await;
+        let admitted = started.load(Ordering::SeqCst);
+        drop(hold); // Always release the writer before reporting a test failure.
+        let responses = tokio::time::timeout(Duration::from_secs(10), async {
+            for pending in requests {
+                assert_eq!(pending.await.unwrap().status(), StatusCode::OK);
+            }
+        }).await;
+        saturated.expect("admitted mutation handlers did not start");
+        assert_eq!(admitted, LIMIT, "queued mutation handlers entered blocking workers");
+        assert_eq!(read.expect("independent read capacity was starved").unwrap().status(), StatusCode::OK);
+        responses.expect("nested mutation acknowledgements deadlocked at the admission limit");
+        assert_eq!(started.load(Ordering::SeqCst), 128);
+        let value: String = state.store.readers.get().query_row(
+            "SELECT value FROM meta WHERE key='write-probe'", [], |row| row.get(0)).unwrap();
+        assert_eq!(value, "committed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writer_admission_bounds_real_http_handlers_and_keeps_reads_live() {
+        writer_burst_keeps_reads_and_nested_acknowledgements_live().await;
+    }
+
+    #[tokio::test]
+    async fn current_thread_writer_handlers_share_capacity_with_nested_callbacks() {
+        writer_burst_keeps_reads_and_nested_acknowledgements_live().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_a_queued_mutation_waiter_keeps_its_completion_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let state = smallclaims::sqlite::with_write_limit_for_test(1, ||
+            super::super::tests::state(root.path()));
+        let held = state.store.connection.admit_write().await;
+        let writing = state.store.clone();
+        let (committed, completed) = tokio::sync::oneshot::channel();
+        let waiting = spawn_handler(None, Some(state.store.clone()), move || {
+            writing.connection.batched(|transaction| transaction.execute(
+                "INSERT INTO meta(key,value) VALUES('detached-write','committed')", [],
+            )).unwrap().unwrap();
+            committed.send(()).unwrap();
+        });
+        drop(waiting);
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5), completed).await.unwrap().unwrap();
+        let value: String = state.store.readers.get().query_row(
+            "SELECT value FROM meta WHERE key='detached-write'", [], |row| row.get(0)).unwrap();
+        assert_eq!(value, "committed");
+    }
 
     fn bounded_state(root: &std::path::Path, limit: usize) -> AppState {
         smallclaims::sqlite::with_read_limit_for_test(limit, || super::super::tests::state(root))
@@ -1355,7 +1475,7 @@ mod tests {
                 release.send(()).unwrap();
             });
             let writing = store.clone();
-            let result = spawn_handler(None, move || {
+            let result = spawn_handler(None, None, move || {
                 tokio::runtime::Handle::current().block_on(super::super::blocking_action(move || {
                     // A synchronous callback may need to wait for an async service itself.
                     tokio::runtime::Handle::current().block_on(async {});
@@ -1381,7 +1501,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn an_inline_read_keeps_its_deadline_without_cancelling_a_later_write() {
-        let result = spawn_handler(None, || {
+        let result = spawn_handler(None, None, || {
             let handle = tokio::runtime::Handle::current();
             let read = read_budget::with(Some(ReadBudget::new("/expired", Duration::ZERO)), || {
                 spawn_blocking(|| panic!("an expired read must not run"))
@@ -1397,7 +1517,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn inline_panics_keep_the_nested_error_boundary_and_handler_cleanup() {
-        let result = spawn_handler(None, || {
+        let result = spawn_handler(None, None, || {
             let handle = tokio::runtime::Handle::current();
             let failure = handle.block_on(spawn_blocking(|| panic!("nested callback")));
             assert!(matches!(failure, Err(WorkError::Panic)));

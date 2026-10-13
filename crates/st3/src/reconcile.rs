@@ -1583,7 +1583,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         work: impl FnOnce(&Self) -> T + Send + 'static,
     ) -> T {
         let this = self.clone();
-        match tokio::task::spawn_blocking(move || work(&this)).await {
+        match self.store.connection.write_workers().spawn_blocking(move || work(&this)).await {
             Ok(value) => value,
             Err(error) => std::panic::resume_unwind(error.into_panic()),
         }

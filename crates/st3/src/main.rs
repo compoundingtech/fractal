@@ -5192,6 +5192,9 @@ fn record_daemon_commands(args: &UpArgs) {
     unsafe { std::env::set_var("PATH", path) };
 }
 
+// Writer-bound store work admits before spawn_blocking. A global blocking-thread cap
+// cannot replace that admission: native provider sessions occupy pool threads for their
+// lifetime, and their control callbacks can depend on another blocking worker.
 #[tokio::main]
 async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
     let native_driver = matches!(&cli.command, Command::Driver(_));
@@ -6595,7 +6598,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     return;
                 }
             };
-            match tokio::task::spawn_blocking(move || {
+            match store.connection.write_workers().spawn_blocking(move || {
                 store.repair_operation_projection_drift_from_audit(&drift)
             })
             .await
@@ -6634,7 +6637,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                         .unwrap_or_else(|| "person/operator".into()),
                 });
             tokio::spawn(async move {
-                match tokio::task::spawn_blocking({
+                match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
                     move || store.complete_replication_activation()
                 })
@@ -24863,7 +24866,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: st3::config::Li
             continue;
         };
         let pass = store.clone();
-        match tokio::task::spawn_blocking(move || {
+        match pass.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task enforce-account-limits", || {
                 let now = now_ms();
                 let check = pass.account_limits_check(now, policy.fresh_ms)?;
@@ -24970,7 +24973,7 @@ fn retry_projection_contention_observed(
             let Some(attempt) = attempt else { continue };
             // Only this task schedules these attempts. The existing projection mutex also
             // serializes them with receive/wake passes. Store ownership ends at attempt return.
-            let result = tokio::task::spawn_blocking(move || {
+            let result = store.connection.write_workers().spawn_blocking(move || {
                 let result = store.project_replication_backlog_unless_catching_up();
                 (result, store.projection_contention_generation(), store.replication_projection_deferred())
             })
@@ -25497,7 +25500,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
 async fn convert_envelope_payloads(store: Arc<Store>) {
     loop {
         let store = store.clone();
-        let result = tokio::task::spawn_blocking(move || store.convert_envelope_payloads()).await;
+        let result = store.connection.write_workers().spawn_blocking(move || store.convert_envelope_payloads()).await;
         match result {
             Ok(Ok(report)) if report.done => return,
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
@@ -25514,7 +25517,7 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
 async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task coordination-counts-catch-up", || {
                 page_store.advance_coordination_counts()
             })
@@ -25554,7 +25557,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                 }
                 Ok(Ok(false)) => {
                     let page_store = store.clone();
-                    match tokio::task::spawn_blocking(move || {
+                    match page_store.connection.write_workers().spawn_blocking(move || {
                         page_store.advance_publication_evidence()
                     })
                     .await
@@ -25694,7 +25697,7 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match tokio::task::spawn_blocking(move || {
+        match clean_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task expire-completed-responses", || {
                 clean_store.cleanup_idempotency(now)
             })
@@ -25999,7 +26002,7 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
     let mut announced = false;
     loop {
         let page_store = store.clone();
-        let more = tokio::task::spawn_blocking(move || {
+        let more = page_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task account-limits-catch-up", || {
                 page_store.catch_up_account_limits(st3::store::LIMITS_CATCH_UP_PAGE)
             })
@@ -26056,7 +26059,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
     loop {
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
-        let trimmed = tokio::task::spawn_blocking(move || {
+        let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task trim-local-observations", || {
                 observation_store.trim_local_observations(
                     now_ms().saturating_sub(u128::from(retention_ms)),
@@ -26067,7 +26070,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         })
         .await;
         let usage_store = store.clone();
-        if let Ok(Err(error)) = tokio::task::spawn_blocking(move || {
+        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || {
             usage_store.trim_usage_responses(
                 now_ms().saturating_sub(st3::store::USAGE_RESPONSE_HORIZON_MS),
                 LOCAL_OBSERVATION_TRIM_CHUNK,
@@ -26085,7 +26088,7 @@ async fn trim_local_observations(store: Arc<Store>, observations: st3::config::O
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
-        match tokio::task::spawn_blocking(move || size_store.record_database_size(now_ms())).await {
+        match size_store.connection.write_workers().spawn_blocking(move || size_store.record_database_size(now_ms())).await {
             Ok(Ok(size)) => st3::slo::note_database_size(&size),
             Ok(Err(error)) => eprintln!("st3: database size sample failed: {error:#}"),
             Err(error) => eprintln!("st3: database size sample stopped: {error}"),
@@ -26105,7 +26108,7 @@ async fn run_checkpoints(store: Arc<Store>, context: st3::store::CheckpointConte
             now_unix_ms: now_ms(),
             ..context.clone()
         };
-        match tokio::task::spawn_blocking(move || {
+        match store.connection.write_workers().spawn_blocking(move || {
             st3::profile::task("task checkpoint", || store.checkpoint_step(&context))
         })
         .await

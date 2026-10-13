@@ -1159,7 +1159,10 @@ async fn response_envelope_unbounded(
             let forwarded_handler = request_path == crate::peer::CLIENT_READ_FORWARD_PATH;
             let remote = served_remote.clone();
             let roster_trace = (request_route == "/v1/client/agents").then(|| server_trace.clone()).flatten();
-            match crate::api::read_deadline::spawn_handler(roster_trace, move || {
+            match crate::api::read_deadline::spawn_handler(
+                roster_trace,
+                smallclaims::read_budget::current().is_none().then(|| state.store.clone()),
+                move || {
                 diagnostic_queue.finish(crate::relay_trace::Outcome::Completed);
                 drop(handler_queue);
                 let queue_ms = handler_enqueued.elapsed().as_millis() as i64;
