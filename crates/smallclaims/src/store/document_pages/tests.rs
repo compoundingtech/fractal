@@ -519,12 +519,12 @@ fn corrupt_document_metadata_stays_an_error_without_a_partial_page() {
             )
             .unwrap();
         let sql = format!("UPDATE {table} SET {column}=?1 WHERE {predicate}");
-        typed.connection.write().execute(&sql, [&value]).unwrap();
+        assert_eq!(typed.connection.write().execute(&sql, [&value]).unwrap(), 1);
         for history in [false, true] {
             parity(&typed, Some("doc/typed"), None, history, None, 10);
             assert!(read(&typed, Some("doc/typed"), None, history, None, 10).is_err());
         }
-        typed.connection.write().execute(&sql, [&saved]).unwrap();
+        assert_eq!(typed.connection.write().execute(&sql, [&saved]).unwrap(), 1);
     }
 
     // The former inner joins excluded missing metadata before applying LIMIT. Keep
