@@ -286,7 +286,8 @@ export function QuestionForm({ request, variant, onSubmit, onDecline, onChat, on
       </div>
     </div>
     {interactive ? <>
-      {questions.length > 1 ? <Tabs
+      {/* Tabs mount only with a defined key, so React Aria never flips between controlled and uncontrolled; RAC 1.21.1 types `selectedKey?: Key` reject null. */}
+      {questions.length > 1 && activeId !== undefined ? <Tabs
         selectedKey={activeId}
         onSelectionChange={key => setActiveId(String(key))}
         orientation={stacked ? 'vertical' : 'horizontal'}
@@ -380,6 +381,19 @@ interface QuestionPanelProps {
 function QuestionPanel({ question, draft, showHeader, showKeys, stacked, pinned, isDisabled, isReadOnly, previewIndex, promptId, onPreview, onChoose, onOther, onNote }: QuestionPanelProps) {
   const hasPreview = question.options.some(option => option.preview !== undefined)
   const [promptExpanded, setPromptExpanded] = React.useState(false)
+  const [promptOverflows, setPromptOverflows] = React.useState(false)
+  const promptRef = React.useRef<HTMLSpanElement>(null)
+  const promptClamped = pinned && !promptExpanded
+  // The disclosure exists only while the two-line clamp hides text: measured after layout and again on every resize.
+  React.useLayoutEffect(() => {
+    const element = promptRef.current
+    if (!promptClamped || element === null) return
+    const measure = () => setPromptOverflows(element.scrollHeight > element.clientHeight)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [promptClamped, question.prompt])
   const selectedIndexes = draft.selected.map(id => question.options.findIndex(option => option.id === id)).filter(index => index >= 0)
   const fallbackIndex = selectedIndexes[0] ?? Math.max(0, question.options.findIndex(option => option.recommended === true))
   const preview = question.options[previewIndex ?? fallbackIndex]
@@ -414,8 +428,8 @@ function QuestionPanel({ question, draft, showHeader, showKeys, stacked, pinned,
   return <div data-question-panel={question.id} {...stylex.props(styles.question)}>
     <div {...stylex.props(styles.promptRow)}>
       {showHeader && question.header !== undefined && <span {...stylex.props(styles.chip)}>{question.header}</span>}
-      <span id={promptId} {...stylex.props(styles.prompt, pinned && !promptExpanded && styles.promptClamped)}>{question.prompt}</span>
-      {pinned && <Button data-question-prompt-disclosure="" variant="ghost" size="sm" aria-expanded={promptExpanded} aria-controls={promptId} onPress={() => setPromptExpanded(expanded => !expanded)}>{promptExpanded ? 'Show less' : 'Show full question'}</Button>}
+      <span ref={promptRef} id={promptId} {...stylex.props(styles.prompt, promptClamped && styles.promptClamped)}>{question.prompt}</span>
+      {pinned && (promptExpanded || promptOverflows) && <Button data-question-prompt-disclosure="" variant="ghost" size="sm" aria-expanded={promptExpanded} aria-controls={promptId} onPress={() => setPromptExpanded(expanded => !expanded)}>{promptExpanded ? 'Show less' : 'Show full question'}</Button>}
     </div>
     {question.subject !== undefined && <div {...stylex.props(styles.subject)}><PreviewBody preview={question.subject} /></div>}
     <div {...stylex.props(styles.body, hasPreview && !stacked && styles.bodyBeside)}>

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { QuestionDock, QuestionDockGroup } from '../../../apps/fractal-web/src/web/questions/QuestionDock.tsx'
 import { questionScenarios, viewedAt, submittedAt } from './assistant-ui/questions/fixtures'
 import type { QuestionRequestView } from './assistant-ui/questions/model'
@@ -14,23 +14,25 @@ import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars, textVars, typeVars } from './assistant-ui/composition-tokens.stylex'
 
 type Phase = 'pending' | 'arrival' | 'readonly' | 'answered'
-interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean; longPrompt: boolean }
+interface Args { scheme: Scheme; phase: Phase; multiple: boolean; drawer: boolean; prompt?: string }
+const longPrompt = 'The orchestration plan spans several worktrees and independent agents. Before continuing, choose the verification coverage that should run across the touched packages, explain how the full application suite relates to narrow checks, and account for the existing terminal session and pending release-note validation. '.repeat(4)
+const headerStatusSince = viewedAt - 120_000
 const requestFor = (phase: Phase): QuestionRequestView => ({
   ...questionScenarios.multi,
   ...(phase === 'readonly' ? { answerable: false, readOnlyReason: 'Answer in the agent terminal. Web answering is not available on this connection.' } : {}),
   ...(phase === 'answered' ? { state: { _tag: 'answered', by: 'You', at: submittedAt, answers: { checks: { selected: ['typecheck'], note: 'Run the narrow checks first.' } } } } : {}),
 })
 /** Real dock, transcript, runtime and composer. Settlement is explicitly story-only, not a live transport. */
-function QuestionsStory({ scheme, phase, multiple, drawer, longPrompt }: Args) {
+function QuestionsStory({ scheme, phase, multiple, drawer, prompt }: Args) {
   const [request, setRequest] = React.useState(() => {
     const request = requestFor(phase)
-    return longPrompt ? { ...request, questions: request.questions.map(question => ({ ...question, prompt: 'The orchestration plan spans several worktrees and independent agents. Before continuing, choose the verification coverage that should run across the touched packages, explain how the full application suite relates to narrow checks, and account for the existing terminal session and pending release-note validation. '.repeat(4) })) } : request
+    return prompt !== undefined ? { ...request, questions: request.questions.map(question => ({ ...question, prompt })) } : request
   })
   const [arrived, setArrived] = React.useState(phase !== 'arrival')
   const [terminalOpen, setTerminalOpen] = React.useState(drawer)
   const options = React.useMemo(() => ({ messages: [], isRunning: false, onNew: async () => {} }), [])
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
-    <ThreadHeader title="Sample agent" status="waiting" needsMe={arrived && request.state._tag === 'pending'} panelOpen={false} drawerOpen={terminalOpen} onTogglePanel={() => {}} onToggleDrawer={() => setTerminalOpen(open => !open)} />
+    <ThreadHeader title="Sample agent" status="waiting" statusLabel="Question pending" statusSince={headerStatusSince} freshness="live" needsMe={arrived && request.state._tag === 'pending'} panelOpen={false} drawerOpen={terminalOpen} onTogglePanel={() => {}} onToggleDrawer={() => setTerminalOpen(open => !open)} />
     <div data-testid="question-conversation-pane" style={{ flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
     <EmbraceRuntimeProvider options={options}>
       <div {...stylex.props(styles.history)}><Transcript title="Sample agent" turns={[]} sync={{ _tag: 'Live', since: viewedAt - 1000 }} now={viewedAt} observedAt={viewedAt} /></div>
@@ -44,7 +46,7 @@ function QuestionsStory({ scheme, phase, multiple, drawer, longPrompt }: Args) {
     <TerminalDrawer open={terminalOpen} height={440} onHeight={() => {}} lines={['$ pnpm typecheck', 'Typecheck completed. The agent is waiting for your answer.']} />
   </main>
 }
-const meta = { title: 'Fractal/Plugins/Questions', component: QuestionsStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', phase: 'pending', multiple: false, drawer: false, longPrompt: false }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phase: { options: ['pending', 'arrival', 'readonly', 'answered'], control: 'radio' } } } satisfies Meta<typeof QuestionsStory>
+const meta = { title: 'Fractal/Plugins/Questions', component: QuestionsStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', phase: 'pending', multiple: false, drawer: false }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phase: { options: ['pending', 'arrival', 'readonly', 'answered'], control: 'radio' } } } satisfies Meta<typeof QuestionsStory>
 export default meta
 type Story = StoryObj<typeof meta>
 export const Pending: Story = { play: async ({ canvasElement }) => {
@@ -98,7 +100,7 @@ export const MultipleWithTerminalDrawer: Story = { args: { multiple: true, drawe
   await expect(composer.bottom).toBeLessThanOrEqual(pane.bottom + 1)
   await expect(canvas.getByRole('textbox', { name: 'Message' })).toBeVisible()
 } }
-export const LongPrompt: Story = { args: { longPrompt: true, phase: 'readonly' }, play: async ({ canvasElement }) => {
+export const LongPrompt: Story = { args: { prompt: longPrompt, phase: 'readonly' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const group = canvas.getByTestId('question-dock-group').getBoundingClientRect()
   const first = canvas.getByRole('checkbox', { name: /Typecheck/ }).closest('label')!.getBoundingClientRect()
@@ -111,6 +113,47 @@ export const LongPrompt: Story = { args: { longPrompt: true, phase: 'readonly' }
   await expect(canvas.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true')
   await userEvent.click(canvas.getByRole('button', { name: 'Show less' }))
   await expect(canvas.getByRole('button', { name: 'Show full question' })).toHaveAttribute('aria-expanded', 'false')
+} }
+/** Negative control: a prompt that fits in the two-line clamp renders no disclosure. */
+export const ShortPrompt: Story = { play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const prompt = canvas.getByText('Which checks should run before merge?')
+  await expect(prompt.scrollHeight).toBeLessThanOrEqual(prompt.clientHeight)
+  await expect(canvas.queryByRole('button', { name: 'Show full question' })).toBeNull()
+} }
+/** The clamp is re-measured on resize: narrowing the pane makes the same prompt overflow, widening it again removes the disclosure. */
+export const PromptResize: Story = { args: { prompt: 'Which verification checks should run across the touched packages before merge?' }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const main = canvasElement.querySelector('main')!
+  await expect(canvas.queryByRole('button', { name: 'Show full question' })).toBeNull()
+  main.style.width = '240px'
+  await waitFor(() => expect(canvas.getByRole('button', { name: 'Show full question' })).toBeVisible())
+  main.style.width = ''
+  await waitFor(() => expect(canvas.queryByRole('button', { name: 'Show full question' })).toBeNull())
+} }
+/** Header signals carry no native title; a kit Tooltip exposes each one on hover and on keyboard focus. */
+export const HeaderSignals: Story = { play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const page = within(canvasElement.ownerDocument.body)
+  const sentence = `Question pending. Observed status since ${new Date(headerStatusSince).toISOString()}. Observation live.`
+  const status = canvas.getByRole('group', { name: 'Agent status' })
+  const needs = canvas.getByRole('img', { name: 'Needs your attention' })
+  await expect(needs.textContent).toBe('')
+  await expect(needs.querySelector('svg')).not.toBeNull()
+  await expect(canvas.getByTestId('thread-header').querySelectorAll('[data-header-signal][title], [data-header-signal] [title]')).toHaveLength(0)
+  await userEvent.hover(needs)
+  await expect(await page.findByRole('tooltip')).toHaveTextContent('Needs your attention')
+  await userEvent.unhover(needs)
+  await userEvent.hover(status)
+  await waitFor(() => expect(page.getByRole('tooltip')).toHaveTextContent(sentence))
+  await userEvent.unhover(status)
+  await waitFor(() => expect(page.queryByRole('tooltip')).toBeNull())
+  for (let step = 0; step < 12 && canvasElement.ownerDocument.activeElement !== status; step++) await userEvent.tab()
+  await expect(status).toHaveFocus()
+  await expect(await page.findByRole('tooltip')).toHaveTextContent(sentence)
+  await userEvent.tab()
+  await expect(needs).toHaveFocus()
+  await waitFor(() => expect(page.getByRole('tooltip')).toHaveTextContent('Needs your attention'))
 } }
 export const AllStates: Story = { render: args => <div>{(['pending', 'readonly', 'answered'] as const).map(phase => <section key={phase} aria-label={phase}><QuestionsStory {...args} phase={phase} /></section>)}</div> }
 const styles = stylex.create({
