@@ -2862,6 +2862,9 @@ fn overlay_down(item: &mut Value, launch_since: Option<u64>, observation: &str, 
     let since = client_timestamp(u128::from(since));
     item["state"] = json!("down");
     item["down_since"] = json!(since);
+    // A harness report that predates the loss of the session says nothing about now; leaving
+    // `working` beside `down` would make the two fields disagree.
+    item["harness_state"] = json!("indeterminate");
     // The activity of an earlier incarnation is not activity of a seat that has no session.
     item["silent_since"] = Value::Null;
     if let Some(work) = item["current_work"].as_array_mut() {

@@ -25,6 +25,16 @@ says `running`; when it stops reporting, the card says `down` and `st terminals 
 session for it too. Finding the process and relaunching a seat that declares `restart always` belong to
 the launch and reconcile path, not to the label.
 
+## A seat that dies mid-turn
+
+Keeping a stale `working` report means the card no longer lapses it after 90 seconds. What ends
+it is the runtime row: the reconciler on the seat's host observes its pty and driver on every pass
+and writes `exited` or `vanished`, after which the card reads `stopped` or `failed`, not
+`running` (`a_seat_whose_runtime_exits_mid_turn_stops_reading_working_with_its_row`). If that
+reconciler is not running, or never writes the row, the card keeps `running`/`working` and
+`silent_since` is the only signal; `down` covers only seats whose row never reached `running`.
+A `down` card also reports `harness_state: indeterminate`, so the two fields never disagree.
+
 ## Example
 
 At audit time a seat `example/builder` showed `desired` with a `working` step and fresh-looking

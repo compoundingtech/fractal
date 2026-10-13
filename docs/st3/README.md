@@ -27,7 +27,7 @@ Use these documents for implementation details:
 - [Founder signing audit](founder-signing-audit.md) explains read-only capture, preserved unsealed
   upgrades, and the remaining warnings for already-sealed unsigned delegations.
 - [Fleet replication](replication.md) defines convergence, inspection, and repair.
-- [Seat status truth](status-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
+- [Seat state truth](seat-state-truth.md) says which state a seat shows, when it is `down`, and where the rule lives.
 - [Agent seat queues](seat-queue.md) explains how each seat orders its mission runs and how moves
   are recorded and replicated.
 - [Checkpoints and trimming](checkpoints.md) explains how every node of a fleet agrees to delete old

@@ -21933,6 +21933,7 @@ mission "example/zero-run" state="ready" {
         assert_eq!(card["state"], "down");
         assert_eq!(card["down_since"], client_timestamp(u128::from(started)));
         assert_eq!(card["silent_since"], Value::Null, "a dead holder's activity is not shown as activity");
+        assert_eq!(card["harness_state"], "indeterminate", "a down seat never keeps a stale working report");
         assert_eq!(card["current_work"][0]["holder_down_since"], card["down_since"]);
     }
 
@@ -22007,6 +22008,30 @@ mission "example/zero-run" state="ready" {
         let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
         assert_eq!(birch["harness_state"], "indeterminate");
         assert_eq!(birch["state"], "waiting");
+    }
+
+    #[test]
+    fn a_seat_whose_runtime_exits_mid_turn_stops_reading_working_with_its_row() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-died-mid-turn");
+        let subject = "agent/cedar";
+        let append = |kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append("harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
+        let running = client_agent_resources(&state.store, false, "", state.store.index().unwrap()).unwrap();
+        assert_eq!(running.iter().find(|item| item["id"] == subject).unwrap()["state"], "running");
+        // The reconciler on the owner host writes this when the pty or driver is gone.
+        append("runtime.observed", json!({"status":"exited", "runtime_id":"native", "incarnation_id":"one"}));
+        let ended = client_agent_resources(&state.store, false, "", state.store.index().unwrap()).unwrap();
+        let ended = ended.iter().find(|item| item["id"] == subject).unwrap();
+        assert_ne!(ended["state"], "running", "{ended}");
+        assert_ne!(ended["state"], "starting");
     }
 
     #[test]
