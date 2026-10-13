@@ -51,9 +51,8 @@ const overflowFree = (header: HTMLElement) => {
   return header.scrollWidth <= header.clientWidth && page.scrollWidth <= page.clientWidth
     && [...header.querySelectorAll('*')].every(element => rect(element).left >= box.left - 0.5 && rect(element).right <= box.right + 0.5)
 }
-
 const meta = {
-  title: 'Fractal UI/Thread header layout', component: ThreadHeaderLayoutStory,
+  title: 'Fractal/Shell/Thread header layout', component: ThreadHeaderLayoutStory,
   parameters: { layout: 'fullscreen' },
   args: { scheme: 'dark', narrow: false, long: false },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, narrow: { control: 'boolean' }, long: { control: 'boolean' } },
