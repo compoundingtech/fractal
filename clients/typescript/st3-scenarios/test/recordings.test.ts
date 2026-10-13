@@ -44,8 +44,8 @@ describe('recording schema-directed N (batch 2)', () => {
     if (!Array.isArray(items)) throw new Error('expected test entries')
     const entry = obj(items[0])
     entry.type = 'message'
-    entry.body = { message_id: 'message/raw', from: 'person/raw', to: 'step/raw' }
-    const mappedScript: RecordingScript = { ...script, id_map: { ...script.id_map, 'message/raw': 'message/proof', 'person/raw': 'person/ada', 'step/raw': 'step/proof' } }
+    entry.body = { message_id: 'message/raw', from: 'person/example', to: 'step/raw' }
+    const mappedScript: RecordingScript = { ...script, id_map: { ...script.id_map, 'message/raw': 'message/proof', 'person/example': 'person/ada', 'step/raw': 'step/proof' } }
     const normalized = normalizeRecording(mappedScript, capture, anchor)
     const outputItems = normalized[2]!.value.items
     if (!Array.isArray(outputItems)) throw new Error('expected test entries')
@@ -53,8 +53,8 @@ describe('recording schema-directed N (batch 2)', () => {
     expect(normalizeRecording(mappedScript, normalized, anchor)).toEqual(normalized)
     for (const field of ['from', 'to']) {
       const original = obj(entry.body)[field]
-      obj(entry.body)[field] = 'person/unregistered'
-      expect(() => normalizeRecording(mappedScript, capture, anchor)).toThrow(`/2/value/items/0/body/${field}: unknown identity person/unregistered`)
+      obj(entry.body)[field] = 'person/intruder'
+      expect(() => normalizeRecording(mappedScript, capture, anchor)).toThrow(`/2/value/items/0/body/${field}: unknown identity person/intruder`)
       obj(entry.body)[field] = original!
     }
   })
@@ -66,10 +66,10 @@ describe('recording schema-directed N (batch 2)', () => {
       run_details: [{
         id: 'mission-run/raw', requester: 'daemon/raw', status: 'running', phase: 'work',
         progress: { done: 0, total: 1 }, must_act: 'agent', state_since: '2026-10-13T03:07:43.034999Z',
-        current_steps: [{ id: 'step-run/raw', title: null, state: 'claimed', since: '2026-10-13T03:07:43.034999Z', assignee: 'person/raw', claimant: null }],
+        current_steps: [{ id: 'step-run/raw', title: null, state: 'claimed', since: '2026-10-13T03:07:43.034999Z', assignee: 'person/example', claimant: null }],
       }],
     }
-    const mappedScript: RecordingScript = { ...script, id_map: { ...script.id_map, 'mission/raw': 'mission/proof', 'mission-run/raw': 'mission-run/proof', 'step-run/raw': 'step-run/proof', 'daemon/raw': 'daemon/proof', 'person/raw': 'person/ada' } }
+    const mappedScript: RecordingScript = { ...script, id_map: { ...script.id_map, 'mission/raw': 'mission/proof', 'mission-run/raw': 'mission-run/proof', 'step-run/raw': 'step-run/proof', 'daemon/raw': 'daemon/proof', 'person/example': 'person/ada' } }
     const run = (captureRows: readonly RecordingRow[]): JsonObject => {
       const details = obj(obj(captureRows[1]!.value.body).value).run_details
       if (!Array.isArray(details)) throw new Error('expected test run details')
@@ -87,8 +87,8 @@ describe('recording schema-directed N (batch 2)', () => {
     run(capture).requester = 'daemon/raw'
     const rawSteps = run(capture).current_steps
     if (!Array.isArray(rawSteps)) throw new Error('expected test steps')
-    obj(rawSteps[0]).assignee = 'person/unregistered'
-    expect(() => normalizeRecording(mappedScript, capture, anchor)).toThrow('/1/value/body/value/run_details/0/current_steps/0/assignee: unknown identity person/unregistered')
+    obj(rawSteps[0]).assignee = 'person/intruder'
+    expect(() => normalizeRecording(mappedScript, capture, anchor)).toThrow('/1/value/body/value/run_details/0/current_steps/0/assignee: unknown identity person/intruder')
   })
   it('fails unknown identity at the exact schema pointer', () => {
     const capture = rows()
