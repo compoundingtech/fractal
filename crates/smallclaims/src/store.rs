@@ -468,6 +468,8 @@ CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, st
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
+-- Generation triggers test fleet membership without scanning a batch's unrelated claims.
+CREATE INDEX IF NOT EXISTS claims_batch_kind ON claims(batch_id, kind);
 -- Heal compares claim identities, not bodies. Keep both join keys in a compact index so a
 -- range digest does not visit every body-bearing claim page.
 CREATE INDEX IF NOT EXISTS claims_batch_claim_id ON claims(batch_id, id);
@@ -2343,17 +2345,18 @@ pub fn max_envelope_rowid(connection: &Connection) -> Result<i64> {
 /// it, a signature on that envelope, or the anchor. `fleet_membership` re-folds only when it moved.
 fn fleet_generation_schema() -> String {
     let bump = "UPDATE fleet_generation SET value=value+1 WHERE id=1;";
-    let carries_fleet_claims = |envelope: &str| {
+    let carries_fleet_claims = |row: &str, column: &str| {
         format!(
-            "EXISTS (SELECT 1 FROM claims WHERE batch_id={envelope}.batch_id \
+            "EXISTS (SELECT 1 FROM claims WHERE batch_id={row}.{column} \
              AND kind IN ({FLEET_CLAIM_KINDS}))"
         )
     };
     let signs_fleet_claims = |signature: &str| {
         format!(
-            "EXISTS (SELECT 1 FROM replica_envelopes AS envelopes \
-             JOIN claims ON claims.batch_id=envelopes.batch_id \
-             WHERE envelopes.writer={signature}.writer AND envelopes.sequence={signature}.sequence \
+            "EXISTS (SELECT 1 FROM batches \
+             JOIN claims ON claims.batch_id=batches.id \
+             JOIN replica_envelopes AS envelopes ON envelopes.batch_id=batches.id \
+             WHERE batches.origin={signature}.writer AND batches.replica_sequence={signature}.sequence \
              AND envelopes.envelope_hash={signature}.envelope_hash \
              AND claims.kind IN ({FLEET_CLAIM_KINDS}))"
         )
@@ -2366,27 +2369,37 @@ fn fleet_generation_schema() -> String {
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_delete AFTER DELETE ON claims
          WHEN OLD.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_update
-         AFTER UPDATE OF kind, batch_id, body ON claims
+         DROP TRIGGER IF EXISTS fleet_generation_claim_update;
+         CREATE TRIGGER fleet_generation_claim_update
+         AFTER UPDATE OF id, kind, subject, body, batch_id ON claims
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) OR OLD.kind IN ({FLEET_CLAIM_KINDS})
          BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_insert AFTER INSERT ON batches
+         WHEN {insert_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_delete AFTER DELETE ON batches
+         WHEN {delete_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_update
+         AFTER UPDATE OF id, origin, replica_sequence ON batches
+         WHEN {insert_batch} OR {delete_batch} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_insert AFTER INSERT ON replica_envelopes
          WHEN NEW.batch_id IS NOT NULL AND {insert_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_update
-         AFTER UPDATE OF batch_id ON replica_envelopes
-         WHEN NEW.batch_id IS NOT NULL AND {update_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_detach
-         AFTER UPDATE OF batch_id ON replica_envelopes
-         WHEN OLD.batch_id IS NOT NEW.batch_id AND {delete_envelope} BEGIN {bump} END;
+         DROP TRIGGER IF EXISTS fleet_generation_envelope_update;
+         DROP TRIGGER IF EXISTS fleet_generation_envelope_detach;
+         CREATE TRIGGER fleet_generation_envelope_update
+         AFTER UPDATE OF batch_id, envelope_hash ON replica_envelopes
+         WHEN {insert_envelope} OR {delete_envelope} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_delete AFTER DELETE ON replica_envelopes
          WHEN {delete_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_insert
+         DROP TRIGGER IF EXISTS fleet_generation_signature_insert;
+         CREATE TRIGGER fleet_generation_signature_insert
          AFTER INSERT ON replica_envelope_signatures
          WHEN {insert_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_delete
+         DROP TRIGGER IF EXISTS fleet_generation_signature_delete;
+         CREATE TRIGGER fleet_generation_signature_delete
          AFTER DELETE ON replica_envelope_signatures
          WHEN {delete_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_update
+         DROP TRIGGER IF EXISTS fleet_generation_signature_update;
+         CREATE TRIGGER fleet_generation_signature_update
          AFTER UPDATE OF writer, sequence, envelope_hash, member_key ON replica_envelope_signatures
          WHEN {insert_signature} OR {delete_signature} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_insert AFTER INSERT ON meta
@@ -2395,9 +2408,10 @@ fn fleet_generation_schema() -> String {
          WHEN NEW.key='fleet_anchor_key' OR OLD.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_delete AFTER DELETE ON meta
          WHEN OLD.key='fleet_anchor_key' BEGIN {bump} END;",
-        insert_envelope = carries_fleet_claims("NEW"),
-        update_envelope = carries_fleet_claims("NEW"),
-        delete_envelope = carries_fleet_claims("OLD"),
+        insert_batch = carries_fleet_claims("NEW", "id"),
+        delete_batch = carries_fleet_claims("OLD", "id"),
+        insert_envelope = carries_fleet_claims("NEW", "batch_id"),
+        delete_envelope = carries_fleet_claims("OLD", "batch_id"),
         insert_signature = signs_fleet_claims("NEW"),
         delete_signature = signs_fleet_claims("OLD"),
     )

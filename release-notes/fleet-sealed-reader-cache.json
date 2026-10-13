@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Normal store open adds local fleet-generation triggers for envelope detach/delete and signature updates. No schema-version change, data rewrite, or persistent view cache; older builds ignore the additional triggers."
+    "detail": "Normal store open installs complete fleet-generation triggers for claim, batch, envelope, signature, and anchor fold inputs, replacing older narrow update triggers. Adds the covering claims_batch_kind index for bounded trigger predicates. No schema-version change, claim rewrite, or persistent view cache; older builds retain the additive index and triggers."
   },
   "rules": {
     "status": "none",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "unknown",
-    "detail": "Normal daemon restart; duration not measured for this change."
+    "detail": "Normal daemon restart. First open builds claims_batch_kind over existing claims before serving requests; startup duration and index size were not measured."
   },
   "manual": {
     "status": "none",

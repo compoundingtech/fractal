@@ -7,6 +7,9 @@ use crate::store::runtime::Plain;
 use std::sync::mpsc;
 use std::time::Duration;
 
+mod mutation_tests;
+mod lifecycle_tests;
+
 fn configure(store: &Store, history: usize) -> String {
     store.bind_fleet("sealed-cache-test").unwrap();
     let (key, _) = MemberKey::generate().unwrap();
@@ -417,4 +420,34 @@ fn sealed_view_cache_generation_and_fold_share_the_pinned_snapshot() {
         vec![json!({"url": "https://new-snapshot.invalid"})]
     );
     assert_eq!(*latest, oracle(&store));
+}
+
+#[test]
+fn sealed_view_cache_trigger_predicates_seek_the_covering_batch_kind_index() {
+    let (store, _) = fixture(1);
+    let reader = store.readers.get();
+    let mut statements = reader.prepare(
+        "SELECT name,sql FROM sqlite_schema WHERE type='trigger'
+         AND (name LIKE 'fleet_generation_batch_%'
+              OR name LIKE 'fleet_generation_envelope_%'
+              OR name LIKE 'fleet_generation_signature_%')",
+    ).unwrap();
+    let triggers = statements.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(triggers.len(), 9);
+    for (name, sql) in triggers {
+        // Explain the installed trigger's actual WHEN expression, not a copy of its query.
+        let predicate = sql.split_once("WHEN ").unwrap().1.split_once(" BEGIN ").unwrap().0;
+        let values = "(SELECT 'batch' AS id, 'batch' AS batch_id, 'writer' AS writer,
+                       1 AS sequence, 'hash' AS envelope_hash)";
+        let explain = format!("EXPLAIN QUERY PLAN SELECT ({predicate})
+                              FROM {values} AS NEW CROSS JOIN {values} AS OLD");
+        let plan = reader.prepare(&explain).unwrap().query_map([], |row| row.get::<_, String>(3))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(plan.iter().any(|detail| detail.contains("COVERING INDEX claims_batch_kind")),
+            "{name}: {plan:?}");
+        assert!(!plan.iter().any(|detail| detail.contains("SCAN claims")),
+            "{name}: {plan:?}");
+    }
 }
