@@ -75,6 +75,7 @@ debug = 0
 name = "st2"
 version = "0.1.0"
 edition = "2024"
+build = "crates/st-drivers/build.rs"
 description = "Harness-agnostic runner: reconcile a unified catalog+inbox folder of rendered agent specs, keep their ptys running, and deliver messages by moving inbox files."
 license = "MIT"
 # Every file in tests/ is a module of one test binary; see tests/integration.rs.
