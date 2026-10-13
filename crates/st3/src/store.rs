@@ -29782,18 +29782,30 @@ fn try_project_simple_replication_tx(
         }
     }
     // Event-only claims do not change the structural graph. Their operation
-    // registry can advance with the frontier, but ambiguous IDs still use the
-    // canonical full replay so conflict selection remains deterministic.
+    // registry can advance with the frontier. Message sends reconcile an ambiguous
+    // receipt from that operation's indexed history, using the full replay's reducer.
+    // Other kinds retain the full replay guard for ambiguous IDs.
+    let mut reconciled_message_operations = BTreeSet::new();
     for claim in &claims {
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
         };
+        if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
+            continue;
+        }
         if let Some((stored_digest, _, state)) =
             operation_tx(transaction, operation_id).map_err(|error| {
                 incremental_claim_error(internal(error), claim, "operation-registry")
             })?
             && (stored_digest != request_digest || state != "active")
         {
+            if claim.kind == "message.sent" {
+                repair_operations_tx(transaction, &[operation_id.to_owned()]).map_err(|error| {
+                    incremental_claim_error(internal(error), claim, "operation-registry")
+                })?;
+                reconciled_message_operations.insert(operation_id.to_owned());
+                continue;
+            }
             crate::profile::note("replay: operation-conflict");
             return Ok(IncrementalProjection::ReplayWithContext {
                 reason: "operation-conflict",
