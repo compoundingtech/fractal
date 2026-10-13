@@ -236,6 +236,15 @@ impl Fabric {
             .map(|_| ())
     }
 
+    /// Expose `argv` to trusted peers under `protocol`: Fabric runs it once for each incoming
+    /// tunnel, with the tunnel on its stdin and stdout. Fabric keeps the exposure in its own
+    /// configuration, so it outlives this process and any st daemon.
+    pub async fn expose_exec(&self, protocol: &str, argv: &[&str]) -> Result<()> {
+        let mut arguments = vec!["expose", protocol, "--exec", "--"];
+        arguments.extend_from_slice(argv);
+        run(&self.program, &arguments).await.map(|_| ())
+    }
+
     /// Expose the Unix socket at `socket` to trusted peers under `protocol`: Fabric opens one
     /// connection to it for each incoming tunnel and forwards bytes both ways. Fabric keeps the
     /// exposure in its own configuration, so it outlives this process, and repeating it replaces
@@ -550,6 +559,10 @@ mod tests {
             .expose_socket("st3/pty/x", Path::new("/run/st/terminals.sock"))
             .await
             .unwrap();
+        fabric
+            .expose_exec("st3/pty/x", &["/bin/st", "terminals", "serve-fabric"])
+            .await
+            .unwrap();
         assert_eq!(
             fabric.peers().await.unwrap(),
             vec![
@@ -564,7 +577,8 @@ mod tests {
         let calls = std::fs::read_to_string(&log).unwrap();
         assert_eq!(
             calls,
-            "expose st3/pty/x --socket /run/st/terminals.sock\npeers\n\
+            "expose st3/pty/x --socket /run/st/terminals.sock\n\
+             expose st3/pty/x --exec -- /bin/st terminals serve-fabric\npeers\n\
              dial node-b st3/pty/x\n"
         );
 

@@ -996,4 +996,24 @@ async fn expose_fabric_points_fabric_at_the_daemons_terminal_socket() {
         "Fabric forwards each tunnel to the daemon, not to a process of its own"
     );
     assert!(stdout.contains(&socket.display().to_string()), "{stdout}");
+
+    // `--exec` keeps attaches working without the daemon: Fabric runs `serve-fabric` per tunnel.
+    let output = command
+        .args(["--exec", "--st", "/opt/example/st"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pty_root = std::path::absolute(root.path().join("state/st3/pty")).unwrap();
+    let calls = std::fs::read_to_string(root.path().join("fabric-calls")).unwrap();
+    assert!(
+        calls.ends_with(&format!(
+            "expose st3/pty/{FLEET_ID} --exec -- /opt/example/st terminals serve-fabric --stdio --pty-root {}\n",
+            pty_root.display()
+        )),
+        "{calls}"
+    );
 }

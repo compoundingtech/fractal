@@ -2,8 +2,9 @@
 //!
 //! `st terminals expose-fabric` has the owning host's Fabric forward each tunnel under the fleet's
 //! PTY protocol to the owner daemon's terminal socket (`TerminalSocket`), one connection per
-//! tunnel. An exposure made before that runs `st terminals serve-fabric --stdio` for each tunnel
-//! instead (`serve_stdio`). The dialing CLI sends one route line that names the PTY session, the
+//! tunnel. `expose-fabric --exec`, and any exposure made before the socket existed, runs
+//! `st terminals serve-fabric --stdio` for each tunnel instead (`serve_stdio`), which needs no
+//! daemon. The dialing CLI sends one route line that names the PTY session, the
 //! subject, and the runtime incarnation st selected. The owner proves that
 //! incarnation against the PTY itself, as a local attach does, answers `{"ok":true}`, and then
 //! splices the tunnel to the session socket: the attach client speaks the PTY session protocol to
@@ -164,8 +165,10 @@ impl TerminalSocket {
 fn bind_terminal_socket(socket: &Path) -> Result<std::os::unix::net::UnixListener> {
     use std::os::unix::fs::PermissionsExt as _;
     crate::config::validate_unix_socket_path(socket, "--state-dir")?;
+    // Only this account may reach the socket, or even its name.
     if let Some(parent) = socket.parent() {
         std::fs::create_dir_all(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     }
     // A second daemon must never detach an active listener by unlinking its pathname.
     anyhow::ensure!(
@@ -756,6 +759,15 @@ mod tests {
             assert!(took < Duration::from_secs(1), "attaching took {took:?}");
             detach(tunnel);
             released(&service, &[&worker]);
+        }
+
+        #[test]
+        fn the_socket_and_its_directory_are_this_accounts_alone() {
+            use std::os::unix::fs::PermissionsExt as _;
+            let (_root, socket, _service) = service(ROUTE_TIMEOUT);
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&socket), 0o600);
+            assert_eq!(mode(socket.parent().unwrap()), 0o700);
         }
 
         #[test]

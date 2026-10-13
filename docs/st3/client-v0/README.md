@@ -1203,9 +1203,12 @@ config-peer fleet, the one trusted Fabric peer with the owner's name, ignoring c
 daemon's terminal socket, `STATE_DIR/run/terminals.sock`: one connection per tunnel, with no process
 or pipe per attach. The daemon serves that socket on a thread and runtime of its own, and an attach
 reads only the PTY registry and the kernel's socket peer, so a daemon busy with its store or other
-requests does not delay it; a stopped daemon refuses the tunnel. An exposure made by an earlier
-`expose-fabric` still has Fabric run `st terminals serve-fabric --stdio` for each tunnel, which
-behaves the same; running `st terminals expose-fabric` again replaces it. The CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
+requests does not delay it. A stopped, crashed or restarting daemon refuses new tunnels, and each
+daemon restart, including every deploy, ends its live remote attaches; the CLI reconnects with the
+same incarnation once the daemon answers again. `st terminals expose-fabric --exec`, and any
+exposure made before the terminal socket existed, has Fabric run `st terminals serve-fabric
+--stdio` for each tunnel instead, which needs no daemon and behaves the same otherwise; running
+`st terminals expose-fabric` again replaces either kind. The CLI sends one line, the `pty remote-serve` route line plus the subject and incarnation:
 `{"op":"route","name":RUNTIME_ID,"subject":SUBJECT,"incarnation":INCARNATION}`. The owner refuses
 a name that is not one file under its PTY root and a session that is not tagged as the subject's.
 It refuses a session whose kernel-reported socket peer and PTY record do not match the incarnation.

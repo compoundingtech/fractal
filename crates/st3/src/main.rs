@@ -2278,11 +2278,15 @@ enum PtyCommand {
     ///
     /// Fabric keeps the exposure in its own configuration and forwards each tunnel to the st
     /// daemon's terminal socket, which serves it on its own thread, so a busy daemon does not
-    /// delay an attach. Each peer also needs a grant for the printed protocol in this machine's
-    /// Fabric `peers.toml`.
-    ExposeFabric,
-    /// Serve one Fabric tunnel to a PTY session on stdin and stdout, for a Fabric exec exposure
-    /// made before `expose-fabric` exposed the daemon's terminal socket.
+    /// delay an attach. While the daemon is stopped or restarting, as during every deploy, it
+    /// refuses new tunnels and its live remote attaches drop; `st terminals attach` reconnects
+    /// once it is back. `--exec` instead has Fabric run `st terminals serve-fabric` for each
+    /// tunnel, which works without the daemon at the cost of a process and pipes per attach.
+    /// Each peer also needs a grant for the printed protocol in this machine's Fabric
+    /// `peers.toml`.
+    ExposeFabric(PtyExposeFabricArgs),
+    /// Serve one Fabric tunnel to a PTY session on stdin and stdout, as `expose-fabric --exec`
+    /// has Fabric run it.
     #[command(hide = true)]
     ServeFabric(PtyServeFabricArgs),
     /// Read one terminal's current screen without taking control.
@@ -2389,6 +2393,18 @@ struct PtyAttachArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_actor_subject)]
     person: Option<String>,
+}
+
+#[derive(Args)]
+struct PtyExposeFabricArgs {
+    /// Have Fabric run `st terminals serve-fabric` for each tunnel instead of forwarding it to the
+    /// daemon's terminal socket, so attaches keep working while the daemon is down.
+    #[arg(long)]
+    exec: bool,
+    /// With `--exec`, the st executable Fabric runs; defaults to this one. Name a stable path,
+    /// since Fabric keeps it after this build is replaced.
+    #[arg(long, requires = "exec")]
+    st: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -5468,8 +5484,8 @@ async fn run(cli: Cli) -> Result<()> {
             run_lanes(&client, config.person.as_deref(), command, cli.json).await
         }
         Command::Terminals {
-            command: PtyCommand::ExposeFabric,
-        } => expose_fabric(&config).await,
+            command: PtyCommand::ExposeFabric(args),
+        } => expose_fabric(&config, args).await,
         Command::Terminals { command } => {
             // This host's PTY root, whichever endpoint answers: a terminal whose session runs
             // there is attached through it when that endpoint cannot answer in time.
@@ -8315,7 +8331,7 @@ async fn run_pty(
             )
             .await
         }
-        PtyCommand::ExposeFabric | PtyCommand::ServeFabric(_) => {
+        PtyCommand::ExposeFabric(_) | PtyCommand::ServeFabric(_) => {
             unreachable!("handled before any daemon client")
         }
         PtyCommand::Peek(args) => {
@@ -8769,19 +8785,44 @@ fn configured_fabric() -> Result<(Option<st3::fleet::transport::Fabric>, Option<
 }
 
 /// `st terminals expose-fabric`: have this machine's Fabric forward the fleet's PTY protocol to
-/// the st daemon's terminal socket.
-async fn expose_fabric(config: &Config) -> Result<()> {
+/// the st daemon's terminal socket, or with `--exec` run `st terminals serve-fabric` for each
+/// tunnel.
+async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()> {
     let (fabric, fleet_id) = configured_fabric()?;
     let fleet_id =
         fleet_id.context("this machine is in no fleet, so no peer can attach its terminals")?;
     let fabric = fabric.context("`fabric` is not on PATH")?;
-    let socket = std::path::absolute(st3::config::terminal_socket(&config.state_dir))?;
     let protocol = st3::terminal_fabric::protocol(&fleet_id);
-    fabric.expose_socket(&protocol, &socket).await?;
-    println!(
-        "Fabric forwards `{protocol}` to the st daemon's terminal socket {}.",
-        socket.display()
-    );
+    if args.exec {
+        let st = match args.st {
+            Some(st) => std::path::absolute(st)?,
+            None => std::env::current_exe().context("find this st executable")?,
+        };
+        let pty_root = std::path::absolute(
+            config
+                .pty_root
+                .clone()
+                .unwrap_or_else(|| config.state_dir.join("pty")),
+        )?;
+        let (st, pty_root) = (st.display().to_string(), pty_root.display().to_string());
+        let argv = [
+            st.as_str(),
+            "terminals",
+            "serve-fabric",
+            "--stdio",
+            "--pty-root",
+            pty_root.as_str(),
+        ];
+        fabric.expose_exec(&protocol, &argv).await?;
+        println!("Fabric serves the PTY sessions under {pty_root} as `{protocol}`, with `{st}`.");
+    } else {
+        let socket = std::path::absolute(st3::config::terminal_socket(&config.state_dir))?;
+        fabric.expose_socket(&protocol, &socket).await?;
+        println!(
+            "Fabric forwards `{protocol}` to the st daemon's terminal socket {}.",
+            socket.display()
+        );
+    }
     println!(
         "Add `{protocol}` to the `allow` list of each peer in this machine's Fabric peers.toml, then run `fabric reload-peers`."
     );
