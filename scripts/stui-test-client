@@ -7,10 +7,11 @@ client costs the daemon.
 It starts st ui in a pseudo-terminal (no display), answers the terminal queries the UI
 makes, sends any `--keys`, then leaves it idle for `--seconds` and quits it with Ctrl+Q. Everything
 a real UI does at idle happens: the three collection windows, the glasses window, the followed
-conversation of the selected agent, and its periodic reads (clients every 10 s, usage every
-60 s, machines and devices). The connection names itself `stui <version> [LABEL]` in the
-`x-st3-client` header, so `st clients` and a profile tell it from a person's UI. Identity is the
-caller's, as for any st ui run from this account (`ST3_PERSON`, or the local default); a label is
+conversation of the selected agent, and optional screen inventory subscriptions. Supported
+members are followed without inventory timer reads; older members keep their explicit reads.
+The connection names itself `stui <version> [LABEL]` in the `x-st3-client` header, so `st clients`
+and a profile tell it from a person's UI. Identity is the caller's, as for any st ui run from
+this account (`ST3_PERSON`, or the local default); a label is
 never authority. Prints only a few status lines, never terminal contents.
 
 `--keys` takes text sent as typed, with `\\x1b`, `\\r` and `\\x0b` (Ctrl+K) escapes understood,
@@ -217,6 +218,7 @@ def say(screen: Screen, write, pump, events: Events, marker: str, timeout: float
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", default="target/release/st3")
+    parser.add_argument("--classic", action="store_true", help="run the classic tabs for a focused-screen transport check")
     parser.add_argument("--seconds", type=float, default=180)
     parser.add_argument("--label", default="measure")
     parser.add_argument("--rows", type=int, default=50)
@@ -242,6 +244,8 @@ def main() -> int:
         env["STUI_TIMING_LOG"] = arguments.timing
     events.write("start", binary_label=arguments.label)
     command = [arguments.binary, "ui"]
+    if arguments.classic:
+        command.append("--classic")
     process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env)
     os.close(slave)
     received = 0
@@ -277,7 +281,9 @@ def main() -> int:
         if arguments.say is not None:
             status = say(screen, write, pump, events, arguments.say, arguments.visible_timeout)
         print(f"test client up: pid {process.pid}, label {arguments.label!r}, idle for {arguments.seconds:g}s", flush=True)
+        events.write("idle_start")
         pump(arguments.seconds)
+        events.write("idle_end", running=process.poll() is None)
         if process.poll() is None:
             os.write(master, b"\x11")  # Ctrl+Q
             pump(3)

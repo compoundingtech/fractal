@@ -502,6 +502,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/harnesses", get(available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route("/v1/client/notes", get(directive_notes::read))
         .route("/v1/notes", axum::routing::put(directive_notes::write))
@@ -7193,6 +7194,15 @@ pub async fn serve_tcp(address: &str, app: Router) -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+async fn available_harnesses() -> Result<Json<Vec<String>>, ApiError> {
+    let harnesses = read_deadline::spawn_blocking(crate::environment::available_harnesses)
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    Ok(Json(harnesses))
+}
+
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({

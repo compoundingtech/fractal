@@ -106,6 +106,8 @@ const DEFAULT_DAEMON_WAIT_SECS: u64 = 30;
 
 #[derive(Subcommand)]
 enum Command {
+    /// Configure this machine and start st, with flags for unattended setup.
+    Setup(st3::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
     #[command(version = st_drivers::version::display_version())]
     Ui(stui::Args),
@@ -2686,11 +2688,11 @@ enum ServiceCommand {
 enum ClaudeChannelCommand {
     /// Install channel assets and approval policy; activate only in st seats.
     Install {
-        /// Install only plugin assets. An administrator will manage the machine policy.
+        /// Install user assets only; seats use development admission without machine policy.
         #[arg(long)]
         no_policy: bool,
     },
-    /// Verify the embedded files, Claude registration, plugin, and machine policy.
+    /// Verify user assets and report approved or development channel admission.
     Status,
     /// Remove the user plugin, marketplace, embedded files, and machine policy.
     Uninstall {
@@ -4813,8 +4815,18 @@ fn main() -> ExitCode {
         std::io::stdout().is_terminal(),
         std::env::var_os("ST_AGENT").is_some(),
     ) {
-        // setup-core adds st3::setup::prepare_plain_ui() here, before the TUI runtime.
-        return run_terminal_ui(stui::Args::default(), None);
+        let subject = match st3::setup::prepare_plain_ui() {
+            Ok(subject) => subject,
+            Err(error) => {
+                eprintln!("st: {}", plain_error(&error));
+                return ExitCode::FAILURE;
+            }
+        };
+        let options = match subject {
+            Some(subject) => stui::Args::default().with_initial_subject(subject),
+            None => stui::Args::default(),
+        };
+        return run_terminal_ui(options, None);
     }
     if cli_help::all_help_requested(&arguments) {
         print!("{}", cli_help::root_help(true));
@@ -4937,6 +4949,11 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
             .filter(|value| !value.is_empty())
             .context("the channel resume state has no runtime incarnation")?;
         return Ok(Some(incarnation.to_owned()));
+    }
+    // Serve scoped Claude MCP initialization while asynchronous bootstrap discovers
+    // and binds ownership. Local argument and resume validation above still applies.
+    if args.driver == "claude-mcp" {
+        return Ok(None);
     }
     let config = Config::load_unvalidated(None)?;
     let endpoint = cli
@@ -5191,6 +5208,9 @@ async fn run(cli: Cli) -> Result<()> {
     let own = std::env::var("ST_AGENT").ok();
     let mission_run = std::env::var("ST_MISSION_RUN").ok();
     guard_mutating_cli_actor(&cli.command, own.as_deref(), mission_run.as_deref())?;
+    if let Command::Setup(args) = cli.command {
+        return st3::setup::run(args).await.map(|_| ());
+    }
     // Completion is a remote device operation. It needs neither a local daemon nor its config.
     if let Command::Devices(DevicesArgs {
         command:
@@ -5295,6 +5315,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
     let immediate = Client::new(endpoint.clone());
     match cli.command {
+        Command::Setup(_) => unreachable!(),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
         Command::Ui(_) => unreachable!("the TUI runs before the CLI runtime"),
@@ -12171,7 +12192,10 @@ fn render_checkpoint_plan(plan: &st3::store::CheckpointPlanView) -> String {
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
     match command {
         ServiceCommand::Install { config } => {
-            st3::service::install(Config::load_with_fleet(config.as_deref())?)
+            st3::service::install_from_config_path(
+                Config::load_with_fleet(config.as_deref())?,
+                config.as_deref(),
+            )
         }
         ServiceCommand::Status => {
             let mut report = st3::service::status()?;
@@ -13717,6 +13741,33 @@ async fn run_agent_new(
     if args.print_kdl {
         print!("{kdl}");
         return Ok(());
+    }
+    let health: Value = client.get("/v1/health").await?;
+    let local = health["node"]
+        .as_str()
+        .context("the daemon health response has no node")?;
+    let host = args
+        .host
+        .as_deref()
+        .unwrap_or(local)
+        .trim_start_matches("host/");
+    if host == local || host == "local" {
+        match client.get::<Vec<String>>("/v1/harnesses").await {
+            Ok(available) => anyhow::ensure!(
+                available.contains(&args.harness),
+                "{} is not installed on the daemon's login PATH; install it and open a new login shell before creating a seat",
+                args.harness
+            ),
+            // An install does not restart the daemon, so a new st can meet an older daemon.
+            Err(error)
+                if st3::client::is_missing_route(&error) || st3::client::is_not_found(&error) =>
+            {
+                eprintln!(
+                    "st: the daemon is older than this st and cannot check which providers are installed; creating the seat anyway"
+                );
+            }
+            Err(error) => return Err(error),
+        }
     }
     let source_name = format!("st agents new {}", args.name);
     let preview: MissionResponse = client
@@ -18167,11 +18218,10 @@ async fn run_driver(client: &Client, args: DriverArgs, catalog: Option<&Path>) -
             None => NativePaths::legacy(subject, "claude")?,
         };
         if push_mailbox_enabled() {
-            let incarnation = wait_for_agent_incarnation(client, subject).await?;
             return st3::claude_channel::run(
                 client,
                 subject,
-                &incarnation,
+                wait_for_agent_incarnation(client, subject),
                 &paths.resolved(),
                 &paths.identity,
                 &paths.runtime_id,

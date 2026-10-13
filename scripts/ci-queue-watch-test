@@ -64,6 +64,36 @@ for producer, labels, gap, expected in [
     assert next(replies, None) is None
 print('passed: eligible owned-job five-minute alert, dependency wait and uncertain evidence exclusion')
 
+# Optional alert metadata errors cannot disable current-ref cancellation.
+for labels, expected_alerts in [(None, 0), (42, 1)]:
+    jobs = (200, {'jobs': [{'name': 'tests', 'status': 'queued', 'runner_id': 0, 'labels': labels}]})
+    responses = iter([jobs, current, jobs, removed, jobs, removed, (202, {})])
+    alerts, posts = [], []
+    def api(path, method='GET'):
+        if method == 'POST': posts.append(path)
+        return next(responses)
+    result = watch(api, 'example/project', '123', ref, sha, pause=lambda _: None,
+                   dependencies={'tests': []}, alert=alerts.append)
+    assert 'canceled' in result and len(posts) == 1
+    assert len(alerts) == expected_alerts and all('observation failed' in a for a in alerts)
+    assert next(responses, None) is None
+
+import os
+previous = os.environ.pop('QUEUE_DEPENDENCIES', None)
+try:
+    alerts = []
+    assert module['queue_dependencies'](alerts.append) == {} and not alerts
+    for value in ('{broken', '[]', '{"tests":null}', '{"tests":[42]}'):
+        os.environ['QUEUE_DEPENDENCIES'] = value
+        assert module['queue_dependencies'](alerts.append) == {}
+    assert len(alerts) == 4 and all('watchdog continues' in a for a in alerts)
+    os.environ['QUEUE_DEPENDENCIES'] = '{"tests":["build"]}'
+    assert module['queue_dependencies'](alerts.append) == {'tests': ['build']}
+finally:
+    if previous is None: os.environ.pop('QUEUE_DEPENDENCIES', None)
+    else: os.environ['QUEUE_DEPENDENCIES'] = previous
+print('passed: absent/config/null-label diagnostics preserve ref-watch cancellation; invalid observation reported')
+
 workflow = (root / ".github/workflows/fleet.yml").read_text()
 guard = workflow.split("  namespace-capacity:\n", 1)[1].split("  genie-freshness:\n", 1)[0]
 assert "ubuntu-latest" in guard

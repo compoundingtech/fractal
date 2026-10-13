@@ -394,5 +394,14 @@ grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
 `collectionSocket.test.mjs` checks authentication and control-event delivery at
 the native bridge boundary; it does not claim an iOS simulator was driven.
 
+The stui consumer is covered by `st3-feed/src/inventory_tests.rs` over an isolated
+Unix daemon: all six windows, typed client/usage adaptation, period replacement,
+unsubscription and authoritative reconnect snapshots.
+`stui/tests/client_only.rs::inventory_screens_send_no_request_after_their_first_frames_for_more_than_a_minute`
+drives the actual binary with `scripts/stui-test-client` and `STUI_TIMING_LOG`.
+Fleet and Usage each remain idle for 72 seconds; their first snapshots must occur
+once, every inventory HTTP read is forbidden, and no request follows ready frames
+for longer than the old 60-second interval.
+
 The usage inventory empty-graph socket test verifies that an open period uses the same wall-clock end as the HTTP read, then reconnects without a graph write.
 `st ui` opens the terminal interface; plain `st` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/st3/tests` exercise this entry point. Pair with `st devices complete`.

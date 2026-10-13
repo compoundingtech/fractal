@@ -2185,13 +2185,17 @@ pub(super) async fn agent_declaration(
         crate::graph::redact_agent_env_values(&mut tree);
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree).map_err(ApiError::bad)?;
-    Ok(Json(json!({
+    let accountable = st3_schema::accountable::from_desired(&tree)
+        .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
+    let mut value = json!({
         "id": subject,
         "revision": revision,
         "tree": tree,
         "kdl": kdl,
         "revisions": revisions,
-    })))
+    });
+    if let Some(person) = accountable { value["accountable"] = json!(person); }
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
@@ -14675,6 +14679,24 @@ mission "queue-parity" state="ready" {
     }
 
     #[tokio::test]
+    async fn accountable_root_declaration_read_exposes_typed_person() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = "version 2\nagent \"example/root\" { accountable \"person/avery\"; command \"true\"; }";
+        let intent = crate::graph::parse_intent(source, "terminal-test").unwrap();
+        let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
+        state.store.apply_as(&intent, &expected, "accountable-read", Some("person/avery")).unwrap();
+        let value = agent_declaration(State(state),
+            Extension(ClientSession::local(Some("person/avery")).unwrap()),
+            AxumPath("example/root".into()), Query(AgentDeclarationQuery {
+                revision: None, show_env_values: false,
+            })).await.unwrap().0;
+        assert_eq!(value["accountable"], "person/avery");
+        let decoded: st3_client::AgentDeclaration = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.accountable.as_deref(), Some("person/avery"));
+    }
+
+    #[tokio::test]
     async fn agent_declarations_require_sensitive_scope_and_select_exact_revision() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -20608,6 +20630,7 @@ mission "example/zero-run" state="ready" {
         let store = Store::open_memory("usage-attribution-node").unwrap();
         let desired = [
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-a".into(),
                 kind: "agent".into(),
                 desired: json!({}),
@@ -20617,6 +20640,7 @@ mission "example/zero-run" state="ready" {
                 owner_step: Some("step-run/gen-one/step-a".into()),
             },
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-b".into(),
                 kind: "agent".into(),
                 desired: json!({}),
@@ -20626,6 +20650,7 @@ mission "example/zero-run" state="ready" {
                 owner_step: Some("step-run/gen-one/step-b".into()),
             },
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-other".into(),
                 kind: "agent".into(),
                 desired: json!({}),
