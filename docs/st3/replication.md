@@ -79,8 +79,8 @@ production digest registry in the same change. A new shared claim-derived view m
 its answer at the same explicit time and recipients. Local pagination metadata may order by
 local arrival; shared winner selection must remain independent of that order.
 
-The [canonical projections audit](canonical-projections-audit.md) records the original gaps and
-local exceptions. Modern status reports a graph digest over the complete projection registry,
+The [data-authority reference](data-authority.md) classifies shared projections and local
+exceptions. Status reports a graph digest over the complete projection registry,
 plus one digest for every table. The original six-table hash remains a compatibility field on
 the peer protocol; it cannot prove that every shared outcome agrees.
 
