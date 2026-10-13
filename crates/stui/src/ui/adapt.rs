@@ -35,6 +35,8 @@ pub struct Extras {
     pub agents_live: bool,
     /// st's own counts, when it serves them.
     pub summary: Option<st3_client::Summary>,
+    pub inventory_supported: Option<bool>,
+    pub inventory_partial: Vec<String>,
 }
 
 fn now() -> String {
@@ -165,7 +167,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let stale = extras
         .window_errors
         .iter()
-        .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str()))
+        .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
         .map(|(name, why)| format!("{name}: {why}"))
         .chain(
             extras
@@ -186,9 +189,9 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents(model, &missions), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
-        machines: loaded(model.machines.snapshot.is_some(), machines(model)),
+        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model), extras.window_errors.get("machines")),
         worktrees: Load::Ready(super::demo::world().worktrees.items().to_vec()),
-        devices: loaded(
+        devices: loaded_or_why(
             model.devices.snapshot.is_some(),
             model
                 .devices()
@@ -202,6 +205,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
                     expires: device.expires_at.clone(),
                 })
                 .collect(),
+            extras.window_errors.get("devices"),
         ),
         conversations: extras.conversations.clone(),
         quiet_missions: quiet,
@@ -228,6 +232,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Err(why)) => Load::Failed(why.clone()),
             None => Load::Loading,
         },
+        inventory_supported: extras.inventory_supported,
+        inventory_partial: extras.inventory_partial.clone(),
     }
 }
 

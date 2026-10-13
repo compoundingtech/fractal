@@ -29,7 +29,7 @@ pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 /// than the chunk itself, so this is well under the writer's 100 ms target.
 pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// A point in a trim where a test makes it stop, as a crash would there.
+/// A condition a test injects into a trim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrimFault {
     /// This many chunks of tombstones are recorded, and the checkpoint is still `recording`.
@@ -40,6 +40,9 @@ pub enum TrimFault {
     AfterChunk(usize),
     /// Every row is deleted and the checkpoint is not yet marked trimmed.
     BeforeFinish,
+    /// The first deletion chunk starts with its time budget already spent.
+    #[cfg(test)]
+    ExpireChunkBudget,
     /// The first chunk bumps the graph generation without changing the graph.
     TouchGraph,
     /// The first chunk changes a graph table, as a trim must never do.
@@ -146,7 +149,7 @@ pub enum Application {
 }
 
 impl Store {
-    /// Make the next trim stop at `fault`, as a crash would. Tests only.
+    /// Arm a fault in the next trim. Tests only.
     pub fn set_trim_fault(&self, fault: Option<TrimFault>) {
         *self
             .trim_fault
@@ -661,6 +664,16 @@ impl Store {
             let mut connection = self.connection.write();
             let transaction = connection.transaction()?;
             let started = std::time::Instant::now();
+            #[cfg(test)]
+            let started = {
+                let mut fault = self.trim_fault.lock().unwrap_or_else(PoisonError::into_inner);
+                if *fault == Some(TrimFault::ExpireChunkBudget) {
+                    *fault = None;
+                    started - TRIM_CHUNK_BUDGET
+                } else {
+                    started
+                }
+            };
             let most = self.trim_chunk_envelopes.load(Ordering::Acquire);
             // Deleting claims touches no graph table, so the generation stays. Only if it moved
             // are the digests themselves compared, before and after, in this transaction.
@@ -669,7 +682,9 @@ impl Store {
             let mut envelopes = Vec::new();
             let mut claims = Vec::new();
             let mut steps = 0;
-            while steps < most && started.elapsed() < TRIM_CHUNK_BUDGET {
+            // Only an empty lookup proves exhaustion. Even if transaction setup spent the
+            // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
+            while steps < most && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET) {
                 let (envelope, envelope_claims) = next_trim_rows(&transaction, &mut cursor)?;
                 if envelope.is_none() && envelope_claims.is_empty() {
                     break;

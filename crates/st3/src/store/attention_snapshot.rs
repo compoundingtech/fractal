@@ -596,6 +596,20 @@ impl Store {
         if !matches!(status, "failed" | "cancelled") {
             return Ok(None);
         }
+        if status == "cancelled" {
+            // Cancellation before admission changes the loop step's state without ever
+            // starting a round. A stopped-loop fault needs round activity in that case;
+            // structural failures still need attention even before the first round.
+            smallclaims::touched::note_read(|| format!("children-of-step:{}", view.subject));
+            let has_round: bool = self.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE parent_step_run=?1)",
+                [&view.subject],
+                |row| row.get(0),
+            )?;
+            if !has_round {
+                return Ok(None);
+            }
+        }
         let reason = state
             .body
             .pointer("/fields/reason")

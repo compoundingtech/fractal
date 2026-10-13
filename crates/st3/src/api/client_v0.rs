@@ -92,10 +92,11 @@ pub(super) mod search;
 pub(super) mod arrangements;
 pub(super) mod conversation_blocks;
 mod collection_windows;
+mod inventory;
 mod collection_ivm;
 #[cfg(test)]
 mod collection_refresh_tests;
-mod summary;
+pub(in crate::api) mod summary;
 
 #[cfg(test)]
 mod stream_start_tests;
@@ -137,6 +138,14 @@ struct CollectionSubscribe {
     subject: Option<String>,
     actor: Option<String>,
     status: Option<String>,
+    /// Usage period boundaries; an omitted end follows new usage through the current time.
+    since_ms: Option<u64>,
+    until_ms: Option<u64>,
+    /// Complete process coverage captured by an inventory read, before window truncation.
+    #[serde(skip)]
+    native_processes: Option<Arc<Mutex<Vec<u32>>>>,
+    #[serde(skip)]
+    inventory_deadline: Option<Arc<Mutex<Option<u128>>>>,
     /// A terminal subscription names the terminal, the incarnation `terminal.attach` fenced,
     /// and the single-use stream capability that attach returned.
     terminal: Option<String>,
@@ -172,6 +181,10 @@ struct CollectionSubscription {
     view_revision: u64,
     /// When the client subscribed, until its first snapshot is sent.
     opened: Option<std::time::Instant>,
+    /// The window's last read found its governed view not ready, and the client was told: it
+    /// waits for the view's next change. A paired session's clock still reads it, so an expired
+    /// or revoked grant still ends it, but another not-ready read sends nothing.
+    waiting_for_view: bool,
 }
 
 const COLLECTION_MAX_SUBSCRIPTIONS: usize = 16;
@@ -244,6 +257,14 @@ fn collection_ignores(collection: &str, kind: &str) -> bool {
     // including otherwise graph-only glasses and arrangements.
     if matches!(kind, "custom.client.pairing-completed" | "custom.client.pairing-revoked") {
         return false;
+    }
+    match collection {
+        "machines" if kind == "transport.observed" => return false,
+        "usage" => return !kind.starts_with("document.") && !matches!(kind, "harness.usage" | "harness.limits" | "message.sent" | "message.staged" | "message.delivered"),
+        "clients" | "devices" => return !kind.starts_with("custom.client.pairing-"),
+        // Terminal declarations and imported session ownership
+        // use the same graph inputs as the existing windows. Keep their conservative coverage.
+        _ => {},
     }
     if collection == "glasses" { return !kind.starts_with("glass."); }
     if collection == "arrangements" {
@@ -382,9 +403,11 @@ async fn collection_items_with_windows(
     if !matches!(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "summary"
+            | "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals"
     ) {
         return Err(validation("unknown collection subscription"));
     }
+    inventory::validate(request)?;
     if request.collection == "summary"
         && (request.actor.is_some() || request.status.is_some() || request.subject.is_some())
     {
@@ -451,11 +474,14 @@ async fn collection_items_with_windows(
             }
         }
         Some(person)
-    } else if matches!(request.collection.as_str(), "attention" | "summary") {
+    } else if matches!(request.collection.as_str(), "attention" | "summary" | "devices") {
         person_filter(session, request.person.as_deref())?
     } else {
         None
     };
+    if request.collection == "devices" && person.as_deref().is_none_or(|person| !person.starts_with("person/")) {
+        return Err(forbidden("device inventory requires an explicitly authenticated person"));
+    }
     let prepared = windows.as_ref().and_then(|windows| windows.prepare(state, current, request));
     let state = state.clone();
     let session = session.clone();
@@ -522,7 +548,7 @@ async fn collection_items_with_windows(
                             request.person.as_deref(),
                             false,
                         )?),
-                        "attention" | "summary" => person_filter(&current, request.person.as_deref())?,
+                        "attention" | "summary" | "devices" => person_filter(&current, request.person.as_deref())?,
                         _ => person.clone(),
                     };
                     Ok::<_, ApiError>((current, person))
@@ -580,8 +606,103 @@ async fn collection_items_with_windows(
                 } else {
                     None
                 };
+                // While a refresher serves the missions list, a missions window serves its newest
+                // publication under that list's own cut and never folds the missions it shows.
+                // Before the first publication, or while the refresher is failing, it folds on
+                // read as without one.
+                let published_missions = (collection == "missions")
+                    .then(|| store.published_missions())
+                    .flatten();
+                // A work window serves the published list for its actor while its refresher runs,
+                // and never folds it on read meanwhile: with no current publication it is not
+                // ready, and once the refresher has ended, unavailable. With no refresher started
+                // it reads directly, as before.
+                let published_work = if collection == "work" {
+                    use crate::store::published_list::ListRead;
+                    match store.published_work_list().current() {
+                        ListRead::Served(publication, _) => Some(publication),
+                        // Held: a refresher governs it, though it has not started yet.
+                        ListRead::NeverStarted if store.collection_view_published("work") => {
+                            return Ok(Err(super::published_lists::work_list_not_ready()));
+                        }
+                        // Explicit off, or nothing ever governed it: the direct read.
+                        ListRead::NeverStarted => None,
+                        ListRead::NotReady => {
+                            store.published_work_list().request_refresh();
+                            return Ok(Err(super::published_lists::work_list_not_ready()));
+                        }
+                        ListRead::Ended => return Ok(Err(super::published_lists::work_list_ended())),
+                    }
+                } else {
+                    None
+                };
+                let list_cut = published_missions.as_ref().map(|list| (list.cut, list.published_at_unix_ms))
+                    .or_else(|| published_work.as_ref().map(|list| (list.cut, list.published_at_unix_ms)));
+                if let Some((cut, at)) = list_cut {
+                    published = Some(cut);
+                    published_at = Some(at);
+                }
                 // A window hit reuses rows an earlier exact fold computed at this cut.
                 let folded = std::cell::Cell::new(false);
+                // A daemon's windows never fold attention or read glasses and arrangements:
+                // they serve the newest published view under that view's own cut, and wake its
+                // refresher when it is older.
+                let published_rows = if store.published_view_serving(&collection) {
+                    use super::published_attention::{published_attention_rows, published_owner_rows};
+                    use crate::store::owner_lists::OwnerView;
+                    let rows = match collection.as_str() {
+                        "attention" => Some(published_attention_rows(
+                            &store, index, person.as_deref(), limit.saturating_add(1),
+                        )),
+                        "summary" => {
+                            use crate::store::summary_list::PublishedSummary;
+                            match store.published_summary(person.as_deref()) {
+                                PublishedSummary::Row(cut, at, row) => {
+                                    if cut < index {
+                                        store.request_attention_list_refresh();
+                                    }
+                                    Some(Some((cut, at, vec![row])))
+                                }
+                                // Not published yet: counted at once from the published
+                                // shared counts and attention rows, as the refresher will.
+                                PublishedSummary::Pending => {
+                                    store.request_attention_list_refresh();
+                                    Some(summary::published_row(&store, person.as_deref())
+                                        .map(|(cut, at, row)| (cut, at, vec![row])))
+                                }
+                                // A selection it does not serve: this window reads its own.
+                                PublishedSummary::Unserved => None,
+                            }
+                        }
+                        "glasses" => Some(published_owner_rows(
+                            &store, OwnerView::Glasses, index,
+                            person.as_deref().expect("authenticated glass owner"),
+                        )),
+                        "arrangements" => Some(published_owner_rows(
+                            &store, OwnerView::Arrangements, index,
+                            person.as_deref().expect("explicit arrangement owner"),
+                        ).map(|(cut, at, mut rows)| {
+                            if let Some(subject) = &subject {
+                                rows.retain(|row| row["id"] == subject.as_str());
+                            }
+                            (cut, at, rows)
+                        })),
+                        _ => None,
+                    };
+                    match rows {
+                        Some(Some((cut, at, rows))) => {
+                            published = Some(cut);
+                            published_at = Some(at);
+                            Some(rows)
+                        }
+                        Some(None) => {
+                            return Ok(Err(super::published_attention::published_view_not_ready(&collection)));
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
                 let snapshot = match published_at {
                     Some(at) => super::roster_snapshot(&state, published.unwrap_or(index), at),
                     None => client_snapshot_at(&state, index),
@@ -590,8 +711,18 @@ async fn collection_items_with_windows(
                 let compute = || {
                     let mut items = match collection.as_str() {
                         "summary" => {
+                            if let Some(rows) = &published_rows {
+                                return Ok((rows.clone(), false));
+                            }
                             return Ok((summary::native(&state, &current, &request, &snapshot,
                                 now, windows.as_deref(), commits)?, false));
+                        }
+                        "missions" if published_missions.is_some() => {
+                            let publication = published_missions.as_ref().expect("published missions");
+                            return super::published_lists::mission_window(&publication.rows, limit);
+                        }
+                        "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals" => {
+                            return inventory::items(&state, &current, &request, &snapshot);
                         }
                         "missions" => {
                             let mut ids =
@@ -601,6 +732,9 @@ async fn collection_items_with_windows(
                             let mut items = mission_list_cards_at(&store, &ids, now)?;
                             has_more |= bound_mission_cards(&mut items)?;
                             return Ok((items, has_more));
+                        }
+                        "glasses" | "arrangements" if published_rows.is_some() => {
+                            published_rows.clone().expect("published rows")
                         }
                         "glasses" => store.glasses(
                             person.as_deref().expect("authenticated glass owner"),
@@ -616,9 +750,10 @@ async fn collection_items_with_windows(
                                 )?
                             }
                         }
-                        "attention" => {
-                            client_attention_resources_at(&store, person.as_deref(), false, now)?
-                        }
+                        "attention" => match &published_rows {
+                            Some(rows) => rows.clone(),
+                            None => client_attention_resources_at(&store, person.as_deref(), false, now)?,
+                        },
                         "agents" => {
                             // Published cards already exist; a cold unfiltered window folds
                             // only its visible cards and gets has_more from shallow membership.
@@ -634,6 +769,12 @@ async fn collection_items_with_windows(
                                     client_agent_resources_cached(&store, false, index)?
                                 }
                             }
+                        }
+                        "work" if published_work.is_some() => {
+                            let publication = published_work.as_ref().expect("published work");
+                            return Ok(super::published_lists::work_window(
+                                &publication.rows, actor.as_deref(), limit,
+                            ));
                         }
                         "work" => client_work_resources(
                             &store,
@@ -749,6 +890,12 @@ fn collection_window_label(collection: &str) -> &'static str {
         "glasses" => "stream collection/glasses",
         "arrangements" => "stream collection/arrangements",
         "summary" => "stream collection/summary",
+        "clients" => "stream collection/clients",
+        "usage" => "stream collection/usage",
+        "machines" => "stream collection/machines",
+        "devices" => "stream collection/devices",
+        "sessions" => "stream collection/sessions",
+        "terminals" => "stream collection/terminals",
         _ => "stream collection/invalid",
     }
 }
@@ -783,6 +930,9 @@ enum Refreshed {
     Current,
     /// A retryable read failed; keep the subscription and schedule another read.
     Retry,
+    /// A published view's refresher has nothing current to serve: keep the subscription. A view
+    /// its refresher governs is read again when it next changes, not on the reread interval.
+    NotReady,
     /// A permanent refusal ended the subscription.
     Dropped,
     /// The socket closed.
@@ -811,6 +961,8 @@ async fn deliver_collection(
             .await;
             return if !sent {
                 Refreshed::Closed
+            } else if retryable && error.code == super::published_lists::WORK_LIST_NOT_READY {
+                Refreshed::NotReady
             } else if retryable {
                 Refreshed::Retry
             } else {
@@ -820,6 +972,13 @@ async fn deliver_collection(
     };
     if request.collection == "summary" {
         summary::retain_timestamp(&mut items, &subscription.previous);
+    }
+    if request.collection == "usage" {
+        for row in &mut items {
+            if let Some(previous) = row["id"].as_str().and_then(|id| subscription.previous.get(id))
+                && row["revision"] == previous["revision"]
+            { row["updated_at"] = previous["updated_at"].clone(); }
+        }
     }
     let order = items
         .iter()
@@ -1208,6 +1367,39 @@ fn conversation_stream_error(id: &str, error: &ApiError) -> Value {
         "retryable":client_error_retryable(error.status, Some(&error.code))})
 }
 
+/// Attribute re-OPENs without changing the frames or replay cursor clients receive.
+fn record_conversation_reopen(
+    id: &str, session_id: &str, remote: bool, reason: &str, code: &str, bytes: usize,
+) {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.reopen",
+        st.subscription.id = id,
+        st.session.id = session_id,
+        st.remote = remote,
+        st.conversation.reopen.reason = reason,
+        st.error.code = code,
+        st.page.bytes = bytes,
+    ).entered();
+}
+
+fn conversation_replay_gap(session_id: &str, reason: &str, message: &str) -> ApiError {
+    let _span = tracing::info_span!(
+        parent: None,
+        "st.conversation.replay_gap",
+        st.session.id = session_id,
+        st.conversation.gap.reason = reason,
+    ).entered();
+    ApiError {
+        status: StatusCode::GONE,
+        code: "cursor-gap".into(),
+        message: message.into(),
+        details: Box::new(serde_json::Map::from_iter([(
+            "full_resync".into(), Value::Bool(true),
+        )])),
+    }
+}
+
 /// Follow a conversation with no subscription time. The collections socket calls
 /// [`follow_conversation_since`]; this form is for the tests that exercise the follower itself.
 #[cfg(test)]
@@ -1328,7 +1520,9 @@ async fn follow_conversation_since(
                             frame["header"] = header.clone();
                         }
                         // Too much changed for one frame: send the newest page instead.
-                        if frame_bytes(&frame) > CLIENT_MAX_RESPONSE_BYTES {
+                        let bytes = frame_bytes(&frame);
+                        if bytes > CLIENT_MAX_RESPONSE_BYTES {
+                            record_conversation_reopen(&id, &session_id, remote.is_some(), "delta-oversize", "", bytes);
                             break;
                         }
                         if queue.send(|| outbox.send((id.clone(), generation, frame))).is_err() {
@@ -1340,9 +1534,11 @@ async fn follow_conversation_since(
                 Err(error)
                     if matches!(error.code.as_str(), "cursor-gap" | "page-cursor-expired") =>
                 {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "replay-gap", &error.code, 0);
                     break;
                 }
                 Err(error) if client_error_retryable(error.status, Some(&error.code)) => {
+                    record_conversation_reopen(&id, &session_id, remote.is_some(), "retryable-error", &error.code, 0);
                     tokio::time::sleep(COLLECTION_REREAD_INTERVAL).await;
                     break;
                 }
@@ -1496,8 +1692,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     let mut changed = state.event_notify.subscribe();
     let mut roster = state.store.subscribe_agent_roster();
     let mut views = state.store.subscribe_collection_views();
+    let mut presence_changes = super::client_presence::subscribe();
+    let mut native_watch: Option<inventory::NativeWatch> = None;
+    let mut native_watch_pending: Option<tokio::task::JoinHandle<Result<inventory::NativeWatch, ApiError>>> = None;
     let windows = collection_windows::Windows::attach(&state.store);
-    let mut window_revisions = [0; 8];
+    let mut window_revisions = [0; collection_windows::COLLECTIONS.len()];
     let mut subscriptions = BTreeMap::<String, CollectionSubscription>::new();
     let mut terminals = BTreeMap::<String, watch::Receiver<TerminalFrame>>::new();
     // When each terminal subscription began, until its first screen is sent.
@@ -1532,9 +1731,17 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     loop {
         // The subscriptions to read after this wake-up.
         let mut refresh = Vec::<String>::new();
+        if !subscriptions.values().any(|s| s.request.collection == "sessions") { native_watch = None; }
+        if native_watch_pending.is_some() {
+            reread_due.retain(|id| subscriptions.get(id).is_some_and(|s| s.request.collection != "sessions"));
+        }
         // A command already waiting goes first: under steady commits a commit wake is almost
         // always ready too, and a fair pick could keep rereading the held windows while a new
         // subscription waits. Otherwise every source gets a fair pick.
+        let now = client_now_ms();
+        let expirations = subscriptions.iter().filter(|(id, s)| s.delivered && s.reading.is_none() && !reread_due.contains(*id))
+            .filter_map(|(id, s)| inventory::next_expiry(s).map(|at| (id.clone(), at))).collect::<Vec<_>>();
+        let expiry = expirations.iter().map(|(_, at)| *at).min();
         let waiting = futures_util::FutureExt::now_or_never(socket.recv());
         let command_waiting = waiting.is_some();
         tokio::select! {
@@ -1552,7 +1759,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             { return; }
                             break 'command;
                         };
-                        let Ok(request) = serde_json::from_str::<CollectionSubscribe>(&payload) else {
+                        let Ok(mut request) = serde_json::from_str::<CollectionSubscribe>(&payload) else {
                             if !send_collection(&mut socket, json!({"kind":"error", "message":"invalid collection command"})).await { return; }
                             break 'command;
                         };
@@ -1570,6 +1777,23 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         if request.kind != "subscribe" || request.id.is_empty() || request.id.len() > 128 || subscriptions.len() + terminals.len() + conversations.0.len() >= COLLECTION_MAX_SUBSCRIPTIONS && !held {
                             if !send_collection(&mut socket, json!({"kind":"error", "id":request.id, "message":"invalid subscription or subscription limit exceeded"})).await { return; }
                             break 'command;
+                        }
+                        if inventory::is_inventory(&request.collection) {
+                            request.inventory_deadline = Some(Arc::new(Mutex::new(None)));
+                        }
+                        if request.collection == "sessions" && native_watch.is_none() && native_watch_pending.is_none()
+                            && let Some(home) = &state.native_session_home
+                        {
+                            let home = home.clone();
+                            // Installing recursive source watches may touch cold directories. It
+                            // runs independently, before the first session snapshot, while all
+                            // other subscription commands and frames continue to be served.
+                            native_watch_pending = Some(tokio::spawn(async move {
+                                blocking_store(move || inventory::NativeWatch::open(&home)).await
+                            }));
+                        }
+                        if request.collection == "sessions" && let Some(watch) = &native_watch {
+                            request.native_processes = Some(watch.processes_in_read.clone());
                         }
                         // What this client follows, for clients.list.
                         if let Some(presence) = &presence {
@@ -1636,7 +1860,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         refresh.push(request.id.clone());
                         // Collection results and conversation frames share the same generation fence.
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -1648,19 +1872,51 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 if subscription.generation != generation { continue; }
                 subscription.reading = None;
                 if std::mem::take(&mut subscription.dirty) { refresh.push(id.clone()); }
+                if subscription.request.collection == "sessions"
+                    && let CollectionRead::Legacy(Ok(_)) = &result
+                    && let Some(watch) = &mut native_watch
+                {
+                    match watch.observe_processes() {
+                        Ok(true) => { reread_due.insert(id.clone()); }
+                        Ok(false) => {},
+                        Err(error) => {
+                            if !send_collection(&mut socket, json!({"kind":"error", "id":id, "retryable":false, "code":"internal", "message":error.to_string()})).await { return; }
+                            subscriptions.remove(&id);
+                            reread_due.remove(&id);
+                            first_frames.remove(&id);
+                            continue;
+                        }
+                    }
+                }
+                let governed = state.store.collection_view_published(&subscription.request.collection);
                 let first_span = first_frames.get(&id).map(|first| first.span.clone());
                 let refreshed = first_frame_work(first_span, async {
                     match result {
+                        // Already told: the same not-ready answer is not sent again. The read still
+                        // rechecked a paired session's authority before it got this far.
+                        CollectionRead::Legacy(Err(error)) if subscription.waiting_for_view && governed
+                            && error.code == super::published_lists::WORK_LIST_NOT_READY
+                            && client_error_retryable(error.status, Some(&error.code)) => Refreshed::NotReady,
                         CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result).await,
                         CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh).await,
                     }
                 }).await;
                 if subscription.delivered { first_frames.remove(&id); }
+                subscription.waiting_for_view = matches!(refreshed, Refreshed::NotReady) && governed;
                 match refreshed {
                     Refreshed::Current => {}
                     Refreshed::Retry => {
                         if subscription.ivm.is_some() { subscription.dirty = true; }
                         else { reread_due.insert(id.clone()); }
+                    }
+                    // A governed view rereads when it next changes: its next publication, hold
+                    // or invalidation bumps the revision this read started at. A reread already
+                    // due stays due: it may be that change's.
+                    Refreshed::NotReady => {
+                        if !governed {
+                            if subscription.ivm.is_some() { subscription.dirty = true; }
+                            else { reread_due.insert(id.clone()); }
+                        }
                     }
                     Refreshed::Dropped => { subscriptions.remove(&id); reread_due.remove(&id); first_frames.remove(&id); }
                     Refreshed::Closed => return,
@@ -1747,6 +2003,59 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 }
                 refresh.extend(reread_due.iter().cloned());
             }
+            () = async {
+                let at = expiry.expect("held inventory expiry");
+                tokio::time::sleep(Duration::from_millis(at.saturating_sub(now).min(u64::MAX as u128) as u64)).await;
+            }, if !command_waiting && expiry.is_some() => {
+                let now = client_now_ms();
+                reread_due.extend(expirations.iter().filter(|(_, at)| *at <= now).map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
+            result = async { native_watch_pending.as_mut().expect("pending native watcher").await }, if !command_waiting && native_watch_pending.is_some() => {
+                native_watch_pending = None;
+                match result.unwrap_or_else(|error| Err(ApiError::internal(error))) {
+                    Ok(watch) => {
+                        for (id, subscription) in subscriptions.iter_mut().filter(|(_, s)| s.request.collection == "sessions") {
+                            subscription.request.native_processes = Some(watch.processes_in_read.clone());
+                            refresh.push(id.clone());
+                        }
+                        native_watch = Some(watch);
+                    }
+                    Err(error) => {
+                        let refused = subscriptions.iter().filter(|(_, s)| s.request.collection == "sessions").map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                        for id in refused {
+                            if !send_collection(&mut socket, json!({"kind":"error", "id":id, "code":error.code, "message":error.message, "retryable":false})).await { return; }
+                            subscriptions.remove(&id);
+                            reread_due.remove(&id);
+                            first_frames.remove(&id);
+                        }
+                    }
+                }
+            }
+            result = async { native_watch.as_mut().expect("held watcher").changed().await }, if !command_waiting && native_watch.is_some() => {
+                if let Err(error) = result {
+                    let refused = subscriptions.iter().filter(|(_, s)| s.request.collection == "sessions").map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                    for id in refused {
+                        if !send_collection(&mut socket, json!({"kind":"error", "id":id, "retryable":false, "code":"internal", "message":error.to_string()})).await { return; }
+                        subscriptions.remove(&id);
+                        reread_due.remove(&id);
+                        first_frames.remove(&id);
+                    }
+                    native_watch = None;
+                    continue;
+                }
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "sessions").map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
+            result = presence_changes.recv(), if !command_waiting => {
+                if result.as_ref().is_ok_and(|member| member != &state.node) { continue; }
+                if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
+                reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "clients").map(|(id, _)| id.clone()));
+                if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
+                refresh.extend(reread_due.iter().cloned());
+            }
             result = roster.changed(), if !command_waiting => {
                 if result.is_err() { return; }
                 // A window read before this roster was published rereads it.
@@ -1775,7 +2084,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // overlays are rechecked on reads.
                 let paired = session.transport != "unix";
                 refresh.extend(subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
-                    && (paired || collection_follows_clock(&s.request.collection)))
+                    && (paired && !inventory::is_inventory(&s.request.collection) || collection_follows_clock(&s.request.collection)))
                     .map(|(id, _)| id.clone()));
             }
             _ = ping_clock.tick() => {
@@ -1820,7 +2129,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
         refresh.sort_unstable();
         refresh.dedup();
         // A permanently refused dirty window no longer counts toward held-window refreshes.
-        refresh.retain(|id| subscriptions.contains_key(id));
+        refresh.retain(|id| subscriptions.get(id).is_some_and(|s|
+            s.request.collection != "sessions" || native_watch_pending.is_none()));
         if refresh.is_empty() {
             continue;
         }
@@ -1978,13 +2288,17 @@ pub(super) async fn agent_declaration(
         crate::graph::redact_agent_env_values(&mut tree);
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree).map_err(ApiError::bad)?;
-    Ok(Json(json!({
+    let accountable = st3_schema::accountable::from_desired(&tree)
+        .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
+    let mut value = json!({
         "id": subject,
         "revision": revision,
         "tree": tree,
         "kdl": kdl,
         "revisions": revisions,
-    })))
+    });
+    if let Some(person) = accountable { value["accountable"] = json!(person); }
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
@@ -2045,35 +2359,8 @@ pub(super) async fn usage_period(
             "usage start must be before its end",
         )));
     }
-    let store = state.store.clone();
-    let (mut rows, agent_messages, limits) = blocking_store(move || {
-        let (rows, agent_messages) = store.usage_period_report(since_ms, until_ms)?;
-        Ok((
-            rows,
-            agent_messages,
-            store.account_limits()?,
-        ))
-    })
-    .await?;
-    for row in &mut rows {
-        if let Some(fields) = row.as_object_mut() {
-            fields.retain(|_, value| value.as_str() != Some(""));
-        }
-    }
-    // The shared account limits selection; what a harness did not report is left out.
-    let limits = limits
-        .into_iter()
-        .map(|limit| {
-            let mut value = serde_json::to_value(limit).unwrap_or_default();
-            if let Some(fields) = value.as_object_mut() {
-                fields.retain(|_, value| !value.is_null());
-            }
-            value
-        })
-        .collect::<Vec<_>>();
-    Ok(Json(
-        json!({ "since_ms": since_ms, "until_ms": until_ms, "rows": rows, "limits": limits, "agent_messages": agent_messages }),
-    ))
+    let value = blocking_store(move || inventory::usage_value(&state.store, since_ms, until_ms)).await?;
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
@@ -2350,6 +2637,7 @@ pub(super) struct ClientSession {
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
     pub(super) pairing_grant: Option<String>,
+    grant_expires_at: Option<u128>,
     pub(super) transport: &'static str,
     pub(super) custom_forms: bool,
     pub(super) conversation_blocks: bool,
@@ -2363,6 +2651,7 @@ impl ClientSession {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport,
             custom_forms: true,
             conversation_blocks: false,
@@ -2397,6 +2686,7 @@ impl ClientSession {
                 actor: "client/local/read-only".into(),
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
+            grant_expires_at: None,
                 transport: "unix",
                 custom_forms,
                 conversation_blocks: false,
@@ -2412,6 +2702,7 @@ impl ClientSession {
             actor: person.into(),
             authority_actor: person.into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport: "unix",
             custom_forms,
             conversation_blocks: false,
@@ -2424,6 +2715,7 @@ impl ClientSession {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport: "fabric-loopback",
             custom_forms: false,
             conversation_blocks: false,
@@ -2469,6 +2761,7 @@ pub(super) fn capabilities(session: &ClientSession) -> Vec<Value> {
     // Attention rows say whether each is an alert and name its agent conversation; `alerts` names
     // the attention collection and routes, and the summary counts alerts.
     capabilities.push(json!({"id":"alerts", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"owned-sets", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -2643,6 +2936,7 @@ fn paired_client_session(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
+        grant_expires_at: Some(expires_at),
         transport,
         custom_forms,
         conversation_blocks: false,
@@ -2767,7 +3061,17 @@ fn mission_list_cards_at(
     ids: &[String],
     at_unix_ms: u128,
 ) -> anyhow::Result<Vec<Value>> {
-    let attention = store.human_attention_runs()?;
+    mission_list_cards_with(store, ids, at_unix_ms, &store.human_attention_runs()?)
+}
+
+/// [`mission_list_cards_at`] with the runs that wait on a person already read, as the published
+/// missions list keeps them.
+pub(super) fn mission_list_cards_with(
+    store: &Store,
+    ids: &[String],
+    at_unix_ms: u128,
+    attention: &BTreeSet<String>,
+) -> anyhow::Result<Vec<Value>> {
     let definitions = store
         .mission_definitions_for_ids(ids)?
         .into_iter()
@@ -2837,7 +3141,7 @@ fn mission_list_cards_at(
     }).collect()
 }
 
-fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
+pub(super) fn bound_mission_cards(items: &mut Vec<Value>) -> anyhow::Result<bool> {
     // Reserve room for the envelope, continuation cursor and fleet sync notice.
     let budget = CLIENT_MAX_RESPONSE_BYTES.saturating_sub(128_000);
     let mut used = 0;
@@ -4855,7 +5159,9 @@ fn device_resources(
             _ => {}
         }
     }
-    let at = client_snapshot_time(snapshot);
+    // Pairing and revocation are fenced by the graph snapshot above. Expiration is
+    // live state: its clock must advance even when no claim advances that snapshot.
+    let at = client_now_ms();
     let mut resources = paired
         .into_iter()
         .map(|(device_id, (completed, revoked))| {
@@ -4904,6 +5210,15 @@ pub(super) async fn clients_list(
     Extension(session): Extension<ClientSession>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
+    let items = client_connection_items(&state, &snapshot)?;
+    Ok(Json(json!({
+        "kind": "client-connections",
+        "member": super::client_host_id(&state.node),
+        "items": items,
+    })))
+}
+
+fn client_connection_items(state: &AppState, snapshot: &ClientSnapshot) -> Result<Vec<Value>, ApiError> {
     let mut items = super::client_presence::list(&state.node, super::client_now_ms());
     // A paired phone acts as person/NAME/session/ID: name its device.
     let people = items
@@ -4914,7 +5229,7 @@ pub(super) async fn clients_list(
         .collect::<BTreeSet<_>>();
     let mut devices = BTreeMap::<String, (Value, Value)>::new();
     for person in people {
-        for device in device_resources(&state, &snapshot, &person)? {
+        for device in device_resources(state, snapshot, &person)? {
             if let Some(actor) = device["session_actor"].as_str() {
                 devices.insert(actor.to_owned(), (device["id"].clone(), device["name"].clone()));
             }
@@ -4926,11 +5241,7 @@ pub(super) async fn clients_list(
             item["device_name"] = name.clone();
         }
     }
-    Ok(Json(json!({
-        "kind": "client-connections",
-        "member": super::client_host_id(&state.node),
-        "items": items,
-    })))
+    Ok(items)
 }
 
 pub(super) async fn devices(
@@ -6428,6 +6739,10 @@ fn timeline_first_page(
             continue;
         }
         if claim.subject == owner && claim.kind == "harness.diagnostic" {
+            // Protocol initialization is informational component evidence, not an error.
+            if fields.get("code").and_then(Value::as_str) == Some("claude-channel-initialized") {
+                continue;
+            }
             if !applies_to_incarnation(fields) {
                 continue;
             }
@@ -6718,28 +7033,18 @@ fn conversation_read_now_unbounded(
             || position.local_position > local_latest
             || position.native_sequence > native_latest
         {
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the conversation cursor is outside the bounded replay window".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "cursor-outside-window",
+                "the conversation cursor is outside the bounded replay window",
+            ));
         }
         if position.source_generation != source_generation {
             // Already-delivered entries changed in place under unchanged sequences, which a
             // sequence-filtered delta cannot carry: send the authoritative newest page.
-            return Err(ApiError {
-                status: StatusCode::GONE,
-                code: "cursor-gap".into(),
-                message: "the transcript was rewritten in place; refresh the newest conversation page".into(),
-                details: Box::new(serde_json::Map::from_iter([(
-                    "full_resync".into(),
-                    Value::Bool(true),
-                )])),
-            });
+            return Err(conversation_replay_gap(
+                session_id, "source-generation",
+                "the transcript was rewritten in place; refresh the newest conversation page",
+            ));
         }
     }
     let mut changed_indexes = BTreeSet::new();
@@ -6804,14 +7109,10 @@ fn conversation_read_now_unbounded(
     if retention_changed {
         // A covering interval can remove a projection-only availability notice.
         // The delta protocol cannot delete it: send an authoritative page instead.
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "transcript retention changed; refresh the newest conversation page".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(), Value::Bool(true),
-            )])),
-        });
+        return Err(conversation_replay_gap(
+            session_id, "retention-changed",
+            "transcript retention changed; refresh the newest conversation page",
+        ));
     }
     let mut items = all
         .iter()
@@ -6846,7 +7147,7 @@ fn conversation_read_now_unbounded(
             .cmp(&b["timestamp"].as_str())
             .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
     });
-    if message_indexes.iter().any(|index| {
+    let missing_message_pair = message_indexes.iter().any(|index| {
         ![
             index.saturating_mul(4),
             index.saturating_mul(4).saturating_add(1),
@@ -6857,23 +7158,20 @@ fn conversation_read_now_unbounded(
                 .iter()
                 .any(|item| item["sequence"].as_u64() == Some(*sequence))
         })
-    }) || explicit_ids
-        .iter()
-        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)))
-        || (all.len() == 200
-            && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
-                native_oldest.is_some_and(|first| first > native)
-            }))
-    {
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "cursor-gap".into(),
-            message: "the conversation exceeded its bounded replay window".into(),
-            details: Box::new(serde_json::Map::from_iter([(
-                "full_resync".into(),
-                Value::Bool(true),
-            )])),
+    });
+    let missing_explicit_id = explicit_ids.iter()
+        .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)));
+    let native_window_gap = all.len() == 200
+        && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
+            native_oldest.is_some_and(|first| first > native)
         });
+    if missing_message_pair || missing_explicit_id || native_window_gap {
+        let reason = if missing_message_pair { "message-pair" }
+            else if missing_explicit_id { "explicit-id" }
+            else { "native-window" };
+        return Err(conversation_replay_gap(
+            session_id, reason, "the conversation exceeded its bounded replay window",
+        ));
     }
     let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
@@ -6914,11 +7212,13 @@ const CONVERSATION_MARK_REUSE: Duration = Duration::from_secs(10);
 type HashMap<K, V> = std::collections::HashMap<K, V>;
 const ISSUED_CURSORS: usize = 4096;
 
-fn issued_cursors()
--> &'static std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)> {
-    static ISSUED: std::sync::OnceLock<
-        std::sync::Mutex<(std::collections::VecDeque<String>, HashMap<String, TranscriptSeen>)>,
-    > = std::sync::OnceLock::new();
+type IssuedCursors = std::sync::Mutex<(
+    std::collections::VecDeque<String>,
+    HashMap<String, TranscriptSeen>,
+)>;
+
+fn issued_cursors() -> &'static IssuedCursors {
+    static ISSUED: std::sync::OnceLock<IssuedCursors> = std::sync::OnceLock::new();
     ISSUED.get_or_init(Default::default)
 }
 
@@ -7154,45 +7454,41 @@ pub(super) async fn conversation_changes(
         || {
             let session_id = conversation_session_id(&state, &id)?;
             let snapshot = new_client_snapshot(&state);
-            let owner = super::managed_session_owner_at(
-                &state.store, snapshot.store_index, &session_id,
-            ).map_err(ApiError::internal)?;
+            let owner =
+                super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                    .map_err(ApiError::internal)?;
             Ok((session_id, owner))
         },
     )?;
     if let Some((_, _, Some(origin))) = owner
+        && origin != state.store.origin()
     {
-        if origin != state.store.origin() {
-            if !acting_party(&session) {
-                return Err(forbidden(
-                    "remote conversation changes require a concrete person or agent",
-                ));
-            }
-            let owner = client_host_id(&origin);
-            let relay = state
-                .client_relay
-                .as_ref()
-                .ok_or_else(|| conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner)))?;
-            let mut value = relay
-                .read(
-                    &owner,
-                    &crate::peer::ClientReadRequest {
-                        authority_actor: session.authority_actor.clone(),
-                        relay: None,
-                        request: crate::peer::ClientReadOperation::ConversationChanges {
-                            session_id,
-                            after: query.after,
-                            wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
-                        },
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    conversation_blocks::availability(remote_read_error(&owner, error))
-                })?;
-            conversation_blocks::legacy(&mut value, &session);
-            return Ok(Json(value));
+        if !acting_party(&session) {
+            return Err(forbidden(
+                "remote conversation changes require a concrete person or agent",
+            ));
         }
+        let owner = client_host_id(&origin);
+        let relay = state.client_relay.as_ref().ok_or_else(|| {
+            conversation_blocks::availability(remote_unavailable_for_owner(&state, &owner))
+        })?;
+        let mut value = relay
+            .read(
+                &owner,
+                &crate::peer::ClientReadRequest {
+                    authority_actor: session.authority_actor.clone(),
+                    relay: None,
+                    request: crate::peer::ClientReadOperation::ConversationChanges {
+                        session_id,
+                        after: query.after,
+                        wait_ms: query.wait_ms.unwrap_or(0).min(30_000),
+                    },
+                },
+            )
+            .await
+            .map_err(|error| conversation_blocks::availability(remote_read_error(&owner, error)))?;
+        conversation_blocks::legacy(&mut value, &session);
+        return Ok(Json(value));
     }
     conversation_changes_local(
         &state,
@@ -10668,6 +10964,7 @@ async fn dispatch_action(
                     &target,
                     action.trim_start_matches("work."),
                     &WorkRequest {
+                        wait_ms: None,
                         actor: Some(authority_actor.clone()),
                         incarnation: request.fence.runtime_incarnation.clone(),
                         summary: p.get("summary").and_then(Value::as_str).map(str::to_owned),
@@ -11624,6 +11921,10 @@ pub(super) async fn action(
     result["snapshot_id"] = Value::String(new_client_snapshot(&state).id);
     Ok(Json(result))
 }
+
+#[cfg(test)]
+#[path = "client_v0/published_attention_tests.rs"]
+mod published_attention_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12719,7 +13020,7 @@ mission "queue-parity" state="ready" {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn fresh_agent_roster_read_cuts_the_refresh_pause_short_and_plain_reads_do_not() {
+    async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let subject = "agent/fresh-pause";
@@ -12768,21 +13069,41 @@ mission "queue-parity" state="ready" {
             "plain reads must not shorten the refresher's minimum pause",
         );
 
-        // Changed: a fresh read waits for one fold, not the rest of the pause (about 750 ms here).
+        // A healthy attempt is already in flight; a fresh read must wait for its result.
+        let _admission = state.store.admit_agent_resources("other").await;
+        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one",
+            "observed_at_ms":2}));
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
         let started = std::time::Instant::now();
-        let (Extension(snapshot), Json(page)) = list(true).await.unwrap();
+        let read = list(true);
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (Extension(snapshot), Json(page)) = read.await.unwrap();
+        worker.await.unwrap().unwrap();
         let waited = started.elapsed();
         assert!(snapshot.store_index >= idle, "a fresh read shows what was written before it");
         assert_eq!(page.items[0]["harness_state"], "idle");
-        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the pause");
+        assert!(waited < Duration::from_millis(500), "a fresh read waited {waited:?} for the healthy attempt");
         // The fresh read's wait and page, and the refresher's folds, land in their stage rows.
         let stages = crate::api::request_latency_snapshot().into_iter()
             .filter(|row| row["scope"] == "agents-roster")
             .filter_map(|row| row["stage"].as_str().map(str::to_owned))
             .collect::<BTreeSet<_>>();
-        for stage in ["fresh-wait", "fresh-page", "refresh"] {
+        for stage in ["fresh-wait", "fresh-page"] {
             assert!(stages.contains(stage), "{stage} recorded: {stages:?}");
         }
+        assert!(stages.contains("refresh") || stages.contains("refresh-cold"),
+            "a warm or cold refresher fold is recorded: {stages:?}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -12970,13 +13291,29 @@ mission "queue-parity" state="ready" {
         assert_eq!(index, cut, "the unchanged roster is served under its own cut");
         assert_eq!(page.items, before.items);
 
-        // A claim about the agent changes its card: the fresh read still waits for a roster
-        // at or after it, and shows it.
+        // A claim about the agent changes its card. Start a healthy attempt and hold it:
+        // the fresh read must wait for this attempt's publication, not answer early.
+        let _admission = state.store.admit_agent_resources("other").await;
         append(subject, "harness.observed", json!({"state":"working",
             "driver":"codex", "incarnation_id":"one"}));
         let written = state.store.index().unwrap();
         assert!(!state.store.published_agent_roster_unchanged_through(written, false).unwrap());
-        let (_, index, page) = fresh().await;
+        let store = state.store.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tokio::task::spawn_blocking(move || store.answer_agent_roster_requests(|| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            crate::api::refresh_agent_roster(&store, false)
+        }));
+        started_rx.await.unwrap();
+        let read = fresh();
+        tokio::pin!(read);
+        assert!(tokio::time::timeout(Duration::from_millis(30), &mut read).await.is_err(),
+            "a fresh read must wait while a healthy attempt is in flight");
+        release_tx.send(()).unwrap();
+        let (_, index, page) = read.await;
+        worker.await.unwrap().unwrap();
         assert_eq!(index, written);
         assert_ne!(page.items, before.items, "the fresh read shows the claim it waited for");
         assert!(*published.borrow_and_update() > revision);
@@ -14464,6 +14801,24 @@ mission "queue-parity" state="ready" {
         .await
         .unwrap_err();
         assert_eq!(error.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn accountable_root_declaration_read_exposes_typed_person() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = "version 2\nagent \"example/root\" { accountable \"person/avery\"; command \"true\"; }";
+        let intent = crate::graph::parse_intent(source, "terminal-test").unwrap();
+        let expected = BTreeMap::from([("agent/example/root".into(), Vec::new())]);
+        state.store.apply_as(&intent, &expected, "accountable-read", Some("person/avery")).unwrap();
+        let value = agent_declaration(State(state),
+            Extension(ClientSession::local(Some("person/avery")).unwrap()),
+            AxumPath("example/root".into()), Query(AgentDeclarationQuery {
+                revision: None, show_env_values: false,
+            })).await.unwrap().0;
+        assert_eq!(value["accountable"], "person/avery");
+        let decoded: st3_client::AgentDeclaration = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.accountable.as_deref(), Some("person/avery"));
     }
 
     #[tokio::test]
@@ -16660,6 +17015,7 @@ mission "example/steps" state="ready" {
             // A seat holds one step at a time: the first run's is claimed and under way.
             if run == 0 {
                 let request = |summary: Option<&str>, key: &str| crate::model::WorkRequest {
+                    wait_ms: None,
                     actor: Some(builder.clone()),
                     incarnation: Some("builder-1".into()),
                     summary: summary.map(str::to_owned),
@@ -16765,6 +17121,7 @@ mission "example/steps" state="ready" {
         assert!(no_progress["steps"].as_array().unwrap().iter().all(|step| step["progress_at"].is_null()));
         // Renewing the operational lease does not prove the claimant made progress.
         state.store.work_action(&progressed.subject, "renew", &crate::model::WorkRequest {
+            wait_ms: None,
             actor: progressed.claimant.clone(),
             incarnation: Some("builder-1".into()),
             summary: None,
@@ -18812,11 +19169,19 @@ mission "example/zero-run" state="ready" {
                 &path,
                 format!("{header}\n{question}\n{}\n{reply}\n", failed(Some(retry))),
             ).unwrap();
-            let gap = conversation_read_now(&state, &session, &session_id, Some(&cursor))
-                .unwrap_err();
+            let mut gap = None;
+            let spans = crate::otel::capture_test_spans(|| {
+                gap = Some(conversation_read_now(&state, &session, &session_id, Some(&cursor))
+                    .unwrap_err());
+            });
+            let gap = gap.unwrap();
             assert_eq!(gap.status, StatusCode::GONE);
             assert_eq!(gap.code, "cursor-gap");
             assert_eq!(gap.details["full_resync"], true);
+            assert!(spans.iter().any(|span| span.name == "st.conversation.replay_gap"
+                && span.attributes.iter().any(|field|
+                    field.key.as_str() == "st.conversation.gap.reason"
+                        && field.value.as_str() == "source-generation")));
             // The follower's reload carries the updated presentation under the same sequence.
             let reloaded = newest_page();
             let (sequence, view) = error_view(&reloaded).expect("the settled turn keeps its error block");
@@ -19921,6 +20286,15 @@ mission "example/zero-run" state="ready" {
             "timeline-diagnostic",
         );
         append(
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("code".into(), json!("claude-channel-initialized")),
+                ("reason".into(), json!("informational initialization")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            "timeline-initialization",
+        );
+        append(
             "harness.usage",
             BTreeMap::from([
                 (
@@ -20017,6 +20391,8 @@ mission "example/zero-run" state="ready" {
                 .content,
             "do the work"
         );
+        assert!(!entries.iter().any(|entry| entry["body"]["code"] == "claude-channel-initialized"));
+        assert!(entries.iter().any(|entry| entry["body"]["code"] == "provider-warning"));
         let types = entries
             .iter()
             .filter_map(|entry| entry["type"].as_str())
@@ -20389,6 +20765,7 @@ mission "example/zero-run" state="ready" {
         let store = Store::open_memory("usage-attribution-node").unwrap();
         let desired = [
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-a".into(),
                 kind: "agent".into(),
                 desired: json!({}),
@@ -20398,6 +20775,7 @@ mission "example/zero-run" state="ready" {
                 owner_step: Some("step-run/gen-one/step-a".into()),
             },
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-b".into(),
                 kind: "agent".into(),
                 desired: json!({}),
@@ -20407,6 +20785,7 @@ mission "example/zero-run" state="ready" {
                 owner_step: Some("step-run/gen-one/step-b".into()),
             },
             crate::model::DesiredSubject {
+                accountable: None,
                 subject: "agent/usage-other".into(),
                 kind: "agent".into(),
                 desired: json!({}),
@@ -21448,6 +21827,7 @@ mission "example/zero-run" state="ready" {
             actor: "person/alex/session/device-one".into(),
             authority_actor: "person/alex".into(),
             pairing_grant: None,
+            grant_expires_at: None,
             transport: "paired",
             custom_forms: false,
             conversation_blocks: false,

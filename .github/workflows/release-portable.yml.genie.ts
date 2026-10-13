@@ -1,4 +1,4 @@
-import { linuxActionlintConfig, linuxRunner } from './workspace-ci.ts'
+import { linuxActionlintConfig, releaseLinuxRunner, priorityRunnerJob } from './workspace-ci.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
@@ -28,8 +28,11 @@ export default githubWorkflow(auditCaches({
     "actions": "read"
   },
   "jobs": {
+    "pick-runner": priorityRunnerJob,
     "linux-x86_64": {
-      "runs-on": linuxRunner,
+      "if": "${{ !cancelled() }}",
+      "needs": ["pick-runner"],
+      "runs-on": releaseLinuxRunner,
       "timeout-minutes": 30,
       "env": {
         "SOURCE_SHA": "${{ inputs.source_sha }}",
@@ -97,4 +100,4 @@ printf 'CI_CACHE_AUDIT_SCRIPT=%s/ci-cache-audit\\nCI_BUILD_SNAPSHOT_SCRIPT=%s/ci
       ]
     }
   }
-}, {}))
+}, {"pick-runner": "Only reads organization runner metadata; checks out and builds nothing."}))
