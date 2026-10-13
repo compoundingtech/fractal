@@ -268,6 +268,9 @@ Mission starts, launches, device pairing, and fleet creation or joining also fin
 next steps. While `agents new` waits, stderr reports the host, elapsed time and declaration,
 replication, launch, readiness and attachment stages. A same-host launch explicitly skips
 replication. With `--json`, the result adds a `stages` array and startup failures add `error`.
+The harness-ready stage means the requested incarnation reached readiness. A later exit
+takes precedence, and a ready replacement cannot upgrade the first launch. A seat without
+the local receipt stays launched; attachment still checks the current runtime and incarnation.
 
 If the requested process exits before readiness, creation promptly returns that process's exit
 status, including zero, and a bounded startup output tail served from the requested host.

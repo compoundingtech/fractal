@@ -4519,6 +4519,22 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
                         })
                         .unwrap();
                 }
+                // This fixture has no background reconciler: publish the same local
+                // reached-readiness receipt after its exact harness-ready observation.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: SEAT.into(),
+                        kind: "runtime.action.succeeded".into(),
+                        actor: None,
+                        fields: serde_json::from_value(json!({
+                            "action":"harness-ready", "incarnation_id":"4243:fixture",
+                        }))
+                        .unwrap(),
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("launch-ready:{SEAT}:4243:fixture")),
+                    })
+                    .unwrap();
                 // The CLI waits on the daemon's event channel after its first state read.
                 events.send_modify(|version| *version += 1);
                 notify.notify_waiters();

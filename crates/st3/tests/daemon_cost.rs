@@ -1376,7 +1376,28 @@ async fn launch_waiters_coalesce_unrelated_event_storms() {
     const MAX_CAPTURES: u64 = 4;
     let root = tempfile::tempdir().unwrap();
     let (store, token, subject) = super::agent_launch::requested_launch();
-    let state = super::agent_launch::state(root.path(), Arc::new(store));
+    let store = Arc::new(store);
+    // This harness measures warm request work. Warm all four simultaneous reader
+    // loans, rather than comparing a single warm reader with cold pool expansion.
+    // The barrier is fixture-local; no request snapshot or network wait is involved.
+    let barrier = Arc::new(std::sync::Barrier::new(WAITERS as usize));
+    let mut warm_readers = Vec::new();
+    for _ in 0..WAITERS {
+        let store = store.clone();
+        let barrier = barrier.clone();
+        warm_readers.push(tokio::task::spawn_blocking(move || {
+            store
+                .read_snapshot(|_| {
+                    barrier.wait();
+                    Ok(())
+                })
+                .unwrap();
+        }));
+    }
+    for reader in warm_readers {
+        reader.await.unwrap();
+    }
+    let state = super::agent_launch::state(root.path(), store);
     let events = state.event_notify.clone();
     let app = st3::api::router(state);
     let path = format!("/v1/hosts/studio/agent-launch?subject={subject}&token={token}");
@@ -1453,7 +1474,6 @@ async fn launch_waiters_coalesce_unrelated_event_storms() {
         );
     }
 }
-
 /// Historical runs may grow the answer, but must not repeat the assignee's message scan.
 #[tokio::test]
 async fn mission_detail_many_finished_runs_do_not_repeat_step_history() {
