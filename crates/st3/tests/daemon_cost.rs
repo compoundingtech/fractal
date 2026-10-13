@@ -767,6 +767,7 @@ const PROBES: &[Probe] = &[
     get("GET /v1/claims/by-id/{id}", "/v1/claims/by-id/{claim}"),
     get("GET /v1/usage", "/v1/usage"),
     get("GET /v1/usage/messages", "/v1/usage/messages"),
+    get("GET /v1/slo", "/v1/slo"),
     get("GET /v1/reviews", "/v1/reviews"),
     get("GET /v1/attention", "/v1/attention"),
     get(

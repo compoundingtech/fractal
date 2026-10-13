@@ -117,6 +117,17 @@ phone's live share is a minimum over foreground milliseconds, so it is not in th
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
 the targets, not every path's snapshot.
 
+`st slo` lists the same targets with the account limits as one list, and `GET /v1/slo`, the daemon's own route
+beside `/v1/usage`, serves it to the CLI. The phone and the web app read it through a client route
+that comes later, with its capability, schema and generated clients. An objective is a target with windows and an error budget: a p99
+target may have 1% of its samples over, so `LEFT` is how much of that 1% the last hour has not
+spent; a max target has no allowance, so it is whole or empty; CPU and the database's size read
+against their own ceilings; a phone's live share against the disconnected time its minimum
+allows. A budget is an allowance that resets: each account's weekly and 5-hour limit, with `LEFT`
+the part not yet used and a reset time. `st slo explain ID` says one row in plain words and `ID`
+may be the start of an id. The list is computed on each read from the live windows and the limit
+readings, and writes nothing.
+
 `st doctor` prints a `slo/NAME` line for each target and a line for each of the ten paths furthest
 over their target in the last five minutes. A p99 target is missed in a window when more than 1%
 of its samples are over. A max target is missed when any one sample is over. A miss is `info`,

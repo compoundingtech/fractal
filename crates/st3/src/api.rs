@@ -745,6 +745,7 @@ fn router_for_transport(state: AppState, transport: ClientTransportBoundary) -> 
         )
         .route("/v1/claims", get(list_claims).post(post_claim))
         .route("/v1/usage", get(get_usage))
+        .route("/v1/slo", get(get_slo))
         .route("/v1/usage/messages", get(get_coordination_counts))
         .route("/v1/claims/by-id/{id}", get(get_claim))
         .route("/v1/reviews", get(list_reviews))
@@ -12597,6 +12598,27 @@ async fn get_usage(
         });
     }
     Ok(Json(report))
+}
+
+/// Every objective and budget as one list: see `objectives`.
+async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let limits = blocking_store(move || store.account_limits()).await?;
+    let fresh_ms = tokio::task::spawn_blocking(crate::config::reload_daemon_limits)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|reloaded| reloaded.ok())
+        .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
+        .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
+    let report = tokio::task::spawn_blocking(request_latency_target_windows)
+        .await
+        .map_err(|error| ApiError::bad(St3Error::new("slo-unavailable", error.to_string())))?;
+    let now = client_now_ms() as u64;
+    Ok(Json(json!({
+        "as_of_unix_ms": now,
+        "rows": crate::objectives::rows(&report, &limits, now, fresh_ms),
+    })))
 }
 
 #[derive(Deserialize)]
