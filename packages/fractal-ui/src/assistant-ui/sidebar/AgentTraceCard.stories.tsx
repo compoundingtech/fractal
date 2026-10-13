@@ -125,7 +125,6 @@ async function assertCard(card: HTMLElement, row: Row) {
 
 const meta = {
   title: 'Fractal UI/Sidebar/Agent Trace Card',
-  component: Sidebar,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Layout B hover card: header, 24 h context histogram, cumulative spend (session vs subagents), token split and compact facts. A chart renders only for a Known series; otherwise its section shows the scalar reading and the muted reason. Opens on row hover and keyboard focus through the row hover-card trigger.' } } },
   args: { scheme: 'dark' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
