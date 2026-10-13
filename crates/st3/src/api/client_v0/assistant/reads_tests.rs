@@ -269,6 +269,7 @@ fn managed_record(root: &std::path::Path, payload: Value) -> (AppState, String, 
         &state, &new_client_snapshot(&state), &session, &session_id, &ClientListQuery::default(),
     ).unwrap().0;
     let (reference, revision) = timeline["items"].as_array().unwrap().iter().find_map(|item| {
+        if item["type"] == "message" { return None; }
         let reference = item["body"]["blocks"].as_array()?.iter()
             .find_map(|block| block["continuation"]["ref"].as_str())?;
         Some((reference.to_owned(), item["revision"].to_string()))
