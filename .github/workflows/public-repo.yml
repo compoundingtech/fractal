@@ -9,7 +9,14 @@ concurrency:
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
   push:
     branches: [main]
 
@@ -19,7 +26,7 @@ permissions:
 jobs:
   fractal-changelog:
     name: fractal-changelog
-    if: github.event_name == 'pull_request'
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -43,10 +50,7 @@ jobs:
           CACHE_REASON: Checks the full Git diff and pure changelog policy without dependencies or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   public-repo:
-    runs-on:
-      [
-        "namespace-profile-linux-x86-64;job.priority=${{ github.event_name == 'merge_group' && 1 || 2 }};github.run-id=${{ github.run_id }}",
-      ]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Test repository guard
@@ -59,3 +63,4 @@ jobs:
         env:
           CACHE_REASON: Runs standard-library source checks without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}

@@ -531,6 +531,8 @@ The `fractal-changelog` PR check requires a newly added entry for product UI sou
 under `apps/fractal-web` or `packages/fractal-ui`. The `no-changelog` label explicitly opts
 out. Run its dependency-free policy tests with
 `node --test apps/fractal-web/scripts/ci/changelog-policy.unit.test.mjs`.
+Like the other PR jobs, this check allocates no runner for drafts and starts when
+the PR becomes ready for review. Label additions and removals refresh the opt-out check.
 This narrative inventory is separate from operational `release-notes/`; keep the public
 wording consistent when both describe the same change.
 

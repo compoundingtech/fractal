@@ -394,4 +394,5 @@ grace cleanup, and 72 seconds of protocol-heartbeat idle with no request.
 `collectionSocket.test.mjs` checks authentication and control-event delivery at
 the native bridge boundary; it does not claim an iOS simulator was driven.
 
+The usage inventory empty-graph socket test verifies that an open period uses the same wall-clock end as the HTTP read, then reconnects without a graph write.
 `st ui` opens the terminal interface; plain `st` does so only with terminal input and output outside an agent seat. The typed-key and paired-device gates in `crates/st3/tests` exercise this entry point. Pair with `st devices complete`.
