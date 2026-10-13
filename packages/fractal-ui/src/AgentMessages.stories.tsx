@@ -127,18 +127,22 @@ export const Reply: Story = { args: { replyTo: 'Parent.Question', subject: 'Rele
   await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
 } }
 const openTooltips = () => [...document.querySelectorAll<HTMLElement>('[role="tooltip"]')].map(tooltip => tooltip.textContent)
-/** The kit hover card is the visible path for a fact that used to be a native title: exactly one card on hover and on keyboard focus. */
+/**
+ * The kit hover card is the visible path for a fact that used to be a native title: exactly one card on keyboard focus and on hover.
+ * React Aria opens focus cards only in keyboard modality and hover cards only in pointer modality, so reach the target with real
+ * Tab presses first, then switch to pointer modality with a real click on the page before hovering.
+ */
 const assertKitTooltip = async (target: HTMLElement, label: string) => {
+  for (let step = 0; step < 12 && target.ownerDocument.activeElement !== target; step++) await userEvent.tab()
+  await expect(target).toHaveFocus()
+  await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
+  await userEvent.click(target.ownerDocument.body)
+  await expect(target).not.toHaveFocus()
   await userEvent.hover(target)
   await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
   await userEvent.unhover(target)
-  await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
-  // Shift is not a modality key in React Aria; Escape switches focus-visible modality to keyboard so focus opens the card.
-  await userEvent.keyboard('{Escape}')
-  target.focus()
-  await expect(target).toHaveFocus()
-  await waitFor(() => expect(openTooltips()).toEqual([label]), { timeout: 3_000 })
-  target.blur()
   await waitFor(() => expect(openTooltips()).toEqual([]), { timeout: 3_000 })
 }
 export const ReplyMarker: Story = { args: { replyTo: 'Parent.Question', subject: 'Release review', onOpenReply: undefined }, play: async ({ canvasElement }) => {
