@@ -1,3 +1,4 @@
+mod trace_principal;
 #[cfg(test)]
 mod accountable_tests;
 pub mod custom;
