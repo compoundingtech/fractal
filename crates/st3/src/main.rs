@@ -6124,6 +6124,20 @@ mod private_gateway_tests {
     }
 }
 
+fn daemon_start_version(machine_version: &str) -> Result<&str> {
+    anyhow::ensure!(
+        machine_version.len() <= 128,
+        "daemon build identity exceeds 128 bytes; correct the compile-time build stamp"
+    );
+    Ok(
+        if machine_version == concat!(env!("CARGO_PKG_VERSION"), "+dev") {
+            env!("CARGO_PKG_VERSION")
+        } else {
+            machine_version
+        },
+    )
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let args_config = args.config.clone();
     let private_state = args.state_dir.is_some();
@@ -6280,7 +6294,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             ("pid".into(), Value::from(std::process::id())),
             (
                 "version".into(),
-                Value::String(env!("CARGO_PKG_VERSION").into()),
+                Value::String(daemon_start_version(&st_drivers::version::machine_version())?.into()),
             ),
             (
                 "schema".into(),
@@ -12093,6 +12107,13 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
         );
     }
     output.push_str(&format!("participants  {}\n", names(&status.participants)));
+    output.push_str("last daemon start (advertised build)\n");
+    for member in &status.participants {
+        output.push_str(&format!(
+            "  machine_version  {member}: {}\n",
+            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
+        ));
+    }
     if !status.excused.is_empty() {
         output.push_str(&format!("excused       {}\n", names(&status.excused)));
     }
@@ -12101,6 +12122,9 @@ fn render_checkpoint_status(status: &st3::store::CheckpointStatusView) -> String
     }
     if let Some(pending) = &status.pending {
         output.push_str(&format!("pending       {}\n", pending.checkpoint));
+        for (member, build) in &pending.builds {
+            output.push_str(&format!("  seal build  {member}: {build}\n"));
+        }
         output.push_str(&format!("  sealed      {}\n", names(&pending.sealed)));
         output.push_str(&format!("  unsealed    {}\n", names(&pending.unsealed)));
         for (writer, difference) in &pending.disagreeing {
@@ -25808,6 +25832,40 @@ mod claude_attachment_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_start_version_keeps_unstamped_builds_bare_and_bounds_metadata() {
+        let unstamped = concat!(env!("CARGO_PKG_VERSION"), "+dev");
+        assert_eq!(
+            daemon_start_version(unstamped).unwrap(),
+            env!("CARGO_PKG_VERSION")
+        );
+        for version in ["0.1.0+abc1234-dirty", "0.1.0+local.abc1234.dirty"] {
+            assert_eq!(daemon_start_version(version).unwrap(), version);
+        }
+        assert!(daemon_start_version(&"x".repeat(128)).is_ok());
+        assert!(daemon_start_version(&"x".repeat(129)).is_err());
+        assert!(daemon_start_version(&"é".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
+        let status = st3::store::CheckpointStatusView {
+            node: "alder".into(),
+            newest_stable: None,
+            trimmed: None,
+            halted: false,
+            pending: None,
+            participants: ["alder".into(), "birch".into()].into(),
+            excused: Default::default(),
+            left: Default::default(),
+            machine_version: [("alder".into(), "0.1.0+abc1234-dirty".into())].into(),
+        };
+        let output = render_checkpoint_status(&status);
+        assert!(output.contains("last daemon start (advertised build)"));
+        assert!(output.contains("machine_version  alder: 0.1.0+abc1234-dirty"));
+        assert!(output.contains("machine_version  birch: not advertised"));
+    }
 
     #[test]
     fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {

@@ -133,6 +133,7 @@ pub(crate) use attention_snapshot::{NativePromptState, native_prompt_gone_key};
 pub(crate) mod attention_ivm;
 mod backup;
 mod checkpoint_rules;
+mod checkpoint_status;
 mod mission_eligibility;
 pub(crate) use mission_eligibility::MISSING_AGENT_CONDITION;
 mod revision_seats;
