@@ -55,6 +55,8 @@ pub mod mailbox;
 pub mod message_body;
 /// Bounded local maintenance workers shared by daemon startup and lifecycle fixtures.
 pub mod maintenance;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod malloc_trim;
 pub(crate) mod memory;
 pub(crate) mod read_cache;
 pub mod mission;
