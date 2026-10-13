@@ -43,6 +43,7 @@ fn isolated_command(binary: &Path, root: &Path) -> Command {
         .env("OTEL_TRACES_EXPORTER", "otlp")
         .env("OTEL_METRICS_EXPORTER", "otlp")
         .env("OTEL_LOGS_EXPORTER", "otlp")
+        .env("ST3_STORAGE_PHASE_SPANS", "1")
         .current_dir(root)
         .stdin(Stdio::null());
     command
@@ -1212,6 +1213,36 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
     }
     assert!(pass_count > 0, "no reconcile pass exported:\n{traces}");
     assert!(api_count > 0, "write must export an API-woken reconcile pass:\n{traces}");
+    let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass")).collect();
+    for name in [
+        "st.reconcile.changes", "st.reconcile.gate-runners", "st.reconcile.desired",
+        "st.reconcile.pty-snapshot", "st.reconcile.render", "st.reconcile.members",
+        "st.reconcile.work-messages", "st.reconcile.stage.intake",
+        "st.reconcile.stage.observers", "st.reconcile.stage.schedules",
+        "st.reconcile.stage.scheduled-work", "st.reconcile.stage.subscriptions",
+        "st.reconcile.stage.provider-capacity-retries", "st.reconcile.stage.person-asks",
+        "st.reconcile.stage.disk-space", "st.reconcile.stage.faults",
+        "st.reconcile.stage.subagents",
+        "st.reconcile.stage.github-watches", "st.reconcile.stage.missions",
+    ] {
+        assert!(requests.iter().flat_map(|request| daemon_spans(request, name)).any(|child| {
+            passes.iter().any(|pass| child["parentSpanId"] == pass["spanId"] && child["traceId"] == pass["traceId"])
+        }), "missing reconcile child {name}: {traces}");
+    }
+    assert!(requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile.desired"))
+        .any(|span| int_attribute(span, "st.reconcile.items") == Some(0)), "{traces}");
+    for request in &requests {
+        assert!(daemon_spans(request, "st.reconcile.member-stop").is_empty(), "{traces}");
+        assert!(daemon_spans(request, "st.reconcile.member-live").is_empty(), "{traces}");
+        for span in daemon_spans(request, "st.reconcile.members") {
+            for kind in ["stop", "live"] {
+                assert_eq!(int_attribute(span, &format!("st.reconcile.members.{kind}.count")), Some(0));
+                assert_eq!(double_attribute(span, &format!("st.reconcile.members.{kind}.total_ms")), Some(0.));
+                assert_eq!(double_attribute(span, &format!("st.reconcile.members.{kind}.max_ms")), Some(0.));
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1433,6 +1464,8 @@ fn storage_stage_gates_export_detached_roots() {
         use opentelemetry::trace::TraceContextExt as _;
         let mut telemetry = st3::otel::Telemetry::init(st3::otel::Unit::Daemon, None);
         assert!(telemetry.enabled());
+        assert!(std::env::var_os("ST3_PROFILE_DIR").is_none());
+        assert!(!smallclaims::profile::enabled());
         for wait in [0.0, 0.999, 1.0, 1.001] {
             let server = tracing::info_span!(
                 "writer gate", otel.kind = "server",
@@ -1465,6 +1498,37 @@ fn storage_stage_gates_export_detached_roots() {
         st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&truncated), false);
         st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), true);
         st3::otel::record_wal_checkpoint(std::time::SystemTime::now(), None, true);
+        let writer_path = directory.path().join("writer.sqlite3");
+        let writer_connection = rusqlite::Connection::open(&writer_path).unwrap();
+        writer_connection.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE writer_proof(value INTEGER);"
+        ).unwrap();
+        let writer = smallclaims::sqlite::WriterConnection::new(
+            writer_connection,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let origin = smallclaims::sqlite::telemetry::enter_origin(
+            smallclaims::sqlite::telemetry::route_origin("POST", "/v1/internal/replication/receive"));
+        let held = writer.write_background();
+        drop(origin);
+        let (done, answer) = std::sync::mpsc::sync_channel(1);
+        writer.send(smallclaims::sqlite::WriterJob::Batched {
+            run: Box::new(|_| true), profile: None, wait: None,
+            enqueued: Instant::now(), done,
+        });
+        // Enqueue synchronously while the connection is lent; the wait has a fixed lower bound.
+        std::thread::sleep(Duration::from_millis(260));
+        drop(held);
+        answer.recv().unwrap().unwrap();
+        let checkpoint = rusqlite::Connection::open(&writer_path).unwrap();
+        smallclaims::profile::task("task checkpoint", || writer.batched(move |_| {
+            // A lower bound, not a race with a timeout: the operation itself exceeds 250 ms.
+            std::thread::sleep(Duration::from_millis(260));
+            smallclaims::sqlite::checkpoint_wal_report(&checkpoint)?;
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap());
+        // ACK precedes retrospective export; joining the writer guarantees its root is ended.
+        drop(writer);
         let current = opentelemetry::Context::current();
         assert!(current.span().span_context().is_valid());
         drop(_attached);
@@ -1499,16 +1563,58 @@ fn storage_stage_gates_export_detached_roots() {
     assert_eq!(waits.len(), 2, "{traces}");
     assert!(waits.contains(&1.0) && waits.contains(&1.001), "{traces}");
     assert!(writers.iter().all(|span| int_attribute(span, "st.writer.ops") == Some(2)));
+    let batches: Vec<_> = spans.iter().filter(|span| span["name"] == "st.db.writer.batch").collect();
+    let batch = batches.into_iter().find(|batch| {
+        int_attribute(batch, "st.db.writer.batch.ops") == Some(1)
+            && double_attribute(batch, "st.db.writer.batch.operations_ms").is_some_and(|ms| ms >= 250.)
+    }).unwrap_or_else(|| panic!("sleeping operation did not export a slow batch: {traces}"));
+    for attribute in [
+        "st.db.writer.batch.begin_ms", "st.db.writer.batch.operations_ms",
+        "st.db.writer.batch.finalizers_ms",
+        "st.db.writer.batch.commit_ms", "st.db.writer.batch.post_commit_ms",
+        "st.db.writer.batch.slowest_op_ms",
+        "st.db.writer.batch.checkpoint_overlap_ms", "st.writer.wait_ms",
+    ] {
+        assert!(double_attribute(batch, attribute).is_some_and(|ms| ms >= 0.), "{batch}");
+    }
+    assert!(double_attribute(batch, "st.db.writer.batch.operations_ms").unwrap() >= 250., "{batch}");
+    assert_eq!(int_attribute(batch, "st.db.writer.batch.ops"), Some(1));
+    assert_eq!(string_attribute(batch, "st.db.writer.batch.slowest_op_origin"), Some("task checkpoint"));
+    assert!(batch["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"), "{batch}");
+    println!("slow writer batch example: {batch}");
+    assert!(double_attribute(batch, "st.db.writer.batch.checkpoint_overlap_ms").unwrap() > 0., "{batch}");
+    let waiting = spans.iter().find(|span| span["name"] == "st.db.writer.batch"
+        && double_attribute(span, "st.writer.wait_ms").is_some_and(|ms| ms >= 250.))
+        .unwrap_or_else(|| panic!("long writer wait did not export a batch: {traces}"));
+    assert_eq!(string_attribute(waiting, "st.writer.holder"), Some("POST /v1/internal/replication/receive"), "{waiting}");
+    println!("writer holder example: {waiting}");
     let checkpoints: Vec<_> = spans.iter().filter(|span| span["name"] == "st.db.checkpoint").collect();
     assert_eq!(checkpoints.len(), 4, "ordinary passes must emit none: {traces}");
     assert_eq!(checkpoints.iter().filter(|span| span["status"]["code"] == 2).count(), 2, "{traces}");
     assert_eq!(checkpoints.iter().filter(|span| string_attribute(span, "db.operation.name") == Some("checkpoint.truncate")).count(), 2);
     let ambient = spans.iter().find(|span| span["name"] == "ambient checkpoint").unwrap();
+    assert_ne!(batch["traceId"], ambient["traceId"], "{batch}");
+    assert!(batch["links"].as_array().is_none_or(Vec::is_empty), "{batch}");
     for span in checkpoints {
         assert!(span["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"), "{span}");
         assert_ne!(span["traceId"], ambient["traceId"], "{span}");
         assert!(span["links"].as_array().is_none_or(Vec::is_empty), "{span}");
         assert_eq!(string_attribute(span, "db.system.name"), Some("sqlite"));
+    }
+    let disabled = tempfile::tempdir().unwrap();
+    let output = isolated_command(&collector, disabled.path())
+        .env(CHILD, "1").env_remove("ST3_STORAGE_PHASE_SPANS")
+        .args(["run", "--out"]).arg(disabled.path().join("capture"))
+        .args(["--protocol", "http/json", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["otel_export::storage_stage_gates_export_detached_roots", "--exact", "--nocapture"])
+        .output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let disabled_traces = std::fs::read_to_string(disabled.path().join("capture/traces.ndjson")).unwrap();
+    for line in disabled_traces.lines() {
+        let request: Value = serde_json::from_str(line).unwrap();
+        assert!(daemon_spans(&request, "st.db.writer.batch").is_empty(),
+            "storage phase instrumentation must be off by default: {line}");
     }
 }
 

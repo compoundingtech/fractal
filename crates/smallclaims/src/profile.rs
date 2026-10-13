@@ -701,6 +701,7 @@ pub fn enter(op: Option<&Op>) -> Option<Entered> {
 
 /// Run `work` as its own operation, unless this thread already works for one.
 pub fn task<T>(label: &'static str, work: impl FnOnce() -> T) -> T {
+    let _origin = crate::sqlite::telemetry::enter_task_origin(label);
     crate::performance::task(label, || profiled_task(label, work))
 }
 
@@ -851,6 +852,8 @@ pub fn sql(statement: &str, duration: Duration) {
 pub struct WriterWait {
     started: Instant,
     holder: Option<Arc<str>>,
+    trace_holder: Option<crate::sqlite::telemetry::Origin>,
+    trace_origin: crate::sqlite::telemetry::Origin,
 }
 
 pub fn writer_waiting() -> Option<WriterWait> {
@@ -862,7 +865,37 @@ pub fn writer_waiting() -> Option<WriterWait> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone(),
+        trace_holder: None,
+        trace_origin: crate::sqlite::telemetry::Origin::other(),
     })
+}
+
+pub(crate) fn writer_waiting_for(
+    wait: Option<WriterWait>,
+    trace_holder: Option<crate::sqlite::telemetry::Origin>,
+    trace_origin: crate::sqlite::telemetry::Origin,
+) -> WriterWait {
+    let mut wait = wait.unwrap_or_else(|| WriterWait {
+        started: Instant::now(), holder: None, trace_holder: None,
+        trace_origin: crate::sqlite::telemetry::Origin::other(),
+    });
+    wait.trace_holder = trace_holder;
+    wait.trace_origin = trace_origin;
+    wait
+}
+
+impl WriterWait {
+    pub(crate) fn trace_holder(&self) -> Option<crate::sqlite::telemetry::Origin> {
+        self.trace_holder.clone()
+    }
+
+    pub(crate) fn trace_origin(&self) -> &crate::sqlite::telemetry::Origin {
+        &self.trace_origin
+    }
+
+    pub(crate) fn take_trace_origin(&mut self) -> crate::sqlite::telemetry::Origin {
+        std::mem::replace(&mut self.trace_origin, crate::sqlite::telemetry::Origin::other())
+    }
 }
 
 /// The writer is this thread's now. Returns when it was taken, for `writer_released`.
