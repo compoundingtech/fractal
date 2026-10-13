@@ -493,8 +493,14 @@ workflow-level path filters. `linux-gate` does not depend on them.
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
-  execution job; build output is not cached. App, UI kit, Storybook, browser and
-  performance lanes join the script with the packages that add them.
+  execution job; build output is not cached. The config's `fractalCssAssets` plugin
+  (`apps/fractal-web/scripts/vite-css-assets.mjs`) fails every production build that
+  emits a stylesheet without rules, or a chunk that loads a font file no `@font-face`
+  in its loaded stylesheets declares. The preceding CSS asset guard lane builds
+  fixtures that must trip both failures, and controls (quoted URLs with parentheses,
+  faces declared by the entry's stylesheet) that must pass.
+  App, UI kit, Storybook, browser and performance lanes join the script with the
+  packages that add them.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
   either no relevant paths changed and execution was skipped, or execution succeeded.
