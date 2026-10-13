@@ -177,6 +177,8 @@ impl Store {
                         "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in stui), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
                         prompt.trim_start_matches(st_drivers::claude_prompts::SUBAGENT_PREFIX)
                     )
+                } else if answerable(&harness) && plan_approval(&harness) {
+                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable(&harness) && ask == "question" {
                     "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (Ctrl+] in stui). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable(&harness) {
@@ -1509,6 +1511,12 @@ impl Store {
         open_screen_prompt(&connection, seat, incarnation)
     }
 
+    /// Whether a record with the idempotency key `key` exists.
+    pub(crate) fn operation_recorded(&self, key: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        recorded(&connection, key)
+    }
+
     /// The person's answer to the screen prompt `claim` recorded, and whether st pressed its keys.
     pub(crate) fn screen_prompt_answer(&self, claim: &str) -> Result<(Option<String>, bool)> {
         let connection = self.readers.get();
@@ -1696,6 +1704,11 @@ fn answerable(harness: &Value) -> bool {
 /// The answers a client may send to the prompt `harness` reports: `allow` or `deny` to a
 /// permission; to a question, `answer` (its choices, see [`question_answers`]) or `deny`. None
 /// when the prompt is answered in the terminal.
+///
+/// Claude's plan approval (`ExitPlanMode`) takes `approve` or `deny`: its hook can refuse a plan,
+/// which Claude reads as the person's feedback, but its allow does not approve one (measured on
+/// Claude Code 2.1.296), so st approves it with the dialog's own keys (see
+/// `Reconciler::reconcile_plan_approval`).
 fn prompt_answers(harness: &Value) -> Vec<String> {
     if !answerable(harness) {
         return Vec::new();
@@ -1705,8 +1718,19 @@ fn prompt_answers(harness: &Value) -> Vec<String> {
     if subagent_prompt(harness) {
         return vec!["deny".into()];
     }
-    let first = if harness["ask"] == "question" { "answer" } else { "allow" };
+    let first = if harness["ask"] == "question" {
+        "answer"
+    } else if plan_approval(harness) {
+        "approve"
+    } else {
+        "allow"
+    };
     vec![first.into(), "deny".into()]
+}
+
+/// Whether the prompt `harness` reports is Claude asking to approve its plan.
+pub(crate) fn plan_approval(harness: &Value) -> bool {
+    harness["driver"] == "claude" && harness["ask"] == "permission" && harness["reason"] == "ExitPlanMode"
 }
 
 /// The most a question's choices may hold: a few indices, so a replicated record stays small.
@@ -1985,7 +2009,7 @@ impl Store {
         if let Some(answered) = self.answer_screen_prompt(seat, episode, answer, actor)? {
             return Ok(answered);
         }
-        if !matches!(answer, "allow" | "deny") && question_answers(answer).is_none() {
+        if !matches!(answer, "allow" | "deny" | "approve") && question_answers(answer).is_none() {
             return Err(St3Error::new(
                 "invalid-answer",
                 "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
@@ -2015,6 +2039,8 @@ impl Store {
         let choices = (question && answer != "deny").then(|| question_answers(answer)).flatten();
         let valid = if question {
             answer == "deny" || choices.is_some()
+        } else if plan_approval(&harness) {
+            matches!(answer, "approve" | "deny")
         } else {
             matches!(answer, "allow" | "deny")
         };

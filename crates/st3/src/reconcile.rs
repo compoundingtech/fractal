@@ -2986,6 +2986,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     screen.as_deref(),
                                     now_ms(),
                                 )?;
+                                self.reconcile_plan_approval(
+                                    subject,
+                                    member,
+                                    &observation,
+                                    screen.as_deref(),
+                                )?;
                                 self.reconcile_claude_channel_consent(
                                     subject,
                                     member,
@@ -4007,6 +4013,91 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.signal_changed();
                 return Ok(());
             }
+        }
+        Ok(())
+    }
+
+    /// Approve Claude's plan for the seat's person, who approved it from a client. A hook's allow
+    /// does not approve a plan (measured on Claude Code 2.1.296), so st presses the dialog's first
+    /// approving option, which continues in the seat's own permission mode: only while the screen
+    /// shows that dialog for the very prompt the person approved, and once.
+    fn reconcile_plan_approval(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: &RuntimeObservation,
+        screen: Option<&str>,
+    ) -> Result<()> {
+        let (Some("claude"), true, Some(incarnation), Some(screen)) = (
+            member.driver.as_deref(),
+            member.terminal && subject.kind == "agent",
+            observation.incarnation_id.as_deref(),
+            screen,
+        ) else {
+            return Ok(());
+        };
+        let Some(blocked) = self
+            .store
+            .latest_claim(&subject.subject, Some("harness.observed"))?
+        else {
+            return Ok(());
+        };
+        let fields = blocked.body.get("fields").unwrap_or(&blocked.body);
+        let (Some(ownership), Some(transition)) = (
+            fields["ownership_sequence"].as_u64(),
+            fields["transition_sequence"].as_u64(),
+        ) else {
+            return Ok(());
+        };
+        if !crate::store::plan_approval(fields)
+            || fields["blocked_on"] != "human"
+            || fields["incarnation_id"] != incarnation
+        {
+            return Ok(());
+        }
+        let key = format!("native-plan-approved:{}:{ownership}:{transition}", subject.subject);
+        if self.store.native_prompt_state(&subject.subject, ownership, transition)?
+            != (crate::store::NativePromptState::Answered {
+                answer: "approve".into(),
+            })
+            || self.store.operation_recorded(&key)?
+        {
+            return Ok(());
+        }
+        let Some(dialog) = st_drivers::blocking_screen::screen_prompt("claude", screen)
+            .filter(|dialog| dialog.kind == "plan")
+        else {
+            return Ok(());
+        };
+        let Some(keys) = dialog.keys_for("Yes, ") else {
+            return Ok(());
+        };
+        // Read the screen again just before typing: the keys are only for this exact dialog.
+        let Ok(fresh) = self.member_screen(&member.runtime_id) else {
+            return Ok(());
+        };
+        if st_drivers::blocking_screen::screen_prompt("claude", &fresh).as_ref() != Some(&dialog) {
+            return Ok(());
+        }
+        // Recorded before the keys: replay must never press them twice.
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "harness.diagnostic".into(),
+            actor: Some(subject.subject.clone()),
+            fields: BTreeMap::from([
+                ("code".into(), Value::String("native-plan-approved".into())),
+                ("status".into(), Value::String("approve".into())),
+                ("driver".into(), Value::String("claude".into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+            ]),
+            evidence: vec![blocked.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(key),
+        })?;
+        self.signal_changed();
+        for key in keys {
+            self.runtime
+                .send_key_if(&member.runtime_id, key, incarnation)?;
         }
         Ok(())
     }
@@ -36962,6 +37053,88 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .insert(member.runtime_id.clone(), "› ready".into());
         reconciler.reconcile_once().unwrap();
         assert!(alert().is_none(), "it clears when the dialog is gone");
+    }
+
+    /// A plan approved from a client is approved with the plan dialog's own keys, once, and only
+    /// while the dialog is on screen: Claude does not take a hook's allow for a plan.
+    #[test]
+    fn a_plan_approved_from_a_client_is_approved_in_its_dialog_once() {
+        let plan = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-plan-dialog.txt");
+        let working = include_str!("../../st-drivers/tests/fixtures/blocking-screens/claude-working.txt");
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.clone(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &mission.subject_tokens, "plan-approval", Some("person/avery"))
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("seat", "running", "one")];
+        let show = |screen: &str| {
+            runtime
+                .screens
+                .lock()
+                .unwrap()
+                .insert("node.seat".into(), screen.into());
+        };
+        // The seat's terminal runs: its prompt waits on its person.
+        show(working);
+        reconciler.reconcile_once().unwrap();
+        let asked = store
+            .append_claim(&ClaimInput {
+                subject: "agent/node.seat".into(),
+                kind: "harness.observed".into(),
+                actor: Some("agent/node.seat".into()),
+                fields: serde_json::from_value(serde_json::json!({
+                    "state": "working", "driver": "claude", "incarnation_id": "one",
+                    "blocked_on": "human", "ask": "permission", "reason": "ExitPlanMode",
+                    "ownership_sequence": 1, "transition_sequence": 3}))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let alert = store
+            .attention_items(Some("person/avery"))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.kind == "harness-prompt")
+            .unwrap();
+        assert_eq!(alert.answers, vec!["approve", "deny"]);
+        assert!(alert.detail.starts_with("Claude asks you to approve its plan;"));
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.keys.lock().unwrap().is_empty(), "nobody approved it yet");
+        store
+            .answer_native_prompt("agent/node.seat", &asked.id, "approve", "person/avery")
+            .unwrap();
+        // The dialog is not on screen yet: nothing is typed into whatever is.
+        reconciler.reconcile_once().unwrap();
+        assert!(runtime.keys.lock().unwrap().is_empty());
+        show(plan);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().as_slice(), ["return"]);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().len(), 1, "approved once");
     }
 
     #[test]
